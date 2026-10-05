@@ -439,11 +439,41 @@ relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
-`.att_syntax prefix`; and the `.cfi_*` family, accepted and dropped because it
-describes unwinding rather than bytes. Anything else -- a directive the table
+`.att_syntax prefix`; `.local` with `.comm name, size[, alignment]`, and
+`.lcomm`, which reserve a private zero-filled object in `.bss`; `.set`/`.equ`
+of `symbol` or `symbol±constant` (or a `.`-relative value), resolved once every
+label is known, so GCC may write it ahead of the label it names; and, accepted
+and dropped because they carry no bytes the linked program uses, the `.cfi_*`
+family, `.file`, `.ident`, and Clang's `.addrsig`/`.addrsig_sym`. A global
+`.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
+absolute value are refused by name. Widths and alignment follow the target
+as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on
+AArch64 `.align N` is 2^N bytes like `.p2align`, `.word` is 32 bits, and
+`.xword`/`.dword` add 64-bit data. A constant that fits neither the signed nor
+the unsigned reading of its directive's width is refused, as llvm-mc does,
+rather than truncated. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
+listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
+register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
+`endbr64` on every target, since they are hint NOPs without IBT (other CET rows
+still require `shstk`); a one-operand shift or rotate (count 1); two-operand
+`shld`/`shrd` (count `%cl`); `xchg` with its memory operand in either position;
+`rep bsf`/`rep bsr`, GCC's spelling of the TZCNT/LZCNT bytes, on every target;
+AT&T `movq` between a general register or memory and an XMM/MMX register; and
+a constant before the symbol in a displacement (`8+w(%rip)`). An unsigned
+immediate field as wide as its operand takes either interpretation, so
+`movb $0xff`, `andb $0xf0`, `xorb $-1` and `mov rax, -2147483649` assemble, and
+an all-ones 64-bit literal is the sign-extended -1. Deliberate differences from
+GNU as: values outside -2^(w-1)..2^w-1 and negative shift counts are diagnosed
+rather than wrapped, and a `movabs` value that fits a sign-extended imm32
+takes the shorter `mov` row. The `moffs` forms of `movabs`, `ret`/`retq` with
+an immediate, multi-byte `nop` with operands, and the short accumulator ALU
+forms (`and al, imm8` encodes as `80 /4 ib`, a byte longer than GNU's `24 ib`)
+are tracked in [#2680](https://github.com/buster14a/buster/issues/2680).
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
 and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
@@ -748,15 +778,21 @@ then the same target roots used by ELF export discovery: `lib/<triple>`,
 sysroot. Without a sysroot, the absolute host roots also include
 `/usr/<triple>/lib` after the two multiarch roots. The sysroot replaces these
 default host paths; explicit `-L` directories retain their literal meaning.
-Each directory prefers `libNAME.so` to `libNAME.a`, so an earlier explicit
+Each directory prefers a target-compatible `libNAME.so` to `libNAME.a`, so an earlier explicit
 archive wins over a later default shared library. `-l:FILE.a` searches the
 exact archive name without that shared-library probe and retains its existing
-bare-path fallback. Other target search policies are unchanged.
+bare-path fallback. A little-endian ELF64 shared candidate naming a different
+CPU is skipped before archive selection, allowing an archive in the same or
+a later directory to satisfy the request. Files without that recognized
+foreign shared header retain the existing export-discovery refusal. The probe
+does not validate the complete foreign object. Other target search policies
+are unchanged.
 
 `compiler_driver_archive_test_default_roots`, invoked by the registered lazy
 archive fixture, checks both ELF CPUs and all six literal sysroot roots,
 named/exact/direct image parity, distinct provider precedence, explicit `-L`,
-shared preference, exact archive bypass and output preservation on refusal.
+shared preference, incompatible shared headers beside and before usable
+archives, exact archive bypass and output preservation on refusal.
 Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
@@ -882,11 +918,20 @@ On x86-64 Linux, `-shared` links a shared object and `-pie` a
 position-independent executable (`NativeImageKind`, carried to the linker in
 `NativeExecutableLinkOptions.image_kind`). `-shared` outranks `-pie` in either
 order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
-inputs of that invocation with the position-independent code model, and
-`-fPIE`/`-fpie` select that same model on every target (the last of the four
-positive spellings wins; `-fno-pie` cancels only a PIE spelling). On any other
-target a link that asks for either image is refused as an unsupported option,
-while a compile-only invocation ignores the link option, as GCC does.
+inputs of that invocation with the position-independent code model.
+The last of `-fPIC`, `-fpic`, `-fPIE` and `-fpie` selects the requested
+model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
+On x86-64 ELF the positive spellings select the implemented PIC reference
+model. Native AArch64 ELF C generation rejects a surviving positive request
+by its spelling before source mapping or output publication; direct invocation
+API requests name the unavailable model. Cancellation, preprocessing,
+syntax-only and assembly/prebuilt-only input routes retain their behavior.
+Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
+behavior is unchanged. LLVM-bitcode and direct backend model requests remain
+an audit residual, so this bounded refusal is only partial issue #1289 support.
+On any other target a link that asks for either image is refused as an
+unsupported option, while a compile-only invocation ignores the link option,
+as GCC does.
 
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
@@ -982,6 +1027,27 @@ preprocessor macro/include operations and dependency requests. Direct `-D`,
 `-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
 preserves any existing artifact instead of reporting a successful stale build.
 
+## Source debug information
+
+`ide cc` omits source debug information by default. Pass `-g` to emit it or
+`-g0` to disable it explicitly; when both occur, the last option wins.
+Other debug levels and formats such as `-g1` remain unsupported. This keeps
+ordinary compilation focused on time to an artifact: it avoids constructing
+source debug models and their larger object payloads unless requested.
+`-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
+objects. Unwind information remains independent of source debug information.
+
+This default also applies when compiler-driver arguments are parsed for an
+embedding caller. The typed invocation API uses its `debug_info` field
+explicitly; a zero-initialized field disables debug output. Release/Debug
+configuration of the Buster compiler executable does not change these source
+compilation options. The self-host recipes pass `-g` explicitly.
+
+The registered driver regression checks the default, both individual switches
+and both orders across x86-64/AArch64 ELF, COFF and Mach-O objects. It reads the
+serialized artifacts, requires debug payloads only in the enabled modes, and
+checks that code/data bytes are unchanged and the default matches `-g0` exactly.
+
 ## Object output (`-c`)
 
 `-c` writes the object through `object_write_borrowing`. The ELF64 writer
@@ -996,6 +1062,10 @@ diagnostic `native elf64 object exceeds the object writer's limits (...)`,
 and leaves an existing output file untouched. `-v` prints the writer's exact
 work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 `-c`. See [object emission](../object-emission.md).
+
+COFF object reads merge same-kind contributions into initialized file-backed
+storage. Alignment gaps and tails introduced by empty aligned sections contain
+zero bytes even when reader arenas are reused; BSS remains virtual-only.
 
 ## ELF TLS companion lookup
 

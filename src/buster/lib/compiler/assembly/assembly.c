@@ -563,6 +563,9 @@ struct AssemblyInstruction
     u8 metadata_reserved_address[3];
     BusterX86MetadataPhysicalOperand metadata_operands[ASSEMBLY_MAX_OPERANDS];
     BusterX86MetadataPhysicalAttributes metadata_attributes;
+    // A feature this statement's spelling authorizes for its own row only
+    // (`rep bsf` is TZCNT's bytes and runs as BSF without BMI1).
+    TargetCpuFeature statement_feature;
 };
 
 typedef struct AssemblyBuilder AssemblyBuilder;
@@ -582,6 +585,8 @@ struct AssemblyBuilder
     bool private_inline_labels;
     bool unit_control_relocations;
     bool inline_assembly;
+    // Set by assembly_instruction_parse for the statement it last parsed.
+    TargetCpuFeature statement_feature;
     // The metadata parser reports this transient semantic fact to the outer
     // source adapter when a feature-gated typed decorator candidate is the
     // authoritative form.  It prevents the handwritten INVALID_OPERANDS
@@ -1124,6 +1129,19 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_parse(AssemblyBuilder* builder, Str
         result->addend = folded;
         return true;
     }
+    // GCC writes a constant ahead of the symbol, as in `8+w(%rip)`. Fold that
+    // leading term into the addend and read the remainder as `symbol[±n]`.
+    s64 leading = 0;
+    u64 leading_operator = assembly_unquoted_character(text, 1, S8("+"));
+    if (leading_operator < text.length &&
+        assembly_parse_s64(assembly_trim(string_slice(text, 0, leading_operator)), &leading))
+    {
+        text = assembly_trim(string_slice(text, leading_operator + 1, text.length));
+    }
+    else
+    {
+        leading = 0;
+    }
     u64 operator_index = assembly_unquoted_character(text, 0, S8("+-"));
     String8 name = assembly_trim((String8){.pointer = text.pointer, .length = operator_index});
     if (!assembly_symbol_spelling(&name))
@@ -1146,7 +1164,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_parse(AssemblyBuilder* builder, Str
             integer = -integer;
         }
     }
-    u32 symbol = assembly_symbol_intern(builder, name);
+    bool leading_fits = (leading <= 0 || integer <= INT64_MAX - leading) && (leading >= 0 || integer >= INT64_MIN - leading);
+    if (leading_fits) integer += leading;
+    u32 symbol = leading_fits ? assembly_symbol_intern(builder, name) : UINT32_MAX;
     if (symbol == UINT32_MAX)
     {
         return false;
@@ -8847,6 +8867,13 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_append_inline_features(AssemblyBu
     {
         assembly_x86_metadata_append_feature(names, count, capacity, S8("RDTSCP"));
     }
+    // ENDBR32/ENDBR64 occupy the hint-NOP space and execute as NOPs without
+    // CET, which is why compilers emit them at every function entry. The `ibt`
+    // token authorizes only these two rows; other CET rows require `shstk`.
+    if (!operand_count && (assembly_word_equal(mnemonic, S8("ENDBR64")) || assembly_word_equal(mnemonic, S8("ENDBR32"))))
+    {
+        assembly_x86_metadata_append_feature(names, count, capacity, S8("ibt"));
+    }
 }
 
 BUSTER_GLOBAL_LOCAL u8 assembly_x86_metadata_physical_class(AssemblyRegisterClass class)
@@ -11572,9 +11599,280 @@ BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder
     }
 }
 
+enum
+{
+    ASSEMBLY_X86_SPELLING_OPERAND_CAPACITY = 4,
+};
+
+// Split at top-level commas; brackets, parentheses, braces and quotes nest.
+BUSTER_GLOBAL_LOCAL u32 assembly_x86_spelling_operands(String8 text, String8* operands, u32 capacity)
+{
+    u32 count = 0;
+    u32 depth = 0;
+    bool quoted = false;
+    u64 begin = 0;
+    bool valid = text.length != 0;
+    for (u64 index = 0; index <= text.length && valid; index += 1)
+    {
+        char8 code_unit = index < text.length ? text.pointer[index] : ',';
+        if (quoted)
+        {
+            if (code_unit == '\\') index += 1;
+            else if (code_unit == '"') quoted = false;
+        }
+        else if (code_unit == '"') quoted = true;
+        else if (code_unit == '(' || code_unit == '[' || code_unit == '{') depth += 1;
+        else if ((code_unit == ')' || code_unit == ']' || code_unit == '}') && depth) depth -= 1;
+        else if (code_unit == ',' && !depth)
+        {
+            valid = count < capacity;
+            if (valid) operands[count++] = assembly_trim(string_slice(text, begin, index));
+            begin = index + 1;
+        }
+    }
+    return valid ? count : UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_register(String8 operand, AssemblySyntax syntax)
+{
+    bool result;
+    if (syntax == ASSEMBLY_SYNTAX_ATT)
+    {
+        result = operand.length > 1 && operand.pointer[0] == '%';
+        for (u64 index = 1; index < operand.length && result; index += 1)
+        {
+            char8 code_unit = operand.pointer[index];
+            result = (code_unit >= 'a' && code_unit <= 'z') || (code_unit >= 'A' && code_unit <= 'Z') || (code_unit >= '0' && code_unit <= '9');
+        }
+    }
+    else
+    {
+        AssemblyRegister reg = {0};
+        result = assembly_register_parse(operand, syntax, &reg);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_memory(String8 operand, AssemblySyntax syntax)
+{
+    bool result = false;
+    if (operand.length && syntax == ASSEMBLY_SYNTAX_ATT)
+    {
+        // Anything but a register, an immediate or an indirect target is an
+        // AT&T memory operand, including a bare `symbol`.
+        result = operand.pointer[0] != '%' && operand.pointer[0] != '$' && operand.pointer[0] != '*';
+    }
+    for (u64 index = 0; index < operand.length && !result; index += 1)
+    {
+        result = operand.pointer[index] == '[';
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_literal(String8 operand, AssemblySyntax syntax)
+{
+    bool prefixed = syntax == ASSEMBLY_SYNTAX_ATT && operand.length && operand.pointer[0] == '$';
+    String8 value = prefixed ? string_slice(operand, 1, operand.length) : operand;
+    s64 signed_value = 0;
+    u64 unsigned_value = 0;
+    return (prefixed || syntax != ASSEMBLY_SYNTAX_ATT) &&
+           (assembly_parse_s64(value, &signed_value) || assembly_parse_u64(value, &unsigned_value));
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_shift(String8 mnemonic)
+{
+    return assembly_word_equal(mnemonic, S8("shl")) || assembly_word_equal(mnemonic, S8("sal")) || assembly_word_equal(mnemonic, S8("shr")) ||
+           assembly_word_equal(mnemonic, S8("sar")) || assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
+           assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr"));
+}
+
+// An XMM or MMX register makes AT&T `movq` the MOVQ transfer, not a
+// suffixed general-purpose MOV.
+BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_vector_register(String8 operand)
+{
+    String8 name = operand.length && operand.pointer[0] == '%' ? string_slice(operand, 1, operand.length) : operand;
+    return (name.length >= 4 && assembly_word_equal(string_slice(name, 0, 3), S8("xmm"))) ||
+           (name.length >= 3 && assembly_word_equal(string_slice(name, 0, 2), S8("mm")) && name.pointer[2] >= '0' && name.pointer[2] <= '7');
+}
+
+// GNU as accepts spellings that compilers emit but the instruction tables do
+// not name. Each is rewritten here into an equivalent accepted spelling with
+// identical bytes, ahead of both parsers:
+//   register-immediate movabs[q] -> mov[q]
+//   AT&T retq/callq -> ret/call
+//   rep bsf/bsr -> tzcnt/lzcnt (GCC's spelling; F3 0F BC/BD either way,
+//   executing as BSF/BSR on CPUs without BMI1/LZCNT)
+//   one-operand shift/rotate -> explicit count 1
+//   two-operand shld/shrd -> explicit %cl count
+//   xchg memory, register -> xchg register, memory (the operation is symmetric)
+//   AT&T movq with an XMM/MMX operand -> MOVQ transfer (the q is the MOVQ name)
+// Anything else is returned unchanged; the parsers stay the authority.
+BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* builder, String8 statement, AssemblySyntax syntax, bool* movq_transfer,
+                                                               TargetCpuFeature* bit_scan_feature)
+{
+    String8 result = statement;
+    String8 text = assembly_trim(statement);
+    String8 words[2] = {0};
+    u64 cursor = 0;
+    u32 word_count = 0;
+    while (word_count < BUSTER_ARRAY_LENGTH(words) && cursor < text.length)
+    {
+        u64 end = cursor;
+        while (end < text.length && !assembly_space(text.pointer[end])) end += 1;
+        words[word_count++] = string_slice(text, cursor, end);
+        cursor = end;
+        while (cursor < text.length && assembly_space(text.pointer[cursor])) cursor += 1;
+    }
+    String8 prefix = {0};
+    String8 mnemonic = words[0];
+    String8 operand_text = assembly_trim(string_slice(text, mnemonic.length, text.length));
+    bool rep_prefix = word_count == 2 && (assembly_word_equal(words[0], S8("rep")) || assembly_word_equal(words[0], S8("repe")) ||
+                                          assembly_word_equal(words[0], S8("repz")));
+    if (rep_prefix)
+    {
+        mnemonic = words[1];
+        operand_text = assembly_trim(string_slice(text, (u64)(words[1].pointer - text.pointer) + words[1].length, text.length));
+    }
+    bool att = syntax == ASSEMBLY_SYNTAX_ATT;
+    char8 suffix = 0;
+    String8 base = mnemonic;
+    if (att && mnemonic.length > 1)
+    {
+        char8 last = assembly_ascii_lower(mnemonic.pointer[mnemonic.length - 1]);
+        if (last == 'b' || last == 'w' || last == 'l' || last == 'q')
+        {
+            suffix = mnemonic.pointer[mnemonic.length - 1];
+            base = string_slice(mnemonic, 0, mnemonic.length - 1);
+        }
+    }
+    String8 operands[ASSEMBLY_X86_SPELLING_OPERAND_CAPACITY] = {0};
+    u32 operand_count = operand_text.length ? assembly_x86_spelling_operands(operand_text, operands, BUSTER_ARRAY_LENGTH(operands)) : 0;
+    String8 new_mnemonic = {0};
+    String8 insert_before = {0};
+    String8 insert_after = {0};
+    bool swap = false;
+    bool drop_prefix = false;
+    if (operand_count != UINT32_MAX)
+    {
+        bool shift = assembly_x86_spelling_shift(mnemonic) || (suffix && assembly_x86_spelling_shift(base));
+        bool double_shift = assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd")) ||
+                            (suffix && (assembly_word_equal(base, S8("shld")) || assembly_word_equal(base, S8("shrd"))));
+        bool xchg = assembly_word_equal(mnemonic, S8("xchg")) || (suffix && assembly_word_equal(base, S8("xchg")));
+        if (rep_prefix)
+        {
+            String8 bit_scan = suffix ? base : mnemonic;
+            if (assembly_word_equal(bit_scan, S8("bsf")) || assembly_word_equal(bit_scan, S8("bsr")))
+            {
+                bool forward = assembly_word_equal(bit_scan, S8("bsf"));
+                drop_prefix = true;
+                new_mnemonic = forward ? (suffix ? S8("tzcnt?") : S8("tzcnt")) : (suffix ? S8("lzcnt?") : S8("lzcnt"));
+                *bit_scan_feature = forward ? TARGET_CPU_FEATURE_X86_BMI1 : TARGET_CPU_FEATURE_X86_LZCNT;
+            }
+        }
+        else if ((assembly_word_equal(mnemonic, S8("movabs")) || (att && suffix == 'q' && assembly_word_equal(base, S8("movabs")))) &&
+                 operand_count == 2 && assembly_x86_spelling_register(operands[att ? 1 : 0], syntax) &&
+                 assembly_x86_spelling_literal(operands[att ? 0 : 1], syntax))
+        {
+            // Only a register and a numeric literal: the moffs forms keep their
+            // own spelling and are refused rather than read as ModRM, and a
+            // symbolic value would lose its 64-bit relocation. A value that
+            // fits a sign-extended imm32 takes the shorter MOV row.
+            new_mnemonic = suffix ? S8("mov?") : S8("mov");
+        }
+        else if (att && (assembly_word_equal(mnemonic, S8("retq")) || assembly_word_equal(mnemonic, S8("callq"))))
+        {
+            new_mnemonic = base;
+        }
+        else if (att && assembly_word_equal(mnemonic, S8("movq")) && operand_count == 2 &&
+                 (assembly_x86_spelling_vector_register(operands[0]) || assembly_x86_spelling_vector_register(operands[1])))
+        {
+            *movq_transfer = true;
+        }
+        else if (shift && operand_count == 1)
+        {
+            if (att) insert_before = S8("$1");
+            else insert_after = S8("1");
+        }
+        else if (double_shift && operand_count == 2)
+        {
+            if (att) insert_before = S8("%cl");
+            else insert_after = S8("cl");
+        }
+        else if (xchg && operand_count == 2)
+        {
+            // The tables take the memory operand first in Intel order, which
+            // AT&T writes last; the operation is symmetric.
+            String8 register_operand = att ? operands[1] : operands[0];
+            String8 memory_operand = att ? operands[0] : operands[1];
+            swap = assembly_x86_spelling_memory(memory_operand, syntax) && assembly_x86_spelling_register(register_operand, syntax);
+        }
+    }
+    if (new_mnemonic.length || insert_before.length || insert_after.length || swap)
+    {
+        if (!new_mnemonic.length) new_mnemonic = mnemonic;
+        if (!drop_prefix && rep_prefix) prefix = words[0];
+        u64 capacity = text.length + 32;
+        char8* buffer = arena_allocate(builder->arena, char8, capacity);
+        u64 length = 0;
+        if (prefix.length)
+        {
+            memcpy(buffer + length, prefix.pointer, prefix.length);
+            length += prefix.length;
+            buffer[length++] = ' ';
+        }
+        for (u64 index = 0; index < new_mnemonic.length; index += 1)
+        {
+            buffer[length++] = new_mnemonic.pointer[index] == '?' ? suffix : new_mnemonic.pointer[index];
+        }
+        buffer[length++] = ' ';
+        if (insert_before.length)
+        {
+            memcpy(buffer + length, insert_before.pointer, insert_before.length);
+            length += insert_before.length;
+            if (operand_count) buffer[length++] = ',';
+        }
+        if (swap)
+        {
+            memcpy(buffer + length, operands[1].pointer, operands[1].length);
+            length += operands[1].length;
+            buffer[length++] = ',';
+            memcpy(buffer + length, operands[0].pointer, operands[0].length);
+            length += operands[0].length;
+        }
+        else
+        {
+            memcpy(buffer + length, operand_text.pointer, operand_text.length);
+            length += operand_text.length;
+        }
+        if (insert_after.length)
+        {
+            buffer[length++] = ',';
+            memcpy(buffer + length, insert_after.pointer, insert_after.length);
+            length += insert_after.length;
+        }
+        result = (String8){.pointer = buffer, .length = length};
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset,
                                                      Target target, AssemblySyntax syntax)
 {
+    bool movq_transfer = false;
+    TargetCpuFeature bit_scan_feature = TARGET_CPU_FEATURE_NONE;
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        statement = assembly_x86_spelling_normalize(builder, statement, syntax, &movq_transfer, &bit_scan_feature);
+    }
+    builder->statement_feature = bit_scan_feature;
+    if (bit_scan_feature != TARGET_CPU_FEATURE_NONE)
+    {
+        // `rep bsf`/`rep bsr` are GCC's spellings of TZCNT/LZCNT bytes. They
+        // run as BSF/BSR without BMI1/LZCNT, so they are legal on every
+        // target; the feature is enabled for this statement only.
+        target.cpu_features = target_cpu_features_add(target_cpu_features_effective(target), bit_scan_feature);
+        target.cpu_features_explicit = true;
+    }
     u32 instruction_count = builder->instruction_count;
     u32 symbol_count = builder->result.symbol_count;
     u32 relocation_count = builder->result.relocation_count;
@@ -11637,6 +11935,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                                                         buster_x86_metadata_block_memory_source_authoritative(metadata_form, metadata_query);
                     }
                 }
+                // AT&T movq naming an XMM/MMX register is the MOVQ transfer;
+                // the handwritten suffix reading of it is not a competing form.
+                metadata_source_authoritative |= movq_transfer;
                 if ((handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE && !metadata_source_authoritative) ||
                     (handwritten_kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
                      (!metadata_source_authoritative &&
@@ -11860,6 +12161,10 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
                     assembly_instruction_parse(builder, statement, line, column, output_offset, target, syntax);
                     if (builder->instruction_count != instruction_count)
                     {
+                        for (u32 index = instruction_count; index < builder->instruction_count; index += 1)
+                        {
+                            builder->instructions[index].statement_feature = builder->statement_feature;
+                        }
                         // A source alias may expand into multiple checked
                         // metadata instructions (for example WAIT-prefixed
                         // x87 FINIT/FCLEX).  Account for every appended
@@ -12121,8 +12426,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_local_relocation(AssemblyBuilder*
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, AssemblyInstruction* instruction)
 {
+    Target statement_target = builder->target;
+    if (instruction->statement_feature != TARGET_CPU_FEATURE_NONE)
+    {
+        statement_target.cpu_features = target_cpu_features_add(target_cpu_features_effective(statement_target), instruction->statement_feature);
+        statement_target.cpu_features_explicit = true;
+    }
     String8 feature_names[TARGET_CPU_FEATURE_COUNT + 1] = {0};
-    u32 feature_count = assembly_x86_metadata_feature_names(builder->target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    u32 feature_count = assembly_x86_metadata_feature_names(statement_target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
     assembly_x86_metadata_append_inline_features(builder, instruction->metadata_mnemonic, instruction->metadata_operand_count,
                                                    feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names));
     BusterX86MetadataPhysicalOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};

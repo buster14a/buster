@@ -4,6 +4,15 @@
 
 ## Benchmarking and diagnostics
 
+Record source debug flags explicitly in benchmark recipes and comparisons:
+use `ide cc -g0 ...` against a reference compiler with debug output disabled,
+or `ide cc -g ...` against a reference using the corresponding debug mode.
+Do not infer source debug output from the compiler executable's Release/Debug
+build configuration. `ide cc` defaults to no source debug information; older
+revisions emitted it by default, so omission across revisions can change the
+workload. The self-host fixed-point and stage-1 recipes deliberately pass `-g`;
+retain that flag when comparing their historical results.
+
 Performance comparisons must control build provenance as well as runtime noise.
 Use the [session-owned worktree setup](workflow.md#parallel-sessions-on-one-machine)
 for builds and measurements; it defines `session_root` for the ordinary
@@ -902,6 +911,16 @@ counting the day's existing entries, so two sessions auditing the same day
 always picked the same letter, and three of the four PRs open when the history
 was split had done exactly that. Those older names are historical — entries
 cross-reference each other by them — and stay as written.
+
+Raw evidence under `docs/performance-audits/evidence/` is **byte-exact**: tool
+output, logs, and `git format-patch` files are stored as produced, and a
+bundle's checksum manifest (`SHA256SUMS`) pins those bytes. Such files carry
+trailing whitespace by nature — a format-patch signature separator is `-- `
+and the file ends in a blank line — so `.gitattributes` marks that directory
+`-whitespace` and `git diff --check` does not report it. Never strip, reflow, or compress evidence
+to satisfy a whitespace check. The exemption covers that directory only: the
+audit prose in `docs/performance-audits/<id>.md` is authored text and remains
+subject to `git diff --check`.
 
 ## Source-map finalization
 

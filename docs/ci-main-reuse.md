@@ -10,7 +10,7 @@ check names and the merge-queue ruleset are unchanged.
 
 | Main-push obligation | Policy | Reason |
 | --- | --- | --- |
-| Sixteen desktop owners: `release` plus isolated check owners on Linux/x86 Windows; grouped `checks` on macOS/Windows ARM | Reuse validation; run cache lifecycle on main | Same queue-proven compiler/configuration/fixture coverage. Main retains exact-key Zig restore, digest verification, publication and evidence, logs and existing job names. |
+| Eighteen desktop owners: `release` plus isolated check owners on Linux, macOS and x86 Windows; grouped `checks` on Windows ARM | Reuse validation; run cache lifecycle on main | Same queue-proven compiler/configuration/fixture coverage. Main retains exact-key Zig restore, digest verification, publication and evidence, logs and existing job names. |
 | Workflow lint | Run on main | The merge-parent guard evaluates the main push's `before` SHA and event. |
 | Clang analyzer shards | Reuse exact queue analysis; retain main receipt job | Both events use the exact SHA as candidate and baseline. Queue performs the full candidate analysis and failure/coverage controls, possibly with an additional comparison; main ordinarily requests candidate-only analysis. All four source execution steps and its artifact must succeed. |
 | Five desktop-native mode lanes and three Unix differentials | Reuse exact queue jobs if admitted | Same commit, job definitions and input-free test commands; source job and required step results remain authoritative. |
@@ -61,7 +61,7 @@ authority, no cross-event cancellation key is shared, and no check is forged.
 
 This is policy `buster-main-ci-reuse-v2`. Existing required checks, matrix
 names, cache keys, cache write policy and artifact names remain unchanged.
-Desktop cache jobs still allocate all sixteen desktop runners and the analyzer receipt still allocates its Linux runner; this change saves
+Desktop cache jobs still allocate all eighteen desktop runners and the analyzer receipt still allocates its Linux runner; this change saves
 build/test and compiler-install work, not those allocations. Reducing them to
 five cache publishers is a separate cache/check-contract transition. Independent
 workflows require their own event/coverage review before reuse can be enabled.

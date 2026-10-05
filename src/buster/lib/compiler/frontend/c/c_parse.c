@@ -11650,6 +11650,25 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_enum_value_type(CParseResult* result,
     return value;
 }
 
+// Microsoft ordinary enums convert explicit initializers during the list,
+// and every completed member, to the ABI's 32-bit signed int. Discard high
+// limbs modulo 2^32 before rebuilding signed magnitude; UINT32_MAX becomes
+// -1 just like a signed wide initializer with the same low bits.
+BUSTER_C_INTERNAL CIntegerConstant c_parse_microsoft_enum_value(CParseResult* result, Target target, CIntegerConstant value, CTypeId type)
+{
+    value = c_parse_enum_value_type(result, target, value, type);
+    if (value.valid)
+    {
+        BUSTER_CHECK(value.bit_width == 32 && value.is_signed);
+        u32 image = (u32)value.magnitude;
+        if (value.is_negative) image = 0u - image;
+        value.is_negative = (image >> 31) != 0;
+        value.magnitude = value.is_negative ? (u64)(0u - image) : image;
+        value.magnitude_high = 0;
+    }
+    return value;
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_enum_range_type(CParseResult* result, Target target, CIntegerConstant negative, CIntegerConstant positive)
 {
     CTypeKind signed_kinds[] = {C_TYPE_INT, C_TYPE_LONG, C_TYPE_LONG_LONG, C_TYPE_INT128};
@@ -11741,7 +11760,8 @@ BUSTER_C_INTERNAL void c_parse_enum_complete(CParseResult* result, CPreprocessRe
     }
     if (!enumeration->has_fixed_underlying_type)
     {
-        CTypeId compatible = c_parse_enum_range_type(result, preprocess.target, negative, positive);
+        CTypeId compatible = preprocess.target.os == OPERATING_SYSTEM_WINDOWS ? c_parse_expression_scalar_type(result, C_TYPE_INT)
+                                : c_parse_enum_range_type(result, preprocess.target, negative, positive);
         enumeration = result->types + id.value;
         enumeration->element_type = compatible;
         if (compatible.value == C_ID_UNDERLYING_INVALID && enumeration->enum_member_count)
@@ -11750,13 +11770,26 @@ BUSTER_C_INTERNAL void c_parse_enum_complete(CParseResult* result, CPreprocessRe
                                C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("no integer type can represent all enumerator values"));
         }
     }
-    bool enum_members = enumeration->has_fixed_underlying_type || (c_preprocess_dialect_is_c23(preprocess.dialect) && !all_int);
-    CTypeId int_type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+    bool microsoft = preprocess.target.os == OPERATING_SYSTEM_WINDOWS && !enumeration->has_fixed_underlying_type;
+    bool enum_members = enumeration->has_fixed_underlying_type || (!microsoft && c_preprocess_dialect_is_c23(preprocess.dialect) && !all_int);
+    CTypeId int_type = microsoft ? enumeration->element_type : c_parse_expression_scalar_type(result, C_TYPE_INT);
     for (u32 index = 0; index < enumeration->enum_member_count; index += 1)
     {
         CEnumMember* member = result->enum_members + enumeration->enum_member_start + index;
-        member->type = enum_members || (member->integer_constant.valid &&
-                                      !c_parse_enum_value_fits(preprocess.target, member->integer_constant, C_TYPE_INT)) ? id : int_type;
+        if (microsoft)
+        {
+            // Implicit successors retain their declaration-point ICE/type.
+            // Publication converts their value without rewriting that fact.
+            CIntegerConstant completed = c_parse_microsoft_enum_value(result, preprocess.target, member->integer_constant, int_type);
+            member->value = completed.magnitude;
+            member->is_negative = completed.is_negative;
+            member->type = int_type;
+        }
+        else
+        {
+            member->type = enum_members || (member->integer_constant.valid &&
+                                          !c_parse_enum_value_fits(preprocess.target, member->integer_constant, C_TYPE_INT)) ? id : int_type;
+        }
     }
 }
 
@@ -15733,9 +15766,17 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                                       c_token_spelling(preprocess.spelling_base, name)));
                     integer_constant.valid = false;
                 }
-                declaration_type = fixed_type.value < result->type_count ? fixed_type
-                                   : c_parse_enum_value_fits(preprocess.target, integer_constant, C_TYPE_INT)
-                                       ? c_parse_expression_scalar_type(result, C_TYPE_INT) : integer_constant.type;
+                if (integer_constant.valid && preprocess.target.os == OPERATING_SYSTEM_WINDOWS && fixed_type.value == C_ID_UNDERLYING_INVALID)
+                {
+                    declaration_type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+                    integer_constant = c_parse_microsoft_enum_value(result, preprocess.target, integer_constant, declaration_type);
+                }
+                else
+                {
+                    declaration_type = fixed_type.value < result->type_count ? fixed_type
+                                       : c_parse_enum_value_fits(preprocess.target, integer_constant, C_TYPE_INT)
+                                           ? c_parse_expression_scalar_type(result, C_TYPE_INT) : integer_constant.type;
+                }
                 scratch_end(temporary);
             }
             else
@@ -23621,6 +23662,12 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             IR_SEMANTIC_RECORD(PARSE_TYPED_NODES, 1);
             u32 begin = task->start;
             u32 limit = task->end;
+            while (begin < limit && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[begin],
+                                                            C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+            {
+                begin += 1;
+            }
+            task->start = begin;
             if (begin >= limit)
             {
                 last = (CParseConstant){.type = C_TYPE_ID_INVALID};
@@ -23636,6 +23683,10 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             for (u32 cursor = begin; cursor < limit; cursor += 1)
             {
                 CToken token = preprocess.tokens[cursor];
+                if (c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+                {
+                    continue;
+                }
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                     c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
                 {

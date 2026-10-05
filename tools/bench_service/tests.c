@@ -372,9 +372,22 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec_packets(BqQueue* queue)
         }
         start = end < attributes_size ? end + 1 : end;
     }
-    BQ_CHECK(attributes_complete && rules_found[0] && rules_found[1]);
-    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED};
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(recipes); index += 1)
+    BQ_CHECK(attributes_complete);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rules); index += 1) BQ_CHECK(rules_found[index]);
+    /* A host installs these files; materialization compares them byte for
+     * byte with the compiled profile, so a served recipe without its file
+     * can be submitted but never run. */
+    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED,
+                          BQ_RECIPE_NATIVE_EXECUTE, BQ_RECIPE_NATIVE_RUNTIME};
+    char const* commands[] = {"bench_service_recipe", "", "native-driver", "native-runtime-driver"};
+    /* Only the first two have a pinned LF checkout rule; the native profiles
+     * are installed from Linux checkouts, so compare their bytes there. */
+#ifdef _WIN32
+    u32 profile_count = 2;
+#else
+    u32 profile_count = (u32)BUSTER_ARRAY_LENGTH(recipes);
+#endif
+    for (u32 index = 0; index < profile_count; index += 1)
     {
         BqRecipeFiles files;
         String8 expected = bq_recipe_profile(recipes[index]);
@@ -386,8 +399,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec_packets(BqQueue* queue)
         size_t count = profile && bytes ? fread(bytes, 1, (size_t)expected.length + 1, profile) : 0;
         BQ_CHECK(described && expected.length > 0 && profile && bytes && count == expected.length &&
                  !memcmp(bytes, expected.pointer, expected.length) &&
-                 (recipes[index] == BQ_RECIPE_VALIDATE_BUSTER ? !strcmp(files.command, "bench_service_recipe") :
-                                                               !files.command[0]));
+                 !strcmp(files.command, commands[index]));
         free(bytes);
         if (profile) fclose(profile);
     }
@@ -5769,6 +5781,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #endif
     bq_test_native_upload_recovery();
     bq_test_native_staging_refusal();
+    bq_test_native_search_only_ancestry();
+    bq_test_native_store_modes();
     bq_test_native_rejections();
     bq_test_native_materialization_execution();
     bq_test_native_collector_failures();
@@ -5848,6 +5862,8 @@ int main(int argc, char** argv)
     {
         bq_test_native_upload_recovery();
         bq_test_native_staging_refusal();
+        bq_test_native_search_only_ancestry();
+        bq_test_native_store_modes();
         bq_test_native_rejections();
         bq_test_native_materialization_execution();
         bq_test_native_collector_failures();

@@ -89,6 +89,8 @@ struct Wasm64FunctionRecord
     Wasm64Signature signature;
     u32 function_index;
     u32 defined_index;
+    u32 source_module_index;
+    u32 source_function_index;
     Wasm64SyntheticFunction synthetic;
     bool imported;
     bool exported;
@@ -113,6 +115,8 @@ struct Wasm64StringRecord
     IrInstructionId instruction;
     String8 literal;
     u64 offset;
+    u32 module_index;
+    u32 function_index;
 };
 
 typedef struct Wasm64Context Wasm64Context;
@@ -176,6 +180,8 @@ struct Wasm64FunctionEmitter
     Wasm64Context* context;
     IrFunction* function;
     Wasm64FunctionRecord* record;
+    u32 module_index;
+    u32 function_index;
     Wasm64Buffer body;
     u32* value_locals;
     u8* value_types;
@@ -1191,6 +1197,11 @@ static bool wasm64_collect_functions(Wasm64Context* context)
                 return false;
             }
             Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(context, symbol->id);
+            if (record)
+            {
+                record->source_module_index = module_index;
+                record->source_function_index = function_index;
+            }
             String8 external_name = wasm64_symbol_external_name(symbol);
             if (record && wasm64_string_equal(external_name, wasm64_s8("_start")) &&
                 context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1)
@@ -1460,7 +1471,12 @@ static bool wasm64_collect_data(Wasm64Context* context)
                                 IR_SYMBOL_ID_INVALID);
                     return false;
                 }
-                Wasm64StringRecord record = {.function = function, .instruction = ir_instruction_self_id(function, instruction), .literal = literal, .offset = context->data_cursor};
+                Wasm64StringRecord record = {.function = function,
+                                             .instruction = ir_instruction_self_id(function, instruction),
+                                             .literal = literal,
+                                             .offset = context->data_cursor,
+                                             .module_index = module_index,
+                                             .function_index = function_index};
                 context->data_cursor = string_end;
                 wasm64_vec_reserve(context->arena, (void**)&context->strings, &context->string_capacity, context->string_count + 1, sizeof(*context->strings));
                 context->strings[context->string_count] = record;
@@ -2297,17 +2313,41 @@ static void wasm64_fe_emit_parallel_copy(Wasm64FunctionEmitter* emitter, IrBlock
     }
 }
 
-static Wasm64StringRecord* wasm64_string_record_find(Wasm64Context* context, IrFunction* function, IrInstructionId instruction)
+// wasm64_collect_data appends records in (module, function, instruction)
+// order, so the context-wide array is sorted by that key.
+static Wasm64StringRecord* wasm64_string_record_find(Wasm64FunctionEmitter* emitter, IrInstructionId instruction)
 {
-    for (u32 index = 0; index < context->string_count; index += 1)
+    Wasm64Context* context = emitter->context;
+    u32 low = 0;
+    u32 high = context->string_count;
+    while (low < high)
     {
-        Wasm64StringRecord* record = context->strings + index;
-        if (record->function == function && record->instruction.value == instruction.value)
+        u32 middle = low + (high - low) / 2;
+        Wasm64StringRecord* record = context->strings + middle;
+        context->stats.string_record_lookup_probes += 1;
+        bool before = record->module_index != emitter->module_index       ? record->module_index < emitter->module_index
+                      : record->function_index != emitter->function_index ? record->function_index < emitter->function_index
+                                                                          : record->instruction.value < instruction.value;
+        if (before)
         {
-            return record;
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
         }
     }
-    return 0;
+    Wasm64StringRecord* result = 0;
+    if (low < context->string_count)
+    {
+        Wasm64StringRecord* record = context->strings + low;
+        context->stats.string_record_lookup_probes += 1;
+        if (record->function == emitter->function && record->instruction.value == instruction.value)
+        {
+            result = record;
+        }
+    }
+    return result;
 }
 
 static void wasm64_fe_emit_cast(Wasm64FunctionEmitter* emitter, IrInstruction* instruction, IrType* source, IrType* destination)
@@ -2437,7 +2477,10 @@ static u32 wasm64_fe_count_block_parameters(IrFunction* function)
 static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* context, Wasm64FunctionRecord* record)
 {
     IrFunction* function = record->function;
-    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record};
+    // Source ordinals come from collection, independently of import-first
+    // function indices or the addresses of unrelated module allocations.
+    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record,
+                                     .module_index = record->source_module_index, .function_index = record->source_function_index};
     wasm64_buffer_init(&emitter->body, context->arena);
     emitter->value_locals = arena_allocate(context->arena, u32, function->value_count ? function->value_count : 1);
     emitter->value_types = arena_allocate(context->arena, u8, function->value_count ? function->value_count : 1);
@@ -3169,7 +3212,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         break;
     case IR_OPCODE_CONSTANT_STRING:
     {
-        Wasm64StringRecord* record = wasm64_string_record_find(context, emitter->function, ir_instruction_self_id(emitter->function, instruction));
+        Wasm64StringRecord* record = wasm64_string_record_find(emitter, ir_instruction_self_id(emitter->function, instruction));
         if (!record)
         {
             wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing WebAssembly string data record"), emitter->function, block, instruction,

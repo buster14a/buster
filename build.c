@@ -23629,7 +23629,10 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_build_for_target(Arena* arena, Mat
             {
                 u32 first_optimize = is_clang && !sanitize ? 1 : 0;
                 u32 optimize_count = is_clang && sanitize ? 2 : 1;
-                bool split_configs = fuzz_supported && optimize_count > 1;
+                // Sanitized Debug and Release always get separate trees so
+                // their independent shard owners never share one mutable
+                // CMake directory, including on hosts without fuzz support.
+                bool split_configs = optimize_count > 1;
                 u32 tree_count = split_configs ? optimize_count : 1;
                 for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
                 {
@@ -23701,10 +23704,9 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_partition_validate(MatrixCoveragePlan* 
         String8 owner = matrix_coverage_row_shard(plan->rows[tree.row_indices[0]]);
         for (u32 row_i = 0; row_i < tree.row_count; row_i += 1)
         {
-            String8 next_owner = matrix_coverage_row_shard(plan->rows[tree.row_indices[row_i]]);
-            // Apple multi-config sanitizer trees are retained in grouped checks.
-            bool same_group = !string_equal(owner, S8("release")) && !string_equal(next_owner, S8("release"));
-            result = result && (string_equal(owner, next_owner) || (tree.sanitize && tree.optimize_count == 2 && same_group));
+            // Every tree has exactly one owner shard: no two owners may
+            // configure, build or test the same directory.
+            result = result && string_equal(owner, matrix_coverage_row_shard(plan->rows[tree.row_indices[row_i]]));
         }
     }
     return result;
@@ -23852,6 +23854,33 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_policy_self_test(Arena* arena)
         {
             MatrixCoverageRow row = plan.rows[row_i];
             result = result && (matrix_coverage_row_selected(row, S8("release")) != matrix_coverage_row_selected(row, S8("checks")));
+        }
+        // #2659: one configuration per tree, so split owners (including the
+        // macOS sanitizer owners) never share a CMake directory.
+        for (u32 tree_i = 0; tree_i < plan.tree_count; tree_i += 1)
+        {
+            result = result && plan.trees[tree_i].row_count == 1 && plan.trees[tree_i].optimize_count == 1;
+        }
+        result = result && matrix_coverage_selected_count(&plan, S8("sanitized-debug")) == (sanitize_supported ? 1u : 0u) &&
+                 matrix_coverage_selected_count(&plan, S8("sanitized-release")) == (sanitize_supported ? 1u : 0u);
+        MatrixCoveragePlan shared_tree = plan;
+        for (u32 tree_i = 0; tree_i < shared_tree.tree_count; tree_i += 1)
+        {
+            MatrixCoverageTreePlan* tree = &shared_tree.trees[tree_i];
+            if (tree->sanitize && tree_i + 1 < shared_tree.tree_count && shared_tree.trees[tree_i + 1].sanitize)
+            {
+                // Merge the sanitized Release row into the Debug tree: a
+                // shared Debug;Release tree has two owners and is rejected.
+                tree->row_indices[tree->row_count++] = shared_tree.trees[tree_i + 1].row_indices[0];
+                tree->optimize_count = 2;
+                for (u32 move_i = tree_i + 1; move_i + 1 < shared_tree.tree_count; move_i += 1)
+                {
+                    shared_tree.trees[move_i] = shared_tree.trees[move_i + 1];
+                }
+                shared_tree.tree_count -= 1;
+                result = result && matrix_coverage_plan_validate(&shared_tree) && !matrix_coverage_partition_validate(&shared_tree);
+                break;
+            }
         }
         MatrixCoverageObligations release_obligations = matrix_coverage_obligations_for_lane(false, true, &plan, S8("release"));
         MatrixCoverageObligations checks_obligations = matrix_coverage_obligations_for_lane(false, true, &plan, S8("checks"));
@@ -24692,9 +24721,13 @@ struct MatrixSuperbuildAllocationCase
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_low_core_allocation_tests(void)
 {
     BUSTER_GLOBAL_LOCAL MatrixSuperbuildAllocationCase cases[] = {
-        // Shared sanitized Debug;Release tree, GCC, Zig on three Apple-Silicon CPUs.
-        {.name = S8_INITIALIZER("macOS arm64 checks"), .thread_count = 3, .tree_count = 3,
-         .runs_tests = {1, 0, 0}, .expected_jobs = {3, 1, 1}, .expected_test_jobs = {3, 1, 1}},
+        // Grouped diagnostic checks on three Apple-Silicon CPUs: sanitized
+        // Debug, sanitized Release, GCC, Zig. Test phases serialize.
+        {.name = S8_INITIALIZER("macOS arm64 checks"), .thread_count = 3, .tree_count = 4,
+         .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}, .expected_test_jobs = {3, 3, 1, 1}},
+        // An isolated macOS sanitized owner receives the whole host budget.
+        {.name = S8_INITIALIZER("macOS arm64 sanitized owner"), .thread_count = 3, .tree_count = 1,
+         .runs_tests = {1}, .expected_jobs = {3}, .expected_test_jobs = {3}},
         // Sanitized Debug, sanitized Release, GCC, Zig. The two test phases run
         // one after the other, each with all four CPUs.
         {.name = S8_INITIALIZER("Linux checks"), .thread_count = 4, .tree_count = 4,
@@ -24711,10 +24744,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_low_core_allocation_tests(vo
         {.name = S8_INITIALIZER("Windows arm64 checks"), .thread_count = 4, .tree_count = 1,
          .runs_tests = {0}, .expected_jobs = {4}, .expected_test_jobs = {4}},
         // Sharing would let the concurrent self-host worker oversubscribe.
-        {.name = S8_INITIALIZER("four-CPU Apple full matrix"), .thread_count = 4, .self_host_jobs = 1, .tree_count = 4,
-         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1}},
-        {.name = S8_INITIALIZER("three-CPU Apple full matrix"), .thread_count = 3, .self_host_jobs = 1, .tree_count = 4,
-         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1}},
+        {.name = S8_INITIALIZER("four-CPU Apple full matrix"), .thread_count = 4, .self_host_jobs = 1, .tree_count = 5,
+         .unity_only = {0, 0, 1, 0, 0}, .runs_tests = {1, 1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1, 1}},
+        {.name = S8_INITIALIZER("three-CPU Apple full matrix"), .thread_count = 3, .self_host_jobs = 1, .tree_count = 5,
+         .unity_only = {0, 0, 1, 0, 0}, .runs_tests = {1, 1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1, 1}},
         // Larger hosts keep the weighted legacy schedule.
         {.name = S8_INITIALIZER("sixteen-CPU checks"), .thread_count = 16, .tree_count = 4,
          .runs_tests = {1, 1, 0, 0}, .expected_jobs = {4, 4, 4, 4}, .expected_test_jobs = {4, 4, 4, 4}},
@@ -41873,11 +41906,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         MatrixCoveragePlan plan = {0};
         bool selected = matrix_coverage_plan_build_for_target(arena, &plan, lane, target) &&
                         matrix_coverage_selected_count(&plan, matrix_shard) > 0;
-        bool shared_sanitizer = target.apple && (string_equal(matrix_shard, S8("sanitized-debug")) ||
-                                                string_equal(matrix_shard, S8("sanitized-release")));
-        if (!selected || shared_sanitizer || !matrix_coverage_test_admission_valid(matrix_shard))
+        if (!selected || !matrix_coverage_test_admission_valid(matrix_shard))
         {
-            string_print(S8("error: matrix selector or test admission is unavailable for this host; Apple sanitizer trees require grouped checks\n"));
+            string_print(S8("error: matrix selector or test admission is unavailable for this host\n"));
             result = PROCESS_RESULT_FAILED;
         }
     }

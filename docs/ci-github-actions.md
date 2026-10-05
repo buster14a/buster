@@ -53,17 +53,17 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-The `test` matrix retains five desktop runner labels, with sixteen internal combination
-jobs: four owners each on Linux x86-64/AArch64 and Windows x86-64, two owners
-each on macOS AArch64 and Windows AArch64. Five independent `native` lanes
+The `test` matrix retains five desktop runner labels, with eighteen internal combination
+jobs: four owners each on Linux x86-64/AArch64, macOS AArch64 and Windows
+x86-64, and two owners on Windows AArch64. Five independent `native` lanes
 run the execution-mode suite. The three Unix
 lanes additionally run the configuration-differential suite, reusing their
 fresh Release compiler; the two Windows lanes report the mode gate
 independently. Mobile retains its two independent suite-level shards; lint,
 UEFI and the independent analyzer remain required. **Require `CI complete`**,
-which checks all groups and the exact 27-job inventory, including all sixteen
+which checks all groups and the exact 29-job inventory, including all eighteen
 desktop partitions and all five native jobs, for full executions. On a
-qualifying same-commit main push, twenty-five native/mobile/UEFI, desktop and analyzer validation jobs are instead
+qualifying same-commit main push, twenty-seven native/mobile/UEFI, desktop and analyzer validation jobs are instead
 proven by the exact queue run while desktop cache publication, lint and the analyzer receipt run on main;
 see [queue-to-main reuse](ci-main-reuse.md) for its admission and fallback.
 The old six names alone do not
@@ -89,7 +89,7 @@ compile/link/bundle-only; Apple Silicon retains simulator execution.
 
 The main workflow covers pull requests (including forks), main pushes, tags,
 merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix.
-The first attempt of a draft pull-request run defers the four macOS-runner
+The first attempt of a draft pull-request run defers the six macOS-runner
 jobs to named Linux no-ops, `<job> (deferred for draft PR)`; merge groups
 always run them, and `CI complete` rejects a deferral anywhere else. A
 "Re-run failed jobs" attempt of a draft run carries its attempt-1 deferrals
@@ -322,7 +322,7 @@ verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
 by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
 unpacked tree instead. See
 [native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
-The aggregate `CI complete` requires all sixteen desktop combination jobs, five
+The aggregate `CI complete` requires all eighteen desktop combination jobs, five
 native jobs, two mobile jobs, workflow lint, UEFI and the analyzer. Its
 read-only Actions inventory rejects missing shard identities even when a
 smaller surviving matrix group reports success. It selects each logical job's

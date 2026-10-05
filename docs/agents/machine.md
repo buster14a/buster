@@ -230,6 +230,20 @@ fixture as well as compiling both architectures.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
+- FAST's existing prepass records one advisory byte per virtual register for
+  a nearby fixed-register or forced-scratch consumer. Only immutable values
+  defined in the same block, at most eight rows before the first qualifying
+  use, receive a hint. The two definition free-pick sites consume it only if
+  the lane is already free in the existing candidate mask and the value does
+  not prefer callee-saved registers. Hints never evict or override fixed,
+  tied, pinned, reserved or class constraints; normal preferred/free/dead/LRU
+  selection remains the fallback. The prepass and placement share the same
+  immutable function lifetime. QUALITY inherits the hints through FAST reruns
+  and retains its strict acceptance comparison. `MACHINE_FAST_CONSUMER_HINTS`
+  defaults to 1; the diagnostic `MACHINE_FAST_AVOID_SCRATCH_PICK` variant
+  defaults to 0. Static code-size observations do not establish compiler
+  throughput gains. The registered consumer-hint MIR fixture verifies the
+  constrained lane, absence of unnecessary edits and deterministic placement.
 - QUALITY scheduling remains pressure-first and deterministic. Pressure is
   counted per register class; metadata supplies barriers, memory membership,
   and implicit vector-state chain membership through the published
@@ -676,9 +690,10 @@ fixture as well as compiling both architectures.
   declare RDX/X10 scratch clobbers. Darwin TLS descriptor rows have ordinary
   call effects; a following move captures RAX/X0 into an SSA value. Every
   relocation site distinguishes the index, value offset, or descriptor field.
-  The thread-local model fixture requires zero fallback with all desktop
-  targets, allocators, frontend forms, and PIC settings; native hosts execute
-  its separate definition object and values held across repeated TLS accesses.
+  The thread-local model fixture requires zero fallback for admitted desktop
+  targets, allocators, frontend forms and code models, and named refusal with
+  no artifact for effective AArch64 ELF PIC requests. Native hosts execute
+  the supported models with separate definitions and live repeated accesses.
 - x86-64 i128 bitwise complement reads both frame-backed limbs and emits
   ordinary three-operand XOR64 rows against one all-ones constant. Each limb
   result has one definition; do not use mutable NOT rows for this expansion.
@@ -722,8 +737,9 @@ fixture as well as compiling both architectures.
   both sides of a VLA, packed narrow arguments, split pairs, indirect large
   results, ninth floating arguments and variadics. The registered driver
   matrix retains both original over-aligned stack fixtures, all six AArch64
-  targets, allocator modes, frontend forms and PIC settings. Native AArch64
-  desktop hosts also link the independent host observer in both directions
+  targets, allocator modes and frontend forms, with supported code models
+  and explicit AArch64 ELF PIC refusals. Native AArch64 desktop hosts also
+  link the independent host observer in both directions
   for all three explicit MIR allocators in the recorded matrix. Its direct
   NONE path stayed an object control: the archived direct reference failed
   independently compiled split-composite and packed Darwin call boundaries.
@@ -892,10 +908,16 @@ fixture as well as compiling both architectures.
   with the function's own offset, because an FDE naming a preemptible function
   is the same PC-relative reference to an interposable symbol that `ld`
   refuses in the body.
-- `-fPIE`/`-fpie` select the same position-independent code model as `-fPIC`
-  on every target. The last positive spelling wins; `-fno-pie` cancels only
-  a PIE spelling, whereas `-fno-pic` clears either model. Target-specific
-  code generation still decides where the selected model changes references.
+- On x86-64 ELF, `-fPIE`/`-fpie` request the same implemented PIC model
+  as `-fPIC`/`-fpic`; the last positive spelling wins. `-fno-pic` clears
+  that request, and `-fno-pie` cancels only a PIE spelling. Native AArch64
+  ELF C generation has no PIC reference model and the driver rejects an
+  effective positive request before mapping sources or publishing artifacts.
+  Default/cancelled generation and non-code actions remain supported.
+  Assembly and prebuilt inputs spell their own references. Mach-O/COFF models
+  and Wasm/eBPF compatibility behavior are unchanged; this partial #1289
+  boundary does not certify their PIC policy or the residual LLVM/direct
+  backend model paths.
 - The built-in linker binds every name in its image: `PLT32` patches the same
   rel32 `PC32` does. The ELF reader preserves `GOTPCREL`, `GOTPCRELX`,
   `REX_GOTPCRELX` and `CODE_4_GOTPCRELX` as distinct relocation kinds.

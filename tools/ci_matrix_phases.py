@@ -134,8 +134,6 @@ def validate_plan(plan, coverage, environment):
             require(identity[key] == environment[env], f"current job mismatch: {key}")
     require(plan.get("scheduler") in ("direct", "pooled"), "unknown scheduler")
     require(identity["shard"] in ("combinations", "release", "checks", "sanitized-debug", "sanitized-release", "portability"), "unknown desktop shard")
-    require(identity["platform"] != "macos" or identity["shard"] not in ("sanitized-debug", "sanitized-release"),
-            "Apple sanitizer trees require grouped checks")
     admission = plan.get("test_admission", "overlap")
     require(admission in ("overlap", "all-builds"), "unknown test admission policy")
     if "BUSTER_MATRIX_TEST_ADMISSION" in environment:

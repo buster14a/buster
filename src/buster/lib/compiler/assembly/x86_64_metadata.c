@@ -6339,6 +6339,29 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_unsigned_operand_fits(BusterX8
     return result;
 }
 
+// An unsigned (UIMM*) immediate whose field is as wide as the data operand
+// is not extended, so it stores the operand's low bytes verbatim. Like GNU as,
+// accept every value representable at that width in either interpretation:
+// source folding already turns byte literals 0x80..0xff into -128..-1, and
+// `mov rax, -2147483649` selects the imm64 row. Narrower fields (shift and
+// rotate counts, vector selectors) and sign-extended SIMM* fields keep their
+// single interpretation.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_unsigned_immediate_fits(BusterX86MetadataPhysicalOperand operand, u8 width,
+                                                                           bool full_width)
+{
+    bool result;
+    if (full_width && !operand.has_unsigned_value && operand.has_value && operand.value < 0)
+    {
+        result = buster_x86_metadata_emit_signed_fits(operand.value, width);
+    }
+    else
+    {
+        result = buster_x86_metadata_emit_unsigned_operand_fits(operand, width);
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_checked_add_s64(s64 left, s64 right, s64* result)
 {
     bool valid = (right <= 0 || left <= INT64_MAX - right) && (right >= 0 || left >= INT64_MIN - right);
@@ -7357,10 +7380,25 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         BusterX86MetadataPhysicalOperand immediate = binding->physical;
         if (!immediate.has_symbol && !immediate.has_value && !immediate.has_unsigned_value)
             return BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE;
+        u16 operand_width = 0;
+        for (u32 index = 0; index < binding_count && !operand_width; index += 1)
+        {
+            BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
+            if (physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+                physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+                operand_width = buster_x86_metadata_emit_operand_width(physical);
+        }
+        bool full_width_immediate = operand_width == (u16)width * 8 &&
+                                    !buster_x86_metadata_string_input_equal(form.category.offset, S8("SHIFT")) &&
+                                    !buster_x86_metadata_string_input_equal(form.category.offset, S8("ROTATE"));
+        // A 64-bit operand reads a literal above INT64_MAX as its two's
+        // complement, so `addq $0xffffffffffffffff` is the sign-extended -1.
+        bool wrapped_signed = operand_width == 64 && immediate.has_unsigned_value &&
+                              buster_x86_metadata_emit_signed_fits((s64)immediate.unsigned_value, width);
         if (!immediate.has_symbol &&
             !(signed_immediate ?
-                  (immediate.has_value && buster_x86_metadata_emit_signed_fits(immediate.value, width))
-                                      : buster_x86_metadata_emit_unsigned_operand_fits(immediate, width)))
+                  ((immediate.has_value && buster_x86_metadata_emit_signed_fits(immediate.value, width)) || wrapped_signed)
+                                      : buster_x86_metadata_emit_unsigned_immediate_fits(immediate, width, full_width_immediate)))
         {
             if (immediate.has_unsigned_value) buster_x86_metadata_emit_diagnostic_u64(diagnostic_value, immediate.unsigned_value);
             else if (diagnostic_value) *diagnostic_value = immediate.value;
@@ -9489,6 +9527,15 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                         // diagnostic supersede an address-size mismatch.  An
                         // unrelated feature-disabled form must not hide a structural
                         // addressing error.
+                        prefer_failure = true;
+                    }
+                    if (status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
+                        first_failure == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE && first_failure_form_recorded &&
+                        (first_failure_form.apx_flags & BUSTER_X86_METADATA_APX) && !(form.apx_flags & BUSTER_X86_METADATA_APX) &&
+                        !query.attributes.apx_flags)
+                    {
+                        // An out-of-range literal on the legacy row is the real
+                        // error; the disabled APX twin must not report a feature.
                         prefer_failure = true;
                     }
                     if (prefer_failure)

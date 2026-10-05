@@ -3,9 +3,39 @@
  * service account; upload subjects never select credentials or paths. */
 #ifdef __linux__
 #include <pwd.h>
+/* The candidate account may search the attempt ancestry but not list it, so
+ * every component is opened as a path reference. That is enough to stat the
+ * source directory and open its two fixed names. */
+BUSTER_GLOBAL_LOCAL int bq_native_open_source(char const* path)
+{
+    int current = path && path[0] == '/' ? open("/", O_PATH | O_DIRECTORY | O_CLOEXEC) : -1;
+    size_t offset = 1;
+    while (current >= 0 && path[offset])
+    {
+        size_t end = offset;
+        while (path[end] && path[end] != '/') end += 1;
+        char name[256];
+        size_t length = end - offset;
+        bool valid = length > 0 && length < sizeof(name) &&
+                     !(length == 1 && path[offset] == '.') &&
+                     !(length == 2 && path[offset] == '.' && path[offset + 1] == '.');
+        int next = -1;
+        if (valid)
+        {
+            memcpy(name, path + offset, length);
+            name[length] = 0;
+            next = openat(current, name, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        }
+        close(current);
+        current = next;
+        offset = path[end] ? end + 1 : end;
+    }
+    return current;
+}
+
 BUSTER_GLOBAL_LOCAL int bq_native_executable(char const* source, char const* identity, uid_t owner)
 {
-    int directory = owner != (uid_t)-1 ? bq_open_absolute_directory(string_from_pointer(source)) : -1;
+    int directory = owner != (uid_t)-1 ? bq_native_open_source(source) : -1;
     struct stat info = {0};
     bool ok = directory >= 0 && strlen(identity) == 64 && bq_native_hex((u8 const*)identity) &&
               fstat(directory, &info) == 0 && info.st_uid == owner && (info.st_mode & 07777) == 0550;

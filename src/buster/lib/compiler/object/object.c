@@ -6500,7 +6500,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     .name = object_section_name_for_kind((ObjectSectionKind)kind),
                     .data =
                         {
-                            .pointer = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]),
+                            .pointer = zero_fill ? 0 : arena_allocate_zeroed(arena, u8, section_sizes[kind]),
                             .length = zero_fill ? 0 : section_sizes[kind],
                         },
                     .virtual_size = section_sizes[kind],
