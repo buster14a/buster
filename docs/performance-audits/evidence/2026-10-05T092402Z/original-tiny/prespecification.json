@@ -1,0 +1,36 @@
+{
+  "pairs": 6,
+  "warmups_per_variant": 1,
+  "order": [
+    "AB",
+    "BA",
+    "AB",
+    "BA",
+    "AB",
+    "BA"
+  ],
+  "cpu": 2,
+  "cells": {
+    "n": 256,
+    "m": [
+      1,
+      2,
+      3,
+      7,
+      15,
+      31,
+      32
+    ],
+    "shape": [
+      0,
+      1
+    ],
+    "calls": 1048576
+  },
+  "source_binary_sha256": {
+    "baseline": "53ed4e8927d75ffab1167bb5c888ea2ead2a77390a47d9d8a66802fd7f0a7c27",
+    "candidate": "52cefa56df4ece05b8c85376a6b33f73751aef40a9365d09ba47c7fbe5a8484a"
+  },
+  "interval": "pointwise min/max of six paired ratios (96.875% sign-order coverage under independent continuous pairs); not simultaneous across 14 cells",
+  "limits": "shared host; no dedicated-host admission, speed/equivalence claim, adaptive extension or timing gate"
+}

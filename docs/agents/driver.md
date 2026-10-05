@@ -446,7 +446,12 @@ label is known, so GCC may write it ahead of the label it names; and, accepted
 and dropped because they carry no bytes the linked program uses, the `.cfi_*`
 family, `.file`, `.ident`, and Clang's `.addrsig`/`.addrsig_sym`. A global
 `.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
-absolute value are refused by name. Anything else -- a directive the table
+absolute value are refused by name. Widths and alignment follow the target
+as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on
+AArch64 `.align N` is 2^N bytes like `.p2align`, `.word` is 32 bits, and
+`.xword`/`.dword` add 64-bit data. A constant that fits neither the signed nor
+the unsigned reading of its directive's width is refused, as llvm-mc does,
+rather than truncated. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
@@ -687,15 +692,21 @@ then the same target roots used by ELF export discovery: `lib/<triple>`,
 sysroot. Without a sysroot, the absolute host roots also include
 `/usr/<triple>/lib` after the two multiarch roots. The sysroot replaces these
 default host paths; explicit `-L` directories retain their literal meaning.
-Each directory prefers `libNAME.so` to `libNAME.a`, so an earlier explicit
+Each directory prefers a target-compatible `libNAME.so` to `libNAME.a`, so an earlier explicit
 archive wins over a later default shared library. `-l:FILE.a` searches the
 exact archive name without that shared-library probe and retains its existing
-bare-path fallback. Other target search policies are unchanged.
+bare-path fallback. A little-endian ELF64 shared candidate naming a different
+CPU is skipped before archive selection, allowing an archive in the same or
+a later directory to satisfy the request. Files without that recognized
+foreign shared header retain the existing export-discovery refusal. The probe
+does not validate the complete foreign object. Other target search policies
+are unchanged.
 
 `compiler_driver_archive_test_default_roots`, invoked by the registered lazy
 archive fixture, checks both ELF CPUs and all six literal sysroot roots,
 named/exact/direct image parity, distinct provider precedence, explicit `-L`,
-shared preference, exact archive bypass and output preservation on refusal.
+shared preference, incompatible shared headers beside and before usable
+archives, exact archive bypass and output preservation on refusal.
 Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.

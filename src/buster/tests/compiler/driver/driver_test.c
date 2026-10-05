@@ -15,6 +15,7 @@
 // compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
+// compiler_driver_test_wasm_string_records checks multi-module lookup scaling.
 // compiler_driver_test_wasm_function_addresses checks escaping function markers and direct calls.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
@@ -12180,6 +12181,110 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_en
     return result;
 }
 
+// Context-wide string records retain identity across distinct modules and
+// functions; each function emits two rows in the reverse of instruction-ID
+// order, with equal contents in separate records as well as unique contents.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_string_records(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 populations[] = {1, 4, 16};
+    for (u32 width = 4; width <= 8; width += 4)
+    {
+        for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(populations); population += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            enum { MODULES = 3 };
+            u32 functions = MODULES * populations[population];
+            u32 strings = functions * 2;
+            IrProgram program = ir_program_initialize(arena, MODULES, 4, functions, 0);
+            Target target = {.cpu_arch = width == 4 ? CPU_ARCH_WASM32 : CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING};
+            program.data_layout = target_data_layout(target);
+            IrTypeLayout pointer_layout = {.size = width, .alignment = width, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true};
+            IrTypeId void_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+            IrTypeId byte_type = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 8, .layout = {.size = 1, .alignment = 1, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+            IrTypeId pointer_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_POINTER, .element_type = byte_type, .layout = pointer_layout});
+            IrTypeId signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = pointer_type, .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+            bool committed = true;
+            for (u32 module_index = 0; module_index < MODULES; module_index += 1)
+            {
+                IrModule* module = program.modules + module_index;
+                module->name = string_format(arena, S8("strings-{u32}"), module_index);
+                for (u32 function_index = 0; function_index < populations[population]; function_index += 1)
+                {
+                    String8 name = string_format(arena, S8("string_{u32}_{u32}"), module_index, function_index);
+                    IrSymbolId symbol = ir_program_add_symbol(&program,
+                        (IrSymbol){.name = name, .link_name = name, .type = signature, .kind = IR_SYMBOL_FUNCTION,
+                                   .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+                    IrFunction* function = ir_module_add_function(arena, module,
+                        (IrFunction){.name = name, .symbol = symbol, .canonical_type = signature, .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+                    ir_function_add_block(arena, function,
+                        (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+                    IrValueId value = ir_function_add_value(arena, function,
+                        (IrValue){.canonical_type = pointer_type, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+                    IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+                    IrInstruction literal = {.canonical_type = pointer_type, .symbol = IR_SYMBOL_ID_INVALID,
+                        .canonical_local = IR_LOCAL_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID, .result = value, .opcode = IR_OPCODE_CONSTANT_STRING};
+                    IrInstructionId row = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, literal, (IrSourceRange){0}, &refusal);
+                    committed &= refusal == IR_COMMIT_ACCEPTED;
+                    if (refusal == IR_COMMIT_ACCEPTED)
+                    {
+                        ir_instruction_extra_ensure(arena, function, row)->literal = function_index % 2 ? name : S8("shared");
+                    }
+                    IrValueId second_value = ir_function_add_value(arena, function,
+                        (IrValue){.canonical_type = pointer_type, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+                    literal.result = second_value;
+                    IrInstructionId second_row = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, literal, (IrSourceRange){0}, &refusal);
+                    committed &= refusal == IR_COMMIT_ACCEPTED;
+                    if (refusal == IR_COMMIT_ACCEPTED)
+                    {
+                        ir_instruction_extra_ensure(arena, function, second_row)->literal = S8("shared");
+                    }
+                    IrValueId* operand = arena_allocate(arena, IrValueId, 1);
+                    *operand = value;
+                    IrInstruction tail = {.canonical_type = void_type, .symbol = IR_SYMBOL_ID_INVALID,
+                        .canonical_local = IR_LOCAL_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID, .result = IR_VALUE_ID_INVALID,
+                        .opcode = IR_OPCODE_RETURN, .operands = operand, .operand_count = 1};
+                    IrInstructionId tail_row = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, tail, (IrSourceRange){0}, &refusal);
+                    committed &= refusal == IR_COMMIT_ACCEPTED;
+                    if (committed)
+                    {
+                        function->blocks[0].first_instruction = second_row;
+                        function->instructions[second_row.value].next = row;
+                        function->instructions[row.value].next = tail_row;
+                    }
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, committed))
+            {
+                WasmOptions options = WASM_OPTIONS_DEFAULT;
+                options.pointer_size = (u8)width;
+                WasmArtifact first = wasm_emit_program(arena, &program, options);
+                WasmArtifact second = wasm_emit_program(arena, &program, options);
+                BUSTER_TEST_RAW(arguments, first.success && second.success, first.error.message);
+                if (BUSTER_REQUIRE(arguments, first.success && second.success))
+                {
+                    u32 bound = 1;
+                    for (u32 remaining = strings; remaining; remaining >>= 1) bound += 1;
+                    BUSTER_TEST(arguments, first.stats.module_count == MODULES && first.stats.defined_function_count == functions);
+                    BUSTER_TEST(arguments, first.stats.data_segment_count == strings);
+                    BUSTER_TEST(arguments, first.stats.string_record_lookup_probes >= strings &&
+                                           first.stats.string_record_lookup_probes <= (u64)strings * bound);
+                    BUSTER_TEST(arguments, first.stats.string_record_lookup_probes == second.stats.string_record_lookup_probes);
+                    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                                           memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                    arguments->show(arguments, S8("WASM_STRING_LOOKUP width={u32} modules={u32} strings={u32} probes={u64} bound={u64}\n"),
+                                    width, (u32)MODULES, strings, first.stats.string_record_lookup_probes, (u64)strings * bound);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Baseline success is still executed: the engine witnesses index-zero/null
 // collisions before the narrowed capability refusal makes those rows fail.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_addresses(UnitTestArguments* arguments)
@@ -15375,7 +15480,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_dynamic_tls(UnitTe
         for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
         {
             String8 object_path = string_format_z(arena, S8("{S8}/foreign-{u32}-{u32}.o"), directory, compiler, variant);
-            String8 compile[] = {compilers[compiler], S8("-O2"), S8("-fPIC"), variants[variant], S8("-c"), S8("-o"), object_path, foreign_path};
+            String8 compile[] = {compilers[compiler], S8("-O2"), S8("-fPIC"), S8("-gz=none"), variants[variant], S8("-c"), S8("-o"), object_path, foreign_path};
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0}, (SliceString8){0},
                                                         (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             bool compiled = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
@@ -19312,6 +19417,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_records);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);

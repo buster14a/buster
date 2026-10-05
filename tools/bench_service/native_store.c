@@ -112,7 +112,11 @@ BUSTER_GLOBAL_LOCAL int bq_native_store(BqQueue const* queue)
     if (ok) descriptor = openat(queue->directory_fd, "native-blobs", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     struct stat info = {0};
     ok = ok && descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
-         info.st_uid == geteuid() && (info.st_mode & 07777) == 0700 && fsync(queue->directory_fd) == 0;
+         info.st_uid == geteuid() &&
+         ((info.st_mode & 07777) == BQ_NATIVE_STORE_MODE ||
+          /* mkdir under the service umask, or a store created before the broker needed it. */
+          ((info.st_mode & 07777) == 0700 && fchmod(descriptor, BQ_NATIVE_STORE_MODE) == 0)) &&
+         fsync(queue->directory_fd) == 0;
     if (!ok && descriptor >= 0) { close(descriptor); descriptor = -1; }
     return descriptor;
 }
@@ -179,12 +183,13 @@ BUSTER_GLOBAL_LOCAL bool bq_native_staging_recover(int store, char const* pendin
     int directory = openat(store, pending, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     struct stat root = {0};
     bool ok = directory >= 0 && fstat(directory, &root) == 0 && root.st_uid == geteuid() &&
-              ((root.st_mode & 07777) == 0700 || (root.st_mode & 07777) == 0500);
+              ((root.st_mode & 07777) == 0700 || (root.st_mode & 07777) == BQ_NATIVE_BUNDLE_MODE);
     int scan = ok ? openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     DIR* stream = scan >= 0 ? fdopendir(scan) : NULL;
     bool present[2] = {false, false};
     struct stat files[2] = {{0}, {0}};
     char const* names[] = {"program", "manifest"};
+    mode_t const sealed[] = {0400, BQ_NATIVE_MANIFEST_MODE};
     ok = ok && stream;
     if (stream)
     {
@@ -201,9 +206,9 @@ BUSTER_GLOBAL_LOCAL bool bq_native_staging_recover(int store, char const* pendin
             {
                 ok = file >= 0 && fstat(file, files + index) == 0 && files[index].st_size >= 0 &&
                      files[index].st_uid == geteuid() && S_ISREG(files[index].st_mode) && files[index].st_nlink == 1 &&
-                     ((files[index].st_mode & 07777) == 0600 || (files[index].st_mode & 07777) == 0400) &&
+                     ((files[index].st_mode & 07777) == 0600 || (files[index].st_mode & 07777) == sealed[index]) &&
                      (u64)files[index].st_size <= (index == 0 ? size : manifest_size) &&
-                     ((files[index].st_mode & 07777) != 0400 || (u64)files[index].st_size == (index == 0 ? size : manifest_size)) &&
+                     ((files[index].st_mode & 07777) != sealed[index] || (u64)files[index].st_size == (index == 0 ? size : manifest_size)) &&
                      bq_native_prefix(file, 8, index == 0 ? input : -1, (u64)files[index].st_size, manifest);
                 present[index] = ok;
             }
@@ -215,8 +220,8 @@ BUSTER_GLOBAL_LOCAL bool bq_native_staging_recover(int store, char const* pendin
     }
     else if (scan >= 0) close(scan);
     if (ok && present[1]) ok = present[0] && (files[0].st_mode & 07777) == 0400 && (u64)files[0].st_size == size;
-    if (ok && (root.st_mode & 07777) == 0500) ok = present[0] && present[1] &&
-        (files[0].st_mode & 07777) == 0400 && (files[1].st_mode & 07777) == 0400;
+    if (ok && (root.st_mode & 07777) == BQ_NATIVE_BUNDLE_MODE) ok = present[0] && present[1] &&
+        (files[0].st_mode & 07777) == sealed[0] && (files[1].st_mode & 07777) == sealed[1];
     if (ok) ok = fchmod(directory, 0700) == 0;
     for (u32 index = 0; ok && index < 2; index += 1)
     {
@@ -255,7 +260,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_native_upload(BqQueue* queue, u32 kind, u8 const*
         int file = openat(committed, "manifest", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         char bytes[BQ_NATIVE_MANIFEST_CAP];
         bool same = fstat(committed, &committed_info) == 0 && committed_info.st_uid == geteuid() &&
-                    (committed_info.st_mode & 07777) == 0500 && bq_native_file(file, manifest_size, 0400) &&
+                    (committed_info.st_mode & 07777) == BQ_NATIVE_BUNDLE_MODE && bq_native_file(file, manifest_size, BQ_NATIVE_MANIFEST_MODE) &&
                     pread(file, bytes, (size_t)manifest_size, 0) == manifest_size && !memcmp(bytes, manifest, (size_t)manifest_size);
         if (file >= 0) close(file);
         int executable = same ? openat(committed, "program", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
@@ -344,7 +349,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_native_upload(BqQueue* queue, u32 kind, u8 const*
             if (error == BQ_OK && !bq_native_finish_checkpoint(2)) error = BQ_IO;
             if (error == BQ_OK) description = openat(staging, "manifest", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
             if (error == BQ_OK && (description < 0 || write(description, manifest, (size_t)manifest_size) != manifest_size ||
-                fchmod(description, 0400) != 0 || fsync(description) != 0 || fchmod(staging, 0500) != 0 || fsync(staging) != 0)) error = BQ_IO;
+                fchmod(description, BQ_NATIVE_MANIFEST_MODE) != 0 || fsync(description) != 0 || fchmod(staging, BQ_NATIVE_BUNDLE_MODE) != 0 || fsync(staging) != 0)) error = BQ_IO;
             if (error == BQ_OK && !bq_native_finish_checkpoint(3)) error = BQ_IO;
             if (description >= 0) close(description);
             if (output >= 0) close(output);
@@ -404,7 +409,7 @@ BUSTER_GLOBAL_LOCAL bool bq_native_description(int directory, char const* identi
     int file = openat(directory, "manifest", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     struct stat info = {0};
     bool ok = file >= 0 && fstat(file, &info) == 0 && info.st_size > 0 && info.st_size < BQ_NATIVE_MANIFEST_CAP &&
-              bq_native_file(file, info.st_size, 0400);
+              bq_native_file(file, info.st_size, BQ_NATIVE_MANIFEST_MODE);
     *length = ok ? (u32)info.st_size : 0;
     if (ok) ok = pread(file, manifest, *length, 0) == *length;
     if (file >= 0) close(file);
@@ -423,7 +428,7 @@ BUSTER_GLOBAL_LOCAL bool bq_native_materialize(BqQueue const* queue, int source,
     int directory = store >= 0 ? openat(store, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info = {0};
     ok = directory >= 0 && fstat(directory, &info) == 0 && info.st_uid == geteuid() &&
-         (info.st_mode & 07777) == 0500 && bq_native_description(directory, name, manifest, &length, program, &size);
+         (info.st_mode & 07777) == BQ_NATIVE_BUNDLE_MODE && bq_native_description(directory, name, manifest, &length, program, &size);
     int input = ok ? openat(directory, "program", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     ok = ok && bq_native_file(input, (off_t)size, 0400) && bq_native_elf(input, size, 0);
     int output = ok ? openat(source, "program", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;

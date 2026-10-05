@@ -2186,6 +2186,193 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
     return result;
 }
 
+// The refused suffix is deliberately supplied after an ordinary call and a
+// valid inline row. Those references must not become live on refusal,
+// even though no C spelling is known to reach this boundary.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_relocation_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrSymbol symbols[] = {
+        {.name = S8_INITIALIZER("call_target"), .kind = IR_SYMBOL_FUNCTION},
+        {.name = S8_INITIALIZER("inline_target"), .kind = IR_SYMBOL_DATA},
+    };
+    IrProgram program = {.symbols = {.symbols = symbols, .count = BUSTER_ARRAY_LENGTH(symbols), .capacity = BUSTER_ARRAY_LENGTH(symbols)}};
+    IrSymbolId call_targets[] = {{.value = 0}};
+    MachineFunction function = {.call_targets = call_targets, .call_target_count = BUSTER_ARRAY_LENGTH(call_targets)};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        MachineCallSite site = {.code_offset = 8};
+        MachineInlineAssemblyRelocation inline_rows[] = {
+            {.symbol = S8_INITIALIZER("inline_target"), .addend = -4, .offset = 20,
+             .kind = architecture ? ASSEMBLY_RELOCATION_AARCH64_BRANCH26 : ASSEMBLY_RELOCATION_X86_PC32},
+            {.symbol = S8_INITIALIZER("inline_target"), .addend = 6, .offset = 28,
+             .kind = architecture ? ASSEMBLY_RELOCATION_AARCH64_CALL26 : ASSEMBLY_RELOCATION_X86_ABSOLUTE64},
+        };
+        MachineEncodeResult encoded = {.call_sites = &site, .call_site_count = 1, .inline_assembly_relocations = inline_rows,
+                                      .inline_assembly_relocation_count = BUSTER_ARRAY_LENGTH(inline_rows)};
+        CodegenModuleRelocation prefix = {.symbol = {.value = 1}, .offset = 12, .addend = -17,
+                                         .source = CODEGEN_MODULE_RELOCATION_DATA, .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64};
+        CodegenModuleRelocation rows[8] = {0};
+        rows[0] = prefix;
+        u8 prefix_bytes[sizeof(prefix)];
+        memcpy(prefix_bytes, rows, sizeof(prefix_bytes));
+        CodegenModule published = {.relocations = rows, .relocation_count = 1};
+        BUSTER_TEST(arguments, codegen_publish_machine_relocations(&program, &published, 4, &function, &encoded, 100, target));
+        BUSTER_TEST(arguments, published.relocation_count == 4 && !memcmp(rows, prefix_bytes, sizeof(prefix_bytes)));
+        BUSTER_TEST(arguments, rows[1].symbol.value == 0 && rows[1].offset == 108 && rows[1].addend == 0 &&
+            rows[1].source == CODEGEN_MODULE_RELOCATION_CODE &&
+            rows[1].kind == (architecture ? CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 : CODEGEN_MODULE_RELOCATION_X86_64_PC32));
+        BUSTER_TEST(arguments, rows[2].symbol.value == 1 && rows[2].offset == 120 && rows[2].addend == (architecture ? -4 : 0) &&
+            rows[2].kind == (architecture ? CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26 : CODEGEN_MODULE_RELOCATION_X86_64_PC32));
+        BUSTER_TEST(arguments, rows[3].symbol.value == 1 && rows[3].offset == 128 && rows[3].addend == 6 &&
+            rows[3].kind == (architecture ? CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 : CODEGEN_MODULE_RELOCATION_ABSOLUTE64));
+
+        MachineInlineAssemblyRelocation saved = inline_rows[1];
+        for (u32 invalid = 0; invalid < 10; invalid += 1)
+        {
+            inline_rows[1] = saved;
+            MachineEncodeResult refused_encoding = encoded;
+            u32 capacity = BUSTER_ARRAY_LENGTH(rows);
+            CodegenModule refused = {.relocations = rows, .relocation_count = 1};
+            switch (invalid)
+            {
+                case 0: inline_rows[1].kind = ASSEMBLY_RELOCATION_X86_ABSOLUTE8; break;
+                case 1: inline_rows[1].is_block = true; break;
+                case 2: inline_rows[1].symbol = S8("missing_symbol"); break;
+                case 3:
+                    inline_rows[1].kind = ASSEMBLY_RELOCATION_X86_PC32;
+                    inline_rows[1].addend = INT64_MAX - 3;
+                    break;
+                case 4:
+                    inline_rows[1].kind = ASSEMBLY_RELOCATION_X86_PC32;
+                    inline_rows[1].addend = INT64_MAX;
+                    break;
+                case 5: capacity = 3; break;
+                case 6: capacity = 0; break;
+                case 7: refused_encoding.call_site_count = UINT32_MAX; break;
+                case 8: refused_encoding.inline_assembly_relocation_count = UINT32_MAX; break;
+                case 9:
+                    refused.relocation_count = UINT32_MAX;
+                    capacity = UINT32_MAX;
+                    break;
+            }
+            u32 live_count = refused.relocation_count;
+            BUSTER_TEST(arguments, !codegen_publish_machine_relocations(&program, &refused, capacity, &function, &refused_encoding, 100, target));
+            BUSTER_TEST(arguments, refused.relocation_count == live_count && !memcmp(rows, prefix_bytes, sizeof(prefix_bytes)));
+            BUSTER_TEST(arguments, program.symbols.count == BUSTER_ARRAY_LENGTH(symbols));
+        }
+        inline_rows[1] = saved;
+        inline_rows[1].kind = ASSEMBLY_RELOCATION_X86_PC32;
+        s64 boundary_addends[] = {INT64_MIN, INT64_MAX - 4};
+        for (u32 boundary = 0; boundary < BUSTER_ARRAY_LENGTH(boundary_addends); boundary += 1)
+        {
+            inline_rows[1].addend = boundary_addends[boundary];
+            CodegenModule boundary_result = {.relocations = rows, .relocation_count = 1};
+            BUSTER_TEST(arguments, codegen_publish_machine_relocations(&program, &boundary_result, 4, &function, &encoded, 100, target));
+            BUSTER_TEST(arguments, boundary_result.relocation_count == 4 && rows[3].addend == boundary_addends[boundary] + 4);
+        }
+        MachineEncodeResult empty_encoding = {0};
+        CodegenModule empty_result = {.relocations = rows, .relocation_count = 1};
+        BUSTER_TEST(arguments, codegen_publish_machine_relocations(&program, &empty_result, 1, &function, &empty_encoding, 100, target));
+        BUSTER_TEST(arguments, empty_result.relocation_count == 1 && !memcmp(rows, prefix_bytes, sizeof(prefix_bytes)));
+    }
+    // The transaction must retain both halves of the Windows ARM64 TLS offset,
+    // including the high relocation for symbols beyond the low 12-bit range.
+    MachineCallSite windows_tls_sites[] = {
+        {.code_offset = 8, .is_thread_local = true, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET},
+        {.code_offset = 12, .is_thread_local = true, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET,
+         .thread_local_low = true},
+    };
+    MachineEncodeResult windows_tls = {.call_sites = windows_tls_sites, .call_site_count = BUSTER_ARRAY_LENGTH(windows_tls_sites)};
+    CodegenModuleRelocation windows_rows[2] = {0};
+    CodegenModule windows_published = {.relocations = windows_rows};
+    Target windows_a64 = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS};
+    BUSTER_TEST(arguments, codegen_publish_machine_relocations(&program, &windows_published, BUSTER_ARRAY_LENGTH(windows_rows),
+                                                              &function, &windows_tls, 100, windows_a64));
+    BUSTER_TEST(arguments, windows_published.relocation_count == 2 &&
+        windows_rows[0].kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 &&
+        windows_rows[1].kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12);
+    BUSTER_TEST(arguments, windows_rows[0].symbol.value == 0 && windows_rows[1].symbol.value == 0 &&
+        windows_rows[0].offset == 108 && windows_rows[1].offset == 112 &&
+        windows_rows[0].source == CODEGEN_MODULE_RELOCATION_CODE && windows_rows[1].source == CODEGEN_MODULE_RELOCATION_CODE);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_publication_c(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    String8 sources[] = {
+        S8("extern int remote(int); int local_data = 7;\n"
+           "int publication_probe(int x) {\n"
+           "    int *pointer;\n"
+           "    __asm__ volatile(\"lea local_data(%%rip), %0\" : \"=r\"(pointer));\n"
+           "    return remote(x) + *pointer;\n"
+           "}\n"),
+        S8("extern int remote(int); int local_data = 7;\n"
+           "int publication_probe(int x) {\n"
+           "    __asm__ volatile(\"nop\");\n"
+           "    return remote(x) + local_data;\n"
+           "}\n"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, sources[target_index], (CPreprocessOptions){0});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("machine-publication.c"), tokens, parsed, target,
+                                                              (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+            BUSTER_TEST(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+            for (u32 allocator = 0; lowered.program && allocator < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; allocator += 1)
+            {
+                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, lowered.program->modules, target,
+                    (CodegenModuleOptions){.debug_info = true, .verify_invariants = true, .register_allocator = (u8)allocator});
+                BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+                u32 calls = 0;
+                u32 addresses = 0;
+                for (u32 index = 0; generated.error == CODEGEN_ERROR_NONE && index < generated.relocation_count; index += 1)
+                {
+                    CodegenModuleRelocation* relocation = generated.relocations + index;
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, relocation->symbol);
+                    bool call = symbol && string_equal(symbol->name, S8("remote"));
+                    bool address = symbol && string_equal(symbol->name, S8("local_data"));
+                    calls += call;
+                    addresses += address;
+                    CodegenModuleRelocationKind expected = target_index
+                        ? (call ? CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 : CODEGEN_MODULE_RELOCATION_ABSOLUTE64)
+                        : (call ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32 : CODEGEN_MODULE_RELOCATION_X86_64_PC32);
+                    u32 width = expected == CODEGEN_MODULE_RELOCATION_ABSOLUTE64 ? 8u : 4u;
+                    BUSTER_TEST(arguments, (call || address) && relocation->kind == expected && relocation->addend == 0 &&
+                        relocation->source == CODEGEN_MODULE_RELOCATION_CODE && relocation->offset <= generated.code.length &&
+                        width <= generated.code.length - relocation->offset);
+                }
+                BUSTER_TEST(arguments, calls == 1 && addresses == 1);
+                BUSTER_TEST(arguments, generated.line_entry_count > 1);
+                for (u32 line_index = 0; line_index < generated.line_entry_count; line_index += 1)
+                {
+                    CodegenLineEntry line = generated.line_entries[line_index];
+                    BUSTER_TEST(arguments, line.code_offset < generated.code.length && line.line >= 2 && line.line <= (target_index ? 4u : 5u));
+                }
+                if (generated.error == CODEGEN_ERROR_NONE)
+                {
+                    ObjectFile object = object_from_canonical_codegen_module(temporary.arena, lowered.program, &generated, target);
+                    BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
+                    ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64);
+                    BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.length > 0);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2727,6 +2914,12 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult verification = codegen_test_verify_invariants(arguments);
     result.succeeded_test_count += verification.succeeded_test_count;
     result.test_count += verification.test_count;
+    UnitTestResult machine_relocations = codegen_test_machine_relocation_publication(arguments);
+    result.succeeded_test_count += machine_relocations.succeeded_test_count;
+    result.test_count += machine_relocations.test_count;
+    UnitTestResult publication_c = codegen_test_machine_publication_c(arguments);
+    result.succeeded_test_count += publication_c.succeeded_test_count;
+    result.test_count += publication_c.test_count;
     UnitTestResult symbol_addresses = codegen_test_aarch64_symbol_addresses(arguments);
     result.succeeded_test_count += symbol_addresses.succeeded_test_count;
     result.test_count += symbol_addresses.test_count;
