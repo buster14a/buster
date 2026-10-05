@@ -17856,7 +17856,7 @@ BUSTER_C_INTERNAL bool c_parse_record_constexpr_integer(CTypeParseMachine* machi
             }
             else
             {
-                constant = c_parse_type_integer_constant_query(temporary.arena, preprocess, result, scope, initializer_start, initializer_end, 0, 0);
+                constant = c_parse_type_integer_constant(temporary.arena, preprocess, result, scope, initializer_start, initializer_end);
             }
             scratch_end(temporary);
             String8 message = {0};
