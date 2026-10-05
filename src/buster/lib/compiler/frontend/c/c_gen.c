@@ -1733,14 +1733,15 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) && index + 1 < end &&
                  c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACKET))
         {
-            u32 scan = index + 2;
-            while (scan + 1 < end && !(c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_BRACKET) &&
-                                       c_token_is_punctuator(&preprocess.tokens[scan + 1], C_PUNCTUATOR_RIGHT_BRACKET)))
-            {
-                scan += 1;
-            }
+            // The list closes on the `]]` at bracket depth zero, the boundary
+            // the parser itself uses: `[[vendor::tag(a[b[c]]), gnu::error("m")]]`
+            // holds an earlier adjacent `]]` inside the tag's payload.
+            u32 after = end;
+            c_parse_c23_attribute_at(preprocess, index, end, &after);
+            bool closed = after >= index + 4 && after <= end && c_token_is_punctuator(&preprocess.tokens[after - 1], C_PUNCTUATOR_RIGHT_BRACKET) &&
+                          c_token_is_punctuator(&preprocess.tokens[after - 2], C_PUNCTUATOR_RIGHT_BRACKET);
             list_start = index + 2;
-            list_end = scan < end ? scan : end;
+            list_end = closed ? after - 2 : end;
             bracketed = true;
             index = list_end;
         }
