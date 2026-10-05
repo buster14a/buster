@@ -62,6 +62,23 @@ BUSTER_CT_CHECK(MACHINE_FAST_REMATERIALIZE_FRAME >= MACHINE_REF_PAYLOAD_LIMIT);
 // register-file masks, allocated and cleared as one block.
 #define MACHINE_FAST_BLOCK_MASK_COUNT 4u
 
+// Consumer-register hints: the prepass records the fixed (or forced scratch)
+// register of each value's first nearby constrained use, and the free-pick
+// sites take it while the hinted lane is still free. Purely advisory — a hint
+// never evicts and never overrides fixed, tied, pinned or forbidden registers.
+#ifndef MACHINE_FAST_CONSUMER_HINTS
+#define MACHINE_FAST_CONSUMER_HINTS 1
+#endif
+// Greedy variant: instead of hinting the consumer's register, refuse to hand
+// a slot's forced scratch to an unrelated free pick while another lane is
+// open, so the constrained row finds it free when its turn comes.
+#ifndef MACHINE_FAST_AVOID_SCRATCH_PICK
+#define MACHINE_FAST_AVOID_SCRATCH_PICK 0
+#endif
+// Furthest instruction distance between a definition and the constrained use
+// that may still hint that definition's register.
+#define MACHINE_FAST_HINT_DISTANCE 8u
+
 BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
 {
     return (operand_masks >> shift) & MACHINE_FAST_OPERAND_LANE_MASK;
@@ -146,6 +163,8 @@ struct MachineFastState
     // the general file's end — the full-width `owner` state stays
     // initialized either way, which keeps the mask-driven clobber spills
     // (the float rows scribble low vector registers) safe no-ops.
+    // Advisory register per virtual register from the prepass, 0xFF for none.
+    u8 const* register_hints;
     u32 active_register_count;
     u32 clock;
     u32 current_point;
@@ -924,7 +943,8 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_occupied(MachineFastState* state)
 // owner — a probe bounded by the register-file size. Call-crossing values
 // reach for the callee-saved members; everything else only touches them
 // once another binding has already paid their push.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mask, u64 forbidden_mask, bool prefers_callee_saved)
+BUSTER_GLOBAL_LOCAL u32 machine_fast_pick_hinted(MachineFastState* state, u64 class_mask, u64 forbidden_mask, bool prefers_callee_saved,
+                                                 u32 hint)
 {
     u64 candidates = class_mask & ~forbidden_mask & ~machine_fast_pin_active(state, state->current_point >> 2);
     if (!prefers_callee_saved)
@@ -937,42 +957,77 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mas
     }
     u64 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
     u64 free = machine_fast_free_candidates(state, candidates);
-    u64 preferred_free = free & preferred_class;
-    if (preferred_free)
+    u32 result;
+#if !MACHINE_FAST_CONSUMER_HINTS
+    BUSTER_UNUSED(hint);
+#endif
+#if MACHINE_FAST_CONSUMER_HINTS
+    // A live hint names the register a nearby constrained consumer already
+    // requires, so binding here costs nothing later. It only ever selects
+    // among lanes already free: it cannot evict, and the candidate mask
+    // already excludes forbidden, pinned and out-of-class registers.
+    if (hint != UINT32_MAX && !prefers_callee_saved && hint < 64u && ((free >> hint) & 1u))
     {
-        return machine_fast_first_set(preferred_free);
+        result = hint;
     }
-    if (free)
+    else
+#endif
     {
-        return machine_fast_first_set(free);
+#if MACHINE_FAST_AVOID_SCRATCH_PICK
+        // Greedy variant: the forced scratches are exactly the registers
+        // constrained rows take over, so keep them out of unrelated free picks
+        // while any other lane is open. Only the general file participates;
+        // the vector file's scratches sit in a different class mask entirely.
+        u64 scratch = machine_fast_lane(state->description->slot_scratch[0]) | machine_fast_lane(state->description->slot_scratch[1]) |
+                      machine_fast_lane(state->description->slot_scratch[2]) | machine_fast_lane(state->description->slot_scratch[3]);
+        u64 without_scratch = free & ~scratch;
+        free = without_scratch ? without_scratch : free;
+#endif
+        u64 preferred_free = free & preferred_class;
+        if (preferred_free)
+        {
+            result = machine_fast_first_set(preferred_free);
+        }
+        else if (free)
+        {
+            result = machine_fast_first_set(free);
+        }
+        else
+        {
+            u32 best = UINT32_MAX;
+            u32 best_age = UINT32_MAX;
+            u32 dead = UINT32_MAX;
+            // Every candidate is held once no free one exists; walk the candidate
+            // bits, ascending as the file walk was, rather than the whole file.
+            for (u64 remaining = candidates; remaining; remaining &= remaining - 1u)
+            {
+                u32 physical_register = machine_fast_first_set(remaining);
+                // A dead owner costs nothing to displace: its spill is dropped.
+                if (dead == UINT32_MAX && machine_fast_owner_is_dead(state, physical_register))
+                {
+                    dead = physical_register;
+                }
+                if (state->age[physical_register] < best_age)
+                {
+                    best_age = state->age[physical_register];
+                    best = physical_register;
+                }
+            }
+            if (dead != UINT32_MAX)
+            {
+                best = dead;
+            }
+            BUSTER_CHECK(best < state->active_register_count); // The caller must leave an allocatable candidate.
+            machine_fast_spill(state, best);
+            result = best;
+        }
     }
+    return result;
+}
 
-    u32 best = UINT32_MAX;
-    u32 best_age = UINT32_MAX;
-    u32 dead = UINT32_MAX;
-    // Every candidate is held once no free one exists; walk the candidate
-    // bits, ascending as the file walk was, rather than the whole file.
-    for (u64 remaining = candidates; remaining; remaining &= remaining - 1u)
-    {
-        u32 physical_register = machine_fast_first_set(remaining);
-        // A dead owner costs nothing to displace: its spill is dropped.
-        if (dead == UINT32_MAX && machine_fast_owner_is_dead(state, physical_register))
-        {
-            dead = physical_register;
-        }
-        if (state->age[physical_register] < best_age)
-        {
-            best_age = state->age[physical_register];
-            best = physical_register;
-        }
-    }
-    if (dead != UINT32_MAX)
-    {
-        best = dead;
-    }
-    BUSTER_CHECK(best < state->active_register_count); // The caller must leave an allocatable candidate.
-    machine_fast_spill(state, best);
-    return best;
+BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mask, u64 forbidden_mask, bool prefers_callee_saved)
+{
+    return machine_fast_pick_hinted(state, class_mask, forbidden_mask, prefers_callee_saved, UINT32_MAX);
 }
 
 // Materializes `virtual_register` in `target` (UINT32_MAX picks freely) and
@@ -1212,6 +1267,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     prepass.last_use = arena_allocate(arena, u32, value_count);
     prepass.escapes = arena_allocate(arena, u8, value_count);
     prepass.next_call = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    prepass.register_hints = arena_allocate(arena, u8, value_count);
     prepass.operand_masks = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     if (wants_quality_facts)
     {
@@ -1235,6 +1291,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         memset(sentinel_values, 0xff, (u64)value_count * 2u * sizeof(*sentinel_values));
         memset(prepass.last_use, 0, (u64)value_count * sizeof(*prepass.last_use));
         memset(prepass.escapes, 0, value_count);
+        memset(prepass.register_hints, 0xff, (u64)value_count * sizeof(*prepass.register_hints));
         memset(definition_seen, 0, value_count);
         for (u32 register_index = 0; wants_quality_facts && register_index < register_count; register_index += 1)
         {
@@ -1340,6 +1397,13 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 virtual_lanes &= lanes_active;
                 physical_lanes &= lanes_active;
                 block_lanes &= lanes_active;
+                // Only irregular rows can pin a use to a fixed register or a
+                // forced scratch, so only they pay for the descriptor decode
+                // the hint below reads; simple rows have no target to record.
+                bool irregular_row = (opcode_row.flags & (MACHINE_OPCODE_ROW_CONSTRAINED | MACHINE_OPCODE_ROW_CALL |
+                                                          MACHINE_OPCODE_ROW_TERMINATOR | MACHINE_OPCODE_ROW_CLOBBERS)) != 0 ||
+                                     (physical_lanes | block_lanes) != 0;
+                MachineOpcodeInfo const* row_info = irregular_row ? machine_opcode_info(instruction->opcode) : 0;
                 u32 role_lanes = opcode_row.role_lanes;
                 u32 operand_masks = (u32)(role_lanes << MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT) |
                                     (physical_lanes << MACHINE_FAST_OPERAND_PHYSICAL_SHIFT) |
@@ -1371,6 +1435,37 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                     u32 slot = machine_fast_first_set(pending);
                     MachineRef ref = instruction->operands[slot];
                     u32 virtual_register = machine_ref_payload(ref);
+                    // Consumer-register hint: the first use (or use-define)
+                    // lane that a fixed register or a forced scratch claims
+                    // suggests where this value should live when defined
+                    // close above the consumer in the same block. Advisory
+                    // only; the placement scan takes it while the lane is
+                    // free.
+                    if (row_info && prepass.register_hints[virtual_register] == 0xff &&
+                        ((role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u ||
+                         (role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot)) & 1u))
+                    {
+                        u32 target = machine_opcode_fixed_register(row_info, slot);
+                        if (target == UINT32_MAX && constrained)
+                        {
+                            target = machine_fast_operand_class(row_info, slot) == MACHINE_REGISTER_CLASS_VECTOR
+                                         ? description->vector_slot_scratch[slot]
+                                         : description->slot_scratch[slot];
+                        }
+                        MachineVirtualRegister const* value = function->virtual_registers + virtual_register;
+                        if (target != UINT32_MAX && target < MACHINE_TARGET_REGISTER_LIMIT &&
+                            ((description->allocatable_mask | description->vector_allocatable_mask) >> target) & 1u &&
+                            !(value->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                            value->definition_point != MACHINE_POINT_INVALID &&
+                            prepass.definition_blocks[virtual_register] == block_index)
+                        {
+                            u32 definition = machine_point_instruction(value->definition_point);
+                            if (definition < instruction_index && instruction_index - definition <= MACHINE_FAST_HINT_DISTANCE)
+                            {
+                                prepass.register_hints[virtual_register] = (u8)target;
+                            }
+                        }
+                    }
                     if (wants_quality_facts)
                     {
                         prepass.interval_starts[virtual_register] = BUSTER_MIN(prepass.interval_starts[virtual_register], instruction_index);
@@ -2940,6 +3035,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             .escapes = prepass->escapes,
             .next_call = prepass->next_call,
             .rematerialize_immediates = prepass->rematerialize_immediates,
+            .register_hints = prepass->register_hints,
             .pinned_registers = pinned_registers,
             .pinned_mask = pinned_mask,
             .pin_active_masks = pin_active_masks,
@@ -3316,8 +3412,10 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         }
                         else
                         {
-                            target = machine_fast_pick(&state, machine_fast_class_mask(&state, virtual_register), 0,
-                                                       machine_fast_crosses_call(&state, virtual_register));
+                            u32 hint = state.register_hints[virtual_register];
+                            target = machine_fast_pick_hinted(&state, machine_fast_class_mask(&state, virtual_register), 0,
+                                                              machine_fast_crosses_call(&state, virtual_register),
+                                                              hint == 0xff ? UINT32_MAX : hint);
                         }
                         machine_fast_bind(&state, virtual_register, target);
                         operand_registers[slot] = (u8)target;
@@ -3607,8 +3705,10 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     }
                     else
                     {
-                        target = machine_fast_pick(&state, machine_fast_class_mask(&state, machine_ref_payload(ref)), reserved_mask,
-                                                   machine_fast_crosses_call(&state, machine_ref_payload(ref)));
+                        u32 hint = state.register_hints[machine_ref_payload(ref)];
+                        target = machine_fast_pick_hinted(&state, machine_fast_class_mask(&state, machine_ref_payload(ref)), reserved_mask,
+                                                          machine_fast_crosses_call(&state, machine_ref_payload(ref)),
+                                                          hint == 0xff ? UINT32_MAX : hint);
                     }
                     machine_fast_bind(&state, machine_ref_payload(ref), target);
                     operand_registers[slot] = (u8)target;
