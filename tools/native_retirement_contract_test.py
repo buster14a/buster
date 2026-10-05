@@ -1737,7 +1737,7 @@ class CurrentNativeReaderTests(unittest.TestCase):
         self.assertEqual(report["candidate_modes"], ["fast", "quality"])
 
 
-    def test_count_reference_preprocessing_and_copied_expectation_are_independent(self):
+    def test_count_reference_preprocessing_and_copied_expectation_are_separately_checked(self):
         reference = (1, 26, sha(b"int unit(void){return 0;}\n"))
         contract.current_native_compare(reference, reference, "1")
         for actual, expected in (((2, reference[1], reference[2]), "1"),
@@ -1848,6 +1848,55 @@ class CurrentNativeReaderTests(unittest.TestCase):
         manifest["supported_gap_ledger_sha256"] = contract.sha256(gap_path)
         with self.assertRaises(AssertionError):
             contract.current_native_gaps(self.root, manifest, rows)
+
+
+    def test_current_checkout_rejects_historical_ledger_and_source_variants(self):
+        checkout = self.root / "checkout"
+        (checkout / "docs").mkdir(parents=True)
+        (checkout / "tests").mkdir()
+        current_support = b"current reviewed support bytes\n"
+        current_applicability = b"current reviewed applicability bytes\n"
+        (checkout / "docs/native-retirement-support-v1.tsv").write_bytes(current_support)
+        (checkout / "docs/native-retirement-applicability-v1.tsv").write_bytes(current_applicability)
+        source = b"int current(void){return 1;}\n"
+        (checkout / "tests/unit.c").write_bytes(source)
+        self.artifact("support-contract.tsv", current_support)
+        self.artifact("applicability-ledger.tsv", current_applicability)
+        inputs = {"tests/unit.c": {"bytes": str(len(source)), "sha256": sha(source)}}
+        manifest = {"support_contract_sha256": sha(current_support),
+                    "applicability_ledger_sha256": sha(current_applicability)}
+        contract.current_native_checkout_inputs(self.root, manifest, inputs, checkout)
+        for field, old_digest in (
+            ("support_contract_sha256", contract.FULL_SUPPORT_CONTRACT_SHA256),
+            ("applicability_ledger_sha256", next(iter(contract.ACCEPTED_APPLICABILITY_LEDGER_SHA256))),
+        ):
+            altered = dict(manifest, **{field: old_digest})
+            with self.subTest(field=field), self.assertRaisesRegex(AssertionError, "current checkout"):
+                contract.current_native_checkout_inputs(self.root, altered, inputs, checkout)
+        older = b"int current(void){return 0;}\n"
+        old_inputs = {"tests/unit.c": {"bytes": str(len(older)), "sha256": sha(older)}}
+        with self.assertRaises(AssertionError):
+            contract.current_native_checkout_inputs(self.root, manifest, old_inputs, checkout)
+        self.artifact("applicability-ledger.tsv", b"producer exclusion\n")
+        with self.assertRaises(AssertionError):
+            contract.current_native_checkout_inputs(self.root, manifest, inputs, checkout)
+
+
+    def test_interpreted_artifact_and_receipt_bytes_must_match_their_digest(self):
+        from unittest.mock import patch
+        bound = self.artifact("bound.raw", b"bound bytes")
+        with patch.object(Path, "read_bytes", return_value=b"different bytes"):
+            with self.assertRaises(AssertionError):
+                contract.current_native_artifact(self.root, bound)
+        revision, tree = "a" * 40, "b" * 40
+        receipt = self.build_receipt(revision, tree)
+        pinned = contract.sha256(self.root / "candidate-build.json")
+        changed = json.dumps(dict(receipt, run_id="2")).encode()
+        original_read = Path.read_bytes
+        def changing_read(path):
+            return changed if path.name == "candidate-build.json" else original_read(path)
+        with patch.object(Path, "read_bytes", changing_read), self.assertRaises(AssertionError):
+            contract.current_native_build(self.root, "candidate", revision, tree, pinned)
 
 
 if __name__ == "__main__":

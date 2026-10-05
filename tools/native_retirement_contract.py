@@ -1699,8 +1699,11 @@ def current_native_artifact(directory, descriptor):
     current_native_hex(descriptor["sha256"], 64, "artifact SHA-256")
     for parent in (path, *path.parents):
         assert not (directory / parent).is_symlink(), f"symlink in artifact path: {path}"
-    exact_sha(directory / path, descriptor["bytes"], descriptor["sha256"])
-    return (directory / path).read_bytes()
+    assert (directory / path).is_file()
+    raw = (directory / path).read_bytes()
+    assert len(raw) == int(descriptor["bytes"]), path
+    assert hashlib.sha256(raw).hexdigest() == descriptor["sha256"], path
+    return raw
 
 
 def current_native_build(directory, role, revision, tree, receipt_sha256):
@@ -1710,8 +1713,10 @@ def current_native_build(directory, role, revision, tree, receipt_sha256):
     current_native_hex(receipt_sha256, 64, "caller build receipt")
     name = "candidate" if role == "candidate" else "baseline"
     path = directory / (name + "-build.json")
-    assert not path.is_symlink() and sha256(path) == receipt_sha256
-    receipt = current_native_json(path.read_bytes())
+    assert path.is_file() and not path.is_symlink()
+    raw = path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == receipt_sha256
+    receipt = current_native_json(raw)
     assert set(receipt) == {"schema", "repository", "provider", "revision", "source_tree",
                             "dirty", "binary", "builder", "build_argv", "build_log",
                             "source_snapshot", "run_id", "run_attempt", "workflow_path",
@@ -1840,6 +1845,57 @@ def current_native_process(directory, descriptor, invocation_sha256):
     return stdout, stderr
 
 
+def current_native_argv(directory, manifest, row, recipes, dependency_adapters, raw):
+    assert raw.endswith(b"\0") and b"\0\0" not in raw
+    argv = [part.decode("utf-8") for part in raw[:-1].split(b"\0")]
+    baseline = row["allocator"] == "none"
+    recorded_root = Path(argv[0]).parent
+    assert recorded_root.is_absolute() and recorded_root.name == directory.name
+    executable = "baseline-ide.exe" if baseline else "candidate-ide.exe"
+    lowering = "-ffrontend-ssa" if row["frontend_lowering"] == "direct-ssa" else "-fno-frontend-ssa"
+    expected = [str(recorded_root / executable), "cc", "-c", "-g0", "-v", "-fwrapv",
+                "-fno-strict-aliasing", "-funsigned-char", "-target", row["target"],
+                "-mcpu=" + row["cpu"], "-fPIC" if row["PIC"] == "1" else "-fno-pic",
+                lowering, "-fregister-allocator=" + row["allocator"], "-fverify-codegen",
+                "-fmachine-fallback" if baseline else "-fno-machine-fallback", "-nostdinc",
+                "-isystem", str(recorded_root / "dependencies" / "resource-include"),
+                ]
+    if manifest.get("project_include_sha256", ""):
+        if row["target"] in {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}:
+            arch = "x86_64" if row["target"].startswith("x86_64-") else "aarch64"
+            expected.extend(["-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / arch / "include"),
+                             "-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / "include")])
+        if row["fixture"] in HOSTED_FIXTURES:
+            sdk_root = recorded_root / "dependencies" / "project-include" / "sdk"
+            target = row["target"]
+            if "windows" in target:
+                expected.append("-U__GNUC__")
+                if target.startswith("x86_64-"):
+                    expected.append("-D__x86_64=1")
+                expected.extend(["-isystem", str(sdk_root / "mingw-adapter"),
+                                 "-isystem", str(sdk_root / "windows")])
+            elif "apple" in target:
+                if (target.endswith("-ios") and
+                        "dependencies/project-include/sdk/darwin-adapter/Availability.h" in dependency_adapters):
+                    expected.extend(["-isystem", str(sdk_root / "darwin-adapter")])
+                expected.extend(["-isystem", str(sdk_root / "darwin")])
+            elif "android" in target:
+                arch = target.split("-", 1)[0]
+                expected.extend(["-isystem", str(sdk_root / "android" / (arch + "-linux-android")),
+                                 "-isystem", str(sdk_root / "android")])
+        expected.append("-I" + str(recorded_root / "inputs" / "tests"))
+        expected.append("-I" + str(recorded_root / "dependencies" / "project-include"))
+    else:
+        expected.append("-I" + str(recorded_root / "inputs" / "tests"))
+    expected.extend([str(recorded_root / "inputs" / row["fixture"]), "-o",
+                str(recorded_root / "groups" / row["group"] / (row["allocator"] + ".o"))])
+    expected.extend(recipes[row["fixture"]])
+    if not baseline:
+        expected.append("-fcodegen-fallback-census")
+    assert argv == expected, f"argv mismatch for row {row['row']}"
+    return argv
+
+
 def current_native_record(directory, manifest, row, record, compiler, closure, recipes,
                           adapters, skip):
     assert set(record) == {"identity", "compiler", "closure_sha256", "skip", "argv",
@@ -1856,9 +1912,8 @@ def current_native_record(directory, manifest, row, record, compiler, closure, r
         return None
     assert record["skip"] is None, "producer cannot classify a supported object away"
     assert record["argv"]["path"] == row["argv_evidence"]
-    current_native_artifact(directory, record["argv"])
-    validate_argv(directory, manifest, row, recipes, adapters)
-    argv = read_argv(directory / row["argv_evidence"])
+    argv_raw = current_native_artifact(directory, record["argv"])
+    argv = current_native_argv(directory, manifest, row, recipes, adapters, argv_raw)
     invocation = {"identity": identity, "compiler": compiler, "closure_sha256": closure,
                   "argv_sha256": record["argv"]["sha256"]}
     stdout, stderr = current_native_process(directory, record["process"], canonical_digest(invocation))
@@ -1881,6 +1936,22 @@ def current_native_compare(reference, observed, expected_functions):
     assert reference is not None and observed is not None, "missing executed count reference"
     assert observed == reference, "function count or preprocessing differs from historical reference"
     assert current_native_number(expected_functions, 32, "expected reference count") == reference[0]
+
+
+def current_native_checkout_inputs(directory, manifest, inputs, checkout=None):
+    """Require current checkout bytes in addition to legacy approved-ledger checks."""
+    checkout = Path(checkout) if checkout is not None else Path(__file__).resolve().parents[1]
+    for copied, policy, field in (
+        ("support-contract.tsv", "docs/native-retirement-support-v1.tsv", "support_contract_sha256"),
+        ("applicability-ledger.tsv", "docs/native-retirement-applicability-v1.tsv", "applicability_ledger_sha256"),
+    ):
+        trusted = checkout / policy
+        assert trusted.is_file() and not trusted.is_symlink()
+        trusted_raw = trusted.read_bytes()
+        assert manifest[field] == hashlib.sha256(trusted_raw).hexdigest(), "current-native ledger differs from current checkout"
+        assert (directory / copied).read_bytes() == trusted_raw
+    for path, source in inputs.items():
+        current_native_artifact(checkout, {"path": path, "bytes": source["bytes"], "sha256": source["sha256"]})
 
 
 def current_native_population(manifest, inputs, rows):
@@ -1930,8 +2001,9 @@ def current_native_gaps(directory, manifest, rows):
 
 
 def validate_current_native(directory, expected):
+    assert directory.is_dir() and not directory.is_symlink()
     directory = directory.resolve()
-    assert directory.is_dir()
+    assert all(not path.is_symlink() for path in directory.rglob("*")), "symlink in current evidence inventory"
     manifest = properties(directory / "manifest.txt")
     assert manifest["version"] == "3" and manifest["profile"] == CURRENT_NATIVE_PROFILE
     assert manifest["manifest_only"] == "0" and manifest["identity_hash"] == "sha256"
@@ -1951,6 +2023,7 @@ def validate_current_native(directory, expected):
         name = "candidate-ide.exe" if prefix == "compiler" else "baseline-ide.exe"
         exact_sha(directory / name, manifest[prefix + "_bytes"], compiler["binary_sha256"])
     inputs, ledger = validate_inputs(directory, manifest)
+    current_native_checkout_inputs(directory, manifest, inputs)
     validate_dependencies(directory, manifest)
     validate_environment(directory)
     for path in ("dependency-policy.json", "dependency-source-snapshot.json", "dependency-resolved-descriptor.json"):
@@ -1968,7 +2041,8 @@ def validate_current_native(directory, expected):
                                 "dependency_receipt": manifest["dependency_receipt_sha256"],
                                 "environment": sha256(directory / "environment.tsv")})
     assert (directory / "current-records.json").is_file() and not (directory / "current-records.json").is_symlink()
-    data = current_native_json((directory / "current-records.json").read_bytes())
+    records_raw = (directory / "current-records.json").read_bytes()
+    data = current_native_json(records_raw)
     assert set(data) == {"schema", "candidate_records", "reference_records"}
     assert data["schema"] == "buster-current-native-observations-v1"
     selected = [row for row in rows if row["selected"] == "1"]
@@ -2009,7 +2083,7 @@ def validate_current_native(directory, expected):
             "gap_ledger_sha256": gap_digest, "applicability_ledger_sha256": applicability_digest,
             "selected_rows": [int(row["row"]) for row in selected],
             "reference_groups": sorted(int(group) for group in references),
-            "nonexecuted_rows": skipped, "records_sha256": sha256(directory / "current-records.json")}
+            "nonexecuted_rows": skipped, "records_sha256": hashlib.sha256(records_raw).hexdigest()}
 
 
 def partition_current_native(reports):

@@ -595,8 +595,11 @@ Version-3 `manifest.txt` uses the existing current support/input/dependency/
 environment fields, `profile=current-native-v1`, `rows=39456` and
 `reference_groups=19728`. `rows.tsv` retains `ROW_FIELDS`, with
 `argv_evidence=groups/<group>/<mode>.argv` and canonical sorted subjects.
-The copied policy, snapshot, resolved descriptor, materializer receipt and
-include closure must match the validator checkout's live generated authority.
+The copied support/applicability ledgers and every retained input must equal
+the current trusted validator checkout's bytes; historical approved ledger
+variants cannot stand in for current subjects. The copied policy, snapshot,
+resolved descriptor, materializer receipt and include closure must match that
+checkout's live generated authority.
 Historical compiler source identity is a separate dimension from the current
 input/include closure.
 
