@@ -24837,6 +24837,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArg
         BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && (family == C_TEST_NESTED_CONTROL_IF || shallow >= SHALLOW) &&
                             deep <= shallow * 6 + DEEP && deep <= DEEP * 16,
                         string_format(arguments->arena, S8("statement-end tokens family={u32} shallow={u64} deep={u64}"), family, shallow, deep));
+        // Every control keyword is a call-shaped candidate and none is a
+        // callee: all are answered without a scope descent or a lookup.
+        u64 skipped = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_CALL_KEYWORDS_SKIPPED);
+        u64 lookups = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_CALL_LOOKUPS);
+        BUSTER_TEST_RAW(arguments, skipped != UINT64_MAX && skipped >= DEEP && lookups == 0,
+                        string_format(arguments->arena, S8("call keywords family={u32} skipped={u64} lookups={u64}"), family, skipped, lookups));
     }
     return result;
 }

@@ -386,6 +386,17 @@ struct CParseValidationCapacities
     (C_SYMBOL_WELL_KNOWN_BIT(CONST) | C_SYMBOL_WELL_KNOWN_BIT(VOLATILE) | C_SYMBOL_WELL_KNOWN_BIT(ATOMIC) | \
      C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(EXTERN))
 
+// The reserved words that can stand before `(` without naming a function. No
+// declaration binds one of them, so a lookup of such a token can only fail;
+// the call-arity walk answers them before any scope descent (#2676). The GNU
+// alternate spellings and `asm` are left out: a dialect that does not reserve
+// them lets a program declare one.
+#define C_PARSE_NON_CALLEE_KEYWORDS                                                                                                  \
+    (C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | \
+     C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(ELSE) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | \
+     C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | \
+     C_SYMBOL_WELL_KNOWN_BIT(SIZEOF))
+
 // The statement keywords that own a parenthesized header and one
 // substatement without a trailing clause; `if` is tested apart because it
 // also admits an `else`.
@@ -4005,6 +4016,12 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
         {
             continue;
         }
+        if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_NON_CALLEE_KEYWORDS))
+        {
+            C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_CALL_KEYWORDS_SKIPPED, 1);
+            continue;
+        }
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_CALL_LOOKUPS, 1);
         u32 use_index = c_parse_identifier_use_index(analysis, index);
         CEntityId entity = use_index != C_ID_UNDERLYING_INVALID ? analysis->identifier_uses[use_index].entity : C_ENTITY_ID_INVALID;
         // A direct function's callee token is resolved by the call-target

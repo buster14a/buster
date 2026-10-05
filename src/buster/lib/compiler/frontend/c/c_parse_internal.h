@@ -94,6 +94,8 @@ BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPrepr
 enum
 {
     C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS,
+    C_TEST_PARSE_NESTING_CALL_KEYWORDS_SKIPPED,
+    C_TEST_PARSE_NESTING_CALL_LOOKUPS,
     C_TEST_PARSE_NESTING_SLOTS,
 };
 BUSTER_F_DECL u64 c_test_parse_nesting_count(u32 slot);
