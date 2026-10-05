@@ -42,11 +42,14 @@ enum
 
     LLVM_BC_ATTRIBUTE_LIST = 2,
     LLVM_BC_ATTRIBUTE_GROUP = 3,
+    LLVM_BC_ATTRIBUTE_ENUM = 0,
     LLVM_BC_ATTRIBUTE_INTEGER = 1,
     LLVM_BC_ATTRIBUTE_TYPE = 6,
     LLVM_BC_ATTRIBUTE_ALIGNMENT = 1,
     LLVM_BC_ATTRIBUTE_BYVAL = 3,
     LLVM_BC_ATTRIBUTE_SRET = 29,
+    LLVM_BC_ATTRIBUTE_SIGNEXT = 24,
+    LLVM_BC_ATTRIBUTE_ZEROEXT = 34,
 
     LLVM_BC_MODULE_VERSION = 1,
     LLVM_BC_MODULE_TRIPLE = 2,
@@ -1261,6 +1264,33 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_abi_attribute(LlvmBcContext* context, LlvmBcAbi
     signature->attribute_group_count += 1;
 }
 
+// Classify the source scalar, never the integer used to coerce an aggregate.
+// Explicit x86-64 conventions are already resolved by the signature builder.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_scalar_abi_extension(LlvmBcContext* context, IrType* type, IrAbiConvention convention)
+{
+    u32 extension = 0;
+    if (type && type->kind == IR_TYPE_ENUM && type->unqualified_type.value < context->program->types.count)
+    {
+        type = llvm_bc_ir_type(context, type->unqualified_type);
+    }
+    u32 width = type ? (type->kind == IR_TYPE_BOOLEAN ? 1u : type->bit_width) : 0;
+    if (type && type->kind == IR_TYPE_ENUM && !width)
+    {
+        width = type->layout.size < 4 ? (u32)type->layout.size * 8 : 32;
+    }
+    bool scalar = type && (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM);
+    bool extend = context->abi_target_valid &&
+                  ((context->abi_target.cpu_arch == CPU_ARCH_X86_64 &&
+                    (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 ||
+                     (convention == IR_ABI_CONVENTION_WIN64_X86_64 && type && type->kind == IR_TYPE_BOOLEAN))) ||
+                   (context->abi_target.cpu_arch == CPU_ARCH_AARCH64 && convention == IR_ABI_CONVENTION_DARWIN_AARCH64));
+    if (scalar && width && width < 32 && extend)
+    {
+        extension = type->kind == IR_TYPE_BOOLEAN || !type->is_signed ? LLVM_BC_ATTRIBUTE_ZEROEXT : LLVM_BC_ATTRIBUTE_SIGNEXT;
+    }
+    return extension;
+}
+
 BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcContext* context, IrType* type)
 {
     LlvmBcAbiSignature* signature = context->abi_signatures[type->id.value];
@@ -1284,6 +1314,11 @@ BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcCont
         IrType* return_type = llvm_bc_ir_type(context, type->return_type);
         signature->result = llvm_bc_abi_value(context, type->return_type, convention, true, &integers, &floats);
         bool indirect_result = signature->result.aggregate && signature->result.indirect;
+        u32 result_extension = llvm_bc_scalar_abi_extension(context, return_type, convention);
+        if (result_extension)
+        {
+            llvm_bc_abi_attribute(context, signature, 0, result_extension, 0, 0);
+        }
         u64* operands = arena_allocate(context->arena, u64, (u64)type->parameter_count + 3);
         u32 count = 0;
         operands[count++] = type->is_variadic;
@@ -1300,6 +1335,11 @@ BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcCont
             signature->parameters[index] = llvm_bc_abi_value(context, type->parameter_types[index], convention, false, &integers, &floats);
             LlvmBcAbiValue* abi = signature->parameters + index;
             operands[count++] = abi->type_id;
+            u32 parameter_extension = llvm_bc_scalar_abi_extension(context, parameter, convention);
+            if (parameter_extension)
+            {
+                llvm_bc_abi_attribute(context, signature, index + 1 + indirect_result, parameter_extension, 0, 0);
+            }
             if (abi->byval)
             {
                 llvm_bc_abi_attribute(context, signature, index + 1 + indirect_result, LLVM_BC_ATTRIBUTE_BYVAL, context->ir_type_ids[type->parameter_types[index].value],
@@ -4942,10 +4982,19 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
         for (u32 index = 0; index < context->attribute_group_count; index += 1)
         {
             LlvmBcAttributeGroup* group = context->attribute_groups + index;
-            // Typed byval/sret attribute, followed by integer alignment.
-            u64 operands[8] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_TYPE, group->kind, group->type_id,
-                               LLVM_BC_ATTRIBUTE_INTEGER, LLVM_BC_ATTRIBUTE_ALIGNMENT, BUSTER_MAX(group->alignment, 1u)};
-            llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 8);
+            if (group->kind == LLVM_BC_ATTRIBUTE_SIGNEXT || group->kind == LLVM_BC_ATTRIBUTE_ZEROEXT)
+            {
+                // Enum attributes carry neither a storage type nor alignment.
+                u64 operands[4] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_ENUM, group->kind};
+                llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 4);
+            }
+            else
+            {
+                // Typed byval/sret attribute, followed by integer alignment.
+                u64 operands[8] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_TYPE, group->kind, group->type_id,
+                                   LLVM_BC_ATTRIBUTE_INTEGER, LLVM_BC_ATTRIBUTE_ALIGNMENT, BUSTER_MAX(group->alignment, 1u)};
+                llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 8);
+            }
         }
         llvm_bc_exit_block(&context->stream);
         llvm_bc_enter_block(&context->stream, LLVM_BC_PARAMATTR_BLOCK, 3);
