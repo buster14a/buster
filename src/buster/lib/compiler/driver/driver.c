@@ -4884,6 +4884,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
     {
         compiler_driver_warning_append_text(warnings, pipeline.log);
     }
+    if (pipeline.log_truncated)
+    {
+        compiler_driver_warning_append_text(warnings, string_format(arena, S8("GPU tool output truncated: {u64} bytes not retained\n"), pipeline.log_dropped_bytes));
+    }
     if (invocation.save_gpu_temporaries && pipeline.temporary_directory.length)
     {
         compiler_driver_warning_append_text(warnings, string_format(arena, S8("GPU temporary files: {S8}\n"), pipeline.temporary_directory));
