@@ -18,8 +18,35 @@ import sys
 import ci_unit_tests_measure as measure
 
 
-def inventory(path):
+def native_host_profile(lines):
+    records = measure.native_records(lines, "CI_UNIT_HOST_V1")
+    measure.require(len(records) <= 1, "Duplicate native host profile")
+    profile = None
+    if records:
+        row = records[0]
+        fields = {"architecture", "feature_source", "feature_word_count", "word0", "word1", "word2", "word3",
+                  "simd_512_base", "simd_512"}
+        measure.require(set(row) == fields, "Native host profile has missing or unexpected fields")
+        architecture = row["architecture"]
+        feature_source = row["feature_source"]
+        measure.require((architecture == "x86_64" and feature_source == "cpuid-xcr0") or
+                        (architecture == "aarch64" and feature_source == "target-native"),
+                        "Native host profile lacks an explicit supported feature oracle")
+        measure.require(measure.number(row, "feature_word_count") == 4, "Native host profile word count differs")
+        words = [measure.number(row, "word" + str(index)) for index in range(4)]
+        measure.require(all(word < 2 ** 64 for word in words), "Native host feature word exceeds u64")
+        base, full = (measure.number(row, key) for key in ("simd_512_base", "simd_512"))
+        measure.require(base in (0, 1) and full in (0, 1) and full <= base and
+                        (architecture == "x86_64" or base == full == 0), "Invalid native build SIMD flags")
+        profile = {"schema": "buster-native-host-profile-v1", "architecture": architecture,
+                   "feature_source": feature_source, "feature_words": words,
+                   "simd_512_base": bool(base), "simd_512": bool(full)}
+    return profile
+
+
+def inventory_proof(path):
     lines = measure.read_log(path)
+    profile = native_host_profile(lines)
     declared = measure.native_records(lines, "CI_UNIT_MODULE_V1")
     rows = []
     fields = {"index", "module", "table_audit", "enabled", "selected", "group"}
@@ -49,11 +76,21 @@ def inventory(path):
         measure.require(measure.number(batch, key) == 0, "Inventory query ran tests or reported failure")
     measure.require(not any(line.startswith("TEST_MODULE_TIMING") for line in lines), "Inventory query executed timed modules")
     measure.require(not any(line.startswith("CI_UNIT_") and
-                            not line.startswith(("CI_UNIT_MODULE_V1 ", "CI_UNIT_BATCH_V1 ")) for line in lines),
+                            not line.startswith(("CI_UNIT_MODULE_V1 ", "CI_UNIT_BATCH_V1 ", "CI_UNIT_HOST_V1 ")) for line in lines),
                     "Inventory query contains unexpected native proof records")
     terminals = measure.parse_terminals(lines, {}, len(rows), True)
     measure.require(terminals["External"]["total"] == 0, "Inventory query executed external tests")
-    return rows
+    return rows, profile
+
+
+def inventory(path):
+    return inventory_proof(path)[0]
+
+
+def host_profile(path, required=False):
+    profile = inventory_proof(path)[1]
+    measure.require(not required or profile is not None, "Missing measured native host profile")
+    return profile
 
 
 def load_record(path):
@@ -140,6 +177,10 @@ def assemble(directory, binary, platform, pairs, environment):
     identities = provenance(directory, binary, platform, environment)
     baseline_jobs = baseline_workers(environment)
     rows = inventory(directory / "inventory.log")
+    profile = host_profile(directory / "inventory.log")
+    if profile is not None:
+        measure.require(profile["architecture"] == identities["architecture"], "Native host profile architecture differs")
+        identities["native_host_profile"] = profile
     samples = []
     phases = []
     for number in range(1, pairs * 2 + 1):

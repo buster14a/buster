@@ -132,6 +132,8 @@ BUSTER_GLOBAL_LOCAL bool probe_lifecycle_test(ProbeHost* host, char const* compi
                 "unsigned long long const pilot_descriptor[7] = {0x4255535445520002ULL,1,1,24,8,0,8};\n" PROBE_TEST_STEP_ONE,
                 "unsigned long long const pilot_descriptor[7] = {0x4255535445520002ULL,1,1,16,8,8,0};\n" PROBE_TEST_STEP_ONE,
                 PROBE_TEST_DESCRIPTOR "int module_global = 1;\n" PROBE_TEST_STEP_ONE,
+                PROBE_TEST_DESCRIPTOR "static void __attribute__((constructor)) module_init(void) {}\n" PROBE_TEST_STEP_ONE,
+                PROBE_TEST_DESCRIPTOR "static void __attribute__((destructor)) module_fini(void) {}\n" PROBE_TEST_STEP_ONE,
                 PROBE_TEST_DESCRIPTOR "int missing_entry(void) { return 1; }\n",
                 PROBE_TEST_DESCRIPTOR "extern unsigned long long missing_import(void);\n"
                     "unsigned long long pilot_step(PilotState* s) { s->calls += 1; return missing_import(); }\n",
@@ -139,7 +141,7 @@ BUSTER_GLOBAL_LOCAL bool probe_lifecycle_test(ProbeHost* host, char const* compi
                     "unsigned long long pilot_step(PilotState* s) { s->calls += 1; return ++module_tls; }\n",
             };
             ProbeError const errors[] = {PROBE_COMPILE, PROBE_ABI, PROBE_ABI, PROBE_ABI, PROBE_ABI,
-                PROBE_MODULE_STATE, PROBE_ENTRY_KIND, PROBE_JIT, PROBE_JIT};
+                PROBE_MODULE_STATE, PROBE_MODULE_STATE, PROBE_MODULE_STATE, PROBE_ENTRY_KIND, PROBE_JIT, PROBE_JIT};
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bad_sources); index += 1)
             {
                 ProbeVersion* incumbent = host->active;
