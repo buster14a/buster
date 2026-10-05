@@ -401,7 +401,8 @@ def rank(plan, trees, tasks, records):
             phase = task["phase"]
             if phase == "validation":
                 test = records[task_id(tree_id, "test", task["configuration"])]
-                elapsed["build"] += test["start_us"] - event["child_start_us"]
+                # Enclosing pre-test work includes the nested observer setup.
+                elapsed["build"] += test["child_start_us"] - event["child_start_us"]
                 elapsed["post_test"] += event["end_us"] - test["end_us"]
             else:
                 elapsed[{"clean": "build", "census": "post_test"}.get(phase, phase)] += event["end_us"] - event["child_start_us"]
