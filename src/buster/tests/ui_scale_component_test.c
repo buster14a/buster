@@ -1,7 +1,8 @@
 // Headless UI scalability regressions. test_ui_scale compiles the actual
 // ui_core module and checks, with work counters instead of timers, that keyed
-// box lookup and keyboard focus navigation stay linear in the number of boxes,
-// while the observable behavior of the box table and of navigation is
+// box lookup, keyboard focus navigation and fuzzy-match highlight drawing stay
+// linear in the number of boxes or in text length plus range count, while the
+// observable behavior of the box table, navigation and highlight rectangles is
 // unchanged. Only the unused native rendering boundary is supplied; no compiler
 // or desktop window/backend dependency belongs to this component runner.
 //
@@ -9,7 +10,9 @@
 // (ui_scale_lookup_scaling) and box-table behavior (ui_scale_table_behavior)
 // cases, the focus-navigation oracle (ui_scale_focus_oracle), its tree builders
 // and equivalence (ui_scale_focus_behavior) and deep-spine scaling
-// (ui_scale_focus_scaling) cases, then main.
+// (ui_scale_focus_scaling) cases, the fuzzy-highlight oracle (ui_scale_oracle_columns),
+// equivalence (ui_scale_fuzzy_behavior) and scaling (ui_scale_fuzzy_scaling) cases,
+// then main.
 
 #include <buster/lib/system_headers.h>
 #include <buster/lib/os.h>
@@ -955,6 +958,340 @@ BUSTER_GLOBAL_LOCAL void ui_scale_focus_scaling(Arena* arena)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fuzzy-match highlight drawing (#2447). The drawing path used to convert both
+// byte endpoints of every range to columns by decoding from byte zero, so R
+// ranges over L bytes cost O(R x L). The oracle below is that algorithm,
+// written independently of ui_core, so the emitted rectangles and the old
+// decode work can both be compared.
+
+typedef struct UI_ScaleFuzzyCase UI_ScaleFuzzyCase;
+struct UI_ScaleFuzzyCase
+{
+    String8 text;
+    UI_BoxFlags flags;
+    UI_TextAlign align;
+    f32 width;
+    // Nonzero wraps the text box in a narrower clipping parent of this width.
+    f32 clip_width;
+};
+
+typedef struct UI_ScaleFuzzyFrame UI_ScaleFuzzyFrame;
+struct UI_ScaleFuzzyFrame
+{
+    UI_State* state;
+    UI_Box* box;
+    F32Interval2* rects;
+    u64 rect_count;
+    u64 decodes;
+};
+
+BUSTER_GLOBAL_LOCAL u64 ui_scale_oracle_decodes;
+
+// Independent strict UTF-8 sequence length; 0 for an invalid or truncated sequence.
+BUSTER_GLOBAL_LOCAL u64 ui_scale_oracle_sequence_length(String8 string, u64 position)
+{
+    u8 first = (u8)string.pointer[position];
+    u64 length = first < 0x80u ? 1 : (first >= 0xc2u && first <= 0xdfu) ? 2 : (first >= 0xe0u && first <= 0xefu) ? 3 : (first >= 0xf0u && first <= 0xf4u) ? 4 : 0;
+    bool valid = length != 0 && length <= string.length - position;
+    for (u64 index = 1; valid && index < length; index += 1)
+    {
+        u8 continuation = (u8)string.pointer[position + index];
+        valid = continuation >= 0x80u && continuation <= 0xbfu;
+    }
+    if (valid && length > 1)
+    {
+        u8 second = (u8)string.pointer[position + 1];
+        valid = !((first == 0xe0u && second < 0xa0u) || (first == 0xedu && second > 0x9fu) || (first == 0xf0u && second < 0x90u) ||
+                  (first == 0xf4u && second > 0x8fu));
+    }
+    return valid ? length : 0;
+}
+
+// The previous column lookup: decode from byte zero, counting each decoded
+// sequence, and floor an offset inside a multibyte sequence to its start.
+BUSTER_GLOBAL_LOCAL u64 ui_scale_oracle_columns(String8 string, u64 byte_offset)
+{
+    u64 result = 0;
+    u64 position = 0;
+    byte_offset = BUSTER_MIN(byte_offset, string.length);
+    while (position < byte_offset)
+    {
+        u64 length = ui_scale_oracle_sequence_length(string, position);
+        length = length ? length : 1;
+        if (length > byte_offset - position)
+        {
+            break;
+        }
+        position += length;
+        result += 1;
+        ui_scale_oracle_decodes += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_fuzzy_frame_begin(Arena* arena, UI_ScaleFuzzyCase* test, UI_FuzzyMatchRange* ranges, u64 count, UI_ScaleFuzzyFrame* frame)
+{
+    memset(frame, 0, sizeof(*frame));
+    frame->state = ui_state_allocate(0, 0);
+    if (ui_scale_check(frame->state != 0, S8("fuzzy state allocation"), count))
+    {
+        ui_scale_frame_begin(frame->state);
+        UI_Box* clip_parent = 0;
+        if (test->clip_width > 0.0f)
+        {
+            ui_set_next_fixed_width(test->clip_width);
+            ui_set_next_fixed_height(20.0f);
+            clip_parent = ui_box_make(UI_BoxFlag_Clip | UI_BoxFlag_AllowOverflowX, S8("fuzzy clip"));
+            ui_push_parent(clip_parent);
+        }
+        ui_set_next_font_size(10.0f);
+        ui_set_next_text_padding(0.0f);
+        ui_set_next_fixed_width(test->width);
+        ui_set_next_fixed_height(20.0f);
+        ui_set_next_text_alignment(test->align);
+        frame->box = ui_box_make(UI_BoxFlag_DrawText | test->flags | (test->clip_width > 0.0f ? UI_BoxFlag_AllowOverflowX : 0), test->text);
+        ui_box_set_fuzzy_match_ranges(frame->box, ranges, count);
+        if (clip_parent)
+        {
+            BUSTER_UNUSED(ui_pop_parent());
+        }
+        ui_build_end();
+        ui_scale_check(frame->box->fuzzy_match_range_count == count, S8("fuzzy ranges retained"), count);
+        u64 decodes_before = frame->state->utf8_column_decodes;
+        ui_scale_check(ui_draw(), S8("fuzzy draw succeeds"), count);
+        frame->decodes = frame->state->utf8_column_decodes - decodes_before;
+        frame->rects = arena_allocate(arena, F32Interval2, count + 1);
+        for (u64 index = 0; index < frame->state->draw_command_count; index += 1)
+        {
+            UI_DrawCommand* command = &frame->state->draw_commands[index];
+            // Highlights are the two-pixel strips on the box's bottom edge; the box's tooltip and
+            // other rectangles are not part of the comparison.
+            if (command->box == frame->box && command->kind == UI_DrawCommandKind_Rect && command->rect.y1 == frame->box->rect.y1 &&
+                command->rect.y1 - command->rect.y0 == 2.0f && frame->rect_count < count)
+            {
+                frame->rects[frame->rect_count] = command->rect;
+                frame->rect_count += 1;
+            }
+        }
+    }
+}
+
+// Origin of the text for the case: the left edge of a reference highlight that
+// starts at the first column.
+BUSTER_GLOBAL_LOCAL f32 ui_scale_fuzzy_origin(Arena* arena, UI_ScaleFuzzyCase* test)
+{
+    UI_FuzzyMatchRange first_column = {.first = 0, .one_past_last = (u64)-1};
+    UI_ScaleFuzzyFrame reference;
+    f32 origin = 0.0f;
+    ui_scale_fuzzy_frame_begin(arena, test, &first_column, 1, &reference);
+    if (test->text.length == 0)
+    {
+        origin = 0.0f;
+    }
+    else if (ui_scale_check(reference.rect_count == 1, S8("origin reference highlight"), reference.rect_count))
+    {
+        origin = reference.rects[0].x0;
+    }
+    ui_state_deinitialize(reference.state);
+    return origin;
+}
+
+// Draws `ranges` and compares every emitted highlight with the old algorithm,
+// in range order. Returns the decode counts of the new and the old algorithm.
+BUSTER_GLOBAL_LOCAL bool ui_scale_fuzzy_compare(Arena* arena, UI_ScaleFuzzyCase* test, UI_FuzzyMatchRange* ranges, u64 count, bool run_oracle, String8 name,
+                                                u64* new_decodes, u64* old_decodes)
+{
+    bool same = true;
+    UI_ScaleFuzzyFrame frame;
+    ui_scale_fuzzy_frame_begin(arena, test, ranges, count, &frame);
+    *new_decodes = frame.decodes;
+    *old_decodes = 0;
+    if (run_oracle && frame.state && frame.box)
+    {
+        UI_Box* box = frame.box;
+        f32 origin = ui_scale_fuzzy_origin(arena, test);
+        String8 string = box->string;
+        u64 expected_count = 0;
+        ui_scale_oracle_decodes = 0;
+        for (u64 index = 0; index < count; index += 1)
+        {
+            u64 first_byte = BUSTER_MIN(ranges[index].first, box->text_visible_length);
+            u64 last_byte = BUSTER_MIN(ranges[index].one_past_last, box->text_visible_length);
+            u64 first = ui_scale_oracle_columns(string, first_byte);
+            u64 last = ui_scale_oracle_columns(string, last_byte);
+            if (last > first)
+            {
+                f32 x0 = origin + (f32)first * box->font_size * 0.60f;
+                f32 x1 = origin + (f32)last * box->font_size * 0.60f;
+                F32Interval2 rect = {.x0 = x0, .y0 = box->rect.y1 - 2.0f, .x1 = x1, .y1 = box->rect.y1};
+                if (box->state_flags & UI_BoxState_Clipped)
+                {
+                    rect.x0 = BUSTER_MAX(rect.x0, box->clip_rect.x0);
+                    rect.y0 = BUSTER_MAX(rect.y0, box->clip_rect.y0);
+                    rect.x1 = BUSTER_MIN(rect.x1, box->clip_rect.x1);
+                    rect.y1 = BUSTER_MIN(rect.y1, box->clip_rect.y1);
+                }
+                if (expected_count >= frame.rect_count || memcmp(&frame.rects[expected_count], &rect, sizeof(rect)) != 0)
+                {
+                    same = false;
+                }
+                expected_count += 1;
+            }
+        }
+        *old_decodes = ui_scale_oracle_decodes;
+        same = same && expected_count == frame.rect_count;
+        ui_scale_check(same, name, expected_count);
+    }
+    ui_state_deinitialize(frame.state);
+    return same;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_fuzzy_shuffle(UI_FuzzyMatchRange* ranges, u64 count, u64 seed)
+{
+    for (u64 index = count; index > 1; index -= 1)
+    {
+        u64 other = ui_scale_mix(seed + index) % index;
+        UI_FuzzyMatchRange swap = ranges[index - 1];
+        ranges[index - 1] = ranges[other];
+        ranges[other] = swap;
+    }
+}
+
+// Every (first, one_past_last) byte pair with first <= one_past_last (the setter
+// rejects reversed ranges), including empty, mid-sequence, past-the-end and duplicate ranges, in a shuffled order.
+BUSTER_GLOBAL_LOCAL void ui_scale_fuzzy_behavior(Arena* arena)
+{
+    static const struct
+    {
+        String8 text;
+        String8 name;
+    } texts[] = {
+        {S8("hello world"), S8("fuzzy ascii oracle")},
+        {S8("a\xc3\xa9\xe6\x97\xa5\xf0\x9f\x98\x80" "b"), S8("fuzzy multibyte oracle")},
+        {S8("x\xff" "y\xc3"), S8("fuzzy invalid utf8 oracle")},
+        {S8("\xf0\x9f\x98\x80\xf0\x9f\x98\x80\xf0\x9f\x98\x80\xf0\x9f\x98\x80"), S8("fuzzy four-byte oracle")},
+    };
+    static const struct
+    {
+        UI_BoxFlags flags;
+        UI_TextAlign align;
+        f32 width;
+        f32 clip_width;
+        String8 name;
+    } layouts[] = {
+        {0, UI_TextAlign_Left, 200.0f, 0.0f, S8("left")},
+        {0, UI_TextAlign_Left, 38.0f, 0.0f, S8("truncated")},
+        {UI_BoxFlag_DisableTextTrunc, UI_TextAlign_Left, 38.0f, 0.0f, S8("untruncated")},
+        {UI_BoxFlag_DisableTextTrunc, UI_TextAlign_Center, 200.0f, 0.0f, S8("centered")},
+        {0, UI_TextAlign_Right, 200.0f, 0.0f, S8("right")},
+        {UI_BoxFlag_DisableTextTrunc, UI_TextAlign_Left, 200.0f, 27.0f, S8("clipped")},
+    };
+    for (u64 text_index = 0; text_index < BUSTER_ARRAY_LENGTH(texts); text_index += 1)
+    {
+        u64 limit = texts[text_index].text.length + 3;
+        u64 count = (limit + 1) * (limit + 2) / 2 + 16;
+        UI_FuzzyMatchRange* ranges = arena_allocate(arena, UI_FuzzyMatchRange, count);
+        u64 used = 0;
+        for (u64 first = 0; first <= limit; first += 1)
+        {
+            for (u64 last = first; last <= limit; last += 1)
+            {
+                ranges[used] = (UI_FuzzyMatchRange){.first = first, .one_past_last = last};
+                used += 1;
+            }
+        }
+        ranges[used++] = (UI_FuzzyMatchRange){.first = 0, .one_past_last = (u64)-1};
+        ranges[used++] = (UI_FuzzyMatchRange){.first = (u64)-1, .one_past_last = (u64)-1};
+        u64 pair_count = used - 2;
+        for (; used < count; used += 1)
+        {
+            ranges[used] = ranges[used * 7 % pair_count];
+        }
+        ui_scale_fuzzy_shuffle(ranges, count, text_index);
+        for (u64 layout_index = 0; layout_index < BUSTER_ARRAY_LENGTH(layouts); layout_index += 1)
+        {
+            UI_ScaleFuzzyCase test = {
+                .text = texts[text_index].text,
+                .flags = layouts[layout_index].flags,
+                .align = layouts[layout_index].align,
+                .width = layouts[layout_index].width,
+                .clip_width = layouts[layout_index].clip_width,
+            };
+            u64 new_decodes = 0;
+            u64 old_decodes = 0;
+            ui_scale_fuzzy_compare(arena, &test, ranges, count, true, texts[text_index].name, &new_decodes, &old_decodes);
+            ui_scale_check(new_decodes <= texts[text_index].text.length * 3, S8("fuzzy decode bounded by the text"), new_decodes);
+        }
+    }
+    // Zero ranges and an empty string draw nothing and decode nothing.
+    UI_ScaleFuzzyCase empty = {.text = S8(""), .align = UI_TextAlign_Left, .width = 50.0f};
+    UI_FuzzyMatchRange any = {.first = 0, .one_past_last = 5};
+    u64 new_decodes = 1;
+    u64 old_decodes = 0;
+    ui_scale_fuzzy_compare(arena, &empty, &any, 1, true, S8("fuzzy empty text oracle"), &new_decodes, &old_decodes);
+    ui_scale_check(new_decodes == 0, S8("empty text decodes nothing"), new_decodes);
+}
+
+BUSTER_GLOBAL_LOCAL String8 ui_scale_fuzzy_text(Arena* arena, bool multibyte, u64 characters, u64* offsets)
+{
+    static const char* const glyphs[] = {"a", "\xc3\xa9", "\xe6\x97\xa5", "\xf0\x9f\x98\x80"};
+    char8* buffer = arena_allocate(arena, char8, characters * 4 + 1);
+    u64 length = 0;
+    for (u64 index = 0; index < characters; index += 1)
+    {
+        const char* glyph = multibyte ? glyphs[index % 4] : glyphs[0];
+        u64 glyph_length = multibyte ? (index % 4) + 1 : 1;
+        offsets[index] = length;
+        memcpy(buffer + length, glyph, glyph_length);
+        length += glyph_length;
+    }
+    offsets[characters] = length;
+    return (String8){.pointer = buffer, .length = length};
+}
+
+// One-character ranges spread over the whole text: work counters must grow
+// with L + R rather than L x R, in the text length and in the range count.
+BUSTER_GLOBAL_LOCAL void ui_scale_fuzzy_scaling(Arena* arena)
+{
+    static const u64 characters[] = {1024, 4096, 16384};
+    static const u64 range_counts[] = {64, 1024, 4096};
+    for (u64 multibyte = 0; multibyte < 2; multibyte += 1)
+    {
+        for (u64 length_index = 0; length_index < BUSTER_ARRAY_LENGTH(characters); length_index += 1)
+        {
+            u64 count = characters[length_index];
+            u64* offsets = arena_allocate(arena, u64, count + 1);
+            String8 text = ui_scale_fuzzy_text(arena, multibyte != 0, count, offsets);
+            for (u64 range_index = 0; range_index < BUSTER_ARRAY_LENGTH(range_counts); range_index += 1)
+            {
+                u64 range_count = BUSTER_MIN(range_counts[range_index], count);
+                UI_FuzzyMatchRange* ranges = arena_allocate(arena, UI_FuzzyMatchRange, range_count);
+                for (u64 index = 0; index < range_count; index += 1)
+                {
+                    u64 character = (count - 1) - index * (count / range_count);
+                    ranges[index] = (UI_FuzzyMatchRange){.first = offsets[character], .one_past_last = offsets[character + 1]};
+                }
+                UI_ScaleFuzzyCase test = {.text = text, .flags = UI_BoxFlag_DisableTextTrunc, .align = UI_TextAlign_Left, .width = (f32)text.length * 6.0f + 20.0f};
+                // The O(R x L) oracle is only affordable on the smaller text sizes.
+                bool run_oracle = count <= 4096;
+                u64 new_decodes = 0;
+                u64 old_decodes = 0;
+                ui_scale_fuzzy_compare(arena, &test, ranges, range_count, run_oracle, S8("scaling draw matches the oracle"), &new_decodes, &old_decodes);
+                printf("ui_scale: fuzzy %s chars=%-6llu bytes=%-6llu ranges=%-5llu decodes=%llu old-algorithm decodes=%llu\n", multibyte ? "multibyte" : "ascii    ",
+                       (unsigned long long)count, (unsigned long long)text.length, (unsigned long long)range_count, (unsigned long long)new_decodes,
+                       (unsigned long long)old_decodes);
+                // One decode per sequence up to the last highlighted byte, never per range.
+                ui_scale_check(new_decodes <= count, S8("fuzzy decode work is bounded by the text length"), new_decodes);
+                if (run_oracle && range_count >= 1024)
+                {
+                    ui_scale_check(old_decodes > new_decodes * 16, S8("fuzzy decode work dropped well below the old algorithm"), old_decodes);
+                }
+            }
+        }
+    }
+}
+
 int main(void)
 {
     os_state.page_size = os_get_page_size();
@@ -968,6 +1305,8 @@ int main(void)
     ui_scale_table_behavior(arena);
     ui_scale_focus_behavior(arena);
     ui_scale_focus_scaling(arena);
+    ui_scale_fuzzy_behavior(arena);
+    ui_scale_fuzzy_scaling(arena);
     ui_scale_check(ui_scale_renderer_calls == 0, S8("headless rendering boundary"), ui_scale_renderer_calls);
     printf("ui_scale_component_tests: %u/%u assertions passed\n", (unsigned)(ui_scale_assertions - ui_scale_failures), (unsigned)ui_scale_assertions);
     thread_context_release(context);

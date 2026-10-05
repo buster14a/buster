@@ -641,7 +641,8 @@ struct UI_State
     u64 active_box_capacity;
     u64 box_count;
     // Work counters for scalability regressions. They only ever increase and
-    // cost one add per inspected chain node, rehashed box, or focus-scope step.
+    // cost one add per inspected chain node, rehashed box, focus-scope step, or
+    // UTF-8 sequence decoded to turn a byte offset into a column.
     u64 box_key_lookups;
     u64 box_key_probes;
     u64 box_index_grows;
@@ -649,6 +650,7 @@ struct UI_State
     u64 focus_navigation_calls;
     u64 focus_scope_steps;
     u64 focus_scope_stamp;
+    u64 utf8_column_decodes;
     UI_DrawCommand* draw_commands;
     u64 draw_command_count;
     u64 draw_command_capacity;

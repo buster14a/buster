@@ -200,6 +200,7 @@ BUSTER_GLOBAL_LOCAL u64 ui_utf8_columns_for_byte_offset(String8 string, u64 byte
         }
         position += sequence_length;
         result += 1;
+        ui_state->utf8_column_decodes += 1;
     }
     return result;
 }
@@ -3242,6 +3243,79 @@ BUSTER_GLOBAL_LOCAL void ui_draw_text_unclipped(UI_Box* box, String8 text, float
     ui_draw_text_clipped(box, text, color, &position, clip_rect);
 }
 
+// Draws the box's fuzzy-match highlights in range order. Each range endpoint
+// is a byte offset; ui_utf8_columns_for_byte_offset answers it by decoding from
+// byte zero, which made R ranges cost O(R x L). The columns of every byte
+// offset up to the largest drawable endpoint are decoded once into a build
+// arena table (same sequence boundaries and the same floor-to-sequence-start
+// answer for an offset inside a multibyte sequence), so the work is O(R + L).
+// The text origin is hoisted too: it only depends on the box.
+BUSTER_GLOBAL_LOCAL void ui_draw_fuzzy_match_ranges(UI_Box* box, F32Interval2 rect)
+{
+    u64 limit = 0;
+    for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
+    {
+        UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
+        u64 first_byte = BUSTER_MIN(range.first, box->text_visible_length);
+        u64 last_byte = BUSTER_MIN(range.one_past_last, box->text_visible_length);
+        if (last_byte > first_byte)
+        {
+            limit = BUSTER_MAX(limit, last_byte);
+        }
+    }
+    limit = BUSTER_MIN(limit, box->string.length);
+    if (limit != 0)
+    {
+        Arena* arena = ui_build_arena();
+        u64 position = arena->position;
+        u64 table_bytes = limit < (u64)-1 / sizeof(u64) ? (limit + 1) * sizeof(u64) : (u64)-1;
+        if (ui_arena_try_advance(arena, &position, table_bytes, BUSTER_ALIGN_OF(u64)))
+        {
+            u64* columns = arena_allocate(arena, u64, limit + 1);
+            u64 column = 0;
+            position = 0;
+            while (position < limit)
+            {
+                u64 sequence_length = ui_utf8_sequence_length(box->string, position);
+                sequence_length = sequence_length ? sequence_length : 1;
+                u64 end = BUSTER_MIN(position + sequence_length, limit + 1);
+                for (u64 offset = position; offset < end; offset += 1)
+                {
+                    columns[offset] = column;
+                }
+                position += sequence_length;
+                column += 1;
+                ui_state->utf8_column_decodes += 1;
+            }
+            if (position == limit)
+            {
+                columns[limit] = column;
+            }
+
+            float2 text_position = ui_box_text_position(box);
+            for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
+            {
+                UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
+                u64 first_byte = BUSTER_MIN(BUSTER_MIN(range.first, box->text_visible_length), limit);
+                u64 last_byte = BUSTER_MIN(BUSTER_MIN(range.one_past_last, box->text_visible_length), limit);
+                u64 first = columns[first_byte];
+                u64 last = columns[last_byte];
+                if (last > first)
+                {
+                    f32 x0 = float2_element(text_position, AXIS2_X) + (f32)first * box->font_size * 0.60f;
+                    f32 x1 = float2_element(text_position, AXIS2_X) + (f32)last * box->font_size * 0.60f;
+                    F32Interval2 highlight = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x1, rect.y1));
+                    ui_draw_rect(highlight, box->border_color);
+                }
+            }
+        }
+        else
+        {
+            ui_state->draw_commands_complete = false;
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
 {
     if (box && box->visible && ui_rect_has_area(box->rect))
@@ -3350,22 +3424,7 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
 
         if ((box->flags & UI_BoxFlag_HasFuzzyMatchRanges) && box->fuzzy_match_ranges)
         {
-            for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
-            {
-                UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
-                u64 first_byte = BUSTER_MIN(range.first, box->text_visible_length);
-                u64 last_byte = BUSTER_MIN(range.one_past_last, box->text_visible_length);
-                u64 first = ui_utf8_columns_for_byte_offset(box->string, first_byte);
-                u64 last = ui_utf8_columns_for_byte_offset(box->string, last_byte);
-                if (last > first)
-                {
-                    float2 text_position = ui_box_text_position(box);
-                    f32 x0 = float2_element(text_position, AXIS2_X) + (f32)first * box->font_size * 0.60f;
-                    f32 x1 = float2_element(text_position, AXIS2_X) + (f32)last * box->font_size * 0.60f;
-                    F32Interval2 highlight = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x1, rect.y1));
-                    ui_draw_rect(highlight, box->border_color);
-                }
-            }
+            ui_draw_fuzzy_match_ranges(box, rect);
         }
 
         if (box->flags & UI_BoxFlag_DrawBorder)
