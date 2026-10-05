@@ -1,0 +1,4 @@
+driver_gcc_wild=1
+unsupported_flag=255
+missing_explicit_linker=1
+Nonzero means explicit request rejected, no implicit successful fallback.

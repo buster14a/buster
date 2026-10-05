@@ -178,6 +178,12 @@ struct NativeExecutableLinkResult
     // named instead of reported only as a failed write. Zero when the writer
     // refused the destination without a system error.
     OsError write_error;
+    // Distinguish policy refusals (links, directories, special files) from an
+    // incomplete transfer when no native OS error was supplied.
+    bool write_unsupported_destination;
+    // Set only for a relocation refused because its address model requires
+    // PIC objects. Malformed sites and TLS relaxation failures do not imply it.
+    bool requires_position_independent_objects;
     LinkError error;
 };
 
