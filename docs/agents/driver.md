@@ -586,7 +586,10 @@ Not in this vocabulary, and still refused unless another owner accepts them:
 `aarch64_base_assembly_tests` checks the encoder against llvm-mc-derived words
 for each family, plus refusal and feature-gating controls. The driver round
 trip `compiler_driver_test_aarch64_assembly_round_trip` reassembles `-S` output
-under every allocator. A corpus-wide differential census against llvm-mc
+with frames, calls, arrays, floating point, division and narrowing under every
+allocator, and compares its text with direct `-c`. Instructions the printer
+still writes as `.word` (#1280) reassemble through the 32-bit AArch64 `.word`.
+A corpus-wide differential census against llvm-mc
 (26,350 of 26,351 constant lines identical, 0 different, one documented
 refusal) was recorded on #2688. Its native, #2467-compliant reimplementation
 is tracked in [#2695](https://github.com/buster14a/buster/issues/2695).

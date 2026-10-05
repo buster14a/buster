@@ -4443,10 +4443,10 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_object_text(ObjectFile const*
 
 // An AArch64 `-S` listing reassembles to the text bytes direct `-c` writes
 // (#2673): frames (`stp`/`ldp` pre/post-index, `mov x29, sp`), calls, arrays,
-// loops, shifts, selects and wide immediates, under every allocator. Listings
-// that print `.word` (floating point, division and narrowing on the printer
-// side) depend on the AArch64 `.word` width tracked in #1282 and stay out of
-// this fixture until it lands.
+// loops, shifts, selects, wide immediates, floating point, division and
+// narrowing, under every allocator. The printer still writes some of the
+// latter as `.word` (#1280); those reassemble through the 32-bit AArch64
+// `.word` (#1282).
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_assembly_round_trip(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4470,6 +4470,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_assembly_round_t
         "    total ^= (m << 3) | (m >> 2);\n"
         "    total += p.c[n & 1] + (n > 3 ? -1 : 7) + observe(total, p.b, \"frame\");\n"
         "    return observe(total, total * m, \"again\") + local[n & 15];\n"
+        "}\n"
+        "extern double observe_fp(double, float, long);\n"
+        "double fp_mix(double x, float y, long n, unsigned char c, signed char s, unsigned short h)\n"
+        "{\n"
+        "    double values[4] = {x, (double)y, 1.5, -0.25};\n"
+        "    double total = 0.0;\n"
+        "    for (long i = 0; i < 4; i += 1) total += values[i] * (double)i / (x + 2.0);\n"
+        "    float narrowed = (float)total * y - 3.0f;\n"
+        "    long quotient = n / (long)(c + 1) + (long)s % 7 + (long)(h / 3u);\n"
+        "    total += (double)quotient + (double)narrowed + (double)(long)(x * 4.0);\n"
+        "    return observe_fp(total, narrowed, quotient) + (x < total ? total : x);\n"
         "}\n")));
     String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
     for (u32 mode = 0; BUSTER_REQUIRE(arguments, written) && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -4487,7 +4498,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_assembly_round_t
         {
             String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
             BUSTER_TEST(arguments, string_first_sequence(assembly, S8("stp x29, x30, [sp, #-0x10]!")) != BUSTER_STRING_NO_MATCH &&
-                                       string_first_sequence(assembly, S8(".word")) == BUSTER_STRING_NO_MATCH);
+                                       string_first_sequence(assembly, S8("fp_mix:")) != BUSTER_STRING_NO_MATCH);
             String8 assemble_command[] = {S8("-target"), S8("aarch64-linux"), S8("-c"), listing, S8("-o"), listing_object};
             CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
                 compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_command)));
