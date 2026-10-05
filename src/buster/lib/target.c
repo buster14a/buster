@@ -3,7 +3,9 @@
 // per-architecture probes live in x86_64.c and aarch64.c), the canonical
 // CPU model names and their feature tables that -march/-mcpu resolve
 // through (cpu_model_from_string, cpu_model_to_string_os), model/arch
-// compatibility checks, target triple splitting/printing, and per-target
+// compatibility checks (cpu_model_supports_arch), validated model defaults
+// (target_cpu_features_default; x86 table in target_cpu_features_x86_default),
+// target triple splitting/printing, and per-target
 // data layouts. New CPU models are added to the tables here, spelled the
 // way cpu_model_to_string_os prints them.
 
@@ -230,7 +232,8 @@ TargetDataLayout target_data_layout(Target target)
     u32 long_size = llp64 || wasm32 || spirv_compute ? 4 : 8;
     bool plain_char_is_signed = target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED ||
                                 (target.plain_char_policy != TARGET_PLAIN_CHAR_POLICY_UNSIGNED && !arm_plain_char_unsigned);
-    bool double_long_double = llp64 || wasm64 || bpfel || spirv_compute || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
+    // WebAssembly uses IEEE binary128 long double in both pointer-width ABIs.
+    bool double_long_double = llp64 || bpfel || spirv_compute || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
     bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
     u32 long_double_bits = double_long_double ? 64 : x87_long_double ? 80 : 128;
@@ -567,7 +570,10 @@ TargetParseResult target_parse_triple(String8 triple)
 
 CpuModel cpu_model_resolve_detected(CpuModel model)
 {
-    return model == CPU_MODEL_ERROR ? CPU_MODEL_NATIVE : model;
+    // Virtualized CPUID family/model identities can resemble an IA-32-only
+    // processor while the host actually executes x86-64. Keep the probed
+    // feature set and use the dynamic native identity in that case.
+    return cpu_model_supports_arch(model, target_native.cpu_arch) ? model : CPU_MODEL_NATIVE;
 }
 
 CpuModel cpu_detect_model(void)
@@ -608,76 +614,97 @@ CpuModel cpu_model_from_string(String8 string)
 
 bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
 {
+    bool result;
     if (model == CPU_MODEL_BASELINE)
     {
-        return arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_AARCH64 || arch == CPU_ARCH_WASM32 || arch == CPU_ARCH_WASM64 ||
-               arch == CPU_ARCH_BPFEL || arch == CPU_ARCH_SPIRV_COMPUTE;
+        result = (u32)arch < CPU_ARCH_COUNT;
     }
-    if (model == CPU_MODEL_NATIVE)
+    else if (model == CPU_MODEL_NATIVE)
     {
-        return arch == target_native.cpu_arch;
+        result = arch == target_native.cpu_arch;
     }
-    if (arch == CPU_ARCH_X86_64)
+    else if (arch == CPU_ARCH_X86_64)
     {
-        return model >= CPU_MODEL_AMD_I486 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+        // Execution-mode capability is independent of the family enum order.
+        // The legacy i486 through Athlon XP models have no AMD64 long mode.
+        switch (model)
+        {
+        case CPU_MODEL_AMD_K8:
+        case CPU_MODEL_AMD_K8_SSE3:
+        case CPU_MODEL_AMD_AMD_FAMILY_10:
+        case CPU_MODEL_AMD_BT_1:
+        case CPU_MODEL_AMD_BT_2:
+        case CPU_MODEL_AMD_BD_1:
+        case CPU_MODEL_AMD_BD_2:
+        case CPU_MODEL_AMD_BD_3:
+        case CPU_MODEL_AMD_BD_4:
+        case CPU_MODEL_AMD_ZEN_1:
+        case CPU_MODEL_AMD_ZEN_2:
+        case CPU_MODEL_AMD_ZEN_3:
+        case CPU_MODEL_AMD_ZEN_4:
+        case CPU_MODEL_AMD_ZEN_5:
+        case CPU_MODEL_INTEL_CORE_2:
+        case CPU_MODEL_INTEL_PENRYN:
+        case CPU_MODEL_INTEL_NEHALEM:
+        case CPU_MODEL_INTEL_WESTMERE:
+        case CPU_MODEL_INTEL_SANDY_BRIDGE:
+        case CPU_MODEL_INTEL_IVY_BRIDGE:
+        case CPU_MODEL_INTEL_HASWELL:
+        case CPU_MODEL_INTEL_BROADWELL:
+        case CPU_MODEL_INTEL_SKYLAKE:
+        case CPU_MODEL_INTEL_SKYLAKE_AVX512:
+        case CPU_MODEL_INTEL_ROCKETLAKE:
+        case CPU_MODEL_INTEL_COOPERLAKE:
+        case CPU_MODEL_INTEL_CASCADELAKE:
+        case CPU_MODEL_INTEL_CANNONLAKE:
+        case CPU_MODEL_INTEL_ICELAKE_CLIENT:
+        case CPU_MODEL_INTEL_TIGERLAKE:
+        case CPU_MODEL_INTEL_ALDERLAKE:
+        case CPU_MODEL_INTEL_RAPTORLAKE:
+        case CPU_MODEL_INTEL_METEORLAKE:
+        case CPU_MODEL_INTEL_GRACEMONT:
+        case CPU_MODEL_INTEL_ARROWLAKE:
+        case CPU_MODEL_INTEL_ARROWLAKE_S:
+        case CPU_MODEL_INTEL_LUNARLAKE:
+        case CPU_MODEL_INTEL_PANTHERLAKE:
+        case CPU_MODEL_INTEL_ICELAKE_SERVER:
+        case CPU_MODEL_INTEL_EMERALD_RAPIDS:
+        case CPU_MODEL_INTEL_SAPPHIRE_RAPIDS:
+        case CPU_MODEL_INTEL_GRANITE_RAPIDS:
+        case CPU_MODEL_INTEL_GRANITE_RAPIDS_D:
+        case CPU_MODEL_INTEL_BONNELL:
+        case CPU_MODEL_INTEL_SILVERMONT:
+        case CPU_MODEL_INTEL_GOLDMONT:
+        case CPU_MODEL_INTEL_GOLDMONT_PLUS:
+        case CPU_MODEL_INTEL_TREMONT:
+        case CPU_MODEL_INTEL_SIERRAFOREST:
+        case CPU_MODEL_INTEL_GRANDRIDGE:
+        case CPU_MODEL_INTEL_CLEARWATERFOREST:
+        case CPU_MODEL_INTEL_KNL:
+        case CPU_MODEL_INTEL_KNM:
+        case CPU_MODEL_INTEL_DIAMOND_RAPIDS:
+            result = true;
+            break;
+        default:
+            result = false;
+            break;
+        }
     }
-    if (arch == CPU_ARCH_AARCH64)
+    else if (arch == CPU_ARCH_AARCH64)
     {
-        return model == CPU_MODEL_A64_GENERIC || model == CPU_MODEL_A64_ARM_CORTEX_R82 || model == CPU_MODEL_A64_ARM_CORTEX_R82AE ||
-               (model >= CPU_MODEL_A64_ARM_CORTEX_A34 && model <= CPU_MODEL_A64_ARM_NEOVERSE_V3AE) ||
-               (model >= CPU_MODEL_A64_APPLE_A7 && model <= CPU_MODEL_A64_APPLE_M4);
+        result = model == CPU_MODEL_A64_GENERIC || model == CPU_MODEL_A64_ARM_CORTEX_R82 || model == CPU_MODEL_A64_ARM_CORTEX_R82AE ||
+                 (model >= CPU_MODEL_A64_ARM_CORTEX_A34 && model <= CPU_MODEL_A64_ARM_NEOVERSE_V3AE) ||
+                 (model >= CPU_MODEL_A64_APPLE_A7 && model <= CPU_MODEL_A64_APPLE_M4);
     }
-    return false;
+    else
+    {
+        result = false;
+    }
+    return result;
 }
 
-TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
+BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel model)
 {
-    if (arch == CPU_ARCH_AARCH64)
-    {
-        if (model == CPU_MODEL_A64_APPLE_M1)
-        {
-            return target_cpu_features_from_array((TargetCpuFeature const[]){
-                TARGET_CPU_FEATURE_AARCH64_V8_4A,
-                TARGET_CPU_FEATURE_AARCH64_AES,
-                TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
-                TARGET_CPU_FEATURE_AARCH64_CCDP,
-                TARGET_CPU_FEATURE_AARCH64_CCPP,
-                TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
-                TARGET_CPU_FEATURE_AARCH64_CRC,
-                TARGET_CPU_FEATURE_AARCH64_DOTPROD,
-                TARGET_CPU_FEATURE_AARCH64_FLAGM,
-                TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
-                TARGET_CPU_FEATURE_AARCH64_FP16FML,
-                TARGET_CPU_FEATURE_AARCH64_FPTOINT,
-                TARGET_CPU_FEATURE_AARCH64_FULLFP16,
-                TARGET_CPU_FEATURE_AARCH64_JSCONV,
-                TARGET_CPU_FEATURE_AARCH64_LSE,
-                TARGET_CPU_FEATURE_AARCH64_LOR,
-                TARGET_CPU_FEATURE_AARCH64_NEON,
-                TARGET_CPU_FEATURE_AARCH64_PAUTH,
-                TARGET_CPU_FEATURE_AARCH64_PERFMON,
-                TARGET_CPU_FEATURE_AARCH64_PREDRES,
-                TARGET_CPU_FEATURE_AARCH64_RAS,
-                TARGET_CPU_FEATURE_AARCH64_RCPC,
-                TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
-                TARGET_CPU_FEATURE_AARCH64_RDM,
-                TARGET_CPU_FEATURE_AARCH64_SB,
-                TARGET_CPU_FEATURE_AARCH64_SHA2,
-                TARGET_CPU_FEATURE_AARCH64_SHA3,
-                TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
-                TARGET_CPU_FEATURE_AARCH64_SSBS,
-                TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
-            }, 30);
-        }
-        return target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
-            TARGET_CPU_FEATURE_AARCH64_NEON,
-        }, 2);
-    }
-    if (arch != CPU_ARCH_X86_64)
-    {
-        return target_cpu_features_empty();
-    }
     TargetCpuFeatures result = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
     if (model >= CPU_MODEL_AMD_K8_SSE3 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS)
     {
@@ -1233,6 +1260,69 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
         break;
     default:
         break;
+    }
+    return result;
+}
+
+TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
+{
+    TargetCpuFeatures result;
+    if (arch == CPU_ARCH_X86_64 && !cpu_model_supports_arch(model, arch))
+    {
+        result = target_cpu_features_empty();
+    }
+    else if (arch == CPU_ARCH_AARCH64)
+    {
+        if (model == CPU_MODEL_A64_APPLE_M1)
+        {
+            result = target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_AARCH64_V8_4A,
+                TARGET_CPU_FEATURE_AARCH64_AES,
+                TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
+                TARGET_CPU_FEATURE_AARCH64_CCDP,
+                TARGET_CPU_FEATURE_AARCH64_CCPP,
+                TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+                TARGET_CPU_FEATURE_AARCH64_CRC,
+                TARGET_CPU_FEATURE_AARCH64_DOTPROD,
+                TARGET_CPU_FEATURE_AARCH64_FLAGM,
+                TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+                TARGET_CPU_FEATURE_AARCH64_FP16FML,
+                TARGET_CPU_FEATURE_AARCH64_FPTOINT,
+                TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+                TARGET_CPU_FEATURE_AARCH64_JSCONV,
+                TARGET_CPU_FEATURE_AARCH64_LSE,
+                TARGET_CPU_FEATURE_AARCH64_LOR,
+                TARGET_CPU_FEATURE_AARCH64_NEON,
+                TARGET_CPU_FEATURE_AARCH64_PAUTH,
+                TARGET_CPU_FEATURE_AARCH64_PERFMON,
+                TARGET_CPU_FEATURE_AARCH64_PREDRES,
+                TARGET_CPU_FEATURE_AARCH64_RAS,
+                TARGET_CPU_FEATURE_AARCH64_RCPC,
+                TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
+                TARGET_CPU_FEATURE_AARCH64_RDM,
+                TARGET_CPU_FEATURE_AARCH64_SB,
+                TARGET_CPU_FEATURE_AARCH64_SHA2,
+                TARGET_CPU_FEATURE_AARCH64_SHA3,
+                TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
+                TARGET_CPU_FEATURE_AARCH64_SSBS,
+                TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
+            }, 30);
+        }
+        else
+        {
+            result = target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+                TARGET_CPU_FEATURE_AARCH64_NEON,
+            }, 2);
+        }
+    }
+    else if (arch == CPU_ARCH_X86_64)
+    {
+        result = target_cpu_features_x86_default(model);
+    }
+    else
+    {
+        result = target_cpu_features_empty();
     }
     return result;
 }

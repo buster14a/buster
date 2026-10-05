@@ -130,6 +130,38 @@ class PhaseValidationTests(unittest.TestCase):
         self.assertFalse(first["predictions"]["acceptance"])
         self.assertEqual(first, self.check())
 
+    def test_detected_capability_duplicates_are_rejected_before_projection(self):
+        self.assertTrue(self.check()["complete"])
+        original = copy.deepcopy(self.coverage["detected"])
+        conflicting = dict(original[0], version="conflicting")
+        changes = {
+            "identical-extra": original + [copy.deepcopy(original[0])],
+            "conflicting-overwritten": [conflicting] + original,
+            "identical-same-length": original[:1] + [copy.deepcopy(original[0])] + original[2:],
+            "conflicting-same-length": original[:1] + [conflicting] + original[2:],
+        }
+        for name, detected in changes.items():
+            with self.subTest(change=name):
+                self.coverage["detected"] = detected
+                with self.assertRaisesRegex(ValueError, "detected capability"):
+                    self.check()
+
+    def test_detected_capability_census_rejects_missing_foreign_and_malformed_records(self):
+        original = copy.deepcopy(self.coverage["detected"])
+        changes = [None, False, 1, "records", {}, [], original[:-1],
+                   original[:-1] + [dict(original[-1], id="foreign")]]
+        for row in (None, False, 1, "record", [], {}, {"id": None}, {"id": False},
+                    {"id": 1}, {"id": []}, {"id": {}}, {"id": ""}):
+            changes.append(original[:-1] + [row])
+        for detected in changes:
+            with self.subTest(detected=detected):
+                self.coverage["detected"] = detected
+                with self.assertRaisesRegex(ValueError, "detected capability"):
+                    self.check()
+        self.coverage.pop("detected")
+        with self.assertRaisesRegex(ValueError, "detected capability"):
+            self.check()
+
     def test_absent_admission_preserves_overlap_and_explicit_policy(self):
         self.assertEqual(self.check()["test_admission"], "overlap")
         self.mutate("plan.json", lambda p: p.update(test_admission="overlap"))
