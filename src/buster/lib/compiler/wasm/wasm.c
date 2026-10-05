@@ -1957,17 +1957,14 @@ static bool wasm64_build_export_payload(Wasm64Context* context)
     // Names are hashed once, in record order, into a set sized for every
     // exported function at no more than half load, so the first record whose
     // name repeats an earlier one is the one reported.
-    u32 slot_capacity = 0;
-    Wasm64ExportNameSlot* slots = 0;
-    if (function_export_count)
+    // Always allocated, even with no exported functions, so the table is never
+    // null where a record is looked up.
+    u32 slot_capacity = WASM64_EXPORT_SLOTS_INITIAL;
+    while (slot_capacity / 2 < function_export_count && slot_capacity <= UINT32_MAX / 2)
     {
-        slot_capacity = WASM64_EXPORT_SLOTS_INITIAL;
-        while (slot_capacity / 2 < function_export_count && slot_capacity <= UINT32_MAX / 2)
-        {
-            slot_capacity *= 2;
-        }
-        slots = arena_allocate_zeroed(context->arena, Wasm64ExportNameSlot, slot_capacity);
+        slot_capacity *= 2;
     }
+    Wasm64ExportNameSlot* slots = arena_allocate_zeroed(context->arena, Wasm64ExportNameSlot, slot_capacity);
     u32 mask = slot_capacity - 1;
     u32 emitted = 0;
     bool valid = true;

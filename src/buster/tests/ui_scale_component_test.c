@@ -114,7 +114,7 @@ typedef enum UI_ScaleKeyShape
 
 BUSTER_GLOBAL_LOCAL UI_Key ui_scale_key(UI_ScaleKeyShape shape, u64 index)
 {
-    UI_Key result = ui_key_make(1);
+    UI_Key result;
     if (shape == UI_ScaleKeyShape_Mixed)
     {
         result = ui_key_make(ui_scale_mix(index + 0x1000000ull));
