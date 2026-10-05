@@ -52,6 +52,11 @@ BUSTER_GLOBAL_LOCAL bool jit_section_is_tls(ObjectSectionKind kind)
     return kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
 }
 
+BUSTER_GLOBAL_LOCAL bool jit_section_is_init_fini(ObjectSectionKind kind)
+{
+    return kind == OBJECT_SECTION_INIT_ARRAY || kind == OBJECT_SECTION_FINI_ARRAY;
+}
+
 BUSTER_GLOBAL_LOCAL u64 jit_section_size(ObjectSection const* section)
 {
     return BUSTER_MAX(section->data.length, section->virtual_size);
@@ -717,9 +722,9 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             result.error = JIT_ERROR_INVALID_INPUT;
             return result;
         }
-        if (jit_section_is_tls(section->kind) && jit_section_size(section))
+        if ((jit_section_is_tls(section->kind) || jit_section_is_init_fini(section->kind)) && jit_section_size(section))
         {
-            result.error = JIT_ERROR_TLS_UNSUPPORTED;
+            result.error = jit_section_is_tls(section->kind) ? JIT_ERROR_TLS_UNSUPPORTED : JIT_ERROR_INIT_FINI_UNSUPPORTED;
             return result;
         }
     }
@@ -737,8 +742,10 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation const* relocation = object->relocations + index;
-        if (relocation->section >= object->section_count)
+        if (relocation->section >= object->section_count || jit_section_is_init_fini(object->sections[relocation->section].kind))
         {
+            // Nonempty arrays were refused above. A relocation in an empty
+            // array is malformed, not an inert metadata relocation to ignore.
             result.error = JIT_ERROR_INVALID_INPUT;
             return result;
         }
@@ -1127,6 +1134,9 @@ String8 jit_error_string(JitError error)
             break;
         case JIT_ERROR_INVALID_BINDING:
             result = S8("invalid JIT host binding");
+            break;
+        case JIT_ERROR_INIT_FINI_UNSUPPORTED:
+            result = S8("runtime initializer/finalizer arrays are not supported by the JIT");
             break;
         default:
             result = S8("unknown JIT error");

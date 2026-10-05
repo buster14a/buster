@@ -19,9 +19,11 @@
 // and deliberate stack traps. Dynamic allocations may publish odd end pointers.
 // wasm64_build_name_payload names the data segments of section-attributed
 // data in the name section.
-// Scalar function pointers are i64 handles into a private i32-indexed table.
-// Collection assigns import/definition indices before relocation and emission;
-// table and element payloads follow that order, with a permanently null slot 0.
+// Memory64 scalar function pointers are i64 handles into a private i32-indexed
+// table. Collection assigns import/definition indices before relocation and
+// emission; table and element payloads follow that order, with a null slot 0.
+// wasm64_fe_emit_instruction confines Wasm32 function markers to direct calls
+// and refuses their conversion to runtime addresses.
 
 // Linear-memory layout policy: static data starts one 64 KiB region above
 // address zero. Its aligned end is the initial pointer and inclusive lower
@@ -87,6 +89,8 @@ struct Wasm64FunctionRecord
     Wasm64Signature signature;
     u32 function_index;
     u32 defined_index;
+    u32 source_module_index;
+    u32 source_function_index;
     Wasm64SyntheticFunction synthetic;
     bool imported;
     bool exported;
@@ -111,6 +115,8 @@ struct Wasm64StringRecord
     IrInstructionId instruction;
     String8 literal;
     u64 offset;
+    u32 module_index;
+    u32 function_index;
 };
 
 typedef struct Wasm64Context Wasm64Context;
@@ -174,6 +180,8 @@ struct Wasm64FunctionEmitter
     Wasm64Context* context;
     IrFunction* function;
     Wasm64FunctionRecord* record;
+    u32 module_index;
+    u32 function_index;
     Wasm64Buffer body;
     u32* value_locals;
     u8* value_types;
@@ -1189,6 +1197,11 @@ static bool wasm64_collect_functions(Wasm64Context* context)
                 return false;
             }
             Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(context, symbol->id);
+            if (record)
+            {
+                record->source_module_index = module_index;
+                record->source_function_index = function_index;
+            }
             String8 external_name = wasm64_symbol_external_name(symbol);
             if (record && wasm64_string_equal(external_name, wasm64_s8("_start")) &&
                 context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1)
@@ -1458,7 +1471,12 @@ static bool wasm64_collect_data(Wasm64Context* context)
                                 IR_SYMBOL_ID_INVALID);
                     return false;
                 }
-                Wasm64StringRecord record = {.function = function, .instruction = ir_instruction_self_id(function, instruction), .literal = literal, .offset = context->data_cursor};
+                Wasm64StringRecord record = {.function = function,
+                                             .instruction = ir_instruction_self_id(function, instruction),
+                                             .literal = literal,
+                                             .offset = context->data_cursor,
+                                             .module_index = module_index,
+                                             .function_index = function_index};
                 context->data_cursor = string_end;
                 wasm64_vec_reserve(context->arena, (void**)&context->strings, &context->string_capacity, context->string_count + 1, sizeof(*context->strings));
                 context->strings[context->string_count] = record;
@@ -2295,17 +2313,41 @@ static void wasm64_fe_emit_parallel_copy(Wasm64FunctionEmitter* emitter, IrBlock
     }
 }
 
-static Wasm64StringRecord* wasm64_string_record_find(Wasm64Context* context, IrFunction* function, IrInstructionId instruction)
+// wasm64_collect_data appends records in (module, function, instruction)
+// order, so the context-wide array is sorted by that key.
+static Wasm64StringRecord* wasm64_string_record_find(Wasm64FunctionEmitter* emitter, IrInstructionId instruction)
 {
-    for (u32 index = 0; index < context->string_count; index += 1)
+    Wasm64Context* context = emitter->context;
+    u32 low = 0;
+    u32 high = context->string_count;
+    while (low < high)
     {
-        Wasm64StringRecord* record = context->strings + index;
-        if (record->function == function && record->instruction.value == instruction.value)
+        u32 middle = low + (high - low) / 2;
+        Wasm64StringRecord* record = context->strings + middle;
+        context->stats.string_record_lookup_probes += 1;
+        bool before = record->module_index != emitter->module_index       ? record->module_index < emitter->module_index
+                      : record->function_index != emitter->function_index ? record->function_index < emitter->function_index
+                                                                          : record->instruction.value < instruction.value;
+        if (before)
         {
-            return record;
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
         }
     }
-    return 0;
+    Wasm64StringRecord* result = 0;
+    if (low < context->string_count)
+    {
+        Wasm64StringRecord* record = context->strings + low;
+        context->stats.string_record_lookup_probes += 1;
+        if (record->function == emitter->function && record->instruction.value == instruction.value)
+        {
+            result = record;
+        }
+    }
+    return result;
 }
 
 static void wasm64_fe_emit_cast(Wasm64FunctionEmitter* emitter, IrInstruction* instruction, IrType* source, IrType* destination)
@@ -2435,7 +2477,10 @@ static u32 wasm64_fe_count_block_parameters(IrFunction* function)
 static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* context, Wasm64FunctionRecord* record)
 {
     IrFunction* function = record->function;
-    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record};
+    // Source ordinals come from collection, independently of import-first
+    // function indices or the addresses of unrelated module allocations.
+    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record,
+                                     .module_index = record->source_module_index, .function_index = record->source_function_index};
     wasm64_buffer_init(&emitter->body, context->arena);
     emitter->value_locals = arena_allocate(context->arena, u32, function->value_count ? function->value_count : 1);
     emitter->value_types = arena_allocate(context->arena, u8, function->value_count ? function->value_count : 1);
@@ -3024,10 +3069,24 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
 {
     Wasm64Context* context = emitter->context;
     IrType* type = wasm64_type(context, instruction->canonical_type);
-    if (!type)
+    // Function-typed values are inert direct-call markers on Wasm32. Every
+    // other operand use would expose the raw function index as an address.
+    bool runtime_function_operand = false;
+    if (type && !wasm64_is_memory64(context))
     {
-        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing canonical WebAssembly instruction type"), emitter->function, block, instruction,
-                    IR_SYMBOL_ID_INVALID);
+        for (u32 operand_index = 0; operand_index < instruction->operand_count && !runtime_function_operand; operand_index += 1)
+        {
+            IrType* operand_type = wasm64_fe_value_ir_type(emitter, instruction->operands[operand_index]);
+            runtime_function_operand = operand_type && operand_type->kind == IR_TYPE_FUNCTION &&
+                                       !(instruction->opcode == IR_OPCODE_CALL && operand_index == 0);
+        }
+    }
+    String8 function_address_error = wasm64_s8("runtime function addresses are unsupported by Wasm32");
+    if (!type || runtime_function_operand)
+    {
+        wasm64_fail(context, type ? WASM64_ERROR_UNSUPPORTED_INSTRUCTION : WASM64_ERROR_IR_VALIDATION,
+                    type ? function_address_error : wasm64_s8("missing canonical WebAssembly instruction type"),
+                    emitter->function, block, instruction, IR_SYMBOL_ID_INVALID);
         return;
     }
     switch (instruction->opcode)
@@ -3153,7 +3212,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         break;
     case IR_OPCODE_CONSTANT_STRING:
     {
-        Wasm64StringRecord* record = wasm64_string_record_find(context, emitter->function, ir_instruction_self_id(emitter->function, instruction));
+        Wasm64StringRecord* record = wasm64_string_record_find(emitter, ir_instruction_self_id(emitter->function, instruction));
         if (!record)
         {
             wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing WebAssembly string data record"), emitter->function, block, instruction,
@@ -3206,9 +3265,17 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                         instruction->symbol);
             return;
         }
-        // Wasm32 retains its direct-call-only marker; Wasm64 uses a nonzero table handle.
-        wasm64_fe_pointer_const(emitter, (u64)record->function_index + (wasm64_is_memory64(context) ? 1 : 0));
-        wasm64_fe_emit_result_set(emitter, instruction, false, false);
+        if (!wasm64_is_memory64(context) && type->kind == IR_TYPE_POINTER)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, function_address_error, emitter->function, block, instruction,
+                        instruction->symbol);
+        }
+        else
+        {
+            // Wasm32 retains its direct-call-only marker; Wasm64 uses a nonzero table handle.
+            wasm64_fe_pointer_const(emitter, (u64)record->function_index + (wasm64_is_memory64(context) ? 1 : 0));
+            wasm64_fe_emit_result_set(emitter, instruction, false, false);
+        }
     }
     break;
     case IR_OPCODE_LENGTH:
