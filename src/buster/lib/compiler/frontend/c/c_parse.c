@@ -5743,8 +5743,11 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                         statement = index + 1;
                     }
                 }
+                // The final statement belongs to the body's parsed scope:
+                // a local value there can shadow an enclosing typedef name.
+                CScopeId tail_scope = c_parse_scope_for_token(result, scope, tail_start);
                 bool expression = tail_start < tail_end && statement == task->end - 1 &&
-                    !c_parse_type_start_token(result, preprocess, scope, preprocess.tokens[tail_start]);
+                    !c_parse_type_start_token(result, preprocess, tail_scope, preprocess.tokens[tail_start]);
                 if (expression)
                 {
                     task->start = tail_start;
