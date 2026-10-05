@@ -1,0 +1,11 @@
+exhaustive_three_node_graphs=32768
+random_multigraphs=20000 seed=0x4f392b17
+unused_acyclic_phi: nodes=4 retained_A=4 retained_B=1 retained_C=1
+loop_dead: nodes=14 retained_A=14 retained_B=14 retained_C=10 edges_A=14 edges_B=14 edges_C=8
+loop_live: nodes=14 retained_A=14 retained_B=14 retained_C=14 edges_A=14 edges_B=14 edges_C=14
+bounded_loop_result_comparisons=394752
+stress_0: nodes=262144 retained_A=262144 retained_B=262144 retained_C=262144 edges_A=262143 edges_B=262143 edges_C=262143 pushes_C=262144
+stress_1: nodes=262144 retained_A=1 retained_B=1 retained_C=1 edges_A=524286 edges_B=524286 edges_C=0 pushes_C=1
+stress_2: nodes=262144 retained_A=262144 retained_B=262144 retained_C=1 edges_A=262143 edges_B=262143 edges_C=0 pushes_C=1
+PASS: graph oracle, closure, retention subsets, input controls, loop controls
+NOT MEASURED: Buster execution, production purity, alias/remap/debug correctness, compilation latency, RSS, native code quality

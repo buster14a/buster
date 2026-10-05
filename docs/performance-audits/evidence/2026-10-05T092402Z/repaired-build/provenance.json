@@ -1,0 +1,17 @@
+{
+  "baseline_main": "2f00f692d60a588f1b1c4b946dd8f718bf1c8ad6",
+  "construction": "same configured path serial builds; exact main production versus candidate prefix-probe production; identical candidate tests/timing fixture held fixed; Clang Release split/testsON/noLTO",
+  "baseline_string_sha256": "61512928187afb05a5f5547587389a3596fedc158c25e2e48cc7f1a66add9f97",
+  "candidate_string_sha256": "b7bf4e0b8aae409aa0677b4689ab2c2f81fb8ae870fcc47f543fb1e9ee6a555b",
+  "common_string_test_sha256": "9dfa5806db1d60241d141dc8ea6c3966ce2d0befa8382799ea1eb3aabc741428",
+  "baseline_binary_sha256": "858cf3993038d196c88de5be0ea2de5564993234aad94c57e4e23ed05435f5b9",
+  "cache_sha256": "c098ff1ab801ac0c55a2650e1bf874c58e7b621cddf868e8d6443d402508f09f",
+  "commands_sha256": "4e6e35453b8667822893c5746a19bd0b7e430337fbdbb3178e03e290bfd340e1",
+  "baseline_function_symbol": "0000000001880ae0 00000000000000a2",
+  "candidate_cache_sha256": "c098ff1ab801ac0c55a2650e1bf874c58e7b621cddf868e8d6443d402508f09f",
+  "candidate_commands_sha256": "4e6e35453b8667822893c5746a19bd0b7e430337fbdbb3178e03e290bfd340e1",
+  "candidate_binary_sha256": "4d591f0f616ab56b1a91618a40ec99222bb0a51058be9cdcc8efb9fa887b994c",
+  "candidate_function_symbol": "0000000001880ae0 0000000000000304",
+  "timed_call_control": "14 loops retain out-of-line search calls and1048576-iteration back edges",
+  "benchmark_object_sha256": "1a5fe7336c652b99db36102636b44ae2d3fac168b7577b454f709f1492c1697e"
+}

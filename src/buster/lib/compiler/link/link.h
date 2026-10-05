@@ -83,8 +83,9 @@ struct NativeDynamicDataSymbol
 typedef struct NativeDynamicVersionedSymbol NativeDynamicVersionedSymbol;
 // One name a shared library defines, with the symbol version it publishes that
 // definition under.  `version` is empty when the library exports the name
-// without a version; `has_default` is false for a `name@VER` definition, which
-// an unversioned reference cannot bind to.  One record per dynamic symbol, so
+// without a version; `has_default` is false for a `name@VER` definition or a
+// hidden/internal entry, which an external unversioned reference cannot bind
+// to. One record per dynamic symbol, so
 // a name published under several versions -- glibc has four of `sys_errlist`,
 // all of them non-default -- appears once per version.
 struct NativeDynamicVersionedSymbol
@@ -92,7 +93,12 @@ struct NativeDynamicVersionedSymbol
     String8 name;
     String8 version;
     bool has_default;
-    u8 reserved[7];
+    // Raw ELF facts retain the distinction between callable/data definitions
+    // and default/protected visibility. Zero type is unknown, including older
+    // API-created metadata. The record's size and alignment are unchanged.
+    u8 elf_type;
+    u8 elf_visibility;
+    u8 reserved[5];
 };
 
 typedef struct NativeDynamicLibrary NativeDynamicLibrary;
@@ -172,6 +178,12 @@ struct NativeExecutableLinkResult
     // named instead of reported only as a failed write. Zero when the writer
     // refused the destination without a system error.
     OsError write_error;
+    // Distinguish policy refusals (links, directories, special files) from an
+    // incomplete transfer when no native OS error was supplied.
+    bool write_unsupported_destination;
+    // Set only for a relocation refused because its address model requires
+    // PIC objects. Malformed sites and TLS relaxation failures do not imply it.
+    bool requires_position_independent_objects;
     LinkError error;
 };
 

@@ -1,0 +1,66 @@
+{
+  "source_sha256": "09b3054ffa17af484c3eae0ec9eb4a639ee13e8308154cea15e3a10bd6a02d50",
+  "helper_sha256": "841e147d1a440bc95cf90c54ff2ec751087fc435c0307229eb5d8ea58c2cd69a",
+  "search_sha256": "2b7891bd78d2a128097e0b357d37da097636dfb30f8bd7d780cbdc68de3ba12b",
+  "equal_sha256": "4cac802799bc4ef005765f34133b7e6bca880b264a8daadd43307f2c768b0def",
+  "command": [
+    "gcc",
+    "-std=c17",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fwrapv",
+    "-fno-strict-aliasing",
+    "-funsigned-char",
+    "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-count-gcc-v2/observer.c",
+    "-o",
+    "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-count-gcc-v2/observer"
+  ],
+  "mutant_command": [
+    "gcc",
+    "-std=c17",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fwrapv",
+    "-fno-strict-aliasing",
+    "-funsigned-char",
+    "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-count-gcc-v2/shift-mutant.c",
+    "-o",
+    "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-count-gcc-v2/shift-mutant"
+  ],
+  "status": {
+    "candidate": 0,
+    "quadratic-work-control": 1,
+    "shift-mutant": 1
+  },
+  "controls": {
+    "candidate": {
+      "rows": 2560,
+      "offset_failures": 0,
+      "work_failures": 0,
+      "mutation_failures": 0,
+      "direct_formula_failures": 0,
+      "failed_rows": 0
+    },
+    "quadratic-work-control": {
+      "rows": 2560,
+      "offset_failures": 0,
+      "work_failures": 122,
+      "mutation_failures": 0,
+      "direct_formula_failures": 0,
+      "failed_rows": 122
+    },
+    "shift-mutant": {
+      "rows": 2560,
+      "offset_failures": 142,
+      "work_failures": 0,
+      "mutation_failures": 0,
+      "direct_formula_failures": 0,
+      "failed_rows": 142
+    }
+  },
+  "unit": "logical scalar byte comparisons; not timing or PMU instructions"
+}
