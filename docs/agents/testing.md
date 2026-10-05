@@ -460,7 +460,17 @@ OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 `./build.sh bench_service self-test` (and its `--sanitize` variant) runs the
 POSIX queue, materializer, journal-replay and fake-worker regressions plus the
 Linux lease-handoff and result-evidence suites; see
-`tools/bench_service/README.md` for the full contract. Interrupted workers
+`tools/bench_service/README.md` for the full contract. `mcp_tests.c` is included
+by this same registered suite: it checks bounded JSON/Unicode/duplicate keys,
+lifecycle and tool schemas, no-ID write suppression, uint64 string identities,
+validated receipt privacy and a real authenticated Unix-socket daemon with a
+disposable journal and no worker configuration. Socket cases cover the six
+job tools and program upload, lost-reply idempotency/reconnect,
+conflicting-key refusal, foreign-job privacy, durable cancellation and
+disconnected-service errors. Artifact receipt/slice retrieval is covered at
+the codec and reply-binding level only. None of this proves an off-host
+cache, a web/Codex installation or retrieval from a real installed job.
+Interrupted workers
 retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
 index, a bundle-only crash prefix completes idempotently, and invalid
 published controls are never repaired. The coordinator removes the

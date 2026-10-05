@@ -1,6 +1,7 @@
 /* Versioned local control codec, not a network server or authentication layer.
  * Requests and ordinary replies are capped at 536 bytes, independent of queue
- * size. Authenticated export replies alone allow one fixed 64 KiB chunk.
+ * size. Off-host observation trailers add 32 reply bytes; authenticated export
+ * replies allow one fixed 64 KiB chunk. Local replies keep their original wire.
  * Both human CLI commands and raw protocol requests enter bq_dispatch.
  * bq_public_response_valid checks successful typed replies before rendering.
  */
@@ -9,6 +10,12 @@
 #define BQ_CONTROL_BODY 512u
 #define BQ_CONTROL_CAP (BQ_CONTROL_HEADER + BQ_CONTROL_BODY)
 #define BQ_LOG_PAGE 4u
+#define BQ_OBSERVATION_SIZE 32u
+#define BQ_OBSERVATION_STALE 1u
+#define BQ_OBSERVATION_PAUSED 2u
+#define BQ_OBSERVATION_RECONCILIATION 4u
+#define BQ_OBSERVATION_QUARANTINE 8u
+#define BQ_OBSERVATION_LIFECYCLE_UNAVAILABLE 16u
 #define BQ_PACKET_CAP (BQ_CONTROL_HEADER + BQ_EXPORT_BODY_CAP)
 
 BUSTER_GLOBAL_LOCAL BqWorkerQuarantine bq_worker_quarantine = {.descriptor = -1};
@@ -18,7 +25,7 @@ typedef enum BqOperation
     BQ_OP_CAPABILITIES = 1, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT,
     BQ_OP_CANCEL, BQ_OP_LOGS, BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE,
     BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE, BQ_OP_WORKER_RUN,
-    BQ_OP_SUBMIT_EXCLUSIVE, BQ_OP_EXPORT
+    BQ_OP_SUBMIT_EXCLUSIVE, BQ_OP_EXPORT, BQ_OP_NATIVE_BEGIN, BQ_OP_NATIVE_WRITE, BQ_OP_NATIVE_FINISH
 } BqOperation;
 
 typedef struct BqPacket
@@ -39,11 +46,11 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 #endif
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
-    "schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
-    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1 "
+    "schema=2 journal=6 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
+    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1,native-runtime-v1 "
     "blocked-recipes=native-retirement-performance-v1\n"
     "validity=not-evaluated materialization=read-only workspace=per-attempt\n"
-    "worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic "
+    "worker=fixed-systemd-service admission=idle-only-atomic "
     "export=1 "
 #ifdef __linux__
     "transport=unix-seqpacket authentication=peer-uid-gid\n"
@@ -55,6 +62,24 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
 #else
     "storage=private-local-posix-directory\n";
 #endif
+
+BUSTER_GLOBAL_LOCAL u8 const* bq_observation(BqPacket const* packet)
+{
+    u8 const* observation = packet->size >= BQ_CONTROL_HEADER + 4 + BQ_OBSERVATION_SIZE ?
+                            packet->bytes + packet->size - BQ_OBSERVATION_SIZE : NULL;
+    /* Export replies end in original archive bytes, which a job's own output
+     * influences; they never carry an observation, whatever their tail. */
+    if (observation && (bq_u32(packet->bytes + 8) == (BQ_OP_EXPORT | 0x80000000u) ||
+                        memcmp(observation, "BQOBS001", 8))) observation = NULL;
+    return observation;
+}
+
+BUSTER_GLOBAL_LOCAL u32 bq_response_body_size(BqPacket const* packet)
+{
+    u32 size = packet->size >= BQ_CONTROL_HEADER ? packet->size - BQ_CONTROL_HEADER : 0;
+    if (bq_observation(packet)) size -= BQ_OBSERVATION_SIZE;
+    return size;
+}
 
 BUSTER_GLOBAL_LOCAL void bq_packet_schema(BqPacket* packet, u32 schema, u32 operation, u64 correlation, u8 const* body, u32 size)
 {
@@ -96,7 +121,12 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
     if (valid)
     {
         u32 operation = bq_u32(request->bytes + 8);
-        u32 length = response->size - BQ_CONTROL_HEADER;
+        u32 length = bq_response_body_size(response);
+        u8 const* observation = bq_observation(response);
+        bool observation_valid = !observation ||
+            (((operation >= BQ_OP_SUBMIT && operation <= BQ_OP_LOGS) || operation == BQ_OP_SUBMIT_EXCLUSIVE) &&
+             !(bq_u32(observation + 16) & ~31u) && bq_u32(observation + 20) <= 3 &&
+             !bq_u32(observation + 24) && !bq_u32(observation + 28));
         u8 const* data = response->bytes + BQ_CONTROL_HEADER;
         u8 const* arguments = request->bytes + BQ_CONTROL_HEADER;
         if (operation == BQ_OP_EXPORT)
@@ -131,9 +161,21 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
                 }
             }
         }
-        else if (response->size > BQ_CONTROL_CAP)
+        else if (length > BQ_CONTROL_BODY)
         {
             valid = false;
+        }
+        else if (operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
+        {
+            valid = request->size >= BQ_CONTROL_HEADER + 72 && length == 76 &&
+                    bq_native_hex(data + 12) && bq_u64(data + 4) <= bq_u64(arguments + 64);
+            if (valid)
+            {
+                char manifest[BQ_NATIVE_MANIFEST_CAP], identity[65];
+                int count = bq_native_manifest(manifest, arguments, bq_u64(arguments + 64), identity);
+                valid = count > 0 && !memcmp(identity, data + 12, 64) &&
+                        (operation != BQ_OP_NATIVE_FINISH || bq_u64(data + 4) == bq_u64(arguments + 64));
+            }
         }
         else if (operation == BQ_OP_CAPABILITIES)
         {
@@ -192,6 +234,7 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
         {
             valid = false;
         }
+        valid = valid && observation_valid;
     }
     return valid;
 }
@@ -228,6 +271,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         else if (queue->poisoned || queue->journal_fd < 0)
         {
             error = BQ_IO;
+        }
+        else if (schema == BQ_CONTROL_SCHEMA && operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
+        {
+            char identity[65];
+            u64 cursor = 0;
+            error = bq_native_upload(queue, operation - BQ_OP_NATIVE_BEGIN + 1, body, length, identity, &cursor);
+            output_size = 76;
+            bq_put64(output + 4, cursor);
+            memcpy(output + 12, identity, 64);
         }
         else if ((operation == BQ_OP_SUBMIT || operation == BQ_OP_SUBMIT_EXCLUSIVE) && length <= BQ_REQUEST_CAP)
         {

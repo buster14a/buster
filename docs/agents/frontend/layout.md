@@ -441,9 +441,62 @@ mutate it, so there only runs of integer expressions and builtin types fold;
 `_Alignof(object)`, so each engine counts nested evaluations and refuses past
 `C_ALIGNOF_OBJECT_DEPTH_LIMIT`; the refusal is sticky up to the outermost
 operand, because a record's evaluator otherwise falls back to another fold and
-answers the type's alignment. Member operands (`_Alignof(s.x)` with an
-`_Alignas` member, or a `packed` one) still answer the member type's alignment
-where Clang answers the member's (issue #1249).
+answers the type's alignment.
+
+For a final member expression, both entry paths call
+`c_semantic_alignof_member` (#1249). It identifies the declaring aggregate and
+physical member through the existing direct/full expression typing and promoted
+member search, then asks the existing record-layout solve for that member's
+placement alignment. GNU member/aggregate packed, explicit requests and pragma
+pack therefore use the same target rules as storage. A nested or promoted field
+uses its declaring inner aggregate, including when the outer aggregate is
+packed; incidental address alignment does not raise the answer.
+
+Lookup and layout run on the protected TYPE query's private model. Address-of
+and qualified-array traversal may append temporary pointer/qualified types, so
+they must never run against the published canonical type-map input. Only the
+final alignment number escapes. Unevaluated named calls pass the existing
+argument-count checker against the private model before that number is exported.
+The prefix TYPE query checks expression constraints before the direct fallback;
+an explicit refusal cannot be rescued by that fallback. Checked postfix updates
+run as an expression-leaf continuation after existing cast/primary parsing.
+Binary, unary, cast and sizeof/alignof priorities stay with their existing
+frames; GNU real/imaginary prefixes split before the leaf and extension prefixes
+are stripped by the existing task normalization. The continuation types
+the isolated operand and uses the existing modifiable-place/type check without
+evaluating it. Valid pointer updates remain unevaluated; aggregate updates are
+refused. The unchecked TYPE path retains its existing leaf.
+The query bypasses committed type-layout rows
+to visit the selected placement; its alignment requests use the protected typed
+integer query in their original source scopes. Other layout solves retain their
+existing evaluation path. Member-query nesting uses the same fixed limit of
+four with a thread-local sticky refusal, including across private models. Member
+answers precede the enum-only natural-layout reader, which cannot type promoted
+or address-derived operands. Canonical constants likewise read a final member's
+alignment before natural operand typing, which can refuse a selected generic
+aggregate's member even when the protected semantic query has its answer.
+The canonical constant fold consults object alignment only for alignof
+spellings; sizeof retains its natural size path.
+
+The grammar check applies declaration alignment only to an outer final member
+expression. Unary, arithmetic, assignment, comma and conditional values keep
+their type's answer; grouped aggregate bases, calls, compound literals and
+selected generic expressions retain the field declaration. Operands remain
+unevaluated.
+
+`c_test_alignof_member` registers frozen enum/global/array-bound answers across
+Linux, Windows and macOS on x86-64/AArch64, GNU17/GNU23 and both frontend forms.
+It includes the original 64/128/16/32/1/32 object/member answers, packed and
+pragma cases, promoted/nested owner selection, typed and shadowed requests,
+unevaluated operands, invalid neighbors, refusal reset, and supported desktop
+execution under FAST and QUALITY. Direct private-seam snapshots compare the
+published model's complete header and spare rows before and after address and
+const-union queries. Reference semantics come from GCC's
+[alignment manual](https://gcc.gnu.org/onlinedocs/gcc/Alignment.html) and Clang
+18.1.8's [member-expression evaluator](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/clang/lib/AST/ExprConstant.cpp)
+and [declaration alignment](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/clang/lib/AST/ASTContext.cpp).
+The held Microsoft aligned-typedef packing repair (#2226/#2203) retains its
+separate rule ownership.
 
 ## Padded GNU vectors
 

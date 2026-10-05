@@ -15340,9 +15340,10 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 nested_start += 1;
                 nested_end -= 1;
             }
+            u32 grouped_dereference_count = 0;
             while (nested_start < nested_end && c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_STAR))
             {
-                dereference_count += 1;
+                grouped_dereference_count += 1;
                 nested_start += 1;
             }
             if (depth || nested_end != nested_start + 1)
@@ -15377,6 +15378,10 @@ c_ir_place_expression_base:
                 }
                 return;
             }
+            // The complete-expression fallback above already evaluates
+            // stars inside the group. Only the direct identifier path still
+            // needs them; stripped outer stars remain pending on both paths.
+            dereference_count += grouped_dereference_count;
             base_index = nested_start;
             index = close;
         }
@@ -34243,10 +34248,10 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
     u32 start = frame->as.expression.start;
     u32 assignment = frame->as.expression.pending_assignment;
     // Most assignment operands can be lowered directly by the place
-    // machine.  A dereference whose pointer is itself parenthesized,
-    // such as `*(&local) = value`, is a value expression that the
-    // place machine intentionally does not parse.  Lower that small
-    // shape through the expression path and recover its final load's
+    // machine. A dereference whose pointer is parenthesized or formed
+    // by address-of, such as `*(&local) = value` or `*&local = value`,
+    // is a value expression the place machine does not parse. Lower
+    // that shape through the expression path and recover its final load's
     // operand in EXPRESSION_PLACE (the same recovery used for
     // parenthesized member assignments above).
     bool parenthesized_base_suffix = false;
@@ -34264,7 +34269,8 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
         start < assignment &&
         ((c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) && !parenthesized_base_suffix) ||
          (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
-          c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
+          (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+           c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_AMPERSAND))));
     // `*d++ = value` — the copy loop in sbase's strlcpy — advances the
     // pointer while forming the place. The place machine parses an
     // identifier and its field/subscript suffixes, not an update, so
@@ -49059,6 +49065,27 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 u32 operand_start = literal ? index + 1 : index + 2;
                 u32 operand_end = literal ? literal_end : close;
                 u32 consumed_index = literal ? literal_end - 1 : close;
+                // A final member's declaration alignment is already a shared
+                // semantic answer. Resolve it before natural operand typing,
+                // which can refuse a generic-selection member expression.
+                bool is_alignof = c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token));
+                u32 member_alignment = 0;
+                if (is_alignof)
+                {
+                    CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, operand_start);
+                    if (!c_semantic_alignof_member(builder->temporary_arena, builder->preprocess, &builder->parse, scope,
+                                                  operand_start, operand_end, &member_alignment))
+                    {
+                        return false;
+                    }
+                    if (member_alignment)
+                    {
+                        values[value_count++] = c_ir_constant_integer(builder->size_type, member_alignment);
+                        expect_operand = false;
+                        index = consumed_index;
+                        continue;
+                    }
+                }
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
                 IrTypeId type_id = IR_TYPE_ID_INVALID;
@@ -49082,11 +49109,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
                 }
-                if (type_id.value == IR_ID_UNDERLYING_INVALID && !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &alignment))
+                if (is_alignof && type_id.value == IR_ID_UNDERLYING_INVALID &&
+                    !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &alignment))
                 {
                     return false;
                 }
-                values[value_count++] = c_ir_constant_integer(builder->size_type, c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)) ? alignment : size);
+                values[value_count++] = c_ir_constant_integer(builder->size_type, is_alignof ? alignment : size);
                 expect_operand = false;
                 index = consumed_index;
                 continue;
@@ -50851,7 +50879,8 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
 // constant query.
 BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder, u32 start, u32 end, u32* alignment)
 {
-    bool valid = true;
+    CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, start);
+    bool valid = c_semantic_alignof_member(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, alignment);
     while (end > start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
     {
@@ -50861,7 +50890,7 @@ BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder,
     CEntityId entity = end == start + 1 && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER
                            ? c_ir_identifier_entity_or_lookup(builder, start) : C_ENTITY_ID_INVALID;
     CEntity const* object = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
-    if (object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL))
+    if (valid && object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL))
     {
         u32 natural = *alignment;
         u32 cursor = 0;
