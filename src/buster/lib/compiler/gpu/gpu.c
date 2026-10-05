@@ -4,7 +4,8 @@
 // gpu_plan_* family builds a deterministic command plan — discovered
 // external tools, intermediates contained by a caller-owned directory, and
 // expected artifacts — that execution then runs and validates. Execution
-// exclusively creates that private directory and atomically publishes named
+// validates a proposed private plan, exclusively claims its child directory
+// under writable scratch storage, and atomically publishes named
 // final artifacts only after validation. Everything
 // external stays external: the plans invoke installed toolchains
 // (clang/llc, spirv tools, metal, dxc) as subprocesses, adding no linked or
@@ -12,6 +13,7 @@
 // artifact is a structured error, not a crash.
 
 #include <buster/lib/compiler/gpu/gpu.h>
+#include <buster/lib/compiler/gpu/gpu_internal.h>
 
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -753,6 +755,7 @@ typedef struct GpuTemporaryDirectoryResult GpuTemporaryDirectoryResult;
 struct GpuTemporaryDirectoryResult
 {
     String8 path;
+    GpuPipelinePlan plan;
     OsError error;
     bool collisions_exhausted;
     u8 reserved[3];
@@ -1043,58 +1046,6 @@ BUSTER_GLOBAL_LOCAL String8 gpu_path_without_extension(String8 path)
     }
     return path;
 }
-
-BUSTER_GLOBAL_LOCAL String8 gpu_path_directory(String8 path)
-{
-    u64 length = path.length;
-    bool separator = false;
-    while (length && !separator)
-    {
-        char8 code_unit = path.pointer[length - 1];
-#if BUSTER_WINDOWS
-        separator = code_unit == '/' || code_unit == '\\' || code_unit == ':';
-#else
-        separator = code_unit == '/';
-#endif
-        if (!separator)
-        {
-            length -= 1;
-        }
-    }
-    return string_slice(path, 0, length);
-}
-
-BUSTER_GLOBAL_LOCAL GpuTemporaryDirectoryResult gpu_temporary_directory_create(Arena* arena, String8 anchor)
-{
-    GpuTemporaryDirectoryResult result = {0};
-    String8 directory = gpu_path_directory(anchor);
-    u64 mark = arena->position;
-    for (u32 attempt = 0; attempt < GPU_TEMPORARY_DIRECTORY_ATTEMPTS && !result.path.length && !result.error.v; attempt += 1)
-    {
-        arena_set_position(arena, mark);
-        u64 serial = atomic_u64_increment(&gpu_temporary_directory_counter);
-        String8 path = string_format_z(arena, S8("{S8}.buster-gpu-{u64}-{u64}.temps"), directory, os_get_current_process_id(), serial);
-        OsDirectoryCreateResult created = os_make_directory_exclusive(path);
-        if (!created.error.v && !created.already_exists)
-        {
-            result.path = path;
-        }
-        else if (created.error.v)
-        {
-            result.error = created.error;
-        }
-        else if (attempt + 1 == GPU_TEMPORARY_DIRECTORY_ATTEMPTS)
-        {
-            result.collisions_exhausted = true;
-        }
-    }
-    if (!result.path.length)
-    {
-        arena_set_position(arena, mark);
-    }
-    return result;
-}
-
 
 BUSTER_GLOBAL_LOCAL String8 gpu_output_suffix(GpuOutputFormat format)
 {
@@ -2136,6 +2087,96 @@ GpuPipelinePlan gpu_pipeline_plan(Arena* arena, GpuPipelineOptions options)
     return builder.plan;
 }
 
+BUSTER_GLOBAL_LOCAL String8 gpu_temporary_root(Arena* arena, GpuPipelineOptions options)
+{
+    String8 result = options.temporary_directory;
+    if (!result.length)
+    {
+#if BUSTER_WINDOWS
+        BUSTER_UNUSED(arena);
+        result = os_get_environment_variable(S8("TEMP"));
+        if (!result.length)
+        {
+            result = os_get_environment_variable(S8("TMP"));
+        }
+#else
+        result = os_get_environment_variable(S8("TMPDIR"));
+        if (!result.length)
+        {
+#if BUSTER_ANDROID
+            BUSTER_UNUSED(arena);
+            result = buster_android_internal_data_path;
+#elif BUSTER_IOS
+            String8 home = os_get_environment_variable(S8("HOME"));
+            if (home.length)
+            {
+                result = string_format_z(arena, S8("{S8}/tmp"), home);
+            }
+#else
+            BUSTER_UNUSED(arena);
+            result = S8("/tmp");
+#endif
+        }
+#endif
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL GpuTemporaryDirectoryResult gpu_temporary_directory_create(Arena* arena, GpuPipelineOptions options, String8 root)
+{
+    GpuTemporaryDirectoryResult result = {0};
+    // Root storage precedes this mark. A collision may discard only its
+    // proposed path and plan; invalid-plan diagnostic storage stays live.
+    u64 mark = arena->position;
+    bool root_has_separator = false;
+    if (root.length && root.pointer)
+    {
+        char8 last = root.pointer[root.length - 1];
+        root_has_separator = last == '/';
+#if BUSTER_WINDOWS
+        root_has_separator = root_has_separator || last == '\\' || last == ':';
+#endif
+    }
+    else if (root.length)
+    {
+        result.plan.error = GPU_PIPELINE_ERROR_INVALID_INPUT;
+        result.plan.diagnostic = S8("GPU scratch root requires a valid path");
+    }
+    String8 separator = root_has_separator ? S8("") : S8("/");
+    u32 attempts = root.length ? GPU_TEMPORARY_DIRECTORY_ATTEMPTS : 1;
+    for (u32 attempt = 0; attempt < attempts && !result.path.length && !result.error.v && result.plan.error == GPU_PIPELINE_ERROR_NONE; attempt += 1)
+    {
+        result.plan = (GpuPipelinePlan){0};
+        arena_set_position(arena, mark);
+        u64 serial = atomic_u64_increment(&gpu_temporary_directory_counter);
+        String8 path = string_format_z(arena, S8("{S8}{S8}.buster-gpu-{u64}-{u64}.temps"), root, separator, os_get_current_process_id(), serial);
+        options.temporary_directory = path;
+        result.plan = gpu_pipeline_plan(arena, options);
+        if (result.plan.error == GPU_PIPELINE_ERROR_NONE && root.length)
+        {
+            OsDirectoryCreateResult created = os_make_directory_exclusive(path);
+            if (created.created)
+            {
+                result.path = path;
+            }
+            else if (created.error.v)
+            {
+                result.error = created.error;
+            }
+            else if (attempt + 1 == attempts)
+            {
+                result.collisions_exhausted = true;
+            }
+        }
+    }
+    if (!result.path.length && result.plan.error == GPU_PIPELINE_ERROR_NONE)
+    {
+        result.plan = (GpuPipelinePlan){0};
+        arena_set_position(arena, mark);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool gpu_argument_needs_quotes(String8 argument)
 {
     if (!argument.length)
@@ -2201,12 +2242,31 @@ BUSTER_GLOBAL_LOCAL void gpu_result_append_log(Arena* arena, GpuPipelineResult* 
     result->log = result->log.length ? string_format(arena, S8("{S8}{S8}"), result->log, text) : text;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool gpu_fail_next_cleanup;
+
+void gpu_test_fail_next_cleanup(bool enabled)
+{
+    gpu_fail_next_cleanup = enabled;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL bool gpu_pipeline_cleanup(GpuPipelinePlan plan, bool save_temporaries)
 {
     bool result = true;
     if (!save_temporaries && plan.temporary_directory.length)
     {
-        result = os_directory_delete(plan.temporary_directory);
+#if BUSTER_INCLUDE_TESTS
+        if (gpu_fail_next_cleanup)
+        {
+            gpu_fail_next_cleanup = false;
+            result = false;
+        }
+        else
+#endif
+        {
+            result = os_directory_delete(plan.temporary_directory);
+        }
     }
     return result;
 }
@@ -2242,6 +2302,7 @@ BUSTER_GLOBAL_LOCAL void gpu_plan_retarget_output(GpuPipelinePlan* plan, String8
 
 BUSTER_GLOBAL_LOCAL void gpu_result_record_cleanup_failure(Arena* arena, GpuPipelineResult* result, String8 diagnostic)
 {
+    result->cleanup_failed = true;
     if (result->error == GPU_PIPELINE_ERROR_NONE)
     {
         result->error = GPU_PIPELINE_ERROR_FILE_WRITE;
@@ -2393,39 +2454,38 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
     }
     else
     {
-        String8 anchor = options.output_path.length ? options.output_path : options.input_paths[0];
-        if (!anchor.length)
+        String8 root = gpu_temporary_root(arena, options);
+        GpuTemporaryDirectoryResult temporary = gpu_temporary_directory_create(arena, options, root);
+        plan = temporary.plan;
+        if (plan.error != GPU_PIPELINE_ERROR_NONE)
         {
-            anchor = S8("buster-gpu-output");
+            result.error = plan.error;
+            result.diagnostic = plan.diagnostic;
+            result.process_result = PROCESS_RESULT_FAILED;
         }
-        GpuTemporaryDirectoryResult temporary = gpu_temporary_directory_create(arena, anchor);
-        if (!temporary.path.length)
+        else if (!temporary.path.length)
         {
             result.error = GPU_PIPELINE_ERROR_FILE_WRITE;
             result.process_result = PROCESS_RESULT_FAILED;
-            if (temporary.error.v)
+            if (!root.length)
             {
-                result.diagnostic = string_format(arena, S8("could not create a private GPU temporary directory beside {S8}: {S8}"), anchor,
+                result.diagnostic = S8("no GPU scratch root is configured; supply a temporary directory or configure the platform temporary environment");
+            }
+            else if (temporary.error.v)
+            {
+                result.diagnostic = string_format(arena, S8("could not create a private GPU temporary directory under {S8}: {S8}"), root,
                                                   string8_from_os_error(arena, temporary.error, false));
             }
             else
             {
                 result.diagnostic =
-                    string_format(arena, S8("could not claim a private GPU temporary directory beside {S8} after {u32} collisions"), anchor,
+                    string_format(arena, S8("could not claim a private GPU temporary directory under {S8} after {u32} collisions"), root,
                                   (u32)GPU_TEMPORARY_DIRECTORY_ATTEMPTS);
             }
         }
         else
         {
             result.temporary_directory = temporary.path;
-            options.temporary_directory = temporary.path;
-            plan = gpu_pipeline_plan(arena, options);
-            if (plan.error != GPU_PIPELINE_ERROR_NONE)
-            {
-                result.error = plan.error;
-                result.diagnostic = plan.diagnostic;
-                result.process_result = PROCESS_RESULT_FAILED;
-            }
 
             if (result.error == GPU_PIPELINE_ERROR_NONE && plan.output_format != GPU_OUTPUT_NONE && !plan.output_is_temporary)
             {
@@ -2544,6 +2604,7 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                 else
                 {
                     result.artifact.path = publication_path;
+                    result.published = true;
                 }
             }
 
@@ -2551,12 +2612,15 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
             {
                 gpu_result_record_cleanup_failure(
                     arena, &result,
-                    string_format(arena, S8("could not remove owned GPU temporary directory {S8}"), plan.temporary_directory));
+                    result.published
+                        ? string_format(arena, S8("GPU artifact published to {S8}; could not remove owned GPU temporary directory {S8}"),
+                                        result.artifact.path, plan.temporary_directory)
+                        : string_format(arena, S8("could not remove owned GPU temporary directory {S8}"), plan.temporary_directory));
             }
         }
     }
 
-    if (result.error != GPU_PIPELINE_ERROR_NONE)
+    if (result.error != GPU_PIPELINE_ERROR_NONE && !result.published)
     {
         result.artifact = (GpuArtifact){0};
     }

@@ -19,7 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: broker-entry-gate-systemd-${{ github.event.pull_request.number || github.ref }}
+  # Keep every main invocation, including pending runs during merge bursts.
+  group: broker-entry-gate-systemd-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
   cancel-in-progress: false
 
 jobs:

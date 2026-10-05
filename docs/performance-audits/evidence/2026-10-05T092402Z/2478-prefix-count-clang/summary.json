@@ -1,0 +1,85 @@
+{
+  "source_sha256": "b7bf4e0b8aae409aa0677b4689ab2c2f81fb8ae870fcc47f543fb1e9ee6a555b",
+  "helper_sha256": "841e147d1a440bc95cf90c54ff2ec751087fc435c0307229eb5d8ea58c2cd69a",
+  "search_sha256": "e8db921783bdfaeafbe05f1dc431d7a4f22276b26e378d1ec85b5c013b947adb",
+  "equal_sha256": "4cac802799bc4ef005765f34133b7e6bca880b264a8daadd43307f2c768b0def",
+  "command": [
+    "clang",
+    "-std=c17",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fwrapv",
+    "-fno-strict-aliasing",
+    "-funsigned-char",
+    "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-count-clang/observer.c",
+    "-o",
+    "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-count-clang/observer"
+  ],
+  "mutant_command": [
+    "clang",
+    "-std=c17",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fwrapv",
+    "-fno-strict-aliasing",
+    "-funsigned-char",
+    "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-count-clang/shift-mutant.c",
+    "-o",
+    "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-count-clang/shift-mutant"
+  ],
+  "status": {
+    "candidate": 0,
+    "quadratic-work-control": 1,
+    "shift-mutant": 1,
+    "preprocessing-mutant": 1
+  },
+  "controls": {
+    "candidate": {
+      "rows": 2560,
+      "offset_failures": 0,
+      "work_failures": 0,
+      "mutation_failures": 0,
+      "direct_formula_failures": 0,
+      "prefix_work_failures": 0,
+      "failed_rows": 0
+    },
+    "quadratic-work-control": {
+      "rows": 2560,
+      "offset_failures": 0,
+      "work_failures": 122,
+      "mutation_failures": 0,
+      "direct_formula_failures": 0,
+      "prefix_work_failures": 0,
+      "failed_rows": 122
+    },
+    "shift-mutant": {
+      "rows": 2560,
+      "offset_failures": 142,
+      "work_failures": 0,
+      "mutation_failures": 0,
+      "direct_formula_failures": 0,
+      "prefix_work_failures": 0,
+      "failed_rows": 142
+    },
+    "preprocessing-mutant": {
+      "rows": 2560,
+      "offset_failures": 0,
+      "work_failures": 0,
+      "mutation_failures": 0,
+      "direct_formula_failures": 0,
+      "prefix_work_failures": 193,
+      "failed_rows": 193
+    }
+  },
+  "csv_sha256": {
+    "candidate": "f70074761fc996eca3ae0d030b0b9cdfa441e2803574b329da53ebebe88f7068",
+    "quadratic-work-control": "30692f1188783e719275ed1909847a818938aa81b0d96d4ee822e7150459093d",
+    "shift-mutant": "19886cdcf216acbb5ef411a224c5f2cd4bdc64f8ff6b8241db49989f6ea73d2e",
+    "preprocessing-mutant": "3a77fb9b9033b8f0940721fecf7d980597bde04ce4d36c48d08966685e97701b"
+  },
+  "unit": "logical scalar byte comparisons; not timing or PMU instructions"
+}
