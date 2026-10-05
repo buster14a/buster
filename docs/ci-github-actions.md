@@ -53,16 +53,17 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-The `test` matrix retains five desktop runner labels, with two internal
-combination jobs per platform: `<platform> release` and `<platform> checks`.
-Six independent `native` lanes run the execution-mode suite. The four Unix
+The `test` matrix retains five desktop runner labels, with sixteen internal combination
+jobs: four owners each on Linux x86-64/AArch64 and Windows x86-64, two owners
+each on macOS AArch64 and Windows AArch64. Five independent `native` lanes
+run the execution-mode suite. The three Unix
 lanes additionally run the configuration-differential suite, reusing their
 fresh Release compiler; the two Windows lanes report the mode gate
 independently. Mobile retains its two independent suite-level shards; lint,
 UEFI and the independent analyzer remain required. **Require `CI complete`**,
-which checks all groups and the exact 21-job inventory, including all ten
+which checks all groups and the exact 27-job inventory, including all sixteen
 desktop partitions and all five native jobs, for full executions. On a
-qualifying same-commit main push, nineteen native/mobile/UEFI, desktop and analyzer validation jobs are instead
+qualifying same-commit main push, twenty-five native/mobile/UEFI, desktop and analyzer validation jobs are instead
 proven by the exact queue run while desktop cache publication, lint and the analyzer receipt run on main;
 see [queue-to-main reuse](ci-main-reuse.md) for its admission and fallback.
 The old six names alone do not
@@ -74,9 +75,9 @@ documents the earlier split.
 
 | Work | Runners | Command |
 |---|---|---|
-| Combination matrix | `release` and `checks` on each of five desktop labels | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
+| Combination matrix | `release` plus three isolated check owners on Linux/x86 Windows; grouped `checks` on macOS/Windows ARM | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
 | Execution-mode matrix | all five independent desktop native lanes | `test_mode_matrix --config Release` |
-| Native differential matrix | the four Unix native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
+| Native differential matrix | the three Unix native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
 | Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
 | iOS shard | `macos-26` | `ios/test_ci.sh --all` |
 
@@ -235,7 +236,7 @@ about 23 s on the hosted AArch64 runner, and serial starts pushed the shared
 workflow-tools step past its five-minute budget
 ([#2021](https://github.com/buster14a/buster/issues/2021)). That step now
 runs its suites in concurrent lanes; see
-[bootstrap wrapper CI](ci-bootstrap-wrapper.md#independent-required-gate).
+[bootstrap wrapper CI](ci-bootstrap-wrapper.md#required-gate-and-budgets).
 
 The native driver selects `gcc-15` for the macOS GCC row and verifies its
 preprocessor identity before configuration. `BUSTER_GCC` can select a different
@@ -321,7 +322,7 @@ verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
 by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
 unpacked tree instead. See
 [native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
-The aggregate `CI complete` requires all ten desktop combination jobs, five
+The aggregate `CI complete` requires all sixteen desktop combination jobs, five
 native jobs, two mobile jobs, workflow lint, UEFI and the analyzer. Its
 read-only Actions inventory rejects missing shard identities even when a
 smaller surviving matrix group reports success. It selects each logical job's
@@ -474,7 +475,7 @@ Collect timing using `python3 tools/github_ci_time.py collect --branch main --li
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
 accepts historical six-, eleven-, fifteen-, seventeen-, nineteen-, twenty-three-
-and twenty-five-job workflows plus the current twenty-one-job layout; all applicable suites must
+and twenty-five-job workflows plus the historical twenty-one-job and current twenty-seven-job layouts; all applicable suites must
 succeed on a complete first attempt. All five current native jobs must report mode
 success; historical layouts retain their original inventories. The three
 current Unix native jobs must additionally report differential
@@ -505,8 +506,12 @@ and `CI complete` requires the result. See
 
 ## Matched manual Zig cache cohorts
 
-Ordinary `Buster CI` manual dispatches retain the existing input surface and
-cache behavior. A deliberate matched cohort selects its mode through the
+Ordinary `Buster CI` events admit the split checks owners on Linux x86-64,
+Linux AArch64 and Windows x86-64. Every sibling uses the same exact Zig archive
+key as its lane's Release owner. Ordinary publication still occurs only on a
+default-branch push; unsupported split targets remain refused. Manual dispatches
+retain the existing input surface and cache behavior. A deliberate matched
+cohort selects its mode through the
 workflow-dispatch ref, so the event contract remains identical to ordinary CI:
 
 - `ci-cohort-prime-<namespace>` restores and, on a verified miss, publishes the

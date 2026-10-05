@@ -1200,8 +1200,8 @@ BUSTER_GLOBAL_LOCAL bool a64_scalar_recipe_encode(BusterAarch64ArmM1ScalarIntege
             option = width == 64 ? A64_SCALAR_INT_EXTEND_UXTX : A64_SCALAR_INT_EXTEND_UXTW;
         }
         if (amount > 4 || option > A64_SCALAR_INT_EXTEND_SXTX) return false;
-        if (width == 32 && (option == A64_SCALAR_INT_EXTEND_UXTX || option == A64_SCALAR_INT_EXTEND_SXTX)) return false;
-        bool source_x = option == A64_SCALAR_INT_EXTEND_UXTX || option == A64_SCALAR_INT_EXTEND_SXTX;
+        bool source_x = width == 64 &&
+                        (option == A64_SCALAR_INT_EXTEND_UXTX || option == A64_SCALAR_INT_EXTEND_SXTX);
         if (operands[2].width != (source_x ? 64u : 32u)) return false;
         result |= (u32)operands[0].index | ((u32)operands[1].index << 5) | (u32)(amount << 10) | ((u32)option << 13) |
                   ((u32)operands[2].index << 16);
@@ -3508,8 +3508,9 @@ BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_recipe_decode(BusterAarch64ArmM1Scalar
     {
         u8 option = (u8)((word >> 13) & 7u);
         u8 amount = (u8)((word >> 10) & 7u);
-        bool source_x = option == A64_SCALAR_INT_EXTEND_UXTX || option == A64_SCALAR_INT_EXTEND_SXTX;
-        if (amount > 4 || (width == 32 && source_x) ||
+        bool source_x = width == 64 &&
+                        (option == A64_SCALAR_INT_EXTEND_UXTX || option == A64_SCALAR_INT_EXTEND_SXTX);
+        if (amount > 4 ||
             !a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
             !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 5) & 31u), width, decoded) ||
             !a64_typed_scalar_decode_register(form, 2, (u8)((word >> 16) & 31u), source_x ? 64 : 32, decoded))

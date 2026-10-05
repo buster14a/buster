@@ -2,6 +2,129 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/os.h>
 #include <buster/lib/os_internal.h>
+#include <buster/lib/arena_internal.h>
+
+BUSTER_GLOBAL_LOCAL UnitTestResult arena_test_decommit_zeroed_reuse(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { partial_tail_size = 128, granularity = 64 };
+    u64 page_size = os_get_page_size();
+    // The last case reserves a partial tail but never writes into it. It
+    // retains the complete-page fast case even with a non-page-sized bound.
+    u64 reservation_sizes[] = {page_size * 3, page_size * 3 + partial_tail_size, page_size + partial_tail_size,
+                               partial_tail_size, page_size * 3 + partial_tail_size};
+    u64 written_ends[] = {page_size * 3, page_size * 3 + partial_tail_size, page_size + partial_tail_size,
+                          partial_tail_size, page_size * 2};
+    for (u64 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(reservation_sizes); case_index += 1)
+    {
+        u64 reserved_size = reservation_sizes[case_index];
+        u64 written_end = written_ends[case_index];
+        u64 payload_size = written_end - arena_minimum_position;
+        Arena* arena = arena_create((ArenaCreation){
+            .reserved_size = reserved_size,
+            .granularity = granularity,
+            .initial_size = reserved_size,
+            .flags = {.no_pool = 1},
+        });
+        if (BUSTER_REQUIRE(arguments, arena != 0))
+        {
+            for (u64 cycle = 0; cycle < 3; cycle += 1)
+            {
+                u8* bytes = arena_allocate_zeroed(arena, u8, payload_size);
+                u8 nonzero = 0;
+                for (u64 index = 0; index < payload_size; index += 1)
+                {
+                    nonzero |= bytes[index];
+                }
+                BUSTER_TEST(arguments, nonzero == 0);
+                memset(bytes, (int)(0x51 + cycle), (size_t)payload_size);
+
+                // Preserve an older, higher dirty mark independently of the
+                // cursor passed to decommit. The tail must survive this rewind.
+                u64 rewind_position = arena_minimum_position + 17;
+                arena_set_position(arena, rewind_position);
+                u64 committed_before = arena->os_position;
+                u64 dirty_before = arena_dirty_position(arena);
+                bool has_discard = case_index == 0 || case_index == 1 || case_index == 4;
+                if (has_discard && cycle == 0)
+                {
+                    arena_test_fail_next_decommit();
+                    bool decommit_succeeded = arena_set_position_and_decommit(arena, arena_minimum_position);
+                    BUSTER_TEST(arguments, !decommit_succeeded);
+                    BUSTER_TEST(arguments, arena->position == rewind_position && arena->os_position == committed_before);
+                    BUSTER_TEST(arguments, arena_dirty_position(arena) == dirty_before);
+                    bool preserved = true;
+                    for (u64 index = 0; index < payload_size; index += 1)
+                    {
+                        preserved = preserved && bytes[index] == 0x51;
+                    }
+                    BUSTER_TEST(arguments, preserved);
+                }
+
+                bool decommitted = arena_set_position_and_decommit(arena, arena_minimum_position);
+                BUSTER_TEST(arguments, decommitted);
+                u64 expected_committed = has_discard ? page_size : committed_before;
+                u64 expected_dirty = written_end;
+#if !defined(__APPLE__)
+                if (case_index == 0 || case_index == 4)
+                {
+                    expected_dirty = page_size;
+                }
+#endif
+                BUSTER_TEST(arguments, arena->position == arena_minimum_position && arena->os_position == expected_committed);
+                BUSTER_TEST(arguments, arena_dirty_position(arena) == expected_dirty);
+                // A second reset without any intervening allocation has no
+                // complete pages left to discard and must preserve that mark.
+                BUSTER_TEST(arguments, arena_set_position_and_decommit(arena, arena_minimum_position));
+                BUSTER_TEST(arguments, arena->os_position == expected_committed && arena_dirty_position(arena) == expected_dirty);
+            }
+            u8* bytes = arena_allocate_zeroed(arena, u8, payload_size);
+            u8 nonzero = 0;
+            for (u64 index = 0; index < payload_size; index += 1)
+            {
+                nonzero |= bytes[index];
+            }
+            BUSTER_TEST(arguments, nonzero == 0);
+            BUSTER_TEST(arguments, arena_destroy(arena, 1));
+        }
+    }
+
+    // Retirement carries the retained partial tail through header rewrite in
+    // the pool, even when reuse initially asks for only the header's page.
+    arena_pool_release_thread();
+    ArenaCreation shape = {
+        .reserved_size = page_size * 3 + partial_tail_size,
+        .granularity = granularity,
+        .initial_size = page_size * 3 + partial_tail_size,
+        .flags = {.pool_reuse = 1},
+    };
+    Arena* arena = arena_create(shape);
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        u64 payload_size = shape.reserved_size - arena_minimum_position;
+        u8* bytes = arena_allocate(arena, u8, payload_size);
+        memset(bytes, 0x74, (size_t)payload_size);
+        arena_retire(arena, 0);
+        BUSTER_TEST(arguments, arena_test_pool_count(shape.reserved_size) == 1);
+        shape.initial_size = arena_minimum_position;
+        Arena* reused = arena_create(shape);
+        if (BUSTER_REQUIRE(arguments, reused != 0))
+        {
+            BUSTER_TEST(arguments, reused == arena && reused->position == arena_minimum_position);
+            BUSTER_TEST(arguments, reused->os_position == page_size && arena_dirty_position(reused) == shape.reserved_size);
+            bytes = arena_allocate_zeroed(reused, u8, payload_size);
+            u8 nonzero = 0;
+            for (u64 index = 0; index < payload_size; index += 1)
+            {
+                nonzero |= bytes[index];
+            }
+            BUSTER_TEST(arguments, nonzero == 0);
+            BUSTER_TEST(arguments, arena_destroy(reused, 1));
+        }
+    }
+    arena_pool_release_thread();
+    return result;
+}
 
 UnitTestResult arena_tests(UnitTestArguments* arguments)
 {
@@ -240,6 +363,86 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
         }
     }
 
+    // Force a base that is page-aligned but not aligned to twice a page. The
+    // synthetic arena stays wholly inside one real, fully committed mapping;
+    // no commit, decommit or destruction uses the synthetic header.
+    {
+        u64 page_size = os_get_page_size();
+        u64 maximum_alignment = page_size * 2;
+        Arena* backing = arena_create((ArenaCreation){
+            .reserved_size = maximum_alignment * 8,
+            .initial_size = maximum_alignment * 8,
+            .flags = {.no_pool = 1},
+        });
+        if (BUSTER_REQUIRE(arguments, backing != 0))
+        {
+            u8* storage = arena_allocate(backing, u8, maximum_alignment * 5);
+            u64 aligned_storage = align_forward((u64)storage, maximum_alignment);
+            Arena* arena = (Arena*)(aligned_storage + page_size);
+            *arena = (Arena){
+                .reserved_size = maximum_alignment * 3,
+                .position = arena_minimum_position,
+                .os_position = maximum_alignment * 3,
+                .granularity = page_size,
+                .flags = {.no_pool = 1},
+                .dirty_position = arena_minimum_position,
+            };
+            BUSTER_TEST(arguments, ((u64)arena % maximum_alignment) == page_size);
+            u64 alignments[] = {1, 16, 64, page_size, maximum_alignment};
+            u64 starts[] = {arena_minimum_position, arena_minimum_position + 3, maximum_alignment + 7};
+            for (u32 alignment_index = 0; alignment_index < BUSTER_ARRAY_LENGTH(alignments); alignment_index += 1)
+            {
+                u64 alignment = alignments[alignment_index];
+                for (u32 start_index = 0; start_index < BUSTER_ARRAY_LENGTH(starts); start_index += 1)
+                {
+                    u64 start = starts[start_index];
+                    arena_set_position(arena, start);
+                    u64 remainder = ((u64)arena + start) % alignment;
+                    u64 padding = remainder ? alignment - remainder : 0;
+                    u64 expected_offset = start + padding;
+                    u64 dirty = arena_dirty_position(arena);
+                    u8* inspected = arena_get_byte_pointer_align(arena, start, alignment);
+                    BUSTER_TEST(arguments, inspected == (u8*)arena + expected_offset);
+                    BUSTER_TEST(arguments, arena->position == start && arena_dirty_position(arena) == dirty);
+                    u8* bytes = (u8*)arena_allocate_bytes(arena, 17, alignment);
+                    BUSTER_TEST(arguments, ((u64)bytes % alignment) == 0);
+                    BUSTER_TEST(arguments, bytes == inspected && arena->position == expected_offset + 17);
+                    memset(bytes, 0xa5, 17);
+                    arena_set_position(arena, start);
+                    u8* zeroed = (u8*)arena_allocate_zeroed_bytes(arena, 17, alignment);
+                    BUSTER_TEST(arguments, zeroed == bytes);
+                    u8 nonzero = 0;
+                    for (u32 byte_index = 0; byte_index < 17; byte_index += 1)
+                    {
+                        nonzero |= zeroed[byte_index];
+                    }
+                    BUSTER_TEST(arguments, nonzero == 0);
+                    arena_set_position(arena, start);
+                    void* empty = arena_allocate_bytes(arena, 0, alignment);
+                    BUSTER_TEST(arguments, empty == inspected && arena->position == expected_offset);
+                }
+            }
+            u64 unchanged = UINT64_MAX;
+            BUSTER_TEST(arguments, !arena_align_position_checked(arena, arena_minimum_position, 0, &unchanged));
+            BUSTER_TEST(arguments, unchanged == UINT64_MAX);
+            BUSTER_TEST(arguments, !arena_align_position_checked(arena, arena_minimum_position, 3, &unchanged));
+            BUSTER_TEST(arguments, unchanged == UINT64_MAX);
+            BUSTER_TEST(arguments, !arena_align_position_checked(arena, UINT64_MAX, 1, &unchanged));
+            BUSTER_TEST(arguments, unchanged == UINT64_MAX);
+            BUSTER_TEST(arguments, !arena_align_position_checked(arena, arena_minimum_position, 16, 0));
+            arena_set_position(arena, arena_minimum_position);
+            u64 end_offset = page_size * 3;
+            arena->reserved_size = end_offset + 17;
+            void* final = arena_allocate_bytes(arena, 17, maximum_alignment);
+            BUSTER_TEST(arguments, final == (u8*)arena + page_size);
+            arena_set_position(arena, end_offset);
+            BUSTER_TEST(arguments, arena_get_byte_pointer_align(arena, end_offset, maximum_alignment) == (u8*)arena + end_offset);
+            void* last = arena_allocate_bytes(arena, 17, maximum_alignment);
+            BUSTER_TEST(arguments, last == (u8*)arena + end_offset && arena->position == arena->reserved_size);
+            BUSTER_TEST(arguments, arena_destroy(backing, 1));
+        }
+    }
+
     // A legal reservation need not be a commit-granularity multiple. Filling
     // the final partial granule must clamp the OS request to the reservation
     // rather than rejecting it or committing into an adjacent arena.
@@ -356,6 +559,8 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             arena_pool_release_thread();
         }
     }
+
+    BUSTER_TEST_FIXTURE(arguments, arena_test_decommit_zeroed_reuse);
 
     // Decommit geometry follows native pages even when the arena's legal
     // allocation granularity is smaller. Retained bytes on the preceding page

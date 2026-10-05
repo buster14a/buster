@@ -62,8 +62,8 @@
   The existing host observer remains shared because its ABI is unchanged.
   These files are loaded by the registered driver test, not compiled as test
   modules. The regression asserts the selected
-  allocator after parsing, verifies every function's intended canonical or
-  machine path without native fallback, and executes aligned
+  allocator after parsing, verifies every function through MIR without native
+  fallback (including the NONE compatibility spelling for MIR-stack), and executes aligned
   parameter reads/writes after integer, vector and combined bank exhaustion.
   Volatile caller objects independently check that callee writes stay in the
   callee's by-value copies.
@@ -88,6 +88,12 @@
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
+- Modules with only test consumers join `ide` through
+  `BUSTER_COMPILER_TEST_MODULES` and a matching `#if BUSTER_INCLUDE_TESTS`
+  unity include. `truetype` and the AArch64 syntax model (`aarch64_syntax.c`
+  and its generated table) follow this rule; `aarch64_syntax.c` fails with
+  `#error` in a tests-disabled compile, so self-host stage 1 cannot silently
+  regain it.
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
@@ -130,6 +136,12 @@
   For cancelled current-PR validation, see [bounded CI recovery](../ci-cancellation-recovery.md)
   and its offline checks: `python3 tests/ci_recovery_test.py` and
   `python3 .github/scripts/test_merge_queue_fail_fast.py`.
+  The lint job's `Validate the performance audit index` step also runs
+  `tools/check_markdown_links.py`: every relative inline link, image and
+  reference definition in tracked Markdown must resolve to a tracked path.
+  Fenced code, code spans, URL schemes and `#anchor` fragments are not checked,
+  and audit records get no exemption, so deleting a linked file fails with
+  `file:line: target`.
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
@@ -487,8 +499,9 @@ module-local function through all four allocator modes, requires PLT32 for the
 import and PC32 for the local call, and links/runs each default-model object
 with the configured host compiler as a PIE. It also verifies that a direct-call
 only function value leaves no separate address relocation. The argument-policy
-regression requires `-fPIE` and `-fpie` to be rejected on x86-64 ELF and remain
-accepted on Mach-O, COFF, UEFI, eBPF and Wasm. The existing fixtures preserve
+regression requires `-fPIE` and `-fpie` to select the position-independent model
+on every target, with the last positive spelling winning and `-fno-pie`
+cancelling only a PIE spelling. The existing fixtures preserve
 signed absolute `R_X86_64_32S` and GOTPCREL coverage; the indexed fixture makes
 both GCC and Clang produce those forms.
 The fixture is compiled `-O2`, because that is where both narrow an address to
@@ -541,8 +554,9 @@ it does not replace target-matrix execution or the seeded differential corpus.
 
 Allocator-matrix commands place optimization flags before the explicit allocator
 flag because the last allocator-affecting option wins. Assert the parsed allocator
-on the invocation passed to execution; retain `-fverify-codegen` and allow machine
-fallback for NONE, while requiring strict machine coverage on applicable MIR rows.
+on the invocation passed to execution; retain `-fverify-codegen` and
+`-fno-machine-fallback` on applicable native rows in every mode. NONE retains its
+parsed spelling but selects MIR-stack, so it has no direct-emitter exception.
 
 ## Oracle independence
 

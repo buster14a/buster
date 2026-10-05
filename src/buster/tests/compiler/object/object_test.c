@@ -850,6 +850,297 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_arena_capacities(UnitTestArgu
     return result;
 }
 
+// Literal words and expected lines are independent of the production decoder.
+// Unsupported distinguishing fields must keep their original four bytes.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_printer_fields(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct ObjectTestAarch64PrinterCase ObjectTestAarch64PrinterCase;
+    struct ObjectTestAarch64PrinterCase
+    {
+        u32 word;
+        String8 line;
+        bool literal_target;
+    };
+    ObjectTestAarch64PrinterCase cases[] = {
+        {UINT32_C(0xd503201f), S8("\tnop\n"), false},
+        {UINT32_C(0xd65f03c0), S8("\tret\n"), false},
+        {UINT32_C(0xd65f00a0), S8("\tret x5\n"), false},
+        {UINT32_C(0xd61f00a0), S8("\tbr x5\n"), false},
+        {UINT32_C(0xd63f00a0), S8("\tblr x5\n"), false},
+        {UINT32_C(0xd53bd043), S8("\tmrs x3, tpidr_el0\n"), false},
+        {UINT32_C(0x93407c43), S8("\tsxtw x3, w2\n"), false},
+        {UINT32_C(0x8a040043), S8("\tand x3, x2, x4\n"), false},
+        {UINT32_C(0xaa040043), S8("\torr x3, x2, x4\n"), false},
+        {UINT32_C(0xca040043), S8("\teor x3, x2, x4\n"), false},
+        {UINT32_C(0xaa0403e3), S8("\tmov x3, x4\n"), false},
+        {UINT32_C(0x8b040043), S8("\tadd x3, x2, x4\n"), false},
+        {UINT32_C(0xcb040043), S8("\tsub x3, x2, x4\n"), false},
+        {UINT32_C(0xeb04005f), S8("\tcmp x2, x4\n"), false},
+        {UINT32_C(0x91000043), S8("\tadd x3, x2, #0x0\n"), false},
+        {UINT32_C(0x910003e3), S8("\tadd x3, sp, #0x0\n"), false},
+        {UINT32_C(0xf100005f), S8("\tcmp x2, #0x0\n"), false},
+        {UINT32_C(0xd2800023), S8("\tmovz x3, #0x0001\n"), false},
+        {UINT32_C(0xf2800023), S8("\tmovk x3, #0x0001\n"), false},
+        {UINT32_C(0x92800023), S8("\tmovn x3, #0x0001\n"), false},
+        {UINT32_C(0x9ac42043), S8("\tlsl x3, x2, x4\n"), false},
+        {UINT32_C(0x9b047c43), S8("\tmul x3, x2, x4\n"), false},
+        {UINT32_C(0x9a9f17e3), S8("\tcset x3, eq\n"), false},
+        {UINT32_C(0x39000043), S8("\tstrb w3, [x2]\n"), false},
+        {UINT32_C(0x39400043), S8("\tldrb w3, [x2]\n"), false},
+        {UINT32_C(0xb9000043), S8("\tstr w3, [x2]\n"), false},
+        {UINT32_C(0xf9000043), S8("\tstr x3, [x2]\n"), false},
+        {UINT32_C(0xf9400043), S8("\tldr x3, [x2]\n"), false},
+        {UINT32_C(0x29001043), S8("\tstp w3, w4, [x2]\n"), false},
+        {UINT32_C(0xa9001043), S8("\tstp x3, x4, [x2]\n"), false},
+        {UINT32_C(0xa9401043), S8("\tldp x3, x4, [x2]\n"), false},
+        {UINT32_C(0x9adf23e3), S8("\tlsl x3, xzr, xzr\n"), false},
+        {UINT32_C(0x9b1f7fe3), S8("\tmul x3, xzr, xzr\n"), false},
+        {UINT32_C(0x8b1f03ff), S8("\tadd xzr, xzr, xzr\n"), false},
+        {UINT32_C(0xd280003f), S8("\tmovz xzr, #0x0001\n"), false},
+        {UINT32_C(0xa9407fe3), S8("\tldp x3, xzr, [sp]\n"), false},
+        {UINT32_C(0x93407c5f), S8("\tsxtw xzr, w2\n"), false},
+        {UINT32_C(0x93407fe3), S8("\tsxtw x3, wzr\n"), false},
+        {UINT32_C(0xd53bd05f), S8("\tmrs xzr, tpidr_el0\n"), false},
+        {UINT32_C(0x390003ff), S8("\tstrb wzr, [sp]\n"), false},
+        {UINT32_C(0x14000000), S8("\tb .Lbuster_0_0\n"), false},
+        {UINT32_C(0x94000000), S8("\tbl .Lbuster_0_0\n"), false},
+        {UINT32_C(0x54000000), S8("\tb.eq .Lbuster_0_0\n"), false},
+        {UINT32_C(0xb4000003), S8("\tcbz x3, .Lbuster_0_0\n"), false},
+        {UINT32_C(0xb5000003), S8("\t.word 0xb5000003\n"), false},
+        {UINT32_C(0x36000003), S8("\ttbz x3, #0, .Lbuster_0_0\n"), false},
+        {UINT32_C(0xb7000003), S8("\t.word 0xb7000003\n"), false},
+        {UINT32_C(0x58000003), S8("\tldr x3, .Lbuster_0_4\n"), true},
+        {UINT32_C(0xd5033bbf), S8("\t.word 0xd5033bbf\n"), false},
+        {UINT32_C(0xd5033fbf), S8("\t.word 0xd5033fbf\n"), false},
+        {UINT32_C(0xd5033b9f), S8("\t.word 0xd5033b9f\n"), false},
+        {UINT32_C(0xd5033fdf), S8("\t.word 0xd5033fdf\n"), false},
+        {UINT32_C(0xd5033f5f), S8("\t.word 0xd5033f5f\n"), false},
+        {UINT32_C(0xd503305f), S8("\t.word 0xd503305f\n"), false},
+        {UINT32_C(0xd51bd040), S8("\t.word 0xd51bd040\n"), false},
+        {UINT32_C(0xd5300000), S8("\t.word 0xd5300000\n"), false},
+        {UINT32_C(0x93401c43), S8("\t.word 0x93401c43\n"), false},
+        {UINT32_C(0x93403c43), S8("\t.word 0x93403c43\n"), false},
+        {UINT32_C(0x13001c43), S8("\t.word 0x13001c43\n"), false},
+        {UINT32_C(0x9347fc43), S8("\t.word 0x9347fc43\n"), false},
+        {UINT32_C(0x93c21c43), S8("\t.word 0x93c21c43\n"), false},
+        {UINT32_C(0x3d802780), S8("\t.word 0x3d802780\n"), false},
+        {UINT32_C(0xfd001380), S8("\t.word 0xfd001380\n"), false},
+        {UINT32_C(0xfd400380), S8("\t.word 0xfd400380\n"), false},
+        {UINT32_C(0x3dc02783), S8("\t.word 0x3dc02783\n"), false},
+        {UINT32_C(0x39800843), S8("\t.word 0x39800843\n"), false},
+        {UINT32_C(0x39c00843), S8("\t.word 0x39c00843\n"), false},
+        {UINT32_C(0xb9800843), S8("\t.word 0xb9800843\n"), false},
+        {UINT32_C(0xf9800843), S8("\t.word 0xf9800843\n"), false},
+        {UINT32_C(0x6d010440), S8("\t.word 0x6d010440\n"), false},
+        {UINT32_C(0xad010440), S8("\t.word 0xad010440\n"), false},
+        {UINT32_C(0x69411043), S8("\t.word 0x69411043\n"), false},
+        {UINT32_C(0xa8011043), S8("\t.word 0xa8011043\n"), false},
+        {UINT32_C(0xaa441c43), S8("\t.word 0xaa441c43\n"), false},
+        {UINT32_C(0x8a041c43), S8("\t.word 0x8a041c43\n"), false},
+        {UINT32_C(0xaa0407e3), S8("\t.word 0xaa0407e3\n"), false},
+        {UINT32_C(0x8b441c43), S8("\t.word 0x8b441c43\n"), false},
+        {UINT32_C(0xeb041c5f), S8("\t.word 0xeb041c5f\n"), false},
+        {UINT32_C(0x91400043), S8("\t.word 0x91400043\n"), false},
+        {UINT32_C(0x52c00023), S8("\t.word 0x52c00023\n"), false},
+        {UINT32_C(0x9a9fe7e3), S8("\t.word 0x9a9fe7e3\n"), false},
+        {UINT32_C(0x9a9ff7e3), S8("\t.word 0x9a9ff7e3\n"), false},
+        {UINT32_C(0x91800043), S8("\t.word 0x91800043\n"), false},
+        {UINT32_C(0x0b048043), S8("\t.word 0x0b048043\n"), false},
+        {UINT32_C(0x72c00023), S8("\t.word 0x72c00023\n"), false},
+        {UINT32_C(0x12c00023), S8("\t.word 0x12c00023\n"), false},
+        {UINT32_C(0x18000003), S8("\t.word 0x18000003\n"), true},
+        {UINT32_C(0x1c000003), S8("\t.word 0x1c000003\n"), true},
+        {UINT32_C(0x5c000003), S8("\t.word 0x5c000003\n"), true},
+        {UINT32_C(0x9c000003), S8("\t.word 0x9c000003\n"), true},
+        {UINT32_C(0x98000003), S8("\t.word 0x98000003\n"), true},
+        {UINT32_C(0xd8000003), S8("\t.word 0xd8000003\n"), true},
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            u32 word = cases[index].word;
+            // A preceding B +4 independently makes the literal's own offset a
+            // branch label. The original literal word and its displacement stay
+            // unchanged; no relocation or decoder-produced target is consulted.
+            u8 bytes[8] = {0};
+            u32 byte_count = cases[index].literal_target ? 8 : 4;
+            u32 start = cases[index].literal_target ? 4 : 0;
+            if (cases[index].literal_target)
+            {
+                bytes[0] = 1;
+                bytes[3] = 0x14;
+            }
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                bytes[start + byte] = (u8)(word >> (byte * 8));
+            }
+            u8 original[8];
+            memcpy(original, bytes, sizeof(bytes));
+            ObjectSection section = {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4,
+                                     .data = {.pointer = bytes, .length = byte_count}};
+            ObjectSymbol symbol = {.name = S8("printer_word"), .section = 0, .size = byte_count,
+                                   .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectFile object = {.target = targets[target], .sections = &section, .section_count = 1,
+                                 .symbols = &symbol, .symbol_count = 1};
+            String8 printed = object_print_assembly(arguments->arena, &object);
+            BUSTER_TEST_RAW(arguments, printed.length != 0 &&
+                object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(printed), cases[index].line),
+                string_format(arguments->arena, S8("AArch64 printer target={u32} word={u32}:\n{S8}"), target, word, printed));
+            BUSTER_TEST(arguments, memcmp(bytes, original, sizeof(bytes)) == 0);
+            arena_set_position(arguments->arena, temporary.position);
+        }
+    }
+    return result;
+}
+
+// Separate controls pin WSP and assembler-refused pair neighbors without
+// changing the original 92-word causal corpus.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_printer_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct PrinterBoundary PrinterBoundary;
+    struct PrinterBoundary
+    {
+        u32 word;
+        String8 line;
+    };
+    PrinterBoundary cases[] = {
+        {UINT32_C(0x110003e3), S8("\tadd w3, wsp, #0x0\n")},
+        {UINT32_C(0x1100005f), S8("\tadd wsp, w2, #0x0\n")},
+        {UINT32_C(0x11400443), S8("\tadd w3, w2, #0x1000\n")},
+        {UINT32_C(0x91400443), S8("\tadd x3, x2, #0x1000\n")},
+        {UINT32_C(0x9a9f17ff), S8("\tcset xzr, eq\n")},
+        {UINT32_C(0xa9c11063), S8("\t.word 0xa9c11063\n")},
+        {UINT32_C(0xa9c10c43), S8("\t.word 0xa9c10c43\n")},
+        {UINT32_C(0xa8c11063), S8("\t.word 0xa8c11063\n")},
+        {UINT32_C(0xa9c17fe3), S8("\tldp x3, xzr, [sp, #0x10]!\n")},
+    };
+    Target targets[] = {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            u8 bytes[4];
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                bytes[byte] = (u8)(cases[row].word >> (8 * byte));
+            }
+            u8 original[4];
+            memcpy(original, bytes, sizeof(bytes));
+            ObjectSection section = {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4,
+                                     .data = {.pointer = bytes, .length = sizeof(bytes)}};
+            ObjectSymbol symbol = {.name = S8("boundary_word"), .section = 0, .size = sizeof(bytes),
+                                   .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectFile object = {.target = targets[target], .sections = &section, .section_count = 1,
+                                 .symbols = &symbol, .symbol_count = 1};
+            String8 printed = object_print_assembly(arguments->arena, &object);
+            BUSTER_TEST_RAW(arguments, printed.length != 0 && object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(printed), cases[row].line),
+                string_format(arguments->arena, S8("AArch64 boundary target={u32} row={u32}:\n{S8}"), target, row, printed));
+            BUSTER_TEST(arguments, memcmp(bytes, original, sizeof(bytes)) == 0);
+            arena_set_position(arguments->arena, temporary.position);
+        }
+    }
+    return result;
+}
+
+// Only the private default code-base anchor loses its conflicting definition;
+// each other symbol or target retains the original type/label/size spelling.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_FREESTANDING},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_UEFI},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 variant = 0; variant < 13; variant += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            u8 text[] = {0x1f, 0x20, 0x03, 0xd5, 0xc0, 0x03, 0x5f, 0xd6};
+            u8 data[8] = {0};
+            ObjectSection sections[OBJECT_SECTION_COUNT + 1] = {0};
+            for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+            {
+                sections[section].kind = (ObjectSectionKind)section;
+            }
+            sections[OBJECT_SECTION_TEXT] = (ObjectSection){.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4,
+                .data = {.pointer = text, .length = sizeof(text)}};
+            sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){.name = S8(".rodata"), .kind = OBJECT_SECTION_READ_ONLY_DATA,
+                .alignment = 8, .data = {.pointer = data, .length = sizeof(data)}};
+            sections[OBJECT_SECTION_COUNT] = (ObjectSection){.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4};
+            ObjectSymbol symbol = {.name = S8(".text"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION};
+            switch (variant)
+            {
+                case 1: symbol.global = true; break;
+                case 2: symbol.name = S8("ordinary_local"); break;
+                case 3: symbol.value = 4; break;
+                case 4: symbol.size = 8; break;
+                case 5: symbol.kind = OBJECT_SYMBOL_DATA; break;
+                case 6: symbol.weak = true; break;
+                case 7: symbol.hidden = true; break;
+                case 8: symbol.comdat = 1; break;
+                case 9: symbol.thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES; break;
+                case 10: sections[OBJECT_SECTION_TEXT].name = S8(".text.other"); break;
+                case 11:
+                {
+                    symbol.section = OBJECT_SECTION_COUNT;
+                    sections[OBJECT_SECTION_COUNT].data = (ByteSlice){.pointer = text, .length = sizeof(text)};
+                    break;
+                }
+                case 12: symbol.section = OBJECT_SECTION_UNDEFINED; break;
+                default: break;
+            }
+            ObjectSymbol original = symbol;
+            ObjectRelocation relocation = {.section = OBJECT_SECTION_READ_ONLY_DATA, .symbol = 0, .addend = 4,
+                                           .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            ObjectFile object = {.target = targets[target], .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections),
+                                 .symbols = &symbol, .symbol_count = 1, .relocations = &relocation, .relocation_count = 1};
+            String8 printed = object_print_assembly(arguments->arena, &object);
+            ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(printed);
+            bool suppressed = target < 3 && variant == 0;
+            bool apple = target == 5;
+            String8 spelling = apple ? S8("_.text") : S8(".text");
+            if (variant == 2)
+            {
+                spelling = apple ? S8("_ordinary_local") : S8("ordinary_local");
+            }
+            String8 label = string_format(arguments->arena, S8("{S8}:\n"), spelling);
+            BUSTER_TEST_RAW(arguments, printed.length != 0 && object_bytes_contain(bytes, label) == (!suppressed && variant != 12),
+                string_format(arguments->arena, S8("anchor target={u32} variant={u32}:\n{S8}"), target, variant, printed));
+            if (target != 3 && !apple)
+            {
+                String8 type = string_format(arguments->arena, S8("\t.type {S8}, "), spelling);
+                String8 size = string_format(arguments->arena, S8("\t.size {S8}, "), spelling);
+                BUSTER_TEST(arguments, object_bytes_contain(bytes, type) == (!suppressed && variant != 12));
+                BUSTER_TEST(arguments, object_bytes_contain(bytes, size) == (!suppressed && variant != 12));
+            }
+            String8 reference = string_format(arguments->arena, S8("\t.quad {S8}"), target == 6 ?
+                (variant == 2 ? S8("\"ordinary_local\"") : S8("\".text\"")) : spelling);
+            BUSTER_TEST(arguments, object_bytes_contain(bytes, reference));
+            BUSTER_TEST(arguments, memcmp(&symbol, &original, sizeof(symbol)) == 0);
+            arena_set_position(arguments->arena, temporary.position);
+        }
+    }
+    return result;
+}
+
 // Generated printer populations and exact-output oracles. The optional
 // BUSTER_OBJECT_ASSEMBLY_BENCH replay times only object_print_assembly,
 // including index construction and cleanup; ordinary tests never time-gate.
@@ -2791,6 +3082,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    UnitTestResult aarch64_printer = object_test_aarch64_printer_fields(arguments);
+    result.test_count += aarch64_printer.test_count;
+    result.succeeded_test_count += aarch64_printer.succeeded_test_count;
+    UnitTestResult aarch64_boundaries = object_test_aarch64_printer_boundaries(arguments);
+    result.test_count += aarch64_boundaries.test_count;
+    result.succeeded_test_count += aarch64_boundaries.succeeded_test_count;
+    UnitTestResult aarch64_anchor = object_test_aarch64_text_anchor(arguments);
+    result.test_count += aarch64_anchor.test_count;
+    result.succeeded_test_count += aarch64_anchor.succeeded_test_count;
     UnitTestResult executable_sections = object_test_executable_sections(arguments);
     result.test_count += executable_sections.test_count;
     result.succeeded_test_count += executable_sections.succeeded_test_count;

@@ -177,8 +177,10 @@ typedef enum ProcessCaptureOverflowPolicy
     PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
     // Retain the prefix, keep draining, and make the wait result fail.
     PROCESS_CAPTURE_OVERFLOW_FAIL,
-    // Retain the prefix and write later bytes to the caller-owned descriptor
-    // for that stream. The descriptor is neither flushed nor closed here.
+    // Retain the prefix and write later bytes to a caller-owned regular file.
+    // Every captured stdout/stderr sink is checked before spawning. The
+    // original descriptor must stay open, writable and unrebound until wait
+    // returns; its flags are unchanged and it is neither flushed nor closed.
     PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE,
     PROCESS_CAPTURE_OVERFLOW_COUNT,
 } ProcessCaptureOverflowPolicy;
@@ -209,6 +211,7 @@ typedef enum ProcessSpawnFailure
     PROCESS_SPAWN_FAILURE_SPAWN,
     PROCESS_SPAWN_FAILURE_UNSUPPORTED,
     PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY,
+    PROCESS_SPAWN_FAILURE_CAPTURE_SINK,
 } ProcessSpawnFailure;
 
 typedef struct ProcessSpawnResult ProcessSpawnResult;
@@ -364,6 +367,8 @@ BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnR
 // The same wait, given up on after `timeout_microseconds`: the child is killed,
 // whatever it had already written is still returned, and `timed_out` says the
 // deadline is why. Zero waits forever, which is what os_process_wait_sync does.
+// Synchronous regular-file spill and metadata I/O can delay deadline servicing;
+// this is not a hard wall-clock bound on storage or operating-system scheduling.
 BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds);
 // Search the environment captured at entry. Windows names use ordinal Unicode
 // case-insensitive comparison; POSIX names compare exactly. The first matching

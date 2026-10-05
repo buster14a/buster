@@ -49,6 +49,41 @@ and update the live state in issue metadata plus a compact comment. See the
 [research lifecycle](research.md) for the vocabulary, transition rules, and
 required evidence/disposition fields.
 
+## Parallel sessions on one machine
+
+Each session that builds, tests or measures takes its own source worktree.
+One writer per branch also means one owner for that worktree's generated build
+and result paths: different build directories in a shared checkout do not
+protect a compiler reading source while another session edits it. For a
+committed subject revision, start from the repository that owns the worktrees:
+
+```sh
+subject_revision=$(git rev-parse HEAD)
+session_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-session.XXXXXX")
+session_root=$(cd "$session_root" && pwd)
+git worktree add --detach "$session_root/src" "$subject_revision"
+cd "$session_root/src"
+```
+
+Keep this session's frozen binaries and captures under `"$session_root"`, and
+record the exact revisions and paths in its issue claim or shared ledger. The
+[A/B benchmark recipe](benchmarking.md#benchmarking-a-compiler-change-ab) builds
+both revisions serially in one owned path and freezes the workload before
+sampling; it also documents the controls needed when build roots differ. The
+[work-ledger recipe](../work-ledger.md#build-and-read) uses a separately named
+diagnostic tree. A session changing source uses its claimed branch in its own
+worktree; building or measuring a committed revision can stay detached.
+
+`generate` still deletes its selected build directory without a live-use lock.
+Regenerate or remove only paths owned by this session, after
+all builds, tests, self-host stages, compilers and profilers using them finish.
+A session name alone is not evidence that a process has stopped. If ownership
+or live use is uncertain, preserve the path and resolve it with its owner.
+Retain captures and provenance before cleanup; remove the worktree with
+`git worktree remove` after its users finish instead of recursively deleting
+shared build directories or fixed paths under `/tmp`. See the
+[build guidance](build.md) for destructive-generation behavior.
+
 ## Cross-cutting internal API migrations
 
 Default to **add -> migrate -> remove** when a new internal API can coexist

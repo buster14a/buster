@@ -5,8 +5,13 @@
 ## Benchmarking and diagnostics
 
 Performance comparisons must control build provenance as well as runtime noise.
-Build compared revisions serially in the same configured path, freezing each
-trusted binary before changing sources. If separate roots are necessary, verify
+Use the [session-owned worktree setup](workflow.md#parallel-sessions-on-one-machine)
+for builds and measurements; it defines `session_root` for the ordinary
+profiling and A/B recipes below.
+Keep each session's build tree, frozen binaries and captures in that workspace,
+and use a new output directory for each attempt. Build compared revisions
+serially in the same configured path, freezing each trusted binary before
+changing sources. If separate roots are necessary, verify
 path normalization and run same-source cross-build controls; identical compiler
 flags alone are insufficient. Record source and binary hashes, complete compile
 commands, and investigate code/section placement when small effects change across
@@ -65,10 +70,10 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   slowest phase as pointers to the raw files:
 
   ```sh
-  python3 tools/uarch_lab.py run --ide build/Release/ide --repo-root . \
-      --cpu 2 --output /tmp/lab [--target-minutes 15 | --runs N] [--sudo] [--skip STEP...] \
+  python3 tools/uarch_lab.py run --ide "$session_root/src/build/Release/ide" --repo-root "$session_root/src" \
+      --cpu 2 --output "$session_root/lab-attempt-1" [--target-minutes 15 | --runs N] [--sudo] [--skip STEP...] \
       [--no-fresh-copy]
-  python3 tools/uarch_lab.py report /tmp/lab [--perf PATH]
+  python3 tools/uarch_lab.py report "$session_root/lab-attempt-1" [--perf PATH]
   python3 -B tools/uarch_lab_test.py
   ```
 
@@ -366,17 +371,31 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   `./build.sh build --config Release -t ide`; a full `--dwarf` pass takes
   about 25 seconds and writes its captures and report under
   `build/cache-miss-survey/`.
-- **The local Release tree is profilable as built.** `BUSTER_DEBUG_INFO` and
-  `BUSTER_FRAME_POINTERS` are both on by default outside `--ci`, so
-  `./build.sh build --config Release -t ide` produces a `-O3` binary that
-  symbolizes to source lines and unwinds through `--call-graph fp`, the same
-  cheap unwinding the sanitized Debug tree allows. Superluminal reads it
-  directly. Record it like any other build:
+- **The local Release tree carries profiling information.** `BUSTER_DEBUG_INFO`
+  and `BUSTER_FRAME_POINTERS` are both on by default outside `--ci`, so a
+  Clang Release `ide` symbolizes to source lines and unwinds through
+  `--call-graph fp`, the same cheap unwinding the sanitized Debug tree allows.
+  Superluminal reads it directly. For a trusted performance binary, configure
+  the idle session worktree explicitly with tests disabled:
 
   ```sh
+  ./build.sh generate --cc clang --no-include-tests
   ./build.sh build --config Release -t ide
-  perf record -F 999 -g --call-graph fp -o release.data -- ./build/Release/ide bench
+  grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
+  perf record -F 999 -g --call-graph fp -o "$session_root/release.data" -- ./build/Release/ide bench
   ```
+
+  The ordinary local default includes tests, which enables
+  `BUSTER_IR_TRANSFORM_CHECKS` in Release. Keep tests-on, sanitized,
+  instrumented and explicit transform-verification builds identified as
+  separate configurations. Retain the source revision, binary hash, cache and
+  compile commands when freezing a binary, as the A/B recipe below does.
+  The workload's `-DBUSTER_INCLUDE_TESTS=0` controls the compiler produced by
+  self-compilation; verify the host compiler's setting in its saved cache.
+  The lab currently records the binary hash without reading that cache, so
+  retain the cache beside the capture and do not infer its setting from
+  `summary.json` or `report.md`. Performance builds complement the separate
+  tests-on correctness and self-host validation.
 
   The `perf script`/`llvm-symbolizer` rules below apply unchanged; the Release
   binary is a clang PIE like the Debug one. Pass
@@ -508,6 +527,41 @@ was frozen before sampling; the admitted service receipt must bind both facts.
     compiler do not produce the same output**, because the host build's
     feature set reaches the compiler's own target defaults. Byte-identity
     gates must compare like with like, and both builds need their own gate.
+  - **Recipe.** Configure a separate diagnostic tree; a default `generate`
+    keeps `-march=native`, so trusted trees are unchanged:
+
+    ```sh
+    ./build.sh generate -DBUSTER_NATIVE_TARGET=x86-64-v3
+    ./build.sh build --config Release -t ide
+    valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
+        --callgrind-out-file=base.cg build/Release/ide cc -c tests/basic_c_operations.c -o /tmp/basic.o
+    callgrind_annotate --inclusive=yes base.cg | head -40
+    ```
+
+    `BUSTER_NATIVE_TARGET` is the `-march=` value for every host-built target
+    (default `native`, and the legacy Clang AVX10 probe only runs for
+    `native`). Developer Release trees already carry `-g`, so the annotation
+    has file and line records, and `fi=`/`fe=` records charge an inlined
+    helper's lines to the physical caller. Build baseline and candidate in the
+    same checkout path, one after the other: an `-O3` unity compile of `ide.c`
+    takes about 5 GiB, and parallel builds can be OOM-killed. Run each workload
+    with the same command line and working directory, and pin `ide cc`'s own
+    output target (for example `-march=znver3`), since it defaults to the host
+    CPU. A stage-1 self-compile takes about 10 minutes per profile;
+    `--cache-sim=yes --branch-sim=yes` roughly doubles that.
+  - **Read the numbers as diagnostics, never as acceptance evidence.**
+    `-march=x86-64-v3` compiles out `BUSTER_SIMD_512` kernels such as
+    `BUSTER_C_LEX_COMPACT`, so the lexer and other SIMD paths run their
+    fallbacks and their counts are not the production binary's. Counts
+    elsewhere compare only between two diagnostic binaries built the same way,
+    never against a `-march=native` build. Callgrind reports instructions and a
+    modeled cache and branch predictor, not time; its small bimodal predictor
+    aliases when code moves, so misprediction deltas often land in unchanged
+    functions. Two rebuilds of the same source differ by about 0.03% of a
+    self-compile's Ir, so a smaller total delta needs per-function or per-line
+    attribution of the changed code. `callgrind_annotate` reads sources at
+    annotation time: annotate each profile from its own checkout, from the
+    build's working directory. The approved 9700X route still owns timing.
 - **`tools/branch_miss_survey.py` ranks branch mispredictions by source line,
   not by symbol.** `perf record -e branch-misses` is not a precise event: the
   sample lands past the branch that caused it, so its histogram names the
@@ -547,27 +601,64 @@ dedicated Zen 5 host are in the
 [baseline audit](../performance-audits/2026-10-03T100722Z.md) (stage-1 compile
 about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
 
-1. Build both Release compilers and freeze them. Two worktrees are separate
-   build roots, so keep the provenance rules above in mind: for an effect near
-   the noise, also compare the base built in each root (an A/A cross-root
-   control), or build both revisions serially in one checkout.
+1. Commit the subject revision, build both tests-off Clang Release compilers,
+   and freeze them. This example uses one session-owned detached worktree and
+   the same configured build path for both revisions. A worktree and output
+   root belong to one session; see
+   [parallel sessions](workflow.md#parallel-sessions-on-one-machine).
+   If separate build roots are necessary, retain the path-normalization and
+   same-source A/A cross-root controls described above.
 
    ```sh
-   git worktree add ../ab-base "$(git merge-base origin/main HEAD)"
-   (cd ../ab-base && ./build.sh generate && ./build.sh build --config Release -t ide)
-   ./build.sh build --config Release -t ide
-   cp ../ab-base/build/Release/ide /tmp/ide-base && cp build/Release/ide /tmp/ide-cand
+   base_revision=$(git merge-base origin/main HEAD)
+   candidate_revision=$(git rev-parse HEAD)
+   session_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-session.XXXXXX")
+   session_root=$(cd "$session_root" && pwd)
+   git worktree add --detach "$session_root/src" "$base_revision"
+   mkdir "$session_root/bin"
+   (
+       set -eu
+       cd "$session_root/src"
+       ./build.sh generate --cc clang --no-include-tests
+       ./build.sh build --config Release -t ide
+       grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
+       cp build/Release/ide "$session_root/bin/ide-base"
+       cp build/CMakeCache.txt "$session_root/bin/base.CMakeCache.txt"
+       cp build/compile_commands.json "$session_root/bin/base.compile_commands.json"
+
+       git switch --detach "$candidate_revision"
+       ./build.sh generate --cc clang --no-include-tests
+       ./build.sh build --config Release -t ide
+       grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
+       cp build/Release/ide "$session_root/bin/ide-cand"
+       cp build/CMakeCache.txt "$session_root/bin/candidate.CMakeCache.txt"
+       cp build/compile_commands.json "$session_root/bin/candidate.compile_commands.json"
+       printf '%s\n' "base=$base_revision" "candidate=$candidate_revision" > "$session_root/bin/revisions.txt"
+       sha256sum "$session_root/bin/ide-base" "$session_root/bin/ide-cand" > "$session_root/bin/SHA256SUMS"
+
+       # Restore and build the frozen workload's generated-header closure.
+       git switch --detach "$base_revision"
+       ./build.sh generate --cc clang --no-include-tests
+       ./build.sh build --config Release -t ide
+   )
    ```
 
-2. Compare them on one frozen, configured source tree (it needs
-   `build/generated`; do not edit or rebuild it during the run):
+   Stop if setup or a build fails. Keep the binaries, saved caches and compile
+   commands together: tests-off is a property of each host compiler build.
+   Save both revisions and all configure/compile flags; a historical audit
+   with an unstated tests policy cannot establish a matched configuration.
+
+2. Compare them on that frozen, configured source tree (it needs
+   `build/generated`; do not edit or rebuild it during the run). Use a new
+   session-owned output directory for each attempt; reused lab outputs can
+   replace earlier captures and reports.
 
    ```sh
-   python3 tools/uarch_lab.py compare --baseline /tmp/ide-base --candidate /tmp/ide-cand \
-       --repo-root ../ab-base --cpu 2 --output /tmp/ab [--target-minutes 15 | --pairs N] \
+   python3 tools/uarch_lab.py compare --baseline "$session_root/bin/ide-base" --candidate "$session_root/bin/ide-cand" \
+       --repo-root "$session_root/src" --cpu 2 --output "$session_root/ab-attempt-1" [--target-minutes 15 | --pairs N] \
        [--profile-steps topdown,sampling] [--sudo] [--require-identical-output] \
        [--min-effect PCT] [--no-fresh-copy]
-   python3 tools/uarch_lab.py report /tmp/ab     # re-render report.md and summary.json
+   python3 tools/uarch_lab.py report "$session_root/ab-attempt-1"     # re-render report.md and summary.json
    ```
 
    Both binaries are probed for `-fsource-metrics`/`-fmetrics-out` before

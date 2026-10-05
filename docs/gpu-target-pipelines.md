@@ -221,6 +221,17 @@ temporary files: <path>`, and the API returns the same path in
 can leave a recognizable `.buster-gpu-*.temps` directory, but a later run
 never adopts or deletes it.
 
+`GpuPipelineResult.published` records that named output replacement committed.
+`cleanup_failed` separately records failure to remove the owned workspace;
+its path remains available in `temporary_directory` for remediation. A cleanup
+failure keeps the primary error, or reports `GPU_PIPELINE_ERROR_FILE_WRITE`
+when compilation and publication otherwise succeeded. After publication it
+preserves the complete artifact bytes and public path despite that error.
+The driver also preserves `gpu`/`has_gpu` on this error path and reports that
+the output was published together with the failed cleanup path. The CLI still
+exits unsuccessfully, so callers must inspect the publication fact before
+retrying; cleanup failure does not roll back or delete a committed output.
+
 A named final artifact is copied from the private directory to an exclusively
 created same-directory `.buster-staging-<pid>-<counter>.tmp` only after format
 validation, then published with the platform atomic replacement primitive.
