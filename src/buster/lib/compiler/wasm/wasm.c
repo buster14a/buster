@@ -19,9 +19,11 @@
 // and deliberate stack traps. Dynamic allocations may publish odd end pointers.
 // wasm64_build_name_payload names the data segments of section-attributed
 // data in the name section.
-// Scalar function pointers are i64 handles into a private i32-indexed table.
-// Collection assigns import/definition indices before relocation and emission;
-// table and element payloads follow that order, with a permanently null slot 0.
+// Memory64 scalar function pointers are i64 handles into a private i32-indexed
+// table. Collection assigns import/definition indices before relocation and
+// emission; table and element payloads follow that order, with a null slot 0.
+// wasm64_fe_emit_instruction confines Wasm32 function markers to direct calls
+// and refuses their conversion to runtime addresses.
 
 // Linear-memory layout policy: static data starts one 64 KiB region above
 // address zero. Its aligned end is the initial pointer and inclusive lower
@@ -3067,10 +3069,24 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
 {
     Wasm64Context* context = emitter->context;
     IrType* type = wasm64_type(context, instruction->canonical_type);
-    if (!type)
+    // Function-typed values are inert direct-call markers on Wasm32. Every
+    // other operand use would expose the raw function index as an address.
+    bool runtime_function_operand = false;
+    if (type && !wasm64_is_memory64(context))
     {
-        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing canonical WebAssembly instruction type"), emitter->function, block, instruction,
-                    IR_SYMBOL_ID_INVALID);
+        for (u32 operand_index = 0; operand_index < instruction->operand_count && !runtime_function_operand; operand_index += 1)
+        {
+            IrType* operand_type = wasm64_fe_value_ir_type(emitter, instruction->operands[operand_index]);
+            runtime_function_operand = operand_type && operand_type->kind == IR_TYPE_FUNCTION &&
+                                       !(instruction->opcode == IR_OPCODE_CALL && operand_index == 0);
+        }
+    }
+    String8 function_address_error = wasm64_s8("runtime function addresses are unsupported by Wasm32");
+    if (!type || runtime_function_operand)
+    {
+        wasm64_fail(context, type ? WASM64_ERROR_UNSUPPORTED_INSTRUCTION : WASM64_ERROR_IR_VALIDATION,
+                    type ? function_address_error : wasm64_s8("missing canonical WebAssembly instruction type"),
+                    emitter->function, block, instruction, IR_SYMBOL_ID_INVALID);
         return;
     }
     switch (instruction->opcode)
@@ -3249,9 +3265,17 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                         instruction->symbol);
             return;
         }
-        // Wasm32 retains its direct-call-only marker; Wasm64 uses a nonzero table handle.
-        wasm64_fe_pointer_const(emitter, (u64)record->function_index + (wasm64_is_memory64(context) ? 1 : 0));
-        wasm64_fe_emit_result_set(emitter, instruction, false, false);
+        if (!wasm64_is_memory64(context) && type->kind == IR_TYPE_POINTER)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, function_address_error, emitter->function, block, instruction,
+                        instruction->symbol);
+        }
+        else
+        {
+            // Wasm32 retains its direct-call-only marker; Wasm64 uses a nonzero table handle.
+            wasm64_fe_pointer_const(emitter, (u64)record->function_index + (wasm64_is_memory64(context) ? 1 : 0));
+            wasm64_fe_emit_result_set(emitter, instruction, false, false);
+        }
     }
     break;
     case IR_OPCODE_LENGTH:
