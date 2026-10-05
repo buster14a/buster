@@ -71,7 +71,7 @@ BUSTER_CT_CHECK(MACHINE_FAST_REMATERIALIZE_FRAME >= MACHINE_REF_PAYLOAD_LIMIT);
 #endif
 // Greedy variant: instead of hinting the consumer's register, refuse to hand
 // a slot's forced scratch to an unrelated free pick while another lane is
-// open, so the constrained row finds it held when its turn comes.
+// open, so the constrained row finds it free when its turn comes.
 #ifndef MACHINE_FAST_AVOID_SCRATCH_PICK
 #define MACHINE_FAST_AVOID_SCRATCH_PICK 0
 #endif
