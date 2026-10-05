@@ -1,5 +1,6 @@
 /* Native regression executable, following tools/throughput/tests.c.
- * No network, benchmark samples or alternative model. Deadline coverage uses
+ * No network or alternative model. Native sample coverage runs only fixed
+ * disposable microkernels and never represents installed-host evidence. Deadline coverage uses
  * only bounded local helper processes and a monotonic timer.
  * Fixture byte edits model durable crash prefixes; they do not simulate a disk
  * cache losing power. Every recovery verdict comes from bq_open/bq_replay.
@@ -238,37 +239,44 @@ BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
     BQ_CHECK(bq_public_response_valid(&typed, &fixed));
     char* capabilities[] = {"capabilities"};
     BQ_CHECK(bq_client_arguments(1, capabilities, true, &typed, &operation));
-    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
-    BQ_CHECK(bq_dispatch(&queue, typed.bytes, typed.size, &fixed) == BQ_OK &&
-             bq_public_response_valid(&typed, &fixed));
-    fixed.bytes[BQ_CONTROL_HEADER + 4] = 0x1b;
-    BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
-    bq_packet(&fixed, BQ_OP_CAPABILITIES | 0x80000000u, 1, body, 4);
-    BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
+    BqQueue* queue = calloc(1, sizeof(*queue));
+    BQ_CHECK(queue != NULL);
+    if (queue)
+    {
+        queue->directory_fd = -1;
+        queue->lock_fd = -1;
+        queue->journal_fd = -1;
+        BQ_CHECK(bq_dispatch(queue, typed.bytes, typed.size, &fixed) == BQ_OK &&
+                 bq_public_response_valid(&typed, &fixed));
+        fixed.bytes[BQ_CONTROL_HEADER + 4] = 0x1b;
+        BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
+        bq_packet(&fixed, BQ_OP_CAPABILITIES | 0x80000000u, 1, body, 4);
+        BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
+    }
+    free(queue);
 }
 
-BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
+BUSTER_GLOBAL_LOCAL void bq_test_codec_packets(BqQueue* queue)
 {
-    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
     BqPacket request, response;
     BQ_CHECK(sizeof(bq_capabilities_v2) - 1 <= BQ_CONTROL_BODY - 4);
     bq_packet(&request, BQ_OP_CAPABILITIES, UINT64_MAX, NULL, 0);
-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_OK);
+    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_OK);
     BQ_CHECK(response.size <= BQ_CONTROL_CAP && bq_u64(response.bytes + 16) == UINT64_MAX);
     for (u32 prefix = 0; prefix < request.size; prefix += 1)
     {
-        BQ_CHECK(bq_dispatch(&queue, request.bytes, prefix, &response) == BQ_BAD_REQUEST);
+        BQ_CHECK(bq_dispatch(queue, request.bytes, prefix, &response) == BQ_BAD_REQUEST);
     }
-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size + 1, &response) == BQ_BAD_REQUEST);
+    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size + 1, &response) == BQ_BAD_REQUEST);
     bq_put32(request.bytes + 4, BQ_CONTROL_SCHEMA + 1);
-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
+    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
     bq_put32(request.bytes + 4, BQ_CONTROL_SCHEMA);
     bq_put32(request.bytes + 12, BQ_CONTROL_BODY + 1);
-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
+    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
     bq_packet(&request, BQ_OP_CAPABILITIES, 0, NULL, BQ_CONTROL_BODY + 1);
     BQ_CHECK(request.size == 0);
     bq_packet_schema(&request, 1, BQ_OP_CAPABILITIES, 42, NULL, 0);
-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_OK && bq_u32(response.bytes + 4) == 1 &&
+    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_OK && bq_u32(response.bytes + 4) == 1 &&
              response.size == BQ_CONTROL_HEADER + 4 + sizeof(bq_capabilities_v1) - 1);
     BqRequest valid = bq_test_request(1, false);
     for (u32 size = 0; size < valid.size; size += 1)
@@ -364,9 +372,22 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
         }
         start = end < attributes_size ? end + 1 : end;
     }
-    BQ_CHECK(attributes_complete && rules_found[0] && rules_found[1]);
-    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED};
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(recipes); index += 1)
+    BQ_CHECK(attributes_complete);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rules); index += 1) BQ_CHECK(rules_found[index]);
+    /* A host installs these files; materialization compares them byte for
+     * byte with the compiled profile, so a served recipe without its file
+     * can be submitted but never run. */
+    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED,
+                          BQ_RECIPE_NATIVE_EXECUTE, BQ_RECIPE_NATIVE_RUNTIME};
+    char const* commands[] = {"bench_service_recipe", "", "native-driver", "native-runtime-driver"};
+    /* Only the first two have a pinned LF checkout rule; the native profiles
+     * are installed from Linux checkouts, so compare their bytes there. */
+#ifdef _WIN32
+    u32 profile_count = 2;
+#else
+    u32 profile_count = (u32)BUSTER_ARRAY_LENGTH(recipes);
+#endif
+    for (u32 index = 0; index < profile_count; index += 1)
     {
         BqRecipeFiles files;
         String8 expected = bq_recipe_profile(recipes[index]);
@@ -378,8 +399,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
         size_t count = profile && bytes ? fread(bytes, 1, (size_t)expected.length + 1, profile) : 0;
         BQ_CHECK(described && expected.length > 0 && profile && bytes && count == expected.length &&
                  !memcmp(bytes, expected.pointer, expected.length) &&
-                 (recipes[index] == BQ_RECIPE_VALIDATE_BUSTER ? !strcmp(files.command, "bench_service_recipe") :
-                                                               !files.command[0]));
+                 !strcmp(files.command, commands[index]));
         free(bytes);
         if (profile) fclose(profile);
     }
@@ -402,12 +422,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
                  !memcmp(expected, actual, SHA256_HEX_CAPACITY));
     }
 #ifdef _WIN32
-    BQ_CHECK(bq_open(&queue, ".") == BQ_UNSUPPORTED);
+    BQ_CHECK(bq_open(queue, ".") == BQ_UNSUPPORTED);
 #endif
 #ifndef __linux__
     BqWorkerConfig worker = {0};
     u64 worker_id = UINT64_MAX;
-    BQ_CHECK(bq_worker_run(&queue, &worker, &worker_id) == BQ_UNSUPPORTED && worker_id == 0);
+    BQ_CHECK(bq_worker_run(queue, &worker, &worker_id) == BQ_UNSUPPORTED && worker_id == 0);
     BQ_CHECK(bq_worker_unit(S8("/unsupported"), S8("1"), S8("2"), S8("validate-buster-v1"), S8("/workspace"),
                              S8("1111111111111111111111111111111111111111"),
                              S8("2222222222222222222222222222222222222222"), S8("/workspace/result")) == BQ_UNSUPPORTED);
@@ -424,6 +444,22 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
     BQ_CHECK(bq_worker_copy_field(field, sizeof(field), "abc") == 3 && !strcmp(field, "abc"));
     BQ_CHECK(bq_worker_copy_field(field, sizeof(field), "abcd") == -1 && !field[0]);
 #endif
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
+{
+    /* Keep these large codec-only fixtures off the Windows 1 MiB stack:
+     * inlining them into the suite leaves too little room for nested MCP. */
+    BqQueue* queue = calloc(1, sizeof(*queue));
+    BQ_CHECK(queue != NULL);
+    if (queue)
+    {
+        queue->directory_fd = -1;
+        queue->lock_fd = -1;
+        queue->journal_fd = -1;
+        bq_test_codec_packets(queue);
+    }
+    free(queue);
 }
 
 #ifndef _WIN32
@@ -572,7 +608,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_end(BqFixture* fixture)
         while (stream && (entry = readdir(stream)) != NULL)
         {
             if (!strncmp(entry->d_name, "failure-", 8) || !strncmp(entry->d_name, "attempt-", 8) ||
-                !strncmp(entry->d_name, "cleanup-", 8) || !strncmp(entry->d_name, "worker-", 7))
+                !strncmp(entry->d_name, "cleanup-", 8) || !strncmp(entry->d_name, "worker-", 7) ||
+                !strncmp(entry->d_name, "export-", 7))
             {
                 BQ_CHECK(unlinkat(directory, entry->d_name, 0) == 0);
             }
@@ -580,6 +617,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_end(BqFixture* fixture)
         if (stream)
         {
             closedir(stream);
+        }
+        int blobs = openat(directory, "native-blobs", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (blobs >= 0)
+        {
+            BQ_CHECK(bq_remove_workspace_payload(blobs) && unlinkat(directory, "native-blobs", AT_REMOVEDIR) == 0);
+            close(blobs);
         }
         BQ_CHECK(unlinkat(directory, "journal", 0) == 0);
         BQ_CHECK(unlinkat(directory, "writer.lock", 0) == 0);
@@ -1938,7 +1981,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_prefixes_and_corruption(void)
         u8 invalid_reservation[16] = {0};
         bq_put64(invalid_reservation, 999);
         bq_put64(invalid_reservation + 8, 2);
-        bq_frame(corrupt + stable, BQ_RESERVE, 2, invalid_reservation, sizeof(invalid_reservation));
+        bq_frame_schema(corrupt + stable, BQ_SCHEMA, BQ_RESERVE, 2, invalid_reservation, sizeof(invalid_reservation));
         bq_test_image(&fixture, corrupt, stable + BQ_HEADER_SIZE + sizeof(invalid_reservation));
         BQ_CHECK(bq_open(queue, fixture.path) == BQ_CORRUPT);
         bq_test_end(&fixture);
@@ -2328,7 +2371,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     BQ_CHECK(bq_transport_queue_admissible(&incompatible));
 #ifdef __linux__
     BQ_CHECK(strstr(bq_capabilities_v2, "local-recipes=fake-success-v1,fake-failure-v1") != NULL);
-    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1,zen5-calibration-v1 "
+    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1,native-runtime-v1 "
                                         "blocked-recipes=native-retirement-performance-v1\n") != NULL);
     /* Served zen5 fits because the redundant profile/retirement words went. */
     BQ_CHECK(strstr(bq_capabilities_v2, "retirement=blocked") == NULL &&
@@ -2872,7 +2915,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
     BqError error = BQ_OK;
     fake->starts += 1;
     fake->argv_valid = count == 6 && !strcmp(argv[0], BQ_SYSTEMD_BROKER) &&
-        !strcmp(argv[1], "start-outer") && !strcmp(argv[2], "1") && argv[3][0] &&
+        (!strcmp(argv[1], "start-outer") || !strcmp(argv[1], BQ_NATIVE_OUTER_VERB) || !strcmp(argv[1], BQ_RUNTIME_OUTER_VERB)) && !strcmp(argv[2], "1") && argv[3][0] &&
         strlen(argv[4]) == 64 && strlen(argv[5]) == 64 &&
         bq_test_worker_probe_locked(fixture->lease);
     fake->inherited_lease = -1;
@@ -5679,6 +5722,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 #endif
 
 #include "export_tests.c"
+#include "native_tests.c"
+#include "mcp_tests.c"
+#include "offhost_tests.c"
 
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
@@ -5695,6 +5741,10 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #endif
     bq_test_codec();
     bq_test_typed_client();
+    bq_test_mcp_protocol();
+    bq_test_mcp_program_codec();
+    bq_test_mcp_receipts();
+    bq_test_mcp_artifacts();
 #ifndef _WIN32
     bq_test_physical_temp_paths();
     bq_test_workspace_root_group_policy();
@@ -5729,7 +5779,16 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #else
     printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
 #endif
+    bq_test_native_upload_recovery();
+    bq_test_native_staging_refusal();
+    bq_test_native_store_modes();
+    bq_test_native_rejections();
+    bq_test_native_materialization_execution();
+    bq_test_native_collector_failures();
+    bq_test_native_runtime();
+    bq_test_native_worker_outcomes();
     bq_test_transport_boundaries();
+    bq_test_mcp_socket();
     bq_test_worker_deadlines();
     bq_test_worker_lease_handoff();
     bq_test_worker_lease_handoff_negative(0);
@@ -5763,6 +5822,13 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lock_precedes_materialization();
     bq_test_transport_worker_retries_after_busy();
     bq_test_transport_worker_signal_handoff();
+    bq_test_offhost_codec();
+    bq_test_offhost_assigned_worker();
+    bq_test_offhost_custodian();
+    bq_test_offhost_cache(false, false);
+    bq_test_offhost_cache(true, false);
+    bq_test_offhost_cache(false, true);
+    bq_test_offhost_quiet_load();
     bq_test_export_inventory();
     bq_test_export(true);
     bq_test_export(false);
@@ -5791,7 +5857,20 @@ int main(int argc, char** argv)
     int result;
 #ifdef __linux__
     bool helper = argc == 10 && !strcmp(argv[1], "fixed-recipe-helper");
-    if (argc == 2 && !strcmp(argv[1], "--export-only"))
+    if (argc == 2 && !strcmp(argv[1], "--native-only"))
+    {
+        bq_test_native_upload_recovery();
+        bq_test_native_staging_refusal();
+        bq_test_native_store_modes();
+        bq_test_native_rejections();
+        bq_test_native_materialization_execution();
+        bq_test_native_collector_failures();
+    bq_test_native_runtime();
+    bq_test_native_worker_outcomes();
+        printf("NATIVE_EXECUTION_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
+        result = bq_test_failures ? 1 : 0;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--export-only"))
     {
         bq_test_export_inventory();
         bq_test_export(true);

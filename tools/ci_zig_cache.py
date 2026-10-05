@@ -63,8 +63,8 @@ def resolve_policy(event_name, ref, default_branch, mode, namespace, runner_os,
         raise ValueError(f"unsupported GitHub event for Zig cache policy: {event_name}")
     if shard not in SHARDS:
         raise ValueError(f"unsupported desktop shard for Zig cache policy: {shard}")
-    if shard in SPLIT_CHECK_SHARDS and (event_name != "workflow_dispatch" or target not in SPLIT_CHECK_TARGETS):
-        raise ValueError("split desktop shards require workflow_dispatch on a supported split target")
+    if shard in SPLIT_CHECK_SHARDS and target not in SPLIT_CHECK_TARGETS:
+        raise ValueError("split desktop shards require a supported split target")
     validate_namespace(mode, namespace)
     if mode != "ordinary" and event_name != "workflow_dispatch":
         raise ValueError(f"{mode} Zig cache mode is available only to workflow_dispatch")

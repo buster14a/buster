@@ -44,7 +44,7 @@ not just function names containing `encode`.
 
 | Site at the audit base | Disposition in this change |
 |---|---|
-| `codegen.c:codegen_canonical_x64_thread_local_general_dynamic` | Migrated: raw 16-byte TLSGD sequence becomes a metadata-owned recipe. |
+| `machine_x86_64.c:machine_encode_x86_64` | TLSGD uses a metadata-owned recipe. The direct-emitter consumer was removed at the MIR-only cutover; the machine TLS tests retain its relocation and encoding coverage. |
 | `machine_x86_64.c:MACHINE_X64_TLS_GENERAL_DYNAMIC`, via `machine_x64_emit_literal_bytes` | Migrated: same recipe; literal helper removed. |
 | `link.c:link_elf_relax_thread_local`, general-dynamic arm | Migrated: metadata-derived FS MOV + fixed-displacement LEA replacement. |
 | The same function, initial-exec arm | Migrated: metadata-derived ADD input/output forms, not manual REX/ModRM surgery. |
