@@ -4546,6 +4546,150 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_lowering(UnitTe
     return result;
 }
 
+// #1617: switch bodies use ordinary statement extents, including labels.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int calls; static int cleaned; static int select_value(void) { calls += 1; return 4; }\n"
+        "static void clean_value(int *value) { cleaned += *value; }\n"
+        "int matched(int x) { int f = 0; switch (x) case 4: f = 2; return f; }\n"
+        "int constant_body(void) { int f = 0; switch (sizeof(int)) case 4: f = 2; return f; }\n"
+        "int default_only(int x) { int f = 0; switch (x) default: f = 2; return f; }\n"
+        "int no_label(int x) { int f = 0; switch (x) f = 3; return f; }\n"
+        "int empty_body(int x) { int f = 7; switch (x); return f; }\n"
+        "int chained(int x) { int f = 0; switch (x) case 1: case 2: f = 3; return f; }\n"
+        "int block_fallthrough(int x) { int f = 0; switch (x) case 1: { f += 1; case 2: f += 2; } return f; }\n"
+        "int range_body(unsigned long long x) { switch (x) case 1 ... 3: return 1; return 0; }\n"
+        "int narrow_body(unsigned char x) { switch (x) case 255: return 1; return 0; }\n"
+        "int wide_body(unsigned long long x) { switch (x) case 4294967296ULL: return 1; return 0; }\n"
+        "int nested(int x, int y) { int f = 0; switch (x) default: switch (y) case 2: f = 8; return f; }\n"
+        "int adjacent(int x) { int f = 0; switch (x) case 1: f = 3; f += 4; return f; }\n"
+        "int break_body(int x) { int f = 0; switch (x) case 1: break; f = 4; return f; }\n"
+        "int return_body(int x) { switch (x) case 1: return 9; return 1; }\n"
+        "int continue_body(int x) { int f = 0; for (int i = 0; i < 3; i += 1) { switch (x) case 1: continue; f += 1; } return f; }\n"
+        "int labelled_block(int x) { int f = 0; switch (x) case 1: { f = 9; break; } return f; }\n"
+        "int labelled_if(int x, int condition) { int f = 0; switch (x) case 1: if (condition) f = 4; else f = 6; return f; }\n"
+        "int labelled_while(int x) { int f = 0; switch (x) case 1: while (f < 3) f += 1; return f; }\n"
+        "int header_once(void) { int f = 0; calls = 0; switch (select_value()) case 4: f = 2; return f == 2 && calls == 1; }\n"
+        "int no_label_once(void) { int f = 0; calls = 0; switch (select_value()) f = 3; return f == 0 && calls == 1; }\n"
+        "int cleanup_break(void) { cleaned = 0; { int outer __attribute__((cleanup(clean_value))) = 3; switch (1) case 1: break; if (cleaned != 0) return 99; } return cleaned; }\n"
+        "int cleanup_block(void) { cleaned = 0; switch (1) case 1: { int inner __attribute__((cleanup(clean_value))) = 5; break; } return cleaned; }\n"
+        "int main(void) { return matched(4) != 2 || matched(0) != 0 || constant_body() != 2 || default_only(0) != 2 || default_only(42) != 2 || no_label(1) != 0 || empty_body(1) != 7 ||\n"
+        " chained(1) != 3 || chained(2) != 3 || chained(3) != 0 || block_fallthrough(1) != 3 || block_fallthrough(2) != 2 || block_fallthrough(0) != 0 ||\n"
+        " range_body(1) != 1 || range_body(3) != 1 || range_body(4) != 0 || narrow_body(255) != 1 || narrow_body(0) != 0 ||\n"
+        " wide_body(4294967296ULL) != 1 || wide_body(0) != 0 || nested(0, 2) != 8 || nested(0, 3) != 0 ||\n"
+        " adjacent(1) != 7 || adjacent(0) != 4 || break_body(1) != 4 || return_body(1) != 9 || return_body(0) != 1 ||\n"
+        " continue_body(1) != 0 || continue_body(0) != 3 || labelled_block(1) != 9 || labelled_block(0) != 0 ||\n"
+        " labelled_if(1, 1) != 4 || labelled_if(1, 0) != 6 || labelled_if(0, 0) != 0 || labelled_while(1) != 3 || labelled_while(0) != 0 ||\n"
+        " !header_once() || !no_label_once() || cleanup_break() != 3 || cleanup_block() != 5; }\n");
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("unbraced-switch.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                {
+                    BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[index].message);
+                }
+                if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                                              lowered.program->module_count == 1))
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // The statement-extent repair preserves controlling-type and label constraints.
+    String8 invalid_sources[] = {
+        S8("int f(double x) { switch (x) case 1: return 1; return 0; }"),
+        S8("int f(int *x) { switch (x) case 1: return 1; return 0; }"),
+        S8("int f(__int128 x) { switch (x) case 1: return 1; return 0; }"),
+        S8("int f(int x) { switch (x) case 1: case 1: return 1; return 0; }"),
+        S8("int f(int x) { switch (x) default: default: return 1; return 0; }"),
+        S8("int f(int x) { switch (x) case 1 ... 3: case 3: return 1; return 0; }"),
+        S8("int f(int x) { switch (x) { { case 1: return 1; } } return 0; }"),
+    };
+    for (u32 dialect = 0; dialect < 2; dialect += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[index], (CPreprocessOptions){
+                    .target = target_native, .data_layout = target_data_layout(target_native),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("unbraced-switch-invalid.c"), tokens, syntax, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                String8 context = string_format(temporary.arena, S8("invalid unbraced switch source={u32} dialect={u32} form={u32}"),
+                    index, dialect, form);
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, context);
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("unbraced-switch"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("unbraced-switch-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
+                                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 context = string_format(temporary.arena, S8("unbraced switch {S8} {S8} form={u32}"),
+                        dialects[dialect], modes[mode], form);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("{S8}: {S8}"), context, compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // A million flat leaves exercise the real initializer machines in bounded
 // scratch; the complete frontend additionally checks the original failure
 // threshold in both forms, plus independent containment/relocation oracles.
@@ -41208,6 +41352,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);
     BUSTER_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
     BUSTER_TEST_FIXTURE(arguments, c_test_static_compound_literal);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
     BUSTER_TEST_FIXTURE(arguments, c_test_stddef_need_protocol);
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
