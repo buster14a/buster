@@ -103,9 +103,56 @@ The legacy full-drain API retains its existing contract.
 Linux/XCB consumers that do not accept drops may set
 `WmWindowCreate.disable_file_drop`. This omits XDND advertisement and ignores
 addressed XDND messages before source watching, property reads or transfer
-state changes. The default keeps existing behavior. The browser opts out:
-bounded event polling alone does not bound the existing default XDND property's
-reply sizes or cumulative transfer staging allocation.
+state changes. The default accepts bounded drops. Extended XDND type negotiation
+requests at most 256 atoms (1024 payload bytes) per property reply and admits/scans
+at most 1024 atoms across the entire list. A list above that work limit is refused
+before accepting a match in its fetched prefix. The three inline advertised
+types retain their constant-work fast path.
+
+XDND direct and incremental payloads share a 16 MiB logical limit. The first
+nonempty accepted chunk creates one precommitted, non-pooled staging arena:
+16 MiB for its stable buffer plus a separate 64 KiB allowance for arena/page
+storage. Reservation or commitment refusal rejects the transfer recoverably;
+subsequent chunks append without replacement buffers. Completion, cancellation,
+superseding negotiation and shutdown release this owner. INCR's advertised
+length is a hint and cannot allocate storage. The browser continues opting out
+of drops; these enabled-consumer bounds do not alter its workflow.
+
+XIM callbacks borrow the active poll's arena/list only during native polling;
+the callback destination is cleared before return. Raw commit input is limited
+to 4096 bytes before UTF-8/compound-text conversion, output to 16384 UTF-8 bytes,
+and each poll to 32 conversion attempts and 64 KiB of published text. Rejected
+conversion output still charges an attempt. Publication checks validated UTF-8
+and already committed space for both the copied text and aligned event before
+mutating the arena; a refusal emits no partial event. Conversion-library
+allocations remain native-library owned and outside the event arena. These
+limits do not establish a general bound on all XIM protocol-library activity.
+
+`test_rendering_raster_native` exercises actual X-server XDND negotiation,
+direct/INCR transfer, decoded-path ownership, cancellation and shutdown, plus
+synthetic XIM reducer boundaries and actual poll scope teardown. Its ordinary
+native invocation also requires a real XIM provider on a second XCB connection,
+using the server API in the already linked `libxcb-imdkit`. Two independently
+negotiated provider cycles exercise UTF-8 and Compound Text commits through
+normal bounded polling with nonzero input contexts. Independent Unicode golden
+bytes, producer-payload mutation/release, scratch clobbering and text reads after
+complete client/provider shutdown check caller-arena ownership. UTF-8 controls
+also admit 4096 raw bytes, refuse 4097 bytes and malformed input, and recover with
+a subsequent valid commit. Asynchronous commits followed by ordered XIM SYNC
+replies distinguish consumed refusals from missing provider traffic.
+
+Provider handshake, commit and teardown phases each have a 5-second deadline,
+a 2048-pass cap, and bounded work per pass (64 provider events, 32 client events).
+Missing providers or failed handshakes fail explicitly; no opt-in environment
+variable skips this gate. These fixture bounds do not bound every underlying
+X-server request or native-library allocation. The first-party fixture copies no
+external implementation and adds no production dependency: its public server
+API was inspected at [xcb-imdkit 1.0.9, commit 44f5c821](https://github.com/fcitx/xcb-imdkit/blob/44f5c8219bcae9e6afc2391dc50486efcf0bdf06/src/imdkit.h),
+whose component notice is `LGPL-2.1-only`; independent Compound Text bytes follow
+the [X Consortium Compound Text 1.1 contract](https://xorg.freedesktop.org/archive/current/doc/xorg-docs/ctext/ctext.html).
+Hosted execution remains the required evidence for the provider gate under
+[#2197](https://github.com/buster14a/buster/issues/2197); broader desktop input
+method interoperability is outside this fixture's scope.
 
 Required window-arena allocation failure releases native initialization and
 returns failure. The existing arena reservation fault seam exercises this

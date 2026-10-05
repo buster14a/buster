@@ -1,0 +1,36 @@
+== whole-file hashes ==
+00d6387f324b27f573978eb45b4e13eae7d8550776c8e818d0251b244a5038b0  /home/runner/work/_temp/out/self-base-g.out
+c9e52864504b220477920aa341c1ad45a32e535b92946555dec7defa70a99bb3  /home/runner/work/_temp/out/self-probe-g.out
+fdf1f4597551d19920bef051bf1c946e5dc0a24439ebe25ce008497fec1d8f58  /home/runner/work/_temp/out/self-base-g0.out
+fdf1f4597551d19920bef051bf1c946e5dc0a24439ebe25ce008497fec1d8f58  /home/runner/work/_temp/out/self-probe-g0.out
+== sections differing between base and probe ==
+g    .bss             same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g    .data            same base=f77182778c9d/267536 probe=f77182778c9d/267536
+g    .debug_abbrev    same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g    .debug_info      same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g    .debug_line      same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g    .debug_str       same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g    .dynstr          same base=c25de77ed2d6/1251 probe=c25de77ed2d6/1251
+g    .dynsym          same base=25cd2680ff48/2400 probe=25cd2680ff48/2400
+g    .eh_frame        same base=0d2d6418326d/194344 probe=0d2d6418326d/194344
+g    .eh_frame_hdr    same base=4b267f1346b4/45284 probe=4b267f1346b4/45284
+g    .rela.plt        same base=4c71f540dc3d/2376 probe=4c71f540dc3d/2376
+g    .rodata          same base=783cacbc5d5f/13742754 probe=783cacbc5d5f/13742754
+g    .strtab          same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g    .symtab          same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g    .text            same base=da1b4f8ae1b2/16086400 probe=da1b4f8ae1b2/16086400
+g0   .bss             same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g0   .data            same base=f77182778c9d/267536 probe=f77182778c9d/267536
+g0   .debug_abbrev    same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g0   .debug_info      same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g0   .debug_line      same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g0   .debug_str       same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g0   .dynstr          same base=c25de77ed2d6/1251 probe=c25de77ed2d6/1251
+g0   .dynsym          same base=25cd2680ff48/2400 probe=25cd2680ff48/2400
+g0   .eh_frame        same base=0d2d6418326d/194344 probe=0d2d6418326d/194344
+g0   .eh_frame_hdr    same base=4b267f1346b4/45284 probe=4b267f1346b4/45284
+g0   .rela.plt        same base=4c71f540dc3d/2376 probe=4c71f540dc3d/2376
+g0   .rodata          same base=783cacbc5d5f/13742754 probe=783cacbc5d5f/13742754
+g0   .strtab          same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g0   .symtab          same base=e3b0c44298fc/0 probe=e3b0c44298fc/0
+g0   .text            same base=da1b4f8ae1b2/16086400 probe=da1b4f8ae1b2/16086400
