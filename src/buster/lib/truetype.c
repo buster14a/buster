@@ -8,6 +8,7 @@
 // ttf_decode_glyph_outline retains encoded points for compound attachment on
 // a bounded frame stack; ttf_append_outline_path flattens positioned contours.
 // ttf_bitmap_work_is_valid limits scanline edge searches before rasterization.
+// truetype_font_atlas_build packs glyph bitmaps into a bounded atlas.
 
 #include <buster/lib/truetype.h>
 #include <buster/lib/truetype_internal.h>
@@ -1539,6 +1540,118 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
             {
                 result = (TTF_Bitmap){0};
             }
+        }
+    }
+
+    return result;
+}
+
+TTF_AtlasBuild truetype_font_atlas_build(Arena* arena, ByteSlice font_file, u32 text_height)
+{
+    TTF_AtlasBuild result = {0};
+    TTF_FontInitialization initialization = {0};
+    if (text_height == 0 || text_height > BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT)
+    {
+        result.status = TTF_ATLAS_INVALID_TEXT_HEIGHT;
+    }
+    else
+    {
+        initialization = truetype_font_initialize(font_file, 0);
+        result.initialization = initialization.result;
+        result.status = initialization.result == TTF_FONT_INITIALIZATION_SUCCESS ? TTF_ATLAS_SUCCESS : TTF_ATLAS_INVALID_FONT;
+    }
+
+    if (result.status == TTF_ATLAS_SUCCESS)
+    {
+        const TTF_FontInformation* font_information = &initialization.information;
+        FontTextureAtlasDescription atlas = {0};
+        u32 character_count = UINT8_MAX + 1u;
+        // The renderer indexes the character and kerning tables with arbitrary
+        // bytes; only ' '..'~' are filled below, so the rest must read as empty.
+        atlas.characters = arena_allocate_zeroed(arena, FontCharacter, character_count);
+        atlas.kerning_tables = arena_allocate_zeroed(arena, s32, (u64)character_count * (u64)character_count);
+        // text_height is bounded above, so the square root is exactly 16 * text_height.
+        atlas.height = (u32)sqrt_f32((f32)(text_height * text_height * character_count));
+        atlas.width = atlas.height;
+        atlas.pointer = arena_allocate_zeroed(arena, u32, (u64)atlas.width * (u64)atlas.height);
+        f32 scale_factor = truetype_scale_for_pixel_height(font_information, (f32)text_height);
+
+        TTF_VerticalMetrics vertical_metrics = truetype_get_font_vertical_metrics(font_information);
+        atlas.ascent = (s32)round_f32((f32)vertical_metrics.ascent * scale_factor);
+        atlas.descent = (s32)round_f32((f32)vertical_metrics.descent * scale_factor);
+        atlas.line_gap = (s32)round_f32((f32)vertical_metrics.line_gap * scale_factor);
+
+        u64 x = 0;
+        u64 y = 0;
+        u64 max_row_height = 0;
+        u32 first_character = ' ';
+        u32 last_character = '~';
+        u64 loop_start_position = arena->position;
+
+        for (u32 i = first_character; result.status == TTF_ATLAS_SUCCESS && i <= last_character; i += 1)
+        {
+            FontCharacter* character = &atlas.characters[i];
+            TTF_HorizontalMetrics horizontal_metrics = truetype_get_codepoint_horizontal_metrics(font_information, i);
+            character->advance = (u32)round_f32((f32)horizontal_metrics.advance_width * scale_factor);
+            character->left_bearing = (u32)round_f32((f32)horizontal_metrics.left_side_bearing * scale_factor);
+
+            TTF_Bitmap bitmap = truetype_get_codepoint_bitmap(arena, font_information, scale_factor, scale_factor, i);
+
+            s32* kerning_table = atlas.kerning_tables + (u64)i * character_count;
+            for (u32 j = first_character; j <= last_character; j += 1)
+            {
+                s32 kerning_advance = truetype_get_codepoint_kern_advance(font_information, i, j);
+                kerning_table[j] = (s32)round_f32((f32)kerning_advance * scale_factor);
+            }
+
+            // Glyph sizes come from the font file. Only the horizontal axis
+            // wraps, so a glyph that exceeds the atlas in either axis fails the
+            // build here, in every build mode, before any pixel is written. A
+            // negative dimension converts to a huge value and fails the same way.
+            u64 glyph_width = (u64)(u32)bitmap.width;
+            u64 glyph_height = (u64)(u32)bitmap.height;
+            if (x + glyph_width > (u64)atlas.width)
+            {
+                y += max_row_height;
+                max_row_height = glyph_height;
+                x = 0;
+            }
+            else
+            {
+                max_row_height = BUSTER_MAX(glyph_height, max_row_height);
+            }
+
+            if (y + glyph_height <= (u64)atlas.height && x + glyph_width <= (u64)atlas.width)
+            {
+                character->x = (u32)x;
+                character->y = (u32)y;
+                character->width = (u32)glyph_width;
+                character->height = (u32)glyph_height;
+                character->x_offset = bitmap.x_offset;
+                character->y_offset = bitmap.y_offset;
+
+                for (u64 bitmap_y = 0; bitmap_y < glyph_height; bitmap_y += 1)
+                {
+                    for (u64 bitmap_x = 0; bitmap_x < glyph_width; bitmap_x += 1)
+                    {
+                        u32 value = bitmap.pixels[bitmap_y * glyph_width + bitmap_x];
+                        atlas.pointer[(bitmap_y + y) * (u64)atlas.width + (bitmap_x + x)] = (value << 24u) | 0x00ffffffu;
+                    }
+                }
+
+                x += glyph_width;
+            }
+            else
+            {
+                result.status = TTF_ATLAS_GLYPH_DOES_NOT_FIT;
+            }
+
+            arena_set_position(arena, loop_start_position);
+        }
+
+        if (result.status == TTF_ATLAS_SUCCESS)
+        {
+            result.description = atlas;
         }
     }
 

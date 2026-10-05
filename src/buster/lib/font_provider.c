@@ -430,10 +430,11 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
         character->width = width;
         character->height = height;
 
-        // The atlas is sized to fit the full glyph set with headroom, but only the horizontal axis
-        // wraps; if a glyph doesn't fit vertically either, fail loudly instead of writing past result.pointer.
-        BUSTER_CHECK(y + height <= result.height);
-        BUSTER_CHECK(x + width <= result.width);
+        // Glyph sizes come from the font file: fail in every build instead of writing past result.pointer.
+        if ((u64)y + (u64)height > (u64)result.height || (u64)x + (u64)width > (u64)result.width)
+        {
+            os_fail_message_format(S8("font file {S8} has a glyph that does not fit the atlas"), create.font_path);
+        }
 
         u8* source = bitmap;
         u32* destination = result.pointer;
@@ -471,99 +472,26 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
     ByteSlice font_file = file_read(arena, create.font_path, (FileReadOptions){0});
     if (font_file.pointer)
     {
-        TTF_FontInitialization font_initialization = truetype_font_initialize(font_file, 0);
-        TTF_FontInformation font_information = font_initialization.information;
-
-        if (font_initialization.result == TTF_FONT_INITIALIZATION_SUCCESS)
+        // truetype_font_atlas_build bounds every glyph against the atlas in
+        // every build; a failed build is reported here, never as a partial atlas.
+        TTF_AtlasBuild build = truetype_font_atlas_build(arena, font_file, create.text_height);
+        if (build.status == TTF_ATLAS_SUCCESS)
         {
-            u32 character_count = UINT8_MAX + 1u;
-            result.characters = arena_allocate(arena, FontCharacter, character_count);
-            result.kerning_tables = arena_allocate(arena, s32, (u64)character_count * (u64)character_count);
-            // Only ' '..'~' get filled below, but the renderer indexes these
-            // tables with arbitrary bytes; zero the rest so unknown bytes
-            // render as empty glyphs instead of reading stale arena memory.
-            memset(result.characters, 0, sizeof(*result.characters) * character_count);
-            memset(result.kerning_tables, 0, sizeof(*result.kerning_tables) * (u64)character_count * (u64)character_count);
-            result.height = (u32)sqrt_f32((f32)(create.text_height * create.text_height * character_count));
-            result.width = result.height;
-            result.pointer = arena_allocate(arena, u32, (u64)result.width * (u64)result.height);
-            f32 scale_factor = truetype_scale_for_pixel_height(&font_information, (f32)create.text_height);
-
-            TTF_VerticalMetrics vertical_metrics = truetype_get_font_vertical_metrics(&font_information);
-
-            result.ascent = (s32)round_f32((f32)vertical_metrics.ascent * scale_factor);
-            result.descent = (s32)round_f32((f32)vertical_metrics.descent * scale_factor);
-            result.line_gap = (s32)round_f32((f32)vertical_metrics.line_gap * scale_factor);
-
-            u32 x = 0;
-            u32 y = 0;
-            u32 max_row_height = 0;
-            u32 first_character = ' ';
-            u32 last_character = '~';
-
-            u64 loop_start_position = arena->position;
-
-            for (u32 i = first_character; i <= last_character; i += 1)
-            {
-                u32 ch = i;
-                FontCharacter* character = &result.characters[i];
-                TTF_HorizontalMetrics horizontal_metrics = truetype_get_codepoint_horizontal_metrics(&font_information, ch);
-
-                character->advance = (u32)round_f32((f32)horizontal_metrics.advance_width * scale_factor);
-                character->left_bearing = (u32)round_f32((f32)horizontal_metrics.left_side_bearing * scale_factor);
-
-                TTF_Bitmap bitmap = truetype_get_codepoint_bitmap(arena, &font_information, scale_factor, scale_factor, ch);
-
-                s32* kerning_table = result.kerning_tables + (u64)i * character_count;
-                for (u32 j = first_character; j <= last_character; j += 1)
-                {
-                    s32 kerning_advance = truetype_get_codepoint_kern_advance(&font_information, i, j);
-                    kerning_table[j] = (s32)round_f32((f32)kerning_advance * scale_factor);
-                }
-
-                if ((x + (u32)bitmap.width) > result.width)
-                {
-                    y += max_row_height;
-                    max_row_height = (u32)bitmap.height;
-                    x = 0;
-                }
-                else
-                {
-                    max_row_height = BUSTER_MAX((u32)bitmap.height, max_row_height);
-                }
-
-                character->x = x;
-                character->y = y;
-                character->width = (u32)bitmap.width;
-                character->height = (u32)bitmap.height;
-                character->x_offset = bitmap.x_offset;
-                character->y_offset = bitmap.y_offset;
-
-                // The atlas is sized to fit the full glyph set with headroom, but only the horizontal axis
-                // wraps; if a glyph doesn't fit vertically either, fail loudly instead of writing past result.pointer.
-                BUSTER_CHECK(y + (u32)bitmap.height <= result.height);
-                BUSTER_CHECK(x + (u32)bitmap.width <= result.width);
-
-                for (u32 bitmap_y = 0; bitmap_y < (u32)bitmap.height; bitmap_y += 1)
-                {
-                    for (u32 bitmap_x = 0; bitmap_x < (u32)bitmap.width; bitmap_x += 1)
-                    {
-                        u64 source_index = (u64)bitmap_y * (u64)(u32)bitmap.width + bitmap_x;
-                        u64 destination_index = (u64)(bitmap_y + y) * (u64)result.width + (bitmap_x + x);
-                        u32 value = bitmap.pixels[source_index];
-                        result.pointer[destination_index] = (value << 24u) | 0x00ffffffu;
-                    }
-                }
-
-                x += (u32)bitmap.width;
-
-                arena_set_position(arena, loop_start_position);
-            }
+            result = build.description;
+        }
+        else if (build.status == TTF_ATLAS_INVALID_TEXT_HEIGHT)
+        {
+            os_fail_message_format(S8("font text height {u32} is outside 1..{u32}"), create.text_height, (u32)BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT);
+        }
+        else if (build.status == TTF_ATLAS_INVALID_FONT)
+        {
+            os_fail_message_format(S8("font file {S8} is not a usable TrueType font (initialization result {u32})"), create.font_path,
+                                   (u32)build.initialization);
         }
         else
         {
-            os_fail_message_format(S8("font file {S8} is not a usable TrueType font (initialization result {u32})"), create.font_path,
-                                   (u32)font_initialization.result);
+            os_fail_message_format(S8("font file {S8} has a glyph that does not fit the atlas for text height {u32}"), create.font_path,
+                                   create.text_height);
         }
     }
     else

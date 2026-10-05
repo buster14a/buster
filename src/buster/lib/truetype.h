@@ -76,6 +76,27 @@ struct TTF_Bitmap
 #define BUSTER_TTF_MAX_RASTER_POINTS 1048576u
 #define BUSTER_TTF_MAX_RASTER_EDGE_STEPS 67108864u
 
+// Glyph atlas policy: the atlas is a square of 16 * text_height pixels per
+// side, so text_height is limited to keep it at or below 4096 by 4096 pixels.
+#define BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT 256u
+
+typedef enum TTF_AtlasStatus
+{
+    TTF_ATLAS_SUCCESS,
+    TTF_ATLAS_INVALID_TEXT_HEIGHT,
+    TTF_ATLAS_INVALID_FONT,
+    TTF_ATLAS_GLYPH_DOES_NOT_FIT,
+    TTF_ATLAS_COUNT,
+} TTF_AtlasStatus;
+
+typedef struct TTF_AtlasBuild TTF_AtlasBuild;
+struct TTF_AtlasBuild
+{
+    FontTextureAtlasDescription description;
+    TTF_AtlasStatus status;
+    TTF_FontInitializationResult initialization;
+};
+
 BUSTER_F_DECL TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index);
 BUSTER_F_DECL f32 truetype_scale_for_pixel_height(const TTF_FontInformation* information, f32 height);
 BUSTER_F_DECL TTF_VerticalMetrics truetype_get_font_vertical_metrics(const TTF_FontInformation* information);
@@ -96,6 +117,15 @@ BUSTER_F_DECL s32 truetype_get_codepoint_kern_advance(const TTF_FontInformation*
 // and phantom-point anchors are unsupported; invalid/out-of-outline anchors
 // return the same all-zero bitmap and roll back extraction allocations.
 BUSTER_F_DECL TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint);
+
+// Rasterizes ' '..'~' of the font in memory into a text_height-scaled atlas.
+// text_height must be in [1, BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT]. Glyph sizes come
+// from the font file, so every glyph is checked against the atlas bounds in
+// every build: a glyph that does not fit (or an unusable font) returns a status
+// other than TTF_ATLAS_SUCCESS with an all-zero description and writes nothing
+// outside the atlas pixels. Arena allocations made before the failure are not
+// released.
+BUSTER_F_DECL TTF_AtlasBuild truetype_font_atlas_build(Arena* arena, ByteSlice font_file, u32 text_height);
 
 #if BUSTER_INCLUDE_TESTS
 typedef struct TTF_RasterTestPoint TTF_RasterTestPoint;
