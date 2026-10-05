@@ -9,11 +9,14 @@
 // a bounded frame stack; ttf_append_outline_path flattens positioned contours.
 // ttf_bitmap_work_is_valid limits scanline edge searches before rasterization.
 // truetype_font_atlas_build packs glyph bitmaps into a bounded atlas.
+// truetype_font_select_first_usable picks the first candidate file this
+// parser accepts, so system font discovery never selects an unparseable face.
 
 #include <buster/lib/truetype.h>
 #include <buster/lib/truetype_internal.h>
 #include <buster/lib/float.h>
 #include <buster/lib/string.h>
+#include <buster/lib/file.h>
 
 #define TTF_GLYPH_DEPTH_LIMIT 8u
 #define TTF_GLYPH_WORK_LIMIT (BUSTER_TTF_MAX_RASTER_POINTS * (TTF_GLYPH_DEPTH_LIMIT + 1u))
@@ -1656,4 +1659,72 @@ TTF_AtlasBuild truetype_font_atlas_build(Arena* arena, ByteSlice font_file, u32 
     }
 
     return result;
+}
+
+String8 truetype_font_candidate_status_description(TTF_FontCandidateStatus status)
+{
+    String8 result = S8("unknown");
+    switch (status)
+    {
+    case TTF_FONT_CANDIDATE_NOT_TRIED:
+        result = S8("not tried");
+        break;
+    case TTF_FONT_CANDIDATE_USABLE:
+        result = S8("usable");
+        break;
+    case TTF_FONT_CANDIDATE_UNREADABLE:
+        result = S8("missing, empty or unreadable");
+        break;
+    case TTF_FONT_CANDIDATE_MALFORMED:
+        result = S8("not a well-formed TrueType font");
+        break;
+    case TTF_FONT_CANDIDATE_UNSUPPORTED:
+        result = S8("unsupported font format (needs glyf outlines and a Unicode cmap, first face of a collection)");
+        break;
+    case TTF_FONT_CANDIDATE_COUNT:
+        break;
+    }
+    return result;
+}
+
+u64 truetype_font_select_first_usable(const String8* paths, u64 count, TTF_FontCandidateStatus* statuses)
+{
+    u64 selected = count;
+    TemporalArena temp = scratch_begin(0, 0);
+    for (u64 index = 0; index < count && selected == count; index += 1)
+    {
+        u64 mark = temp.arena->position;
+        TTF_FontCandidateStatus status = TTF_FONT_CANDIDATE_UNREADABLE;
+        ByteSlice file = {0};
+        if (paths[index].pointer && paths[index].length)
+        {
+            file = file_read(temp.arena, paths[index], (FileReadOptions){0});
+        }
+
+        if (file.pointer && file.length)
+        {
+            TTF_FontInitialization initialization = truetype_font_initialize(file, 0);
+            if (initialization.result == TTF_FONT_INITIALIZATION_SUCCESS)
+            {
+                status = TTF_FONT_CANDIDATE_USABLE;
+                selected = index;
+            }
+            else if (initialization.result == TTF_FONT_INITIALIZATION_UNSUPPORTED)
+            {
+                status = TTF_FONT_CANDIDATE_UNSUPPORTED;
+            }
+            else
+            {
+                status = TTF_FONT_CANDIDATE_MALFORMED;
+            }
+        }
+
+        if (statuses)
+        {
+            statuses[index] = status;
+        }
+        arena_set_position(temp.arena, mark);
+    }
+    scratch_end(temp);
+    return selected;
 }

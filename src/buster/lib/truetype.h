@@ -127,6 +127,29 @@ BUSTER_F_DECL TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_F
 // released.
 BUSTER_F_DECL TTF_AtlasBuild truetype_font_atlas_build(Arena* arena, ByteSlice font_file, u32 text_height);
 
+// Why a candidate font file was or was not selected by
+// truetype_font_select_first_usable. NOT_TRIED is zero so a zeroed status
+// array reads as "no attempt was made".
+typedef enum TTF_FontCandidateStatus
+{
+    TTF_FONT_CANDIDATE_NOT_TRIED,
+    TTF_FONT_CANDIDATE_USABLE,
+    TTF_FONT_CANDIDATE_UNREADABLE,
+    TTF_FONT_CANDIDATE_MALFORMED,
+    TTF_FONT_CANDIDATE_UNSUPPORTED,
+    TTF_FONT_CANDIDATE_COUNT,
+} TTF_FontCandidateStatus;
+
+// Reads each path in order (file_read, so bundled iOS and APK paths resolve)
+// and runs truetype_font_initialize on the first face, exactly the check
+// truetype_font_atlas_build applies later. Returns the index of the first
+// candidate that initializes, or count when none does. statuses (count
+// entries, may be null) receives the outcome of every candidate that was
+// tried; entries after the returned index are left untouched. Each file is read
+// into scratch memory that is released before the next candidate.
+BUSTER_F_DECL u64 truetype_font_select_first_usable(const String8* paths, u64 count, TTF_FontCandidateStatus* statuses);
+BUSTER_F_DECL String8 truetype_font_candidate_status_description(TTF_FontCandidateStatus status);
+
 #if BUSTER_INCLUDE_TESTS
 typedef struct TTF_RasterTestPoint TTF_RasterTestPoint;
 struct TTF_RasterTestPoint

@@ -627,12 +627,116 @@ BUSTER_GLOBAL_LOCAL UnitTestResult truetype_test_font_atlas(UnitTestArguments* a
     return result;
 }
 
+// System font discovery must only select a file this parser can use, and must
+// say why every other candidate was passed over (font_provider.c reports it).
+// Candidate files are synthesized: an 'OTTO' (CFF) sfnt, a TrueType collection
+// whose first face is unreadable, a truncated font, an empty and a missing
+// file, then a valid font.
+BUSTER_GLOBAL_LOCAL UnitTestResult truetype_test_candidate_selection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    u8 valid_bytes[1536];
+    u32 valid_length = truetype_test_atlas_font(valid_bytes, sizeof(valid_bytes), 700, 0);
+    u8 cff_bytes[1536];
+    memcpy(cff_bytes, valid_bytes, valid_length);
+    memcpy(cff_bytes, "OTTO", 4);
+    u8 collection_bytes[64] = {'t', 't', 'c', 'f', 0, 1, 0, 0, 0, 0, 0, 2};
+    truetype_test_u32(collection_bytes, 12, 4000); // first face lies outside the file
+    u8 truncated_bytes[16];
+    memcpy(truncated_bytes, valid_bytes, sizeof(truncated_bytes));
+
+    typedef struct CandidateFile CandidateFile;
+    struct CandidateFile
+    {
+        String8 name;
+        ByteSlice content;
+        bool write;
+        TTF_FontCandidateStatus expected;
+    };
+    CandidateFile files[] = {
+        {S8("font-candidate-missing"), {0}, false, TTF_FONT_CANDIDATE_UNREADABLE},
+        {S8("font-candidate-empty"), {0}, true, TTF_FONT_CANDIDATE_UNREADABLE},
+        {S8("font-candidate-otto"), {cff_bytes, valid_length}, true, TTF_FONT_CANDIDATE_UNSUPPORTED},
+        {S8("font-candidate-collection"), {collection_bytes, sizeof(collection_bytes)}, true, TTF_FONT_CANDIDATE_MALFORMED},
+        {S8("font-candidate-truncated"), {truncated_bytes, sizeof(truncated_bytes)}, true, TTF_FONT_CANDIDATE_MALFORMED},
+        {S8("font-candidate-valid"), {valid_bytes, valid_length}, true, TTF_FONT_CANDIDATE_USABLE},
+        {S8("font-candidate-valid-later"), {valid_bytes, valid_length}, true, TTF_FONT_CANDIDATE_USABLE},
+    };
+    enum
+    {
+        file_count = 7,
+        valid_index = 5,
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(files) == file_count);
+    String8 paths[file_count];
+    for (u32 index = 0; index < file_count; index += 1)
+    {
+        paths[index] = buster_test_temporary_path(arena, files[index].name, S8(".ttf"));
+        os_file_delete(paths[index]);
+        if (files[index].write)
+        {
+            BUSTER_TEST(arguments, file_write(paths[index], files[index].content));
+        }
+    }
+
+    // Unsupported candidates fall through to the first valid one, and the
+    // search stops there: later candidates are not even read.
+    TTF_FontCandidateStatus statuses[file_count] = {0};
+    u64 selected = truetype_font_select_first_usable(paths, file_count, statuses);
+    BUSTER_TEST(arguments, selected == valid_index);
+    for (u32 index = 0; index < file_count; index += 1)
+    {
+        TTF_FontCandidateStatus expected = index > valid_index ? TTF_FONT_CANDIDATE_NOT_TRIED : files[index].expected;
+        BUSTER_TEST(arguments, statuses[index] == expected);
+    }
+
+    // The first usable candidate wins even when it is first, and a null status array is allowed.
+    BUSTER_TEST(arguments, truetype_font_select_first_usable(paths + valid_index, 2, 0) == 0);
+
+    // When nothing is usable every path carries its own reason.
+    memset(statuses, 0, sizeof(statuses));
+    selected = truetype_font_select_first_usable(paths, valid_index, statuses);
+    BUSTER_TEST(arguments, selected == valid_index);
+    for (u32 index = 0; index < valid_index; index += 1)
+    {
+        BUSTER_TEST(arguments, statuses[index] == files[index].expected && statuses[index] != TTF_FONT_CANDIDATE_USABLE);
+        BUSTER_TEST(arguments, truetype_font_candidate_status_description(statuses[index]).length != 0);
+    }
+    BUSTER_TEST(arguments, truetype_font_select_first_usable(paths, 0, statuses) == 0);
+    String8 empty_path = {0};
+    TTF_FontCandidateStatus empty_status = TTF_FONT_CANDIDATE_USABLE;
+    BUSTER_TEST(arguments, truetype_font_select_first_usable(&empty_path, 1, &empty_status) == 1 && empty_status == TTF_FONT_CANDIDATE_UNREADABLE);
+
+    // A font the atlas builder cannot use must be rejected by selection too: both ask truetype_font_initialize.
+    for (u32 index = 0; index < valid_index; index += 1)
+    {
+        if (files[index].write && files[index].content.length)
+        {
+            TTF_AtlasBuild build = truetype_font_atlas_build(arena, files[index].content, 16);
+            BUSTER_TEST(arguments, build.status == TTF_ATLAS_INVALID_FONT);
+            arena_set_position(arena, position);
+        }
+    }
+
+    for (u32 index = 0; index < file_count; index += 1)
+    {
+        os_file_delete(paths[index]);
+    }
+    arena_set_position(arena, position);
+    return result;
+}
+
 UnitTestResult truetype_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = truetype_test_compound_attachments(arguments);
     UnitTestResult atlas_result = truetype_test_font_atlas(arguments);
     result.test_count += atlas_result.test_count;
     result.succeeded_test_count += atlas_result.succeeded_test_count;
+    UnitTestResult selection_result = truetype_test_candidate_selection(arguments);
+    result.test_count += selection_result.test_count;
+    result.succeeded_test_count += selection_result.succeeded_test_count;
     // Long loca entries [0,34], then a rectangle with bounds (-2,-3)-(6,5).
     // Four on-curve points use signed 16-bit x/y deltas without instructions.
     u8 bytes[] = {
