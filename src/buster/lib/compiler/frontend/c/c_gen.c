@@ -8565,6 +8565,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
 // API so brace-elision can ask whether a non-braced expression already has an
 // aggregate type before descending into its first member.
 BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type);
+BUSTER_C_INTERNAL bool c_ir_initializer_type_takes_string(CIntegerIrBuilder* builder, IrType* type);
 BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end);
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_nullptr(CIntegerIrBuilder* builder, CToken token)
@@ -26324,8 +26325,8 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             IrType* child = ir_type_from_id(&builder->program->types, child_type);
             // A string literal initializes an entire character-array member;
             // brace elision must not descend into its first character.
-            bool string_initializer = child && child->kind == IR_TYPE_ARRAY &&
-                                      c_ir_tokens_are_string_literals(builder->preprocess, value_start, index);
+            bool string_literal = c_ir_tokens_are_string_literals(builder->preprocess, value_start, index);
+            bool string_initializer = string_literal && c_ir_initializer_type_takes_string(builder, child);
             // C's brace-elision permits a scalar initializer to reach the
             // first scalar subobject of a nested aggregate (`.ptr = 3` when
             // ptr is a struct whose first member is an integer).  The old
@@ -26337,7 +26338,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 initializer_scope = builder->parse.declarations[builder->declaration_index].scope;
             }
-            bool value_is_aggregate = c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index);
+            bool value_is_aggregate = !string_literal && c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index);
             // Type prediction intentionally stays conservative for a
             // parenthesized compound literal.  Recognize `(T){...}` here so
             // it is stored as one aggregate rather than brace-elided into its
@@ -26394,6 +26395,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     break;
                 }
                 child = ir_type_from_id(&builder->program->types, child_type);
+                string_initializer = string_literal && c_ir_initializer_type_takes_string(builder, child);
             }
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -43687,6 +43689,15 @@ BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type)
     return type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
 }
 
+// C11 6.7.9p14: a string literal initializes an array of scalars whole. Any
+// other aggregate (`char[2][3]`, a struct) is reached through brace elision,
+// which descends until the literal meets such an array.
+// c_parse_initializer_type_takes_string answers the same question for C types.
+BUSTER_C_INTERNAL bool c_ir_initializer_type_takes_string(CIntegerIrBuilder* builder, IrType* type)
+{
+    return type && type->kind == IR_TYPE_ARRAY && !c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, type->element_type));
+}
+
 BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end)
 {
     if (end == start + 1 && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
@@ -44244,8 +44255,9 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
             };
             continue;
         }
-        if (aggregate && !c_ir_tokens_are_string_literals(builder->preprocess, designator.value_start, value_end) &&
-            !c_ir_initializer_value_is_aggregate_expression(builder, scope, designator.value_start, value_end))
+        bool string_value = c_ir_tokens_are_string_literals(builder->preprocess, designator.value_start, value_end);
+        if (aggregate && !(string_value && c_ir_initializer_type_takes_string(builder, value_type)) &&
+            (string_value || !c_ir_initializer_value_is_aggregate_expression(builder, scope, designator.value_start, value_end)))
         {
             if (frame_count + designator.continuation_count >= capacity)
             {
@@ -45534,7 +45546,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             }
             continue;
         }
-        if (aggregate && !c_ir_tokens_are_string_literals(builder->preprocess, value_start, value_end))
+        if (aggregate && !(c_ir_tokens_are_string_literals(builder->preprocess, value_start, value_end) &&
+                           c_ir_initializer_type_takes_string(builder, child)))
         {
             u32 compound_open = 0;
             u32 compound_close = 0;
@@ -52515,12 +52528,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             }
             u64 specifiers = declaration_specifier_sets[declarations_by_entity[bucket_index]] &
                              (C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) |
-                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
+                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL));
             bool is_extern = (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) != 0;
             bool initialized = c_ir_declaration_initializer_range(preprocess, *declaration, &(u32){0}, &(u32){0});
             internal |= (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 || declaration->is_constexpr;
-            is_thread_local |= (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) |
-                                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23))) != 0;
+            is_thread_local |= (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL))) != 0;
             if (initialized || (!is_extern && !definition))
             {
                 definition = declaration;
