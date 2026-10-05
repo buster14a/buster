@@ -14323,6 +14323,7 @@ struct CIrExpressionCoreState
     IrSourceRange* operation_sources;
     IrTypeId* operation_cast_types;
     u32 index;
+    u32 capacity;
     u32 value_count;
     u32 operation_count;
     u32 pending_start;
@@ -18847,6 +18848,48 @@ BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPrepar
     return true;
 }
 
+BUSTER_C_INTERNAL u32 c_ir_call_argument_count(CIntegerIrBuilder* builder, CIrPreparedCall* call)
+{
+    u32 count = call->open_index + 1 < call->close_index ? 1 : 0;
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    for (u32 index = call->open_index + 1; index < call->close_index; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
+        {
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
 typedef struct CIrTypeCompatibilityTask CIrTypeCompatibilityTask;
 struct CIrTypeCompatibilityTask
 {
@@ -22053,7 +22096,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                selected->arguments = arena_allocate(builder->arena, IrValueId, selected->close_index - selected->token_index);
+                u32 argument_capacity = c_ir_call_argument_count(builder, selected);
+                selected->arguments = arena_allocate(builder->arena, IrValueId, argument_capacity ? argument_capacity : 1);
                 argument_count = 0;
             }
             while (argument_index < argument_end)
@@ -22115,6 +22159,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             remaining -= 1;
             continue;
         }
+        TemporalArena call_argument_temporary = arena_begin_temporal(builder->temporary_arena);
         u32 argument_capacity = selected->close_index - selected->open_index;
         u32* argument_starts = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
         u32* argument_ends = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
@@ -22161,6 +22206,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             if (separator == predicted_argument_index || predicted_argument_count >= argument_capacity)
             {
+                scratch_end(call_argument_temporary);
                 return false;
             }
             argument_starts[predicted_argument_count] = predicted_argument_index;
@@ -22171,6 +22217,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             selected->indirect ? UINT32_MAX
                                : c_ir_find_function_for_call(builder, token.symbol, c_token_spelling(builder->preprocess.spelling_base, token),
                                                              argument_starts, argument_ends, predicted_argument_count);
+        scratch_end(call_argument_temporary);
         IrValueId indirect_callee = IR_VALUE_ID_INVALID;
         CIrSignature signature = {0};
         if (selected->indirect)
@@ -22411,7 +22458,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         }
         if (continuation != C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT)
         {
-            selected->arguments = arena_allocate(builder->arena, IrValueId, selected->close_index - selected->token_index);
+            selected->arguments = arena_allocate(builder->arena, IrValueId, predicted_argument_count ? predicted_argument_count : 1);
             frame->as.prepared_call.state->argument_count = 0;
             frame->as.prepared_call.state->argument_index = selected->open_index + 1;
             frame->as.prepared_call.state->declaration_index = declaration_index;
@@ -29242,6 +29289,33 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_vla_suffix_evaluated(CIntegerIrBuilder* build
     return result;
 }
 
+#define C_IR_EXPRESSION_CORE_STACK_SLACK 8u
+#define C_IR_EXPRESSION_CORE_ITERATION_PUSHES 4u
+
+// One stack slot per token the evaluator visits; prepared calls contribute only their result.
+BUSTER_C_INTERNAL u32 c_ir_expression_core_capacity(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 visited = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        visited += 1;
+        CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, index);
+        if (prepared_call && prepared_call->close_index >= end)
+        {
+            prepared_call = 0;
+        }
+        if (prepared_call)
+        {
+            prepared_call = c_ir_prepared_call_chained(builder, prepared_call, end);
+        }
+        if (prepared_call)
+        {
+            index = prepared_call->close_index;
+        }
+    }
+    return visited + C_IR_EXPRESSION_CORE_STACK_SLACK;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -29585,7 +29659,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         c_ir_lower_expression_core_root_update_resume(builder, state);
         return;
     }
-    u32 capacity = end - start + 1;
+    u32 capacity = c_ir_expression_core_capacity(builder, start, end);
     values = arena_allocate(builder->temporary_arena, IrValueId, capacity);
     operations = arena_allocate(builder->temporary_arena, CConditionalOperator, capacity);
     operation_sources = arena_allocate(builder->temporary_arena, IrSourceRange, capacity);
@@ -29594,11 +29668,20 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     state->operations = operations;
     state->operation_sources = operation_sources;
     state->operation_cast_types = operation_cast_types;
+    state->capacity = capacity;
     index = start;
     expect_operand = true;
 c_ir_expression_core_loop:
     for (; index < end; index += 1)
     {
+        if (value_count + C_IR_EXPRESSION_CORE_ITERATION_PUSHES > state->capacity ||
+            operation_count + C_IR_EXPRESSION_CORE_ITERATION_PUSHES > state->capacity)
+        {
+            builder->failure_message = S8("C expression operand stack exceeds its lowering capacity");
+            builder->failure_token_index = index;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
         builder->failure_token_index = index;
         CToken token = builder->preprocess.tokens[index];
         IrSourceRange source = c_ir_token_source_range(builder, token);
@@ -36604,6 +36687,9 @@ BUSTER_C_INTERNAL bool c_ir_builder_controlled_body_range(CIntegerIrBuilder* bui
 
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
+#define C_IR_SWITCH_CHUNK_VALUE_CAPACITY (UINT16_MAX - 1u)
+
+// target_count = values + 1 must fit in u16.
 BUSTER_C_INTERNAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrValueId switched, CIrSwitchCase* cases, u32 case_count, IrBlockId default_block,
                                                IrSourceRange source)
 {
@@ -36612,31 +36698,50 @@ BUSTER_C_INTERNAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrValue
     {
         value_count += !cases[index].is_default;
     }
-    if (value_count >= UINT16_MAX)
+    u32 emitted_value_count = 0;
+    u32 case_index = 0;
+    bool complete = false;
+    bool result = true;
+    while (!complete && result)
     {
-        return false;
-    }
-    IrSourceRange instruction_source = source;
-    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_SWITCH, builder->void_type);
-    instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
-    instruction.operands[0] = switched;
-    instruction.operand_count = 1;
-    instruction.targets = arena_allocate(builder->arena, IrBlockId, value_count + 1);
-    instruction.immediates = arena_allocate(builder->arena, u64, value_count);
-    u32 value_index = 0;
-    for (u32 index = 0; index < case_count; index += 1)
-    {
-        if (!cases[index].is_default)
+        u32 chunk_value_count = BUSTER_MIN(value_count - emitted_value_count, C_IR_SWITCH_CHUNK_VALUE_CAPACITY);
+        bool has_next_chunk = emitted_value_count + chunk_value_count < value_count;
+        IrBlockId next_chunk = has_next_chunk ? c_ir_block_create(builder) : default_block;
+        if (next_chunk.value == IR_ID_UNDERLYING_INVALID)
         {
-            instruction.targets[value_index] = cases[index].block;
-            instruction.immediates[value_index] = cases[index].value;
-            value_index += 1;
+            result = false;
+        }
+        else
+        {
+            IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_SWITCH, builder->void_type);
+            instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+            instruction.operands[0] = switched;
+            instruction.operand_count = 1;
+            instruction.targets = arena_allocate(builder->arena, IrBlockId, chunk_value_count + 1);
+            instruction.immediates = arena_allocate(builder->arena, u64, chunk_value_count);
+            u32 chunk_index = 0;
+            for (; case_index < case_count && chunk_index < chunk_value_count; case_index += 1)
+            {
+                if (!cases[case_index].is_default)
+                {
+                    instruction.targets[chunk_index] = cases[case_index].block;
+                    instruction.immediates[chunk_index] = cases[case_index].value;
+                    chunk_index += 1;
+                }
+            }
+            instruction.targets[chunk_value_count] = next_chunk;
+            instruction.target_count = (u16)(chunk_value_count + 1);
+            instruction.immediate_count = (u16)chunk_value_count;
+            result = c_ir_append_instruction(builder, instruction, source).value != IR_ID_UNDERLYING_INVALID;
+            if (result && has_next_chunk)
+            {
+                result = c_ir_switch_block(builder, next_chunk);
+            }
+            emitted_value_count += chunk_value_count;
+            complete = emitted_value_count == value_count;
         }
     }
-    instruction.targets[value_count] = default_block;
-    instruction.target_count = (u16)(value_count + 1);
-    instruction.immediate_count = (u16)value_count;
-    return c_ir_append_instruction(builder, instruction, instruction_source).value != IR_ID_UNDERLYING_INVALID;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_switch_promoted_type(CIntegerIrBuilder* builder, IrTypeId type_id)
