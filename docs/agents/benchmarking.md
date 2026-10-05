@@ -4,6 +4,15 @@
 
 ## Benchmarking and diagnostics
 
+Record source debug flags explicitly in benchmark recipes and comparisons:
+use `ide cc -g0 ...` against a reference compiler with debug output disabled,
+or `ide cc -g ...` against a reference using the corresponding debug mode.
+Do not infer source debug output from the compiler executable's Release/Debug
+build configuration. `ide cc` defaults to no source debug information; older
+revisions emitted it by default, so omission across revisions can change the
+workload. The self-host fixed-point and stage-1 recipes deliberately pass `-g`;
+retain that flag when comparing their historical results.
+
 Performance comparisons must control build provenance as well as runtime noise.
 Use the [session-owned worktree setup](workflow.md#parallel-sessions-on-one-machine)
 for builds and measurements; it defines `session_root` for the ordinary

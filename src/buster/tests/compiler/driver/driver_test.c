@@ -5,6 +5,7 @@
 // owns the configured external compiler command for the ELF PIC fixture.
 // compiler_driver_test_bit_field_assignment_results checks stored-width results.
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
+// compiler_driver_test_debug_options owns the default and ordered debug switches.
 // driver_metrics_test.c holds the per-input metrics / -fkeep-going fixtures.
 // compiler_driver_test_aarch64_elf_ldst checks foreign non-PIC memory references
 // against native host-linked controls, including each scaled low12 form.
@@ -4656,6 +4657,121 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_global_relocations
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(named); name_index += 1)
         {
             BUSTER_TEST_RAW(arguments, named_found[name_index], named[name_index]);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The default and -g0 must omit debug payloads in the serialized artifact,
+// while -g opts in and the final debug option wins for every native format.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_options(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 input = buster_test_temporary_path(temporary.arena, S8("buster-debug-options"), S8(".c"));
+    String8 source = S8("int state = 7; int f(int x) { int local = x + state; return local * 3; }\n");
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {
+            S8("x86_64-linux"), S8("aarch64-linux"),
+            S8("x86_64-windows"), S8("aarch64-windows"),
+            S8("x86_64-macos"), S8("aarch64-macos"),
+        };
+        String8 debug_options[][2] = {
+            {S8(""), S8("")}, {S8("-g"), S8("")}, {S8("-g0"), S8("")},
+            {S8("-g"), S8("-g0")}, {S8("-g0"), S8("-g")},
+        };
+        u32 debug_option_counts[] = {0, 1, 1, 2, 2};
+        bool debug_expected[] = {false, true, false, false, true};
+        ObjectSectionKind payload_kinds[] = {
+            OBJECT_SECTION_TEXT, OBJECT_SECTION_DATA, OBJECT_SECTION_READ_ONLY_DATA,
+        };
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            TemporalArena target_temporary = arena_begin_temporal(temporary.arena);
+            ByteSlice default_image = {0};
+            ByteSlice default_payloads[BUSTER_ARRAY_LENGTH(payload_kinds)] = {0};
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(debug_options); mode += 1)
+            {
+                String8 output = buster_test_temporary_path(target_temporary.arena, S8("buster-debug-options"), S8(".o"));
+                String8 command[10];
+                u32 command_count = 0;
+                for (u32 option = 0; option < debug_option_counts[mode]; option += 1)
+                {
+                    command[command_count++] = debug_options[mode][option];
+                }
+                command[command_count++] = S8("-c");
+                command[command_count++] = S8("-nostdinc");
+                command[command_count++] = S8("-target");
+                command[command_count++] = targets[target_index];
+                command[command_count++] = S8("-o");
+                command[command_count++] = output;
+                command[command_count++] = input;
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                    target_temporary.arena, (SliceString8){.pointer = command, .length = command_count});
+                BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, invocation.debug_info == debug_expected[mode]);
+                BUSTER_TEST(arguments, invocation.debug_info_explicit == (mode != 0));
+                CompilerDriverResult built = compiler_driver_execute_invocation(target_temporary.arena, invocation);
+                if (BUSTER_REQUIRE(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object))
+                {
+                    ByteSlice image = file_read(target_temporary.arena, output, (FileReadOptions){0});
+                    if (BUSTER_REQUIRE(arguments, image.length != 0))
+                    {
+                        ObjectFile serialized = object_read(target_temporary.arena, image, built.object.target);
+                        if (BUSTER_REQUIRE(arguments, serialized.error == OBJECT_ERROR_NONE && serialized.sections &&
+                                           serialized.section_count >= OBJECT_SECTION_COUNT))
+                        {
+                            bool debug_found = false;
+                            for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+                            {
+                                if (object_section_kind_is_debug((ObjectSectionKind)kind))
+                                {
+                                    bool populated = serialized.sections[kind].data.length != 0;
+                                    debug_found |= populated;
+                                    BUSTER_TEST(arguments, debug_expected[mode] || !populated);
+                                }
+                            }
+                            BUSTER_TEST(arguments, debug_found == debug_expected[mode]);
+                            BUSTER_TEST(arguments, serialized.sections[OBJECT_SECTION_TEXT].data.length != 0);
+                            for (u32 payload = 0; payload < BUSTER_ARRAY_LENGTH(payload_kinds); payload += 1)
+                            {
+                                ByteSlice bytes = serialized.sections[payload_kinds[payload]].data;
+                                if (!mode)
+                                {
+                                    default_payloads[payload] = bytes;
+                                }
+                                else if (BUSTER_REQUIRE(arguments, default_image.length != 0))
+                                {
+                                    ByteSlice expected = default_payloads[payload];
+                                    if (BUSTER_REQUIRE(arguments, bytes.length == expected.length))
+                                    {
+                                        if (bytes.length && memcmp(bytes.pointer, expected.pointer, bytes.length))
+                                        {
+                                            arguments->show(arguments, S8("DEBUG_OPTION_PAYLOAD_V1 target={S8} mode={u32} kind={u32} bytes={u64}\n"),
+                                                targets[target_index], mode, (u32)payload_kinds[payload], bytes.length);
+                                        }
+                                        BUSTER_TEST(arguments, !bytes.length || !memcmp(bytes.pointer, expected.pointer, bytes.length));
+                                    }
+                                }
+                            }
+                            if (!mode)
+                            {
+                                default_image = image;
+                            }
+                            else if (!debug_expected[mode] && BUSTER_REQUIRE(arguments, default_image.length != 0))
+                            {
+                                if (BUSTER_REQUIRE(arguments, image.length == default_image.length))
+                                {
+                                    BUSTER_TEST(arguments, !memcmp(image.pointer, default_image.pointer, image.length));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            scratch_end(target_temporary);
         }
     }
     scratch_end(temporary);
@@ -19798,6 +19914,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dwarf5_objects);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_options);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
@@ -21433,7 +21550,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 cross_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-object"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 cross_command_line[] = {
-            S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), cross_object_path, S8("tests/basic_c_compile.c"),
+            S8("-c"), S8("-g"), S8("-target"), c_object_targets[target_index], S8("-o"), cross_object_path, S8("tests/basic_c_compile.c"),
         };
         CompilerDriverResult cross = compiler_driver_execute_invocation(
             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cross_command_line)));
@@ -22883,7 +23000,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         TemporalArena codeview_temporary = scratch_begin(&arguments->arena, 1);
         String8 codeview_object_path = buster_test_temporary_path(codeview_temporary.arena, S8("buster-c-codeview"), S8(".o"));
         String8 codeview_command_line[] = {
-            S8("-target"), S8("x86_64-windows"), S8("-c"), S8("-o"), codeview_object_path, S8("tests/basic_c_operations.c"),
+            S8("-target"), S8("x86_64-windows"), S8("-c"), S8("-g"), S8("-o"), codeview_object_path, S8("tests/basic_c_operations.c"),
         };
         CompilerDriverResult codeview_compile = compiler_driver_execute_invocation(
             codeview_temporary.arena, compiler_driver_parse_arguments(codeview_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(codeview_command_line)));

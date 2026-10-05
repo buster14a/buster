@@ -1322,6 +1322,108 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_scaling(UnitTestArgument
     return result;
 }
 
+// COFF merges aligned same-kind contributions, including empty final ones.
+// Poisoned reader storage must not leak into the resulting gaps or tail.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_merged_padding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u8 prefix[] = {0x11, 0x22, 0x33};
+    u8 suffix[] = {0x44, 0x55};
+    u8 expected[] = {0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0x44, 0x55, 0, 0, 0, 0, 0, 0};
+    ObjectSectionKind kinds[] = {OBJECT_SECTION_TEXT, OBJECT_SECTION_DATA, OBJECT_SECTION_READ_ONLY_DATA};
+    u32 flags[] = {UINT32_C(0x60000020), UINT32_C(0xc0000040), UINT32_C(0x40000040)};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u8 patterns[] = {0xa5, 0x5a};
+    enum
+    {
+        COFF_HEADER_BYTES = 20,
+        COFF_SECTION_BYTES = 40,
+        COFF_PADDING_SECTION_COUNT = 10,
+        COFF_PADDING_RAW_OFFSET = COFF_HEADER_BYTES + COFF_PADDING_SECTION_COUNT * COFF_SECTION_BYTES,
+        COFF_PADDING_STRING_OFFSET = COFF_PADDING_RAW_OFFSET + 15,
+        COFF_PADDING_FILE_BYTES = COFF_PADDING_STRING_OFFSET + 4,
+    };
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        // Literal section headers keep this reader oracle independent of
+        // object_write's layout, classification and alignment encoder.
+        u8 image[COFF_PADDING_FILE_BYTES] = {0};
+        u16 machine = architectures[architecture] == CPU_ARCH_X86_64 ? 0x8664 : 0xaa64;
+        u16 section_count = COFF_PADDING_SECTION_COUNT;
+        u32 string_offset = COFF_PADDING_STRING_OFFSET;
+        u32 string_size = 4;
+        memcpy(image, &machine, sizeof(machine));
+        memcpy(image + 2, &section_count, sizeof(section_count));
+        memcpy(image + 8, &string_offset, sizeof(string_offset));
+        memcpy(image + string_offset, &string_size, sizeof(string_size));
+        u32 raw_offset = COFF_PADDING_RAW_OFFSET;
+        for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
+        {
+            String8 name = object_section_name_for_kind(kinds[kind_index]);
+            for (u32 contribution = 0; contribution < 3; contribution += 1)
+            {
+                u32 header = COFF_HEADER_BYTES + (kind_index * 3 + contribution) * COFF_SECTION_BYTES;
+                memcpy(image + header, name.pointer, name.length);
+                u32 size = contribution == 0 ? sizeof(prefix) : contribution == 1 ? sizeof(suffix) : 0;
+                u32 characteristics = flags[kind_index] | (contribution == 0 ? UINT32_C(0x00100000) :
+                                                            contribution == 1 ? UINT32_C(0x00400000) : UINT32_C(0x00500000));
+                memcpy(image + header + 16, &size, sizeof(size));
+                memcpy(image + header + 20, &raw_offset, sizeof(raw_offset));
+                memcpy(image + header + 36, &characteristics, sizeof(characteristics));
+                if (size)
+                {
+                    memcpy(image + raw_offset, contribution == 0 ? prefix : suffix, size);
+                    raw_offset += size;
+                }
+            }
+        }
+        u32 zero_header = COFF_HEADER_BYTES + 9 * COFF_SECTION_BYTES;
+        u32 zero_size = 19;
+        u32 zero_characteristics = UINT32_C(0xc0500080);
+        memcpy(image + zero_header, ".bss", 4);
+        memcpy(image + zero_header + 16, &zero_size, sizeof(zero_size));
+        memcpy(image + zero_header + 36, &zero_characteristics, sizeof(zero_characteristics));
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_WINDOWS};
+        {
+            Arena* reader = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
+            if (BUSTER_REQUIRE(arguments, reader != 0))
+            {
+                u64 reader_start = reader->position;
+                for (u32 iteration = 0; iteration <= BUSTER_ARRAY_LENGTH(patterns); iteration += 1)
+                {
+                    if (iteration)
+                    {
+                        u8* poison = arena_allocate(reader, u8, BUSTER_KB(64));
+                        memset(poison, patterns[iteration - 1], BUSTER_KB(64));
+                        arena_set_position(reader, reader_start);
+                    }
+                    ObjectFile restored = object_read(reader, (ByteSlice)BUSTER_ARRAY_TO_SLICE(image), target);
+                    if (BUSTER_REQUIRE(arguments, restored.error == OBJECT_ERROR_NONE && restored.sections &&
+                                       restored.section_count >= OBJECT_SECTION_COUNT))
+                    {
+                        for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
+                        {
+                            ByteSlice bytes = restored.sections[kinds[kind_index]].data;
+                            BUSTER_TEST(arguments, restored.sections[kinds[kind_index]].alignment == 16);
+                            if (BUSTER_REQUIRE(arguments, bytes.length == sizeof(expected)))
+                            {
+                                BUSTER_TEST(arguments, !memcmp(bytes.pointer, expected, sizeof(expected)));
+                            }
+                        }
+                        ObjectSection zero = restored.sections[OBJECT_SECTION_ZERO];
+                        BUSTER_TEST(arguments, !zero.data.pointer && !zero.data.length && zero.virtual_size == 19);
+                    }
+                    arena_set_position(reader, reader_start);
+                }
+                BUSTER_TEST(arguments, arena_destroy(reader, 1));
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // COFF carries in-memory section alignment in IMAGE_SCN_ALIGN_* rather than
 // in PointerToRawData. Read the bytes directly so the writer test does not
 // certify its output through object_read's matching decoder.
@@ -3094,6 +3196,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult executable_sections = object_test_executable_sections(arguments);
     result.test_count += executable_sections.test_count;
     result.succeeded_test_count += executable_sections.succeeded_test_count;
+    UnitTestResult coff_padding = object_test_coff_merged_padding(arguments);
+    result.test_count += coff_padding.test_count;
+    result.succeeded_test_count += coff_padding.succeeded_test_count;
     UnitTestResult coff_alignment = object_test_coff_section_alignment(arguments);
     result.test_count += coff_alignment.test_count;
     result.succeeded_test_count += coff_alignment.succeeded_test_count;

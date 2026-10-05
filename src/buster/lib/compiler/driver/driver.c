@@ -1196,7 +1196,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         .language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
-        .debug_info = true,
+        // Source debug information is opt-in; ordinary artifact generation
+        // should not construct debug models or pay their output cost.
+        .debug_info = false,
         // Native machine code needs register placement even when source-level
         // optimization is disabled. Match LLVM's -O0 policy by using the
         // low-latency allocator unless the caller explicitly opts out.
