@@ -22365,6 +22365,35 @@ BUSTER_GLOBAL_LOCAL String8 c_test_tall_expression_source(Arena* arena, const u3
 // GitHub #2531: the strict operand-type walk runs as query-machine frames, so
 // operands taller than the old depth-64 cap are still typed by the walk rather
 // than falling back to the identifier-scan guess.
+// Strict operand-type answers computed while the type-mapping rounds run (the
+// local array is still unmapped there and types as its decayed pointer) must
+// not be reused when the body lowers: `sizeof(names)` below is 2 * 16 bytes,
+// not the 8 of a pointer, so the braced initializer fits its bound.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_strict_operand_cache_phases(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("typedef struct { const char* pointer; unsigned long length; } Name;\n"
+                        "int probe(void)\n"
+                        "{\n"
+                        "    static Name const names[] = {{\"a\", 1}, {\"b\", 1}};\n"
+                        "    unsigned wanted = sizeof(names) / sizeof((names)[0]);\n"
+                        "    unsigned indices[sizeof(names) / sizeof((names)[0])] = {4294967295u, 4294967295u};\n"
+                        "    return (int)(wanted + indices[1]);\n"
+                        "}\n");
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("strict-cache-phases.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+    {
+        BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -38783,6 +38812,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_static_compound_literal);
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
     BUSTER_TEST_FIXTURE(arguments, c_test_stddef_need_protocol);
+    BUSTER_TEST_FIXTURE(arguments, c_test_strict_operand_cache_phases);
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_memo);
     BUSTER_TEST_FIXTURE(arguments, c_test_switch_integer_controls);

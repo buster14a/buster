@@ -2244,6 +2244,13 @@ struct CIrQueryMachine
     u32 strict_result_count;
     u32 strict_result_capacity;
     u32 strict_slot_mask;
+    // Persistent answers depend on which locals and C-to-IR type mappings exist
+    // when they are computed (an unmapped local array types as its decayed
+    // pointer), so they are only kept while function bodies lower, and the
+    // epoch advances whenever that state changes. Earlier answers stay in the
+    // table but never match a later key.
+    u32 strict_epoch;
+    bool strict_persist;
     u32 value_count;
     u32 value_capacity;
     u32 operator_count;
@@ -3320,7 +3327,8 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
         case C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT:
             return left.first_type.value == right.first_type.value && left.start == right.start && left.end == right.end;
         case C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE:
-            return left.start == right.start && left.end == right.end && left.flag == right.flag && left.third == right.third;
+            return left.start == right.start && left.end == right.end && left.flag == right.flag && left.third == right.third &&
+                   left.fourth == right.fourth;
         }
     }
 
@@ -3336,7 +3344,7 @@ BUSTER_C_INTERNAL u32 c_ir_strict_result_probe(CIrQueryMachine* machine, CIrQuer
 BUSTER_C_INTERNAL bool c_ir_strict_result_find(CIrQueryMachine* machine, CIrQueryFrame key, CIrQueryFrame* result_out)
 {
     bool hit = false;
-    for (u32 probe = c_ir_strict_result_probe(machine, key); machine->strict_slots[probe] && !hit; probe = (probe + 1) & machine->strict_slot_mask)
+    for (u32 probe = c_ir_strict_result_probe(machine, key); machine->strict_persist && machine->strict_slots[probe] && !hit; probe = (probe + 1) & machine->strict_slot_mask)
     {
         CIrQueryFrame stored = machine->strict_results[machine->strict_slots[probe] - 1];
         hit = c_ir_query_key_equal(stored, key);
@@ -3350,7 +3358,7 @@ BUSTER_C_INTERNAL bool c_ir_strict_result_find(CIrQueryMachine* machine, CIrQuer
 
 BUSTER_C_INTERNAL void c_ir_strict_result_insert(CIrQueryMachine* machine, CIrQueryFrame frame)
 {
-    if (machine->strict_result_count < machine->strict_result_capacity)
+    if (machine->strict_persist && machine->strict_result_count < machine->strict_result_capacity)
     {
         u32 probe = c_ir_strict_result_probe(machine, frame);
         while (machine->strict_slots[probe])
@@ -3611,6 +3619,7 @@ BUSTER_C_INTERNAL bool c_ir_query_strict_operand_type(CIntegerIrBuilder* builder
         .start = start,
         .end = end,
         .third = statement_tail || builder->sizeof_statement_expression_tail_depth != 0,
+        .fourth = builder->queries->strict_epoch,
         .kind = C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE,
         .flag = promote_bit_fields,
     };
@@ -6834,6 +6843,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
     }
     builder->local_entities[builder->local_count] = entity.value;
     builder->local_symbols[builder->local_count] = name.symbol;
+    builder->queries->strict_epoch += 1;
     builder->locals[builder->local_count++] = (CIntegerIrLocal){
         .direct_ssa = direct_ssa,
         .name = c_token_spelling(builder->preprocess.spelling_base, name),
@@ -28494,6 +28504,7 @@ BUSTER_C_INTERNAL bool c_ir_strict_operand_type(CIntegerIrBuilder* builder, u32 
             .start = start,
             .end = end,
             .third = builder->sizeof_statement_expression_tail_depth != 0,
+            .fourth = machine->strict_epoch,
             .kind = C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE,
             .flag = promote_bit_fields,
         };
@@ -41381,6 +41392,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     place = c_ir_emit_global_place(builder, entity, local_source);
                     builder->local_entities[builder->local_count] = entity.value;
                     builder->local_symbols[builder->local_count] = name.symbol;
+                    builder->queries->strict_epoch += 1;
                     builder->locals[builder->local_count++] = (CIntegerIrLocal){
                         .name = c_token_spelling(builder->preprocess.spelling_base, name),
                         .source = local_source,
@@ -44812,6 +44824,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
         if (candidates[type_index])
         {
             builder->c_type_ir_map[type_index] = IR_TYPE_ID_INVALID;
+            builder->queries->strict_epoch += 1;
         }
     }
     for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
@@ -53878,6 +53891,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             continue;
         }
         TemporalArena lowering_temporary = arena_begin_temporal(lowering_arena);
+        queries.strict_persist = true;
+        queries.strict_epoch += 1;
         u64 local_capacity = (u64)signatures[declaration_index].parameter_count + declaration_local_counts[declaration_index];
         u64 local_slot_capacity = C_IR_LOCAL_SLOT_MINIMUM;
         while (local_slot_capacity < local_capacity * C_IR_LOCAL_SLOT_LOAD_DIVISOR)
