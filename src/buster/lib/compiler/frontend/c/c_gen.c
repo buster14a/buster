@@ -8639,6 +8639,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
 // API so brace-elision can ask whether a non-braced expression already has an
 // aggregate type before descending into its first member.
 BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type);
+BUSTER_C_INTERNAL bool c_ir_initializer_type_takes_string(CIntegerIrBuilder* builder, IrType* type);
 BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end);
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_nullptr(CIntegerIrBuilder* builder, CToken token)
@@ -15413,9 +15414,10 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 nested_start += 1;
                 nested_end -= 1;
             }
+            u32 grouped_dereference_count = 0;
             while (nested_start < nested_end && c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_STAR))
             {
-                dereference_count += 1;
+                grouped_dereference_count += 1;
                 nested_start += 1;
             }
             if (depth || nested_end != nested_start + 1)
@@ -15450,6 +15452,10 @@ c_ir_place_expression_base:
                 }
                 return;
             }
+            // The complete-expression fallback above already evaluates
+            // stars inside the group. Only the direct identifier path still
+            // needs them; stripped outer stars remain pending on both paths.
+            dereference_count += grouped_dereference_count;
             base_index = nested_start;
             index = close;
         }
@@ -16150,20 +16156,32 @@ BUSTER_C_SHARED bool c_ir_declaration_initializer_range(CPreprocessResult prepro
 
 BUSTER_C_INTERNAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal* initializer)
 {
-    if (!type || !initializer)
+    bool valid = false;
+    if (type && initializer)
     {
-        return false;
+        if (type->kind == IR_TYPE_POINTER)
+        {
+            valid = initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+        }
+        else if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+        {
+            valid = initializer->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && initializer->relocation_count == 0;
+        }
+        else if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128 &&
+                 initializer->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES)
+        {
+            // Wide scalar constants use their target byte image, just like
+            // ordinary integer128 globals, rather than the one-limb payload.
+            valid = type->layout.size == 16 && initializer->bytes.pointer && initializer->bytes.length == 16 &&
+                    initializer->relocation_count == 0;
+        }
+        else
+        {
+            valid = initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO || initializer->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER ||
+                    initializer->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT;
+        }
     }
-    if (type->kind == IR_TYPE_POINTER)
-    {
-        return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
-    }
-    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
-    {
-        return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && initializer->relocation_count == 0;
-    }
-    return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO || initializer->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER ||
-           initializer->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_report_unsupported_signature(CIntegerIrBuilder* builder, String8 name)
@@ -26499,8 +26517,8 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             IrType* child = ir_type_from_id(&builder->program->types, child_type);
             // A string literal initializes an entire character-array member;
             // brace elision must not descend into its first character.
-            bool string_initializer = child && child->kind == IR_TYPE_ARRAY &&
-                                      c_ir_tokens_are_string_literals(builder->preprocess, value_start, index);
+            bool string_literal = c_ir_tokens_are_string_literals(builder->preprocess, value_start, index);
+            bool string_initializer = string_literal && c_ir_initializer_type_takes_string(builder, child);
             // C's brace-elision permits a scalar initializer to reach the
             // first scalar subobject of a nested aggregate (`.ptr = 3` when
             // ptr is a struct whose first member is an integer).  The old
@@ -26512,7 +26530,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 initializer_scope = builder->parse.declarations[builder->declaration_index].scope;
             }
-            bool value_is_aggregate = c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index);
+            bool value_is_aggregate = !string_literal && c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index);
             // Type prediction intentionally stays conservative for a
             // parenthesized compound literal.  Recognize `(T){...}` here so
             // it is stored as one aggregate rather than brace-elided into its
@@ -26569,6 +26587,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     break;
                 }
                 child = ir_type_from_id(&builder->program->types, child_type);
+                string_initializer = string_literal && c_ir_initializer_type_takes_string(builder, child);
             }
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -34404,10 +34423,10 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
     u32 start = frame->as.expression.start;
     u32 assignment = frame->as.expression.pending_assignment;
     // Most assignment operands can be lowered directly by the place
-    // machine.  A dereference whose pointer is itself parenthesized,
-    // such as `*(&local) = value`, is a value expression that the
-    // place machine intentionally does not parse.  Lower that small
-    // shape through the expression path and recover its final load's
+    // machine. A dereference whose pointer is parenthesized or formed
+    // by address-of, such as `*(&local) = value` or `*&local = value`,
+    // is a value expression the place machine does not parse. Lower
+    // that shape through the expression path and recover its final load's
     // operand in EXPRESSION_PLACE (the same recovery used for
     // parenthesized member assignments above).
     bool parenthesized_base_suffix = false;
@@ -34425,7 +34444,8 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
         start < assignment &&
         ((c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) && !parenthesized_base_suffix) ||
          (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
-          c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
+          (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+           c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_AMPERSAND))));
     // `*d++ = value` — the copy loop in sbase's strlcpy — advances the
     // pointer while forming the place. The place machine parses an
     // identifier and its field/subscript suffixes, not an update, so
@@ -43862,6 +43882,15 @@ BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type)
     return type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
 }
 
+// C11 6.7.9p14: a string literal initializes an array of scalars whole. Any
+// other aggregate (`char[2][3]`, a struct) is reached through brace elision,
+// which descends until the literal meets such an array.
+// c_parse_initializer_type_takes_string answers the same question for C types.
+BUSTER_C_INTERNAL bool c_ir_initializer_type_takes_string(CIntegerIrBuilder* builder, IrType* type)
+{
+    return type && type->kind == IR_TYPE_ARRAY && !c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, type->element_type));
+}
+
 BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end)
 {
     if (end == start + 1 && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
@@ -44419,8 +44448,9 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
             };
             continue;
         }
-        if (aggregate && !c_ir_tokens_are_string_literals(builder->preprocess, designator.value_start, value_end) &&
-            !c_ir_initializer_value_is_aggregate_expression(builder, scope, designator.value_start, value_end))
+        bool string_value = c_ir_tokens_are_string_literals(builder->preprocess, designator.value_start, value_end);
+        if (aggregate && !(string_value && c_ir_initializer_type_takes_string(builder, value_type)) &&
+            (string_value || !c_ir_initializer_value_is_aggregate_expression(builder, scope, designator.value_start, value_end)))
         {
             if (frame_count + designator.continuation_count >= capacity)
             {
@@ -45709,7 +45739,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             }
             continue;
         }
-        if (aggregate && !c_ir_tokens_are_string_literals(builder->preprocess, value_start, value_end))
+        if (aggregate && !(c_ir_tokens_are_string_literals(builder->preprocess, value_start, value_end) &&
+                           c_ir_initializer_type_takes_string(builder, child)))
         {
             u32 compound_open = 0;
             u32 compound_close = 0;
@@ -48931,6 +48962,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder
 BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
 {
     bool valid = start < end;
+    u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(builder->preprocess.target).pointer.bit_width).low;
     u32 comma = end;
     u32 nested = 0;
     for (u32 index = start; index < end; index += 1)
@@ -48970,7 +49002,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
         CIrPromotedMemberPath path = {0};
         valid = token.kind == C_TOKEN_IDENTIFIER &&
                 c_ir_promoted_member_path(builder, type_id, c_token_spelling(builder->preprocess.spelling_base, token), &path) &&
-                path.field && !path.field->is_bit_field && offset <= UINT64_MAX - path.offset;
+                path.field && !path.field->is_bit_field && path.offset <= maximum && offset <= maximum - path.offset;
         if (valid)
         {
             offset += path.offset;
@@ -48987,15 +49019,21 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
             CIrConstantValue subscript = {0};
             valid = close < end && element_id.value != IR_ID_UNDERLYING_INVALID &&
                     c_ir_query_constant(builder, index + 1, close, &subscript) && subscript.kind == C_IR_CONSTANT_INTEGER;
+            IrType* subscript_type = ir_type_from_id(&builder->program->types, subscript.type);
+            IrInteger bits = subscript_type
+                ? ir_integer_mask((IrInteger){.low = subscript.integer, .high = subscript.integer_high}, subscript_type->bit_width)
+                : (IrInteger){0};
             IrType* element = ir_type_from_id(&builder->program->types, element_id);
-            valid = valid && element && element->layout.resolved;
+            valid = valid && subscript_type && (subscript_type->kind == IR_TYPE_INTEGER || subscript_type->kind == IR_TYPE_BOOLEAN) &&
+                    subscript_type->bit_width && subscript_type->bit_width <= 128 && !bits.high &&
+                    !(subscript_type->is_signed && ir_integer_sign_bit(bits, subscript_type->bit_width)) && element && element->layout.resolved;
             if (valid)
             {
-                valid = !element->layout.size || subscript.integer <= UINT64_MAX / element->layout.size;
+                valid = !element->layout.size || bits.low <= maximum / element->layout.size;
                 if (valid)
                 {
-                    u64 element_offset = subscript.integer * element->layout.size;
-                    valid = offset <= UINT64_MAX - element_offset;
+                    u64 element_offset = bits.low * element->layout.size;
+                    valid = offset <= maximum - element_offset;
                     if (valid)
                     {
                         offset += element_offset;
@@ -49202,6 +49240,27 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 u32 operand_start = literal ? index + 1 : index + 2;
                 u32 operand_end = literal ? literal_end : close;
                 u32 consumed_index = literal ? literal_end - 1 : close;
+                // A final member's declaration alignment is already a shared
+                // semantic answer. Resolve it before natural operand typing,
+                // which can refuse a generic-selection member expression.
+                bool is_alignof = c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token));
+                u32 member_alignment = 0;
+                if (is_alignof)
+                {
+                    CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, operand_start);
+                    if (!c_semantic_alignof_member(builder->temporary_arena, builder->preprocess, &builder->parse, scope,
+                                                  operand_start, operand_end, &member_alignment))
+                    {
+                        return false;
+                    }
+                    if (member_alignment)
+                    {
+                        values[value_count++] = c_ir_constant_integer(builder->size_type, member_alignment);
+                        expect_operand = false;
+                        index = consumed_index;
+                        continue;
+                    }
+                }
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
                 IrTypeId type_id = IR_TYPE_ID_INVALID;
@@ -49225,11 +49284,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
                 }
-                if (type_id.value == IR_ID_UNDERLYING_INVALID && !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &alignment))
+                if (is_alignof && type_id.value == IR_ID_UNDERLYING_INVALID &&
+                    !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &alignment))
                 {
                     return false;
                 }
-                values[value_count++] = c_ir_constant_integer(builder->size_type, c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)) ? alignment : size);
+                values[value_count++] = c_ir_constant_integer(builder->size_type, is_alignof ? alignment : size);
                 expect_operand = false;
                 index = consumed_index;
                 continue;
@@ -50994,7 +51054,8 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
 // constant query.
 BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder, u32 start, u32 end, u32* alignment)
 {
-    bool valid = true;
+    CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, start);
+    bool valid = c_semantic_alignof_member(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, alignment);
     while (end > start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
     {
@@ -51004,7 +51065,7 @@ BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder,
     CEntityId entity = end == start + 1 && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER
                            ? c_ir_identifier_entity_or_lookup(builder, start) : C_ENTITY_ID_INVALID;
     CEntity const* object = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
-    if (object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL))
+    if (valid && object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL))
     {
         u32 natural = *alignment;
         u32 cursor = 0;
@@ -52690,12 +52751,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             }
             u64 specifiers = declaration_specifier_sets[declarations_by_entity[bucket_index]] &
                              (C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) |
-                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
+                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL));
             bool is_extern = (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) != 0;
             bool initialized = c_ir_declaration_initializer_range(preprocess, *declaration, &(u32){0}, &(u32){0});
             internal |= (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 || declaration->is_constexpr;
-            is_thread_local |= (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) |
-                                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23))) != 0;
+            is_thread_local |= (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL))) != 0;
             if (initialized || (!is_extern && !definition))
             {
                 definition = declaration;

@@ -460,7 +460,17 @@ OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 `./build.sh bench_service self-test` (and its `--sanitize` variant) runs the
 POSIX queue, materializer, journal-replay and fake-worker regressions plus the
 Linux lease-handoff and result-evidence suites; see
-`tools/bench_service/README.md` for the full contract. Interrupted workers
+`tools/bench_service/README.md` for the full contract. `mcp_tests.c` is included
+by this same registered suite: it checks bounded JSON/Unicode/duplicate keys,
+lifecycle and tool schemas, no-ID write suppression, uint64 string identities,
+validated receipt privacy and a real authenticated Unix-socket daemon with a
+disposable journal and no worker configuration. Socket cases cover the six
+job tools and program upload, lost-reply idempotency/reconnect,
+conflicting-key refusal, foreign-job privacy, durable cancellation and
+disconnected-service errors. Artifact receipt/slice retrieval is covered at
+the codec and reply-binding level only. None of this proves an off-host
+cache, a web/Codex installation or retrieval from a real installed job.
+Interrupted workers
 retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
 index, a bundle-only crash prefix completes idempotently, and invalid
 published controls are never repaired. The coordinator removes the
@@ -797,6 +807,26 @@ have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
 classes, scale mismatches and malformed sites; `link_tests` derives patched
 addresses from static/dynamic section tables and imported-data copy slots.
 
+## Wasm function-address capability
+
+`compiler_driver_test_wasm_function_addresses` constructs and validates canonical
+IR before emission for both pointer widths. Four topologies cover first-index
+imports/definitions and later definitions. Six escape paths use pointer FUNCTION,
+place FUNCTION/address-of, void-pointer/integer round trips, volatile storage,
+returned pointers and address/dereference aliases. Wasm32 must refuse these
+runtime addresses with instruction attribution and empty artifact aliases;
+Wasm64 keeps its nonzero handles. Direct CALL and unused inert references are
+accepted controls. Independent Node checks use the original module SHA-256,
+repeated emission equality and file readbacks, with the existing deadline and
+exact terminal marker. Baseline modules that are incorrectly admitted are still
+executed, so null collisions are observable rather than hidden by a refusal check.
+
+`compiler_driver_test_wasm_function_address_outputs` checks both frontend forms
+through the actual Wasm32 driver: alias, storage/return, indirect-call and static
+relocation refusals preserve absent/existing output destinations. Both direct
+Wasm targets retain successful C direct-call controls. Inline source/oracle bytes
+leave the frozen support inventory and startup shims unchanged.
+
 ## Wasm object-address alignment
 
 `compiler_driver_test_wasm_stack_alignment` lowers both C frontend forms for
@@ -896,3 +926,21 @@ Tracked-drift, source-identity, and checkout-race controls still exercise the
 production validator against those private checkouts.
 
 `node tools/wasm_integer_execution_startup_test.js` checks the real frozen oracle against an independently emitted Wasm fixture, buffered-output and live-resource controls, arithmetic/load/output failures, and an implicit-exit mutation that must time out. The focused hosted workflow runs these controls on Linux and Windows; the full driver policy still rejects deliberate hangs, nonzero exits, stderr and missing summaries.
+
+## Binary-coverage inventory controls
+
+The native build driver's `binary_coverage_inventory --self-test` runs in the
+existing Release/combinations preflight. Its hand-authored ELF fixture has
+independent expected identity/range values; malformed/truncated/overflowed and
+unsupported ELF inputs fail rather than producing a partial denominator.
+Regenerated-report comparisons reject omitted artifact/range, wrong-build hash,
+fabricated instruction/edge counts, missing MC/DC pair/completeness claims, and
+incomplete-collection claims. These are report-gate controls, not trace collector
+validation or test sensitivity evidence for the inventoried binary.
+
+Linux x86-64 also inventories the actual running native driver from
+`/proc/self/exe` into its ordinary combination log. Every executable byte stays
+unclassified, and instruction execution, machine edges, MC/DC and functional
+assertions each stay unmeasured. No percentages or approved tracing capability
+are inferred from a successful preflight. See
+[the exact-artifact pilot command and gaps](build.md#exact-artifact-binary-coverage-pilot).

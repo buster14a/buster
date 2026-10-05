@@ -149,6 +149,37 @@ the capture limits allocate no retained-payload storage. Prefixes, shared-quota
 admission order, overflow policy and observed/captured/streamed/dropped counters
 keep their existing meanings. Overflow-file descriptors remain caller-owned.
 
+`STREAM_TO_FILE` requires a regular-file descriptor for each captured stdout or
+stderr stream, even when its configured quota would avoid overflow. Admission
+runs after policy/argv/environment validation and before executable lookup or
+platform process setup. POSIX checks descriptor metadata with `fstat`; Windows
+requires `GetFileType` disk classification before checked file metadata. Missing
+or nonregular sinks fail with `PROCESS_SPAWN_FAILURE_CAPTURE_SINK` and the native
+invalid-argument error; failed metadata/type queries preserve their native
+errors. Uncaptured sinks and all sink fields under truncate/fail are ignored.
+Refusal launches no child and acquires no process pipes or containment objects.
+
+The caller must keep the original borrowed descriptors open, writable and
+unrebound through wait, and must not change their flags while the operation is
+active. Admission does not seek, write, flush, close or change those flags.
+Synchronous regular-file storage and metadata I/O can delay deadline/cancellation
+servicing; this policy rejects stream backpressure and does not promise a hard
+wall-clock bound on storage or operating-system scheduling. Spill write failures
+still preserve native child status, explicit capture failure and exact transferred
+and dropped-byte counts while owned process cleanup continues.
+
+Registered desktop `os_tests` run sink-refusal probes inside a first-party helper
+with its own 30-second outer deadline and private group/job. Inner probes inherit
+that containment. POSIX fills an actual pipe to `EAGAIN`, restores its original
+blocking flags, and checks refusal for stdout, stderr and valid-first/bad-second
+sinks without a child marker. Actual FIFO/socket and Windows pipe/character
+handles supplement missing/invalid/query-error controls. Descriptor/handle census,
+identity and flag controls check caller ownership. Separate literal both-stream
+regular spill controls cover partial writes, real read-only-descriptor write
+failure, caller reuse, platform deadline cleanup and POSIX flag cancellation.
+Mobile retains production compilation and existing collector coverage; these
+desktop process fixtures do not claim mobile process execution.
+
 For retained stream lengths `R_s`, the collector allocates exactly
 `N = sum(ceil(R_s / 16384))` chunk headers and payload blocks. With `R` total
 retained bytes, `S` nonempty streams and header size/alignment `H`/`A`, requested
