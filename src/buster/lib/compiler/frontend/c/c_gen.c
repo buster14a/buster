@@ -2993,6 +2993,10 @@ struct CIntegerIrBuilder
     IrInstructionId previous_instruction;
     bool previous_instruction_known;
     String8 failure_message;
+    // Nonzero only while a required initializer is being folded. General
+    // constant probes decline unsupported address conversions without a
+    // diagnostic; the initializer supplies its source token, biased by one.
+    u32 static_initializer_token_plus_one;
     // Set by c_ir_construction_refused; see there.
     bool construction_refused;
     // The CDiagnosticKind `failure_message` deserves, biased by one so a
@@ -37514,6 +37518,24 @@ BUSTER_C_SHARED bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_
     return valid;
 }
 
+// These unions admit an existing fixed register in every case. Select that
+// member rather than representing an immediate or memory alternative in IR.
+// Target validation still applies to the selected x86 register class.
+BUSTER_C_SHARED u64 c_semantic_asm_register_alternative(String8 text, bool output)
+{
+    u64 result = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+    if (output && text.length >= 3 && (text.pointer[0] == '=' || text.pointer[0] == '+'))
+    {
+        u64 prefix = text.pointer[1] == '&' ? 2 : 1;
+        if (string_equal(string_slice(text, prefix, text.length), S8("am"))) result = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+    }
+    else if (!output && string_equal(text, S8("dN")))
+    {
+        result = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+    }
+    return result;
+}
+
 // The x86-64 register names a local register variable may bind, paired with the
 // operand class that pins an asm operand to them. The set is the emitter's
 // caller-saved asm pool; rbx and r12-r15 are callee-saved and are left out
@@ -37695,7 +37717,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     bool early_clobber = false;
     bool matching = false;
     u32 match_index = UINT32_MAX;
-    if (output)
+    u64 alternative = c_semantic_asm_register_alternative((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, output);
+    if (alternative != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+    {
+        constraint = alternative;
+        read_write = output && bytes.pointer[0] == '+';
+        early_clobber = output && bytes.pointer[1] == '&';
+    }
+    else if (output)
     {
         bool modifier_shape = bytes.length == 2 || (bytes.length == 3 && bytes.pointer[1] == '&');
         if (!modifier_shape || (bytes.pointer[0] != '=' && bytes.pointer[0] != '+'))
@@ -37952,8 +37981,16 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     return true;
 }
 
+BUSTER_C_SHARED String8 c_semantic_asm_clobber_name(Target target, String8 clobber)
+{
+    // GNU x86 register number zero denotes AX, independently of operand ties.
+    String8 result = target.cpu_arch == CPU_ARCH_X86_64 && string_equal(clobber, S8("0")) ? S8("rax") : clobber;
+    return result;
+}
+
 BUSTER_C_SHARED bool c_semantic_asm_clobber_valid(Target target, String8 clobber)
 {
+    clobber = c_semantic_asm_clobber_name(target, clobber);
     bool result = false;
     if (string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")))
     {
@@ -38038,6 +38075,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
                 .pointer = (char8*)name.pointer,
                 .length = name.length,
             };
+            clobber = c_semantic_asm_clobber_name(builder->target, clobber);
             if (!c_semantic_asm_clobber_valid(builder->target, clobber))
             {
                 return false;
@@ -38068,6 +38106,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
 
 BUSTER_C_SHARED bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint)
 {
+    clobber = c_semantic_asm_clobber_name(target, clobber);
     bool matches = false;
     if (target.cpu_arch == CPU_ARCH_AARCH64 && IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint))
     {
@@ -42643,6 +42682,21 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     {
                         return false;
                     }
+                    if (converted.kind == C_IR_CONSTANT_POINTER)
+                    {
+                        if (!c_ir_constant_type_is_integer(type) || type->layout.size != program->data_layout.pointer.size || task.is_bit_field ||
+                            c_ir_symbol_is_thread_local(builder, converted.symbol) || !relocations || !relocation_count ||
+                            *relocation_count >= relocation_capacity || relocation_base > UINT64_MAX - task.offset)
+                        {
+                            return false;
+                        }
+                        relocations[(*relocation_count)++] = (IrGlobalRelocation){
+                            .symbol = converted.symbol,
+                            .addend = converted.addend,
+                            .offset = relocation_base + task.offset,
+                        };
+                        continue;
+                    }
                     u64 bits = 0;
                     bool sign_extend = false;
                     bool binary128 = type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && c_ir_binary128_static_target(builder->target, type);
@@ -45855,7 +45909,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             // type; everything read and written here spans that unit.
             u64 unit = selected_field->access_size ? selected_field->access_size : child->layout.size;
             if (!c_ir_constant_evaluate(builder, value_start, value_end, &value) ||
-                !c_ir_constant_cast(builder, &value, child_type, &converted) || !c_ir_constant_type_is_integer(child) || !child->layout.resolved ||
+                !c_ir_constant_cast(builder, &value, child_type, &converted) || converted.kind != C_IR_CONSTANT_INTEGER ||
+                !c_ir_constant_type_is_integer(child) || !child->layout.resolved ||
                 selected_field->bit_width > 64 || !selected_field->bit_width || selected_field->bit_width > child->layout.size * 8 ||
                 selected_field->bit_offset + selected_field->bit_width > unit * 8 || child_offset > byte_count ||
                 unit > byte_count - child_offset)
@@ -47051,6 +47106,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
                     .type = pointer_type,
                     .symbol = builder->entity_symbols[entity_id.value],
                     .kind = C_IR_CONSTANT_POINTER,
+                    .function_designator = true,
                 };
                 return result->symbol.value != IR_ID_UNDERLYING_INVALID;
             }
@@ -48108,7 +48164,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                 }
                 else if (c_ir_constant_type_is_integer(target))
                 {
-                    if (source.kind == C_IR_CONSTANT_FLOAT)
+                    if (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        u32 pointer_bits = builder->program->data_layout.pointer.bit_width;
+                        success = target->bit_width == pointer_bits && target->layout.size == builder->program->data_layout.pointer.size;
+                        if (success)
+                        {
+                            // The carrier still owns S+A, but its C type is
+                            // now integer: subsequent arithmetic uses bytes.
+                            source.type = target_type;
+                            *result = source;
+                        }
+                        else if (builder->static_initializer_token_plus_one)
+                        {
+                            c_ir_constant_initializer_fail(builder,
+                                target->bit_width < pointer_bits ? S8("an address cannot initialize an integer type narrower than pointer")
+                                                               : S8("an address relocation requires an integer type exactly as wide as pointer"),
+                                builder->static_initializer_token_plus_one - 1);
+                        }
+                    }
+                    else if (source.kind == C_IR_CONSTANT_FLOAT)
                     {
                         CIrWideInteger integer = {0};
                         success = source_type && source_type->bit_width > 64
@@ -48185,6 +48260,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
                 value->kind = C_IR_CONSTANT_POINTER;
             }
         }
+        else if (value->function_designator && value->kind == C_IR_CONSTANT_POINTER && value->symbol.value != IR_ID_UNDERLYING_INVALID &&
+                 !value->addend)
+        {
+            // A function designator has already decayed to its address, and
+            // `&f` names that same address.
+            success = true;
+        }
     }
     else if (operation == C_CONDITIONAL_LOGICAL_NOT)
     {
@@ -48228,6 +48310,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
                     else value->floating = -value->floating;
                 }
                 success = true;
+            }
+            else if (c_ir_constant_type_is_integer(type) && value->kind == C_IR_CONSTANT_POINTER)
+            {
+                // Unary plus preserves S+A. Negation and complement cannot
+                // be represented by one absolute symbol relocation.
+                success = operation == C_CONDITIONAL_UNARY_PLUS;
+                if (success)
+                {
+                    IrTypeId promoted = c_ir_constant_common_type(builder, value->type, value->type);
+                    success = c_ir_constant_cast(builder, value, promoted, value);
+                }
             }
             else if (c_ir_constant_type_is_integer(type))
             {
@@ -48370,6 +48463,38 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     // Adding a type may have grown the table, so re-resolve both operands.
     left_type = ir_type_from_id(&builder->program->types, left.type);
     right_type = ir_type_from_id(&builder->program->types, right.type);
+    bool left_integer_address = left_pointer && c_ir_constant_type_is_integer(left_type);
+    bool right_integer_address = right_pointer && c_ir_constant_type_is_integer(right_type);
+    if (left_integer_address || right_integer_address)
+    {
+        // Address-to-integer arithmetic follows integer conversions and has
+        // byte scale one. Two symbols and nonlinear operations stay refused.
+        bool address_left = left_integer_address;
+        CIrConstantValue address = address_left ? left : right;
+        CIrConstantValue offset = address_left ? right : left;
+        IrTypeId common = c_ir_constant_common_type(builder, left.type, right.type);
+        if (left_integer_address == right_integer_address || offset.kind != C_IR_CONSTANT_INTEGER ||
+            (operation != C_CONDITIONAL_ADD && operation != C_CONDITIONAL_SUBTRACT) ||
+            (operation == C_CONDITIONAL_SUBTRACT && !address_left) ||
+            !c_ir_constant_cast(builder, &address, common, &address) || !c_ir_constant_cast(builder, &offset, common, &offset))
+        {
+            return false;
+        }
+        IrType* common_type = ir_type_from_id(&builder->program->types, common);
+        s64 count = c_ir_integer_signed_value(offset.integer, common_type);
+        if (operation == C_CONDITIONAL_SUBTRACT)
+        {
+            if (count == INT64_MIN) return false;
+            count = -count;
+        }
+        if ((count > 0 && address.addend > INT64_MAX - count) || (count < 0 && address.addend < INT64_MIN - count))
+        {
+            return false;
+        }
+        address.addend += count;
+        *result = address;
+        return true;
+    }
     if ((left_pointer || (left_type && left_type->kind == IR_TYPE_POINTER)) || (right_pointer || (right_type && right_type->kind == IR_TYPE_POINTER)))
     {
         if (!left_pointer && left.kind == C_IR_CONSTANT_INTEGER && left.integer == 0 && left.integer_high == 0)
@@ -49304,6 +49429,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
             }
             if (success)
             {
+                selected.function_designator = false;
                 values[(*value_count)++] = selected;
             }
         }
@@ -49311,6 +49437,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
     else if (c_conditional_is_unary(operation.operation))
     {
         success = *value_count && c_ir_constant_apply_unary(builder, operation.operation, operation.cast_type, &values[*value_count - 1]);
+        if (success)
+        {
+            values[*value_count - 1].function_designator = false;
+        }
     }
     else if (*value_count >= 2)
     {
@@ -49320,6 +49450,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
         success = c_ir_constant_apply_binary(builder, operation.operation, &left, &right, &result);
         if (success)
         {
+            result.function_designator = false;
             values[(*value_count)++] = result;
         }
     }
@@ -50030,7 +50161,8 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
         }
         CIrConstantValue converted = {0};
         if (c_ir_constant_cast(builder, &value, global->type, &converted) &&
-            (converted.kind == C_IR_CONSTANT_INTEGER || converted.kind == C_IR_CONSTANT_FLOAT))
+            (converted.kind == C_IR_CONSTANT_INTEGER || converted.kind == C_IR_CONSTANT_FLOAT ||
+             (converted.kind == C_IR_CONSTANT_POINTER && c_ir_constant_type_is_integer(type))))
         {
             if (type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && c_ir_binary128_static_target(builder->target, type))
             {
@@ -50094,6 +50226,22 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
             }
             if (c_ir_constant_type_is_integer(type))
             {
+                if (converted.kind == C_IR_CONSTANT_POINTER)
+                {
+                    if (type->layout.size != builder->program->data_layout.pointer.size || c_ir_symbol_is_thread_local(builder, converted.symbol))
+                    {
+                        return false;
+                    }
+                    global->bytes = (ByteSlice){
+                        .pointer = arena_allocate_zeroed(builder->arena, u8, type->layout.size),
+                        .length = type->layout.size,
+                    };
+                    global->relocations = arena_allocate(builder->arena, IrGlobalRelocation, 1);
+                    global->relocations[0] = (IrGlobalRelocation){.symbol = converted.symbol, .addend = converted.addend};
+                    global->relocation_count = 1;
+                    global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+                    return true;
+                }
                 if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128 && type->layout.size == 16)
                 {
                     u8* bytes = arena_allocate(builder->arena, u8, 16);
@@ -50440,7 +50588,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_flexible_initializer_type(CIntegerIrBuilder* bui
     return ir_program_add_type(program, clone);
 }
 
-BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
+BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
 {
     Arena* arena = builder->arena;
     IrProgram* program = builder->program;
@@ -50455,6 +50603,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
         return true;
     }
+    builder->static_initializer_token_plus_one = start + 1;
     for (u32 index = start; index < end; index += 1)
     {
         if (c_ir_label_address_prefix(builder, start, index) && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
@@ -50966,6 +51115,15 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
     }
     return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
+{
+    u32 previous_initializer = builder->static_initializer_token_plus_one;
+    builder->static_initializer_token_plus_one = 0;
+    bool result = c_ir_global_initializer_impl(builder, declaration, type, global);
+    builder->static_initializer_token_plus_one = previous_initializer;
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)

@@ -218,6 +218,10 @@ struct CompilerDriverInvocation
     // -shared` will place. A PIE takes the same model; the image writer
     // relaxes the GOT loads of the definitions it binds.
     bool position_independent;
+    // 0: none, 1: lowercase PIC spelling, 2: uppercase PIC spelling.
+    u8 position_independent_level;
+    // The selected position-independent spelling was a PIE flag.
+    bool position_independent_executable;
     // -shared or -pie: the NativeImageKind a link produces. Accepted for a
     // link only on x86-64 Linux, the one target with a writer for it.
     NativeImageKind image_kind;

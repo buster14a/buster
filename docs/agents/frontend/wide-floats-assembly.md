@@ -315,6 +315,33 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   whose `long double` is not this format. Current native admission follows the
   MIR selectors and shared canonical-IR ABI classification; `none` selects
   MIR-stack and does not restore those retired direct-emitter paths.
+- **GNU x86 inline-assembly unions `am` on outputs and `dN` on inputs select
+  their existing fixed-register member.** `=am`, `+am`, `=&am` and `+&am`
+  carry A/RAX, preserving ties, early clobbers and exactly-once output-place
+  evaluation; `dN` carries D/RDX for both constants and runtime values. The
+  shared selector is used by lowering and its semantic-only validation mirror.
+  This bounded vocabulary does not plan alternatives across conflicts: an
+  otherwise legal memory member of `am`, or immediate member of `dN`, still
+  cannot rescue a conflicting fixed register. Those combinations retain the
+  existing conflict diagnostic. Neither union is admitted on AArch64.
+  Numeric x86 clobber `0` denotes AX/RAX rather than operand zero; lowering
+  canonicalizes it to `rax` before publishing IR, so register exclusion,
+  operand conflicts, literal-register checks and duplicate `0`/`rax` rejection
+  use the existing clobber machinery. Lowering and semantic-only validation
+  both reject duplicate normalized names, including ordinary `rax`/`rax`
+  lists in unused static definitions. Other numeric clobbers remain refused.
+  `inb` and `outb` use the shared assembler's checked AL/DX forms; their port
+  fixture is compile-only because execution requires OS privileges. GNU
+  operand-width modifiers such as `%w1` retain their existing refusal; the
+  fixture supplies the port operand's width through its `unsigned short` type.
+  `c_test_inline_assembly_constraint_unions` checks both frontend forms,
+  semantic-only validation, normalized IR, malformed neighbours and the
+  deliberately unsupported register-conflict cases described above.
+  `machine_test_inline_assembly_constraint_unions` checks exact port bytes
+  `EC`/`EE`, all four allocators and both PIC/frontend forms on three x86 OS
+  layouts; the registered driver fixture executes the nonprivileged union and
+  numeric-clobber cases on matching desktop hosts. These registrations do not
+  constitute a validation result.
 - **A module-level `__asm__` block emits into the module's text through
   `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
   directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives
