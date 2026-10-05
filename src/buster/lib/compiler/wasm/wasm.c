@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/wasm/wasm_internal.h>
+#include <buster/lib/hash.h>
 
 // wasm_emit owns direct WebAssembly output for Memory64 freestanding and
 // wasm32 WASI Preview 1. wasm64_emit keeps the original Memory64 API. Both
@@ -17,6 +18,10 @@
 // wasm64_fe_initialize plans actual place alignment; wasm64_fe_emit_prologue
 // aligns the fixed-frame base while retaining the unrounded entry SP for returns
 // and deliberate stack traps. Dynamic allocations may publish odd end pointers.
+// wasm64_signature_add interns signatures through an open-addressing table
+// keyed by a structural hash, resolved by exact equality, and numbers types in
+// first-use order, so type numbering and lookup cost do not depend on how many
+// signatures came before.
 // wasm64_build_name_payload names the data segments of section-attributed
 // data in the name section.
 // Memory64 scalar function pointers are i64 handles into a private i32-indexed
@@ -64,6 +69,19 @@ struct Wasm64Signature
     Wasm64ValType result;
     bool has_result;
     u32 type_index;
+};
+
+typedef struct Wasm64SignatureSlot Wasm64SignatureSlot;
+struct Wasm64SignatureSlot
+{
+    u64 hash;
+    u32 index_plus_one;
+    u32 reserved;
+};
+
+enum
+{
+    WASM64_SIGNATURE_SLOTS_INITIAL = 16,
 };
 
 typedef enum Wasm64SyntheticFunction
@@ -144,6 +162,14 @@ struct Wasm64Context
     Wasm64Signature* signatures;
     u32 signature_count;
     u32 signature_capacity;
+    // Open-addressing index over `signatures` keyed by the structural hash;
+    // slots store index plus one so zero is empty. The scratch row holds the
+    // parameter types of the signature being built until interning decides
+    // whether a copy is needed.
+    Wasm64SignatureSlot* signature_slots;
+    u32 signature_slot_capacity;
+    Wasm64ValType* signature_scratch;
+    u32 signature_scratch_capacity;
     Wasm64FunctionRecord* functions;
     u32 function_count;
     u32 function_capacity;
@@ -646,21 +672,92 @@ static bool wasm64_signature_equal(Wasm64Signature* a, Wasm64Signature* b)
     return result;
 }
 
-static u32 wasm64_signature_add(Wasm64Context* context, Wasm64Signature signature)
+// Structural key: parameter count, parameter types, and the optional result.
+// Equal signatures hash equally whichever buffer holds their parameters.
+static u64 wasm64_signature_hash(Wasm64Signature* signature)
 {
-    for (u32 index = 0; index < context->signature_count; index += 1)
+    u64 params_hash = signature->param_count ? buster_hash_64((u8*)signature->params, (u64)signature->param_count * sizeof(*signature->params)) : 0;
+    u64 shape = (u64)signature->param_count | ((u64)(signature->has_result ? signature->result : 0) << 32) | ((u64)signature->has_result << 48);
+    u64 result = (params_hash ^ shape) * UINT64_C(0x9e3779b97f4a7c15);
+    result ^= result >> 32;
+    return result;
+}
+
+static void wasm64_signature_slot_insert(Wasm64SignatureSlot* slots, u32 capacity, u64 hash, u32 index_plus_one)
+{
+    u32 mask = capacity - 1;
+    u32 slot = (u32)hash & mask;
+    while (slots[slot].index_plus_one)
     {
-        if (wasm64_signature_equal(context->signatures + index, &signature))
-        {
-            return context->signatures[index].type_index;
-        }
+        slot = (slot + 1) & mask;
     }
-    wasm64_vec_reserve(context->arena, (void**)&context->signatures, &context->signature_capacity, context->signature_count + 1,
-                       sizeof(*context->signatures));
-    signature.type_index = context->signature_count;
-    context->signatures[context->signature_count] = signature;
-    context->signature_count += 1;
-    return signature.type_index;
+    slots[slot].hash = hash;
+    slots[slot].index_plus_one = index_plus_one;
+}
+
+// Interns by structure and numbers signatures in first-use order. A hit or a
+// new entry leaves `signature` pointing at the interned parameter row, so the
+// caller may build parameters in the shared scratch row.
+static u32 wasm64_signature_add(Wasm64Context* context, Wasm64Signature* signature)
+{
+    if (!context->signature_slot_capacity)
+    {
+        context->signature_slots = arena_allocate_zeroed(context->arena, Wasm64SignatureSlot, WASM64_SIGNATURE_SLOTS_INITIAL);
+        context->signature_slot_capacity = WASM64_SIGNATURE_SLOTS_INITIAL;
+    }
+    u64 hash = wasm64_signature_hash(signature);
+    u32 mask = context->signature_slot_capacity - 1;
+    u32 slot = (u32)hash & mask;
+    Wasm64Signature* found = 0;
+    while (!found && context->signature_slots[slot].index_plus_one)
+    {
+        context->stats.signature_lookup_probes += 1;
+        if (context->signature_slots[slot].hash == hash)
+        {
+            Wasm64Signature* candidate = context->signatures + (context->signature_slots[slot].index_plus_one - 1);
+            context->stats.signature_comparisons += 1;
+            found = wasm64_signature_equal(candidate, signature) ? candidate : 0;
+        }
+        slot = (slot + 1) & mask;
+    }
+    u32 result;
+    if (found)
+    {
+        signature->params = found->params;
+        result = found->type_index;
+    }
+    else
+    {
+        if ((u64)(context->signature_count + 1) * 2 > context->signature_slot_capacity)
+        {
+            u32 new_capacity = context->signature_slot_capacity * 2;
+            Wasm64SignatureSlot* grown = arena_allocate_zeroed(context->arena, Wasm64SignatureSlot, new_capacity);
+            for (u32 index = 0; index < context->signature_slot_capacity; index += 1)
+            {
+                Wasm64SignatureSlot* old = context->signature_slots + index;
+                if (old->index_plus_one)
+                {
+                    wasm64_signature_slot_insert(grown, new_capacity, old->hash, old->index_plus_one);
+                }
+            }
+            context->signature_slots = grown;
+            context->signature_slot_capacity = new_capacity;
+        }
+        if (signature->param_count)
+        {
+            Wasm64ValType* params = arena_allocate(context->arena, Wasm64ValType, signature->param_count);
+            memcpy(params, signature->params, sizeof(*params) * signature->param_count);
+            signature->params = params;
+        }
+        wasm64_vec_reserve(context->arena, (void**)&context->signatures, &context->signature_capacity, context->signature_count + 1,
+                           sizeof(*context->signatures));
+        signature->type_index = context->signature_count;
+        context->signatures[context->signature_count] = *signature;
+        context->signature_count += 1;
+        wasm64_signature_slot_insert(context->signature_slots, context->signature_slot_capacity, hash, context->signature_count);
+        result = signature->type_index;
+    }
+    return result;
 }
 
 static bool wasm64_function_signature(Wasm64Context* context, IrTypeId function_type_id, Wasm64Signature* result, IrFunction* function,
@@ -681,7 +778,10 @@ static bool wasm64_function_signature(Wasm64Context* context, IrTypeId function_
     signature.param_count = function_type->parameter_count;
     if (signature.param_count)
     {
-        signature.params = arena_allocate(context->arena, Wasm64ValType, signature.param_count);
+        // Built in the scratch row; wasm64_signature_add interns a copy.
+        wasm64_vec_reserve(context->arena, (void**)&context->signature_scratch, &context->signature_scratch_capacity, signature.param_count,
+                           sizeof(*context->signature_scratch));
+        signature.params = context->signature_scratch;
     }
     for (u32 index = 0; index < signature.param_count; index += 1)
     {
@@ -804,7 +904,7 @@ static bool wasm64_add_function_record(Wasm64Context* context, IrFunction* funct
     {
         return false;
     }
-    signature.type_index = wasm64_signature_add(context, signature);
+    signature.type_index = wasm64_signature_add(context, &signature);
     wasm64_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
                        sizeof(*context->functions));
     Wasm64FunctionRecord* record = context->functions + context->function_count;
@@ -894,7 +994,7 @@ static bool wasm64_add_synthetic_function(Wasm64Context* context, Wasm64Syntheti
         signature.params = arena_allocate(context->arena, Wasm64ValType, param_count);
         memcpy(signature.params, params, sizeof(*params) * param_count);
     }
-    signature.type_index = wasm64_signature_add(context, signature);
+    signature.type_index = wasm64_signature_add(context, &signature);
     bool reused = false;
     bool valid = true;
     if (imported)
@@ -1295,7 +1395,7 @@ BUSTER_GLOBAL_LOCAL bool wasm64_collect_indirect_signatures(Wasm64Context* conte
                         }
                         if (valid)
                         {
-                            wasm64_signature_add(context, signature);
+                            wasm64_signature_add(context, &signature);
                         }
                     }
                 }
@@ -2950,7 +3050,7 @@ static void wasm64_fe_emit_call(Wasm64FunctionEmitter* emitter, IrInstruction* i
             }
             else
             {
-                signature.type_index = wasm64_signature_add(context, signature);
+                signature.type_index = wasm64_signature_add(context, &signature);
                 valid = signature.type_index < context->stats.type_count;
                 if (!valid)
                 {

@@ -17,6 +17,7 @@
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 // compiler_driver_test_wasm_string_records checks multi-module lookup scaling.
+// compiler_driver_test_wasm_signature_interning checks hashed signature numbering.
 // compiler_driver_test_wasm_function_addresses checks escaping function markers and direct calls.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
@@ -13625,6 +13626,244 @@ BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_bit_count_program(Arena*
     return program;
 }
 
+// Signature interning: `distinct` parameter sequences over i32/i64/f32/f64,
+// each declared by two functions through separate canonical function types,
+// then `callers` functions that call a zero-parameter function pointer, a
+// signature first used after every one of the distinct ones. Interning must
+// number types in first-use order and cost O(1) hash-slot visits per query.
+enum
+{
+    COMPILER_DRIVER_WASM_SIGNATURE_WIDTH = 8,
+};
+
+BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_signature_program(Arena* arena, u32 pointer_size, u32 distinct, u32 callers,
+                                                                          bool* committed_out)
+{
+    u32 functions = distinct * 2 + 1 + callers;
+    IrProgram program = ir_program_initialize(arena, 1, 8 + distinct * 2, functions, 0);
+    Target target = {.cpu_arch = pointer_size == 4 ? CPU_ARCH_WASM32 : CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING};
+    program.data_layout = target_data_layout(target);
+    IrModule* module = program.modules;
+    module->name = S8("wasm-signatures");
+    IrTypeLayout pointer_layout = {.size = pointer_size, .alignment = pointer_size, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true};
+    IrTypeId void_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+    IrTypeId scalars[4];
+    scalars[0] = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true,
+        .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    scalars[1] = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 64, .is_signed = true,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    scalars[2] = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 32,
+        .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true}});
+    scalars[3] = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true}});
+    bool committed = true;
+    IrTypeId late_signature = {0};
+    IrTypeId late_pointer = {0};
+    IrTypeId caller_signature = {0};
+    for (u32 function_index = 0; function_index < functions; function_index += 1)
+    {
+        bool declared = function_index < distinct * 2;
+        bool is_late = function_index == distinct * 2;
+        IrTypeId signature;
+        if (declared)
+        {
+            u32 pattern = function_index % distinct;
+            IrTypeId* parameters = arena_allocate(arena, IrTypeId, COMPILER_DRIVER_WASM_SIGNATURE_WIDTH);
+            for (u32 parameter = 0; parameter < COMPILER_DRIVER_WASM_SIGNATURE_WIDTH; parameter += 1)
+            {
+                parameters[parameter] = scalars[(pattern >> (parameter * 2)) & 3];
+            }
+            signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = void_type, .parameter_types = parameters,
+                         .parameter_count = COMPILER_DRIVER_WASM_SIGNATURE_WIDTH, .calling_convention = IR_CALLING_CONVENTION_C,
+                         .layout = pointer_layout});
+        }
+        else if (is_late)
+        {
+            late_signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = void_type, .calling_convention = IR_CALLING_CONVENTION_C,
+                         .layout = pointer_layout});
+            late_pointer = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_POINTER, .element_type = late_signature, .layout = pointer_layout});
+            IrTypeId* parameters = arena_allocate(arena, IrTypeId, 1);
+            parameters[0] = late_pointer;
+            caller_signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = void_type, .parameter_types = parameters, .parameter_count = 1,
+                         .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+            signature = late_signature;
+        }
+        else
+        {
+            signature = caller_signature;
+        }
+        String8 name = string_format(arena, S8("signature_{u32}"), function_index);
+        IrSymbolId symbol = ir_program_add_symbol(&program,
+            (IrSymbol){.name = name, .link_name = name, .type = signature, .kind = IR_SYMBOL_FUNCTION,
+                       .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+        IrFunction* function = ir_module_add_function(arena, module,
+            (IrFunction){.name = name, .symbol = symbol, .canonical_type = signature, .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+        ir_function_add_block(arena, function,
+            (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+        IrInstruction rows[3];
+        u32 row_count = 0;
+        if (!declared && !is_late)
+        {
+            IrValueId callee = ir_function_add_value(arena, function,
+                (IrValue){.canonical_type = late_pointer, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+            rows[0] = compiler_driver_test_wasm_canonical_row(IR_OPCODE_ARGUMENT, late_pointer, callee);
+            rows[0].immediates = arena_allocate(arena, u64, 1);
+            rows[0].immediates[0] = 0;
+            rows[0].immediate_count = 1;
+            rows[1] = compiler_driver_test_wasm_canonical_row(IR_OPCODE_CALL, void_type, IR_VALUE_ID_INVALID);
+            rows[1].operands = arena_allocate(arena, IrValueId, 1);
+            rows[1].operands[0] = callee;
+            rows[1].operand_count = 1;
+            row_count = 2;
+        }
+        rows[row_count] = compiler_driver_test_wasm_canonical_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID);
+        row_count += 1;
+        for (u32 row = 0; row < row_count; row += 1)
+        {
+            IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+            IrInstructionId id = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, rows[row], (IrSourceRange){0}, &refusal);
+            committed &= refusal == IR_COMMIT_ACCEPTED && id.value == row;
+        }
+    }
+    *committed_out = committed;
+    return program;
+}
+
+// Reads the function section's type indices from a finished module.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_function_section(ByteSlice module, u32* count_out, u32** types_out, Arena* arena)
+{
+    bool found = false;
+    u64 cursor = 8;
+    while (!found && cursor < module.length)
+    {
+        u8 id = module.pointer[cursor];
+        cursor += 1;
+        u64 size = 0;
+        for (u32 shift = 0; cursor < module.length; shift += 7)
+        {
+            u8 byte = module.pointer[cursor];
+            cursor += 1;
+            size |= (u64)(byte & 0x7f) << shift;
+            if (!(byte & 0x80))
+            {
+                break;
+            }
+        }
+        if (id == 3)
+        {
+            u64 count = 0;
+            u64 position = cursor;
+            for (u32 shift = 0; position < module.length; shift += 7)
+            {
+                u8 byte = module.pointer[position];
+                position += 1;
+                count |= (u64)(byte & 0x7f) << shift;
+                if (!(byte & 0x80))
+                {
+                    break;
+                }
+            }
+            u32* types = arena_allocate(arena, u32, count ? count : 1);
+            for (u64 index = 0; index < count && position < module.length; index += 1)
+            {
+                u64 value = 0;
+                for (u32 shift = 0; position < module.length; shift += 7)
+                {
+                    u8 byte = module.pointer[position];
+                    position += 1;
+                    value |= (u64)(byte & 0x7f) << shift;
+                    if (!(byte & 0x80))
+                    {
+                        break;
+                    }
+                }
+                types[index] = (u32)value;
+            }
+            *count_out = (u32)count;
+            *types_out = types;
+            found = true;
+        }
+        cursor += size;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_signature_interning(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 populations[] = {64, 256, 1024, 4096};
+    for (u32 width = 4; width <= 8; width += 4)
+    {
+        for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(populations); population += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            u32 distinct = populations[population];
+            u32 callers = width == 8 ? distinct : 0;
+            bool committed = false;
+            IrProgram program = compiler_driver_test_wasm_signature_program(arena, width, distinct, callers, &committed);
+            if (BUSTER_REQUIRE(arguments, committed))
+            {
+                WasmOptions options = WASM_OPTIONS_DEFAULT;
+                options.pointer_size = (u8)width;
+                WasmArtifact first = wasm_emit_program(arena, &program, options);
+                WasmArtifact second = wasm_emit_program(arena, &program, options);
+                BUSTER_TEST_RAW(arguments, first.success && second.success,
+                                first.error.diagnostic.length ? first.error.diagnostic : first.error.message);
+                if (BUSTER_REQUIRE(arguments, first.success && second.success))
+                {
+                    u32 declarations = distinct * 2 + 1;
+                    // Every function interns once; each caller interns its own
+                    // signature on the first pass of collection and again at
+                    // emission, plus the indirect target twice.
+                    u64 lookups = (u64)declarations + callers + callers * 2;
+                    u32 type_count = distinct + 1 + (callers ? 1 : 0);
+                    BUSTER_TEST(arguments, first.stats.type_count == type_count);
+                    // Exact comparisons only follow a full hash match: one per
+                    // repeated structure, never one per prior signature.
+                    BUSTER_TEST(arguments, first.stats.signature_comparisons == lookups - type_count);
+                    BUSTER_TEST(arguments, first.stats.signature_lookup_probes >= lookups - type_count &&
+                                           first.stats.signature_lookup_probes <= lookups * 4);
+                    BUSTER_TEST(arguments, first.stats.signature_lookup_probes == second.stats.signature_lookup_probes);
+                    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                                           memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                    u32 function_count = 0;
+                    u32* types = 0;
+                    bool section = compiler_driver_test_wasm_function_section(first.bytes, &function_count, &types, arena);
+                    BUSTER_TEST(arguments, section && function_count == declarations + callers);
+                    if (section && function_count == declarations + callers)
+                    {
+                        // First-use numbering: a new type is always the next
+                        // integer, and the second declaration of a pattern
+                        // reuses the first one's type.
+                        u32 next = 0;
+                        bool first_use = true;
+                        for (u32 index = 0; index < function_count; index += 1)
+                        {
+                            first_use &= types[index] <= next;
+                            next += types[index] == next;
+                        }
+                        BUSTER_TEST(arguments, first_use && next == type_count);
+                        bool shared = true;
+                        for (u32 index = 0; index < distinct; index += 1)
+                        {
+                            shared &= types[index] == types[distinct + index];
+                        }
+                        BUSTER_TEST(arguments, shared);
+                    }
+                    arguments->show(arguments, S8("WASM_SIGNATURE_INTERNING width={u32} distinct={u32} lookups={u64} probes={u64} comparisons={u64}\n"),
+                                    width, distinct, lookups, first.stats.signature_lookup_probes, first.stats.signature_comparisons);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_bit_counts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -20376,6 +20615,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_records);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_signature_interning);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
