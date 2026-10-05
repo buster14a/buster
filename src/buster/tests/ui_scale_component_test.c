@@ -1,9 +1,9 @@
 // Headless UI scalability regressions. test_ui_scale compiles the actual
 // ui_core module and checks, with work counters instead of timers, that keyed
-// box lookup, keyboard focus navigation and fuzzy-match highlight drawing stay
-// linear in the number of boxes or in text length plus range count, while the
-// observable behavior of the box table, navigation and highlight rectangles is
-// unchanged. Only the unused native rendering boundary is supplied; no compiler
+// box lookup, keyboard focus navigation, fuzzy-match highlight drawing and box
+// signals stay linear in the number of boxes (and events) or in text length plus
+// range count, while the observable behavior of the box table, navigation,
+// highlight rectangles and signals is unchanged. Only the unused native rendering boundary is supplied; no compiler
 // or desktop window/backend dependency belongs to this component runner.
 //
 // Map: ui_scale_check and the key helpers, the keyed-box lookup scaling
@@ -12,7 +12,8 @@
 // and equivalence (ui_scale_focus_behavior) and deep-spine scaling
 // (ui_scale_focus_scaling) cases, the fuzzy-highlight oracle (ui_scale_oracle_columns),
 // equivalence (ui_scale_fuzzy_behavior) and scaling (ui_scale_fuzzy_scaling) cases,
-// then main.
+// the signal-chain equivalence (ui_scale_signal_equivalence) and scaling
+// (ui_scale_signal_scaling) cases, then main.
 
 #include <buster/lib/system_headers.h>
 #include <buster/lib/os.h>
@@ -1292,6 +1293,339 @@ BUSTER_GLOBAL_LOCAL void ui_scale_fuzzy_scaling(Arena* arena)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Box signals and the event list (#2449). ui_signal_from_box used to start a
+// walk of every remaining event for every box, so B boxes over E events cost
+// B x E inspections. The router now chains each owner's events, so a box
+// visits only its own. The previous scan survives as the fallback taken when
+// the chains are not valid for the build, which lets the same scenario run
+// both ways: clearing event_owner_chains_build_index after ui_build_begin
+// forces the whole-list scan, and the two runs must agree on every signal,
+// every routed owner and the events left in the list.
+
+#define UI_SCALE_SIGNAL_CELL 10.0f
+#define UI_SCALE_SIGNAL_COLUMNS 80u
+
+typedef enum UI_ScaleSignalMix
+{
+    // Every box is mouse clickable; each gets one press and one release.
+    UI_ScaleSignalMix_ClickEveryBox,
+    // Boxes of five kinds and a randomized mix of event kinds.
+    UI_ScaleSignalMix_Varied,
+} UI_ScaleSignalMix;
+
+typedef struct UI_ScaleSignalRun UI_ScaleSignalRun;
+struct UI_ScaleSignalRun
+{
+    u64* signal_digests;
+    u64 routed_digest;
+    u64 remaining_digest;
+    u64 state_digest;
+    u64 remaining_count;
+    u64 inspections;
+    u64 own_events;
+    u64 event_count;
+};
+
+BUSTER_GLOBAL_LOCAL u64 ui_scale_digest_add(u64 digest, u64 value)
+{
+    return ui_scale_mix(digest ^ ui_scale_mix(value));
+}
+
+BUSTER_GLOBAL_LOCAL u64 ui_scale_float_bits(f32 value)
+{
+    u32 bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+BUSTER_GLOBAL_LOCAL UI_BoxFlags ui_scale_signal_flags(UI_ScaleSignalMix mix, u64 index)
+{
+    UI_BoxFlags result = UI_BoxFlag_MouseClickable;
+    if (mix == UI_ScaleSignalMix_Varied)
+    {
+        switch (index % 5)
+        {
+        case 0:
+            result = UI_BoxFlag_MouseClickable;
+            break;
+        case 1:
+            result = UI_BoxFlag_MouseClickable | UI_BoxFlag_KeyboardClickable | UI_BoxFlag_ClickToFocus;
+            break;
+        case 2:
+            result = UI_BoxFlag_Scroll | UI_BoxFlag_ViewScrollY;
+            break;
+        case 3:
+            result = UI_BoxFlag_DropSite;
+            break;
+        default:
+            result = UI_BoxFlag_DrawText | UI_BoxFlag_DrawTextFastpathCodepoint | UI_BoxFlag_FocusHot;
+            break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL f32 ui_scale_signal_origin(u64 index, bool y_axis)
+{
+    u64 cell = y_axis ? index / UI_SCALE_SIGNAL_COLUMNS : index % UI_SCALE_SIGNAL_COLUMNS;
+    return (f32)cell * UI_SCALE_SIGNAL_CELL;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_signal_build_boxes(UI_ScaleSignalMix mix, u64 count, UI_Box** boxes)
+{
+    for (u64 index = 0; index < count; index += 1)
+    {
+        ui_set_next_fixed_x(ui_scale_signal_origin(index, false));
+        ui_set_next_fixed_y(ui_scale_signal_origin(index, true));
+        ui_set_next_fixed_width(UI_SCALE_SIGNAL_CELL - 2.0f);
+        ui_set_next_fixed_height(UI_SCALE_SIGNAL_CELL - 2.0f);
+        boxes[index] = ui_build_box_from_key(ui_scale_signal_flags(mix, index) | UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY, ui_scale_key(UI_ScaleKeyShape_Mixed, index));
+        if (boxes[index]->flags & UI_BoxFlag_DrawTextFastpathCodepoint)
+        {
+            ui_box_set_display_string(boxes[index], S8("x"));
+            ui_box_set_fastpath_codepoint(boxes[index], 'x');
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL float2 ui_scale_signal_center(u64 index)
+{
+    return float2_make(ui_scale_signal_origin(index, false) + UI_SCALE_SIGNAL_CELL * 0.5f - 1.0f,
+                       ui_scale_signal_origin(index, true) + UI_SCALE_SIGNAL_CELL * 0.5f - 1.0f);
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_signal_push(Arena* arena, UI_EventList* events, UI_EventKind kind, WmKey key, u64 box_index)
+{
+    UI_Event event = {.kind = kind, .key = key, .pos = ui_scale_signal_center(box_index)};
+    if (kind == UI_EventKind_Text)
+    {
+        event.string = S8("x");
+    }
+    else if (kind == UI_EventKind_Scroll)
+    {
+        event.delta = float2_make(0.0f, 1.0f);
+    }
+    ui_event_list_push(arena, events, &event);
+}
+
+BUSTER_GLOBAL_LOCAL UI_EventList ui_scale_signal_events(Arena* arena, UI_ScaleSignalMix mix, u64 count, u64 event_count, u64 seed)
+{
+    UI_EventList result = {0};
+    if (mix == UI_ScaleSignalMix_ClickEveryBox)
+    {
+        for (u64 index = 0; index < count; index += 1)
+        {
+            ui_scale_signal_push(arena, &result, UI_EventKind_Press, WM_KEY_MOUSE_LEFT, index);
+            ui_scale_signal_push(arena, &result, UI_EventKind_MouseMove, WM_KEY_NULL, (index * 7 + 3) % count);
+            ui_scale_signal_push(arena, &result, UI_EventKind_Release, WM_KEY_MOUSE_LEFT, index);
+        }
+    }
+    else
+    {
+        for (u64 index = 0; index < event_count; index += 1)
+        {
+            u64 pick = ui_scale_mix(seed * 1000003ull + index);
+            u64 box_index = (pick >> 8) % count;
+            switch (pick % 9)
+            {
+            case 0:
+                ui_scale_signal_push(arena, &result, UI_EventKind_Press, WM_KEY_MOUSE_LEFT, box_index);
+                break;
+            case 1:
+                ui_scale_signal_push(arena, &result, UI_EventKind_Release, WM_KEY_MOUSE_LEFT, box_index);
+                break;
+            case 2:
+                ui_scale_signal_push(arena, &result, UI_EventKind_Scroll, WM_KEY_NULL, box_index);
+                break;
+            case 3:
+                ui_scale_signal_push(arena, &result, UI_EventKind_FileDrop, WM_KEY_NULL, box_index);
+                break;
+            case 4:
+                ui_scale_signal_push(arena, &result, UI_EventKind_Text, WM_KEY_NULL, box_index);
+                break;
+            case 5:
+                ui_scale_signal_push(arena, &result, UI_EventKind_Press, WM_KEY_RETURN, box_index);
+                break;
+            case 6:
+                ui_scale_signal_push(arena, &result, UI_EventKind_Press, WM_KEY_TAB, box_index);
+                break;
+            case 7:
+                ui_scale_signal_push(arena, &result, UI_EventKind_Release, WM_KEY_RETURN, box_index);
+                break;
+            default:
+                ui_scale_signal_push(arena, &result, UI_EventKind_MouseMove, WM_KEY_NULL, box_index);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ui_scale_signal_digest(UI_Signal signal)
+{
+    u64 digest = ui_scale_digest_add(0, signal.f);
+    digest = ui_scale_digest_add(digest, (u64)signal.key);
+    digest = ui_scale_digest_add(digest, signal.modifiers);
+    digest = ui_scale_digest_add(digest, ui_scale_float_bits(float2_element(signal.scroll_delta, AXIS2_X)));
+    digest = ui_scale_digest_add(digest, ui_scale_float_bits(float2_element(signal.scroll_delta, AXIS2_Y)));
+    digest = ui_scale_digest_add(digest, ui_scale_float_bits(float2_element(signal.left_click_position, AXIS2_X)));
+    digest = ui_scale_digest_add(digest, ui_scale_float_bits(float2_element(signal.left_click_position, AXIS2_Y)));
+    digest = ui_scale_digest_add(digest, signal.drop_paths.length);
+    return digest;
+}
+
+// Digest of the live events: kind, key and the router's owner fields.
+BUSTER_GLOBAL_LOCAL u64 ui_scale_event_list_digest(UI_EventList* list, u64* count, u64* owned)
+{
+    u64 digest = 0;
+    *count = 0;
+    *owned = 0;
+    for (UI_EventNode* node = list->first; node; node = node->next)
+    {
+        digest = ui_scale_digest_add(digest, node->v.kind);
+        digest = ui_scale_digest_add(digest, (u64)node->v.key);
+        digest = ui_scale_digest_add(digest, node->v.owner_key);
+        digest = ui_scale_digest_add(digest, node->v.owner_assigned);
+        digest = ui_scale_digest_add(digest, node->v.route_flags);
+        *count += 1;
+        *owned += node->v.owner_assigned && node->v.owner_key != 0;
+    }
+    return digest;
+}
+
+// Two frames: one builds the boxes, the second routes the events and then asks
+// every box for its signal. `late_events` pushes unrouted events after the
+// router ran, which every box must still see.
+BUSTER_GLOBAL_LOCAL void ui_scale_signal_run(Arena* arena, UI_ScaleSignalMix mix, u64 count, u64 event_count, u64 seed, bool use_chains, bool late_events,
+                                             bool reverse_queries, UI_ScaleSignalRun* run)
+{
+    memset(run, 0, sizeof(*run));
+    UI_State* state = ui_state_allocate(0, 0);
+    if (ui_scale_check(state != 0, S8("signal state allocation"), count))
+    {
+        UI_Box** boxes = arena_allocate(arena, UI_Box*, count);
+        run->signal_digests = arena_allocate(arena, u64, count);
+        ui_scale_frame_begin(state);
+        ui_scale_signal_build_boxes(mix, count, boxes);
+        ui_build_end();
+
+        UI_EventList events = ui_scale_signal_events(arena, mix, count, event_count, seed);
+        ui_state_select(state);
+        ui_build_begin(0, 0, 16.0, events);
+        if (!use_chains)
+        {
+            state->event_owner_chains_build_index = 0;
+        }
+        u64 live_count = 0;
+        u64 owned = 0;
+        run->routed_digest = ui_scale_event_list_digest(&state->events, &live_count, &owned);
+        run->own_events = owned;
+        if (late_events)
+        {
+            UI_EventList* live = &state->events;
+            ui_scale_signal_push(arena, live, UI_EventKind_Text, WM_KEY_NULL, 4);
+            ui_scale_signal_push(arena, live, UI_EventKind_Press, WM_KEY_RETURN, 1);
+            ui_scale_signal_push(arena, live, UI_EventKind_Press, WM_KEY_RETURN, 6);
+            live_count += 3;
+        }
+        run->event_count = live_count;
+        ui_scale_signal_build_boxes(mix, count, boxes);
+        u64 inspections_before = state->signal_event_inspections;
+        for (u64 index = 0; index < count; index += 1)
+        {
+            u64 box_index = reverse_queries ? count - 1 - index : index;
+            run->signal_digests[box_index] = ui_scale_signal_digest(ui_signal_from_box(boxes[box_index]));
+        }
+        run->inspections = state->signal_event_inspections - inspections_before;
+        ui_build_end();
+        u64 remaining_owned = 0;
+        run->remaining_digest = ui_scale_event_list_digest(&state->events, &run->remaining_count, &remaining_owned);
+        u64 state_digest = ui_scale_digest_add(0, state->focus_active_key.value);
+        state_digest = ui_scale_digest_add(state_digest, state->focus_hot_key.value);
+        state_digest = ui_scale_digest_add(state_digest, state->focus_edit_key.value);
+        state_digest = ui_scale_digest_add(state_digest, state->hot_box_key.value);
+        state_digest = ui_scale_digest_add(state_digest, state->active_box_key[UI_MouseButtonKind_Left].value);
+        run->state_digest = state_digest;
+        ui_state_deinitialize(state);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_signal_equivalence(Arena* arena)
+{
+    static const u64 box_counts[] = {5, 60, 300};
+    u64 comparisons = 0;
+    u64 consumed_events = 0;
+    for (u64 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(box_counts); count_index += 1)
+    {
+        for (u64 seed = 1; seed <= 6; seed += 1)
+        {
+            for (u64 variant = 0; variant < 4; variant += 1)
+            {
+                u64 count = box_counts[count_index];
+                bool late = (variant & 1) != 0;
+                bool reverse = (variant & 2) != 0;
+                UI_ScaleSignalRun chained;
+                UI_ScaleSignalRun scanned;
+                ui_scale_signal_run(arena, UI_ScaleSignalMix_Varied, count, count * 3, seed, true, late, reverse, &chained);
+                ui_scale_signal_run(arena, UI_ScaleSignalMix_Varied, count, count * 3, seed, false, late, reverse, &scanned);
+                bool same = chained.signal_digests && scanned.signal_digests && chained.routed_digest == scanned.routed_digest &&
+                            chained.remaining_digest == scanned.remaining_digest && chained.remaining_count == scanned.remaining_count &&
+                            chained.state_digest == scanned.state_digest && chained.event_count == scanned.event_count;
+                for (u64 index = 0; same && index < count; index += 1)
+                {
+                    same = chained.signal_digests[index] == scanned.signal_digests[index];
+                }
+                ui_scale_check(same, S8("chained signals match the whole-list scan"), count * 100 + seed);
+                ui_scale_check(chained.inspections <= scanned.inspections, S8("chains never inspect more events"), chained.inspections);
+                comparisons += 1;
+                consumed_events += chained.event_count - chained.remaining_count;
+            }
+        }
+    }
+    printf("ui_scale: signal equivalence comparisons=%llu consumed events=%llu\n", (unsigned long long)comparisons, (unsigned long long)consumed_events);
+    // The scenarios must actually consume events, otherwise the comparison is vacuous.
+    ui_scale_check(consumed_events > comparisons * 4, S8("signal scenarios consume events"), consumed_events);
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_signal_scaling(Arena* arena)
+{
+    static const u64 box_counts[] = {256, 512, 1024, 2048};
+    f64 first_rate = 0.0;
+    for (u64 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(box_counts); count_index += 1)
+    {
+        u64 count = box_counts[count_index];
+        UI_ScaleSignalRun chained;
+        UI_ScaleSignalRun scanned;
+        ui_scale_signal_run(arena, UI_ScaleSignalMix_ClickEveryBox, count, 0, 0, true, false, false, &chained);
+        ui_scale_signal_run(arena, UI_ScaleSignalMix_ClickEveryBox, count, 0, 0, false, false, false, &scanned);
+        bool same = chained.signal_digests && scanned.signal_digests && chained.remaining_digest == scanned.remaining_digest &&
+                    chained.remaining_count == scanned.remaining_count && chained.state_digest == scanned.state_digest;
+        for (u64 index = 0; same && index < count; index += 1)
+        {
+            same = chained.signal_digests[index] == scanned.signal_digests[index];
+        }
+        ui_scale_check(same, S8("click-every-box signals match the whole-list scan"), count);
+        f64 chained_rate = (f64)chained.inspections / (f64)count;
+        printf("ui_scale: signals boxes=%-5llu events=%-6llu owned=%-5llu inspections chained=%llu (%.2f/box) whole-list scan=%llu (%.2f/box)\n",
+               (unsigned long long)count, (unsigned long long)chained.event_count, (unsigned long long)chained.own_events,
+               (unsigned long long)chained.inspections, chained_rate, (unsigned long long)scanned.inspections, (f64)scanned.inspections / (f64)count);
+        // Each box owns its press and release: two inspections per box, however many boxes and
+        // unowned events the frame holds.
+        ui_scale_check(chained.inspections <= chained.own_events, S8("a box inspects only its owned events"), chained.inspections);
+        ui_scale_check(chained_rate <= 2.0, S8("signal inspections per box are bounded"), (u64)(chained_rate * 100.0));
+        ui_scale_check(scanned.inspections > chained.inspections * (count / 16), S8("chains avoid the quadratic scan"), scanned.inspections);
+        if (count_index == 0)
+        {
+            first_rate = chained_rate;
+        }
+        else
+        {
+            ui_scale_check(chained_rate < first_rate * 1.5 + 0.5, S8("signal inspections per box do not grow with population"), count);
+        }
+    }
+}
+
 int main(void)
 {
     os_state.page_size = os_get_page_size();
@@ -1307,6 +1641,8 @@ int main(void)
     ui_scale_focus_scaling(arena);
     ui_scale_fuzzy_behavior(arena);
     ui_scale_fuzzy_scaling(arena);
+    ui_scale_signal_equivalence(arena);
+    ui_scale_signal_scaling(arena);
     ui_scale_check(ui_scale_renderer_calls == 0, S8("headless rendering boundary"), ui_scale_renderer_calls);
     printf("ui_scale_component_tests: %u/%u assertions passed\n", (unsigned)(ui_scale_assertions - ui_scale_failures), (unsigned)ui_scale_assertions);
     thread_context_release(context);

@@ -509,6 +509,7 @@ void ui_eat_event_node(UI_EventList* list, UI_EventNode* node)
 {
     if (node)
     {
+        node->eaten = true;
         if (node->prev)
         {
             node->prev->next = node->next;
@@ -2328,6 +2329,101 @@ BUSTER_GLOBAL_LOCAL bool ui_focus_navigation_event(UI_Event* event, UI_BoxFlags*
     return result;
 }
 
+// Slot index of an owner key in a table of 1 << bits slots.
+BUSTER_GLOBAL_LOCAL u64 ui_event_owner_slot_start(u64 key, u64 bits)
+{
+    return (key * 0x9e3779b97f4a7c15ull) >> (64 - bits);
+}
+
+// Links the live, routed events that carry a nonzero owner key into one
+// chronological chain per owner. Only such events can reach a box signal: every
+// signal branch that consumes an event requires owner_assigned && owner_key ==
+// box key (a routed event is always owner_assigned for the kinds the signal
+// accepts), and a box with the zero key never matches. Events pushed after
+// routing are not chained; ui_signal_from_box finds them at the list tail. If
+// the table cannot be reserved the chains stay invalid and signals fall back to
+// scanning the whole list.
+BUSTER_GLOBAL_LOCAL void ui_event_owner_chains_build(void)
+{
+    u64 owned_count = 0;
+    for (UI_EventNode* node = ui_state->events.first; node; node = node->next)
+    {
+        if (node->v.owner_assigned && node->v.owner_key != 0)
+        {
+            owned_count += 1;
+        }
+    }
+    ui_state->event_owner_slots = 0;
+    ui_state->event_owner_slot_count = 0;
+    ui_state->event_owner_slot_bits = 0;
+    ui_state->event_owner_chains_build_index = 0;
+    if (owned_count == 0)
+    {
+        ui_state->event_owner_chains_build_index = ui_state->build_index;
+    }
+    else if (owned_count <= (u64)1 << 40)
+    {
+        u64 bits = 1;
+        while (((u64)1 << bits) < owned_count * 2)
+        {
+            bits += 1;
+        }
+        u64 slot_count = (u64)1 << bits;
+        Arena* arena = ui_build_arena();
+        u64 position = arena->position;
+        if (ui_arena_try_advance(arena, &position, slot_count * sizeof(UI_EventOwnerSlot), BUSTER_ALIGN_OF(UI_EventOwnerSlot)))
+        {
+            UI_EventOwnerSlot* slots = arena_allocate(arena, UI_EventOwnerSlot, slot_count);
+            memset(slots, 0, slot_count * sizeof(UI_EventOwnerSlot));
+            for (UI_EventNode* node = ui_state->events.first; node; node = node->next)
+            {
+                if (node->v.owner_assigned && node->v.owner_key != 0)
+                {
+                    u64 slot_index = ui_event_owner_slot_start(node->v.owner_key, bits);
+                    while (slots[slot_index].key != 0 && slots[slot_index].key != node->v.owner_key)
+                    {
+                        slot_index = (slot_index + 1) & (slot_count - 1);
+                    }
+                    UI_EventOwnerSlot* slot = &slots[slot_index];
+                    if (slot->key == 0)
+                    {
+                        slot->key = node->v.owner_key;
+                        slot->first = node;
+                    }
+                    else
+                    {
+                        slot->last->owner_next = node;
+                    }
+                    slot->last = node;
+                }
+            }
+            ui_state->event_owner_slots = slots;
+            ui_state->event_owner_slot_count = slot_count;
+            ui_state->event_owner_slot_bits = bits;
+            ui_state->event_owner_chains_build_index = ui_state->build_index;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL UI_EventNode* ui_event_owner_chain_first(u64 key)
+{
+    UI_EventNode* result = 0;
+    u64 slot_count = ui_state->event_owner_slot_count;
+    if (key != 0 && slot_count != 0)
+    {
+        u64 slot_index = ui_event_owner_slot_start(key, ui_state->event_owner_slot_bits);
+        while (ui_state->event_owner_slots[slot_index].key != 0 && ui_state->event_owner_slots[slot_index].key != key)
+        {
+            slot_index = (slot_index + 1) & (slot_count - 1);
+        }
+        if (ui_state->event_owner_slots[slot_index].key == key)
+        {
+            result = ui_state->event_owner_slots[slot_index].first;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
 {
     u64 previous_build_index = ui_state->build_index ? ui_state->build_index - 1 : 0;
@@ -2355,6 +2451,9 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
     for (UI_EventNode* node = ui_state->events.first; node; node = node->next)
     {
         UI_Event* event = &node->v;
+        node->owner_next = 0;
+        node->routed_build_index = ui_state->build_index;
+        node->eaten = false;
         event->owner_key = 0;
         event->owner_assigned = 0;
         event->route_flags = UI_EventRouteFlag_None;
@@ -2483,6 +2582,7 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
     {
         ui_state->active_box_key[i] = provisional_active[i];
     }
+    ui_event_owner_chains_build();
 }
 
 BUSTER_GLOBAL_LOCAL bool ui_box_focusable(UI_Box* box, bool active)
@@ -2537,6 +2637,95 @@ BUSTER_GLOBAL_LOCAL void ui_signal_add_focus_state(UI_Signal* signal, UI_Box* bo
     }
 }
 
+// Applies one event to the signal of `box`; consumed events leave the list.
+BUSTER_GLOBAL_LOCAL void ui_signal_apply_event(UI_Box* box, UI_Signal* signal, UI_Event* event, bool disabled)
+{
+    UI_Signal sig = *signal;
+    bool is_mouse = false;
+    UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);
+    bool event_in_bounds = ui_box_contains_point(box, event->pos);
+    bool event_owned = event->owner_assigned && event->owner_key == box->key.value;
+    if (event->kind == UI_EventKind_Text && (box->flags & UI_BoxFlag_DrawTextFastpathCodepoint) && box->fastpath_codepoint != 0 && !disabled &&
+        (ui_key_match(ui_state->focus_hot_key, box->key) || event_owned) && ui_box_focusable(box, false) && ui_utf8_codepoint_count(event->string) == 1 &&
+        ui_utf8_codepoint_at(event->string, 0) == box->fastpath_codepoint && (!event->owner_assigned || event_owned))
+    {
+        sig.f |= UI_SignalFlag_KeyboardPressed;
+        sig.clicked_left = 1;
+        sig.key = event->key;
+        sig.modifiers = event->modifiers;
+        ui_eat_event(event);
+    }
+    else if (event->kind == UI_EventKind_Scroll && (box->flags & UI_BoxFlag_Scroll) && event_in_bounds && !disabled &&
+        ui_event_belongs_to_box(event, box, UI_BoxFlag_Scroll))
+    {
+        float2 delta = float2_make(float2_element(event->delta, AXIS2_X) * 32.0f, float2_element(event->delta, AXIS2_Y) * 32.0f);
+        if (!(box->flags & UI_BoxFlag_ViewScrollX))
+        {
+            float2_element(delta, AXIS2_X) = 0.0f;
+        }
+        if (!(box->flags & UI_BoxFlag_ViewScrollY))
+        {
+            float2_element(delta, AXIS2_Y) = 0.0f;
+        }
+        ui_box_scroll_by(box, delta);
+        sig.f |= UI_SignalFlag_Scrolled;
+        sig.scrolled = 1;
+        sig.scroll_delta = delta;
+        ui_eat_event(event);
+    }
+    else if (event->kind == UI_EventKind_FileDrop && (box->flags & UI_BoxFlag_DropSite) && event_in_bounds && !disabled &&
+             ui_event_belongs_to_box(event, box, UI_BoxFlag_DropSite))
+    {
+        sig.f |= UI_SignalFlag_Dropped;
+        sig.dropped = 1;
+        sig.drop_paths = ui_copy_drop_paths(event->paths);
+        ui_eat_event(event);
+    }
+    else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Press && event_in_bounds && !disabled &&
+             ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+    {
+        if (button == UI_MouseButtonKind_Left)
+        {
+            sig.f |= UI_SignalFlag_LeftPressed;
+            sig.pressed_left = 1;
+        }
+        if (event->route_flags & UI_EventRouteFlag_FocusChanged)
+        {
+            sig.f |= UI_SignalFlag_FocusChanged;
+            sig.focus_changed = 1;
+        }
+        ui_eat_event(event);
+    }
+    else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Release &&
+             !disabled && ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+    {
+        if (button == UI_MouseButtonKind_Left)
+        {
+            sig.f |= UI_SignalFlag_LeftReleased;
+            sig.released_left = 1;
+            if (event_in_bounds)
+            {
+                sig.f |= UI_SignalFlag_LeftClicked;
+                sig.clicked_left = 1;
+                sig.left_click_position = event->pos;
+            }
+        }
+        ui_eat_event(event);
+    }
+    else if ((box->flags & UI_BoxFlag_KeyboardClickable) && event->kind == UI_EventKind_Press &&
+             (event->key == WM_KEY_RETURN || event->key == WM_KEY_SPACE) &&
+             !disabled && ui_box_focusable(box, true) &&
+             (event->owner_assigned ? event->owner_key == box->key.value : ui_key_match(ui_state->focus_active_key, box->key)))
+    {
+        sig.f |= UI_SignalFlag_KeyboardPressed;
+        sig.clicked_left = 1;
+        sig.key = event->key;
+        sig.modifiers = event->modifiers;
+        ui_eat_event(event);
+    }
+    *signal = sig;
+}
+
 UI_Signal ui_signal_from_box(UI_Box* box)
 {
     UI_Signal sig = {.box = box};
@@ -2575,91 +2764,46 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         return sig;
     }
 
-    UI_EventIterator iterator = ui_event_iterator_initialize(ui_state);
-    UI_Event* event;
-    while ((event = ui_next_event(&iterator)))
+    // A box can only act on events it owns, so with the router's per-owner
+    // chains the scan visits those (in chronological order) instead of every
+    // event in the frame. Events pushed after routing are unrouted and visible
+    // to every box, as before; they sit at the list tail. Without valid chains
+    // the whole list is scanned.
+    if (ui_state->event_owner_chains_build_index == ui_state->build_index)
     {
-        bool is_mouse = false;
-        UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);
-        bool event_in_bounds = ui_box_contains_point(box, event->pos);
-        bool event_owned = event->owner_assigned && event->owner_key == box->key.value;
-        if (event->kind == UI_EventKind_Text && (box->flags & UI_BoxFlag_DrawTextFastpathCodepoint) && box->fastpath_codepoint != 0 && !disabled &&
-            (ui_key_match(ui_state->focus_hot_key, box->key) || event_owned) && ui_box_focusable(box, false) && ui_utf8_codepoint_count(event->string) == 1 &&
-            ui_utf8_codepoint_at(event->string, 0) == box->fastpath_codepoint && (!event->owner_assigned || event_owned))
+        UI_EventNode* node = ui_event_owner_chain_first(box->key.value);
+        while (node)
         {
-            sig.f |= UI_SignalFlag_KeyboardPressed;
-            sig.clicked_left = 1;
-            sig.key = event->key;
-            sig.modifiers = event->modifiers;
-            ui_eat_event(event);
-        }
-        else if (event->kind == UI_EventKind_Scroll && (box->flags & UI_BoxFlag_Scroll) && event_in_bounds && !disabled &&
-            ui_event_belongs_to_box(event, box, UI_BoxFlag_Scroll))
-        {
-            float2 delta = float2_make(float2_element(event->delta, AXIS2_X) * 32.0f, float2_element(event->delta, AXIS2_Y) * 32.0f);
-            if (!(box->flags & UI_BoxFlag_ViewScrollX))
+            UI_EventNode* next = node->owner_next;
+            if (!node->eaten)
             {
-                float2_element(delta, AXIS2_X) = 0.0f;
+                ui_state->signal_event_inspections += 1;
+                ui_signal_apply_event(box, &sig, &node->v, disabled);
             }
-            if (!(box->flags & UI_BoxFlag_ViewScrollY))
-            {
-                float2_element(delta, AXIS2_Y) = 0.0f;
-            }
-            ui_box_scroll_by(box, delta);
-            sig.f |= UI_SignalFlag_Scrolled;
-            sig.scrolled = 1;
-            sig.scroll_delta = delta;
-            ui_eat_event(event);
+            node = next;
         }
-        else if (event->kind == UI_EventKind_FileDrop && (box->flags & UI_BoxFlag_DropSite) && event_in_bounds && !disabled &&
-                 ui_event_belongs_to_box(event, box, UI_BoxFlag_DropSite))
+        UI_EventNode* tail_start = 0;
+        for (UI_EventNode* tail = ui_state->events.last; tail && tail->routed_build_index != ui_state->build_index; tail = tail->prev)
         {
-            sig.f |= UI_SignalFlag_Dropped;
-            sig.dropped = 1;
-            sig.drop_paths = ui_copy_drop_paths(event->paths);
-            ui_eat_event(event);
+            tail_start = tail;
         }
-        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Press && event_in_bounds && !disabled &&
-                 ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+        node = tail_start;
+        while (node)
         {
-            if (button == UI_MouseButtonKind_Left)
-            {
-                sig.f |= UI_SignalFlag_LeftPressed;
-                sig.pressed_left = 1;
-            }
-            if (event->route_flags & UI_EventRouteFlag_FocusChanged)
-            {
-                sig.f |= UI_SignalFlag_FocusChanged;
-                sig.focus_changed = 1;
-            }
-            ui_eat_event(event);
+            UI_EventNode* next = node->next;
+            ui_state->signal_event_inspections += 1;
+            ui_signal_apply_event(box, &sig, &node->v, disabled);
+            node = next;
         }
-        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Release &&
-                 !disabled && ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+    }
+    else
+    {
+        UI_EventIterator iterator = ui_event_iterator_initialize(ui_state);
+        UI_Event* event;
+        while ((event = ui_next_event(&iterator)))
         {
-            if (button == UI_MouseButtonKind_Left)
-            {
-                sig.f |= UI_SignalFlag_LeftReleased;
-                sig.released_left = 1;
-                if (event_in_bounds)
-                {
-                    sig.f |= UI_SignalFlag_LeftClicked;
-                    sig.clicked_left = 1;
-                    sig.left_click_position = event->pos;
-                }
-            }
-            ui_eat_event(event);
-        }
-        else if ((box->flags & UI_BoxFlag_KeyboardClickable) && event->kind == UI_EventKind_Press &&
-                 (event->key == WM_KEY_RETURN || event->key == WM_KEY_SPACE) &&
-                 !disabled && ui_box_focusable(box, true) &&
-                 (event->owner_assigned ? event->owner_key == box->key.value : ui_key_match(ui_state->focus_active_key, box->key)))
-        {
-            sig.f |= UI_SignalFlag_KeyboardPressed;
-            sig.clicked_left = 1;
-            sig.key = event->key;
-            sig.modifiers = event->modifiers;
-            ui_eat_event(event);
+            ui_state->signal_event_inspections += 1;
+            ui_signal_apply_event(box, &sig, event, disabled);
         }
     }
 
