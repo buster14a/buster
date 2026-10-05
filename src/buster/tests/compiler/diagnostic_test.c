@@ -127,7 +127,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_null_device_output(U
     BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_LINK);
     BUSTER_TEST(arguments, linked.native_link.error == LINK_ERROR_FILE_WRITE && linked.native_link.write_error.v == 12345);
     BUSTER_TEST_RAW(arguments, string_first_sequence(linked.diagnostic, output) < linked.diagnostic.length, linked.diagnostic);
-    String8 system_error = string_format(arguments->arena, S8(" ({EOs})"), (OsError){12345});
+    String8 system_error = string_format(arguments->arena, S8(": {EOs}"), (OsError){12345});
     BUSTER_TEST_RAW(arguments, string_ends_with_sequence(linked.diagnostic, system_error), linked.diagnostic);
     BUSTER_TEST(arguments, os_file_delete(input));
     return result;

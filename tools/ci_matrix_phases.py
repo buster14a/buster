@@ -61,6 +61,19 @@ def index(items, label):
     return result
 
 
+def capability_index(items, expected_ids):
+    """Check the full detected census before any IDs can overwrite each other."""
+    require(isinstance(items, list), "missing/malformed detected capability census")
+    require(len(items) == len(expected_ids), "detected capability cardinality differs from full policy")
+    require(all(isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"] for item in items),
+            "malformed detected capability record")
+    identities = [item["id"] for item in items]
+    unique = set(identities)
+    require(len(unique) == len(identities), "duplicate detected capability identity")
+    require(unique == set(expected_ids), "missing/unknown detected capability identity")
+    return {item["id"]: item for item in items}
+
+
 def task_id(tree, phase, config=""):
     return f"{tree}-{phase}-{config or 'all'}"
 
@@ -141,7 +154,7 @@ def validate_plan(plan, coverage, environment):
     expected_rows = coverage.get("expected", [])
     required = {row["id"]: row for row in expected_rows if row.get("state") == "required" and
                 row_selected(row, identity["shard"])}
-    detected = {row["id"]: row for row in coverage.get("detected", [])}
+    detected = capability_index(coverage.get("detected"), {row["id"] for row in expected_rows})
     owned = []
     expected_tasks = {task_id("matrix", "evidence", "coverage")}
     canonical = None

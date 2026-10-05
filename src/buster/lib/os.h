@@ -64,6 +64,23 @@ struct OsError
     u32 v;
 };
 
+// Filled only when an OS virtual-memory commit fails. The Windows values are
+// best-effort observations taken after the native error has already been
+// captured; zero observation flags mean that the platform did not provide the
+// corresponding context, not that its resource values were zero.
+typedef struct OsCommitFailureContext OsCommitFailureContext;
+struct OsCommitFailureContext
+{
+    OsError error;
+    u64 page_size;
+    u64 system_commit_limit_bytes;
+    u64 system_commit_available_bytes;
+    u64 physical_available_bytes;
+    u64 process_commit_bytes;
+    bool system_memory_observed;
+    bool process_memory_observed;
+};
+
 typedef enum OsFileKind
 {
     OS_FILE_KIND_MISSING,
@@ -658,6 +675,8 @@ BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection,
 // succeeded and its outcome is not folded into this result, so a refused or
 // unavailable prefault can neither fail a good commit nor stand in for a
 // failed one. Call os_prefault directly when the outcome matters.
+BUSTER_F_DECL bool os_commit_diagnose(void* address, u64 size, ProtectionFlags protection, bool prefault,
+                                     OsCommitFailureContext* failure_context);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault);
 BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
@@ -676,6 +695,9 @@ BUSTER_F_DECL u32 os_get_logical_thread_count(void);
 BUSTER_F_DECL u64 os_get_page_size(void);
 BUSTER_F_DECL u64 os_get_physical_memory_size(void);
 BUSTER_F_DECL u64 os_get_resident_memory_size(void);
+// The process's resident high water in bytes: getrusage's ru_maxrss on Linux
+// and Apple, the peak working set on Windows; 0 where unavailable.
+BUSTER_F_DECL u64 os_get_peak_resident_memory_size(void);
 BUSTER_F_DECL u64 os_get_current_process_id(void);
 BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle(void);
 BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle(void);

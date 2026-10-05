@@ -5,6 +5,7 @@
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/gpu/gpu.h>
+#include <buster/lib/compiler/gpu/gpu_internal.h>
 #include <buster/lib/file.h>
 #include <buster/lib/string.h>
 #include <buster/lib/system_headers.h>
@@ -712,6 +713,100 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(native_input));
     }
 
+    // Fault only the final owned-workspace deletion, after real COPY,
+    // validation and atomic publication. No external tool is required.
+    {
+        u8 good_data[] = {0x03, 0x02, 0x23, 0x07, 0, 0, 0, 0};
+        u8 bad_data[] = {'n', 'o', 'p', 'e'};
+        u8 old_data[] = {'o', 'l', 'd'};
+        ByteSlice good = (ByteSlice)BUSTER_ARRAY_TO_SLICE(good_data);
+        ByteSlice bad = (ByteSlice)BUSTER_ARRAY_TO_SLICE(bad_data);
+        ByteSlice old = (ByteSlice)BUSTER_ARRAY_TO_SLICE(old_data);
+        String8 input = buster_test_temporary_path(arena, S8("gpu-cleanup-input"), S8(".spv"));
+        String8 output = buster_test_temporary_path(arena, S8("gpu-cleanup-output"), S8(".spv"));
+        String8 inputs[] = {input};
+        GpuPipelineOptions options = gpu_test_options(inputs, 1, gpu_test_target(S8("spirv64")), GPU_PIPELINE_ACTION_LINK);
+        options.output_path = output;
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, file_write(input, good));
+        for (u32 existing = 0; existing < 2; existing += 1)
+        {
+            BUSTER_TEST(arguments, existing ? file_write(output, old) : os_file_delete(output));
+            gpu_test_fail_next_cleanup(true);
+            GpuPipelineResult committed = gpu_pipeline_execute(arena, options);
+            gpu_test_fail_next_cleanup(false);
+            BUSTER_TEST(arguments, committed.published && committed.cleanup_failed);
+            BUSTER_TEST(arguments, committed.error == GPU_PIPELINE_ERROR_FILE_WRITE && committed.process_result == PROCESS_RESULT_FAILED);
+            BUSTER_TEST(arguments, committed.artifact.format == GPU_OUTPUT_SPIRV_BINARY);
+            BUSTER_STRING_TEST(arguments, committed.artifact.path, output);
+            BUSTER_TEST(arguments, committed.artifact.bytes.length == good.length &&
+                                       memory_compare(committed.artifact.bytes.pointer, good.pointer, good.length));
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, good));
+            BUSTER_TEST(arguments, string_first_sequence(committed.diagnostic, S8("GPU artifact published to")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, gpu_test_path_has_kind(committed.temporary_directory, OS_FILE_KIND_DIRECTORY));
+            BUSTER_TEST(arguments, os_directory_delete(committed.temporary_directory));
+        }
+
+        BUSTER_TEST(arguments, file_write(input, bad));
+        BUSTER_TEST(arguments, file_write(output, old));
+        gpu_test_fail_next_cleanup(true);
+        GpuPipelineResult invalid = gpu_pipeline_execute(arena, options);
+        gpu_test_fail_next_cleanup(false);
+        BUSTER_TEST(arguments, !invalid.published && invalid.cleanup_failed && invalid.error == GPU_PIPELINE_ERROR_INVALID_ARTIFACT);
+        BUSTER_TEST(arguments, !invalid.artifact.bytes.length && !invalid.artifact.path.length);
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, old));
+        BUSTER_TEST(arguments, string_first_sequence(invalid.diagnostic, S8("does not contain a valid")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, os_directory_delete(invalid.temporary_directory));
+
+        BUSTER_TEST(arguments, file_write(input, good));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_make_directory_attempt(output));
+        gpu_test_fail_next_cleanup(true);
+        GpuPipelineResult refused = gpu_pipeline_execute(arena, options);
+        gpu_test_fail_next_cleanup(false);
+        BUSTER_TEST(arguments, !refused.published && refused.cleanup_failed && refused.error == GPU_PIPELINE_ERROR_FILE_WRITE);
+        BUSTER_TEST(arguments, !refused.artifact.bytes.length && !refused.artifact.path.length);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(output, OS_FILE_KIND_DIRECTORY));
+        BUSTER_TEST(arguments, os_directory_delete(refused.temporary_directory));
+        BUSTER_TEST(arguments, os_directory_delete(output));
+
+        options.save_temporaries = true;
+        gpu_test_fail_next_cleanup(true);
+        GpuPipelineResult saved = gpu_pipeline_execute(arena, options);
+        gpu_test_fail_next_cleanup(false);
+        BUSTER_TEST(arguments, saved.published && !saved.cleanup_failed && saved.error == GPU_PIPELINE_ERROR_NONE);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(saved.temporary_directory, OS_FILE_KIND_DIRECTORY));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, good));
+        BUSTER_TEST(arguments, os_directory_delete(saved.temporary_directory));
+
+        String8 argv[] = {S8("-target=spirv64"), input, S8("-o"), output};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+        gpu_test_fail_next_cleanup(true);
+        CompilerDriverResult driver = compiler_driver_execute_invocation(arena, invocation);
+        gpu_test_fail_next_cleanup(false);
+        BUSTER_TEST(arguments, driver.error == COMPILER_DRIVER_ERROR_GPU && driver.has_gpu);
+        BUSTER_STRING_TEST(arguments, driver.gpu.path, output);
+        BUSTER_TEST(arguments, driver.gpu.bytes.length == good.length && memory_compare(driver.gpu.bytes.pointer, good.pointer, good.length));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, good));
+        BUSTER_TEST(arguments, string_first_sequence(driver.diagnostic, S8("GPU artifact published to")) != BUSTER_STRING_NO_MATCH);
+        // The public artifact path is preserved; the owned workspace path is
+        // included in the error text for remediation. Remove only this test's
+        // workspace, found through its unique output-adjacent namespace below.
+        String8 marker = S8("could not remove owned GPU temporary directory ");
+        u64 marker_index = string_first_sequence(driver.diagnostic, marker);
+        BUSTER_TEST(arguments, marker_index != BUSTER_STRING_NO_MATCH);
+        if (marker_index != BUSTER_STRING_NO_MATCH)
+        {
+            String8 workspace = string_format_z(arena, S8("{S8}"), string_slice(driver.diagnostic, marker_index + marker.length, driver.diagnostic.length));
+            BUSTER_TEST(arguments, gpu_test_path_has_kind(workspace, OS_FILE_KIND_DIRECTORY));
+            BUSTER_TEST(arguments, os_directory_delete(workspace));
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+    }
+
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     // A private executable shell script is a deterministic fake external
     // tool. Its sleep child must be terminated with the complete process group.
@@ -738,6 +833,20 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, timed.timed_out && timed.process_result == PROCESS_RESULT_FAILED);
         BUSTER_TEST(arguments, elapsed < 5000000);
         BUSTER_TEST(arguments, timed.temporary_directory.length && gpu_test_path_has_kind(timed.temporary_directory, OS_FILE_KIND_MISSING));
+        String8 failure_script = S8("#!/bin/sh\nexit 7\n");
+        u8 old_output[] = {'o', 'l', 'd'};
+        ByteSlice old_bytes = (ByteSlice)BUSTER_ARRAY_TO_SLICE(old_output);
+        BUSTER_TEST(arguments, file_write(tool, (ByteSlice){(u8*)failure_script.pointer, failure_script.length}));
+        BUSTER_TEST(arguments, file_write(output, old_bytes));
+        gpu_test_fail_next_cleanup(true);
+        GpuPipelineResult failed = gpu_pipeline_execute(arena, options);
+        gpu_test_fail_next_cleanup(false);
+        BUSTER_TEST(arguments, failed.error == GPU_PIPELINE_ERROR_TOOL_FAILED && failed.cleanup_failed && !failed.published);
+        BUSTER_TEST(arguments, failed.process_result != PROCESS_RESULT_SUCCESS && !failed.artifact.bytes.length);
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, old_bytes));
+        BUSTER_TEST(arguments, string_first_sequence(failed.diagnostic, S8("GPU tool failed:")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(failed.temporary_directory, OS_FILE_KIND_DIRECTORY));
+        BUSTER_TEST(arguments, os_directory_delete(failed.temporary_directory));
         BUSTER_TEST(arguments, os_file_delete(tool));
         BUSTER_TEST(arguments, os_file_delete(first));
         BUSTER_TEST(arguments, os_file_delete(second));

@@ -8,6 +8,7 @@ end-to-end runs against a second fake `ide-b`.
 Run: python3 -B tools/uarch_lab_test.py
 """
 
+import io
 import json
 import os
 import shutil
@@ -321,6 +322,10 @@ class TimelineTests(unittest.TestCase):
 FAKE_IDE = r'''#!/usr/bin/env python3
 import sys, time
 args = sys.argv[1:]
+if globals().get("COMPILE_LOG"):
+    import json
+    with open(COMPILE_LOG, "a") as handle:
+        handle.write(json.dumps(args) + "\n")
 if globals().get("ARGV_LOG"):
     import os
     info = os.stat(sys.argv[0])
@@ -339,6 +344,9 @@ if args[:1] == ["bench"]:
     print("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=21042 min_ns=3359552 median_ns=3983033")
     sys.exit(0)
 out = args[args.index("-o") + 1]
+if globals().get("FAIL_PLAIN") and not any(arg.startswith(("-fsource-metrics=", "-fmetrics-out=")) for arg in args):
+    sys.stderr.write("cc: error: requested plain compile failure\n")
+    sys.exit(1)
 for arg in args:
     if arg.startswith("-fsource-metrics="):
         open(arg.split("=", 1)[1], "w").write(SOURCE)
@@ -468,8 +476,10 @@ class Fakes:
         write_script(os.path.join(root, "sudo"), FAKE_SUDO, {})
         return root, ide, perf
 
-    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3")):
+    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3"), compiler=None):
         root, ide, perf = self.fakes(mode, stat)
+        write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": mode,
+                                        "COMPILE_LOG": os.path.join(root, "compile.jsonl")}, **(compiler or {})))
         output = os.path.join(root, "out")
         stdout = sys.stdout
         try:
@@ -577,6 +587,35 @@ class FlowTests(Fakes, unittest.TestCase):
         self.assertEqual(meta["steps"]["timed"]["status"], "ok")
         self.assertIn("Phase breakdown: NA -- the binary does not accept -fmetrics-out=", report)
         self.assertIn("Phase attribution: NA", report)
+
+    def test_zero_warmups_prepares_single_binary_reference(self):
+        arguments = ["--runs", "2", "--warmups", "0", "--skip"] + [step for step in lab.STEPS if step != "timed"]
+        for mode in ("new", "old"):
+            with self.subTest(mode=mode):
+                meta, report, output = self.run_lab(mode, runs=arguments)
+                self.assertEqual(meta["steps"]["timed"]["status"], "ok")
+                with open(os.path.join(output, "timed", "runs.json")) as handle:
+                    records = json.load(handle)
+                self.assertEqual(len(records), 2)
+                self.assertEqual([record["exit"] for record in records], [0, 0])
+                self.assertTrue(all(record["identical"] for record in records))
+                with open(os.path.join(os.path.dirname(output), "compile.jsonl")) as handle:
+                    calls = [json.loads(line) for line in handle]
+                self.assertEqual(len(calls), 5)  # Two probes, untimed reference, two measured runs.
+                self.assertEqual([any(arg.startswith("-fmetrics-out=") for arg in call) for call in calls[2:]], [mode == "new"] * 3)
+                self.assertEqual(meta["capabilities"]["metrics_out"], mode == "new")
+                self.assertTrue(os.path.exists(os.path.join(output, "timed", "reference-run.log")))
+                self.assertFalse(os.path.exists(os.path.join(output, "timed", "warmup-0.log")))
+                self.assertIn("2 runs (0 failed), 2 byte-identical", report)
+
+    def test_zero_warmup_single_reference_failure_stops_before_timing(self):
+        arguments = ["--runs", "2", "--warmups", "0", "--skip"] + [step for step in lab.STEPS if step != "timed"]
+        meta, _, output = self.run_lab("old", runs=arguments, compiler={"FAIL_PLAIN": True})
+        self.assertEqual(meta["steps"]["timed"]["status"], "failed")
+        self.assertIn("reference compile failed: cc: error: requested plain compile failure", meta["steps"]["timed"]["note"])
+        self.assertFalse(os.path.exists(os.path.join(output, "timed", "runs.json")))
+        self.assertFalse(os.path.exists(os.path.join(output, "timed", "reference.exe")))
+        self.assertFalse(os.path.exists(os.path.join(output, "timed", "run-0001.csv")))
 
 
 def write_files(root, files):
@@ -844,7 +883,7 @@ class Lab2ReviewTests(unittest.TestCase):
 RUN_SUMMARY_KEYS = {"schema", "directory", "command", "cpu", "ide", "host", "capabilities", "steps", "timed", "phases", "work",
                     "topdown", "dominant_topdown_category", "hot_symbols", "findings"}
 COMPARE_SUMMARY_KEYS = {"schema", "directory", "command", "repo_root", "cpu", "host", "baseline", "candidate", "outputs_identical",
-                        "code_bytes", "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
+                        "phase_metrics", "code_bytes", "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
 CODE_BYTES_KEYS = {"a_value", "b_value", "ratio", "a_format", "b_format", "a_file_bytes", "b_file_bytes", "a_sections", "b_sections", "note"}
 RETIREMENT_SUMMARY_KEYS = {"schema", "directory", "decision", "contract", "verdict", "baseline", "candidate", "stage1", "repo_root", "cpu",
                            "host", "plan", "limits", "cells", "aggregates", "external_checks", "warnings"}
@@ -860,7 +899,8 @@ RUNTIME_CHECKS = {"generated_runtime", "generated_compilers_agree", "runs_succee
 COMPARE_METRIC_KEYS = {"unit", "direction", "label", "n", "a_median", "b_median", "a_min", "b_min", "a_mad", "b_mad", "delta", "ratio",
                        "ci_low", "ci_high", "ci_coverage", "geomean_ratio", "bootstrap_ci_low", "bootstrap_ci_high",
                        "ratio_of_medians", "min_ratio", "change_percent", "outcome", "note"}
-VARIANT_KEYS = {"path", "sha256", "size_bytes", "runs", "failed", "identical_runs", "deterministic", "metrics_out", "source_metrics"}
+VARIANT_KEYS = {"path", "sha256", "size_bytes", "runs", "failed", "identical_runs", "deterministic", "metrics_out",
+                "metrics_out_supported", "metrics_out_enabled", "source_metrics"}
 VERDICT_KEYS = {"metric", "outcome", "ratio", "ci_low", "ci_high", "ci_coverage", "change_percent", "bound_percent",
                 "min_effect_percent", "n", "explanation", "text"}
 PLAN_KEYS = {"pairs", "reason", "order", "fresh_copy", "seed", "confidence", "bootstrap_resamples", "complete_pairs"}
@@ -991,10 +1031,11 @@ class CompareStatisticsTests(unittest.TestCase):
 class CompareFlowTests(Fakes, unittest.TestCase):
     def compare(self, arguments, candidate=None, baseline=None):
         root, ide, perf = self.fakes("new")
-        if baseline:
-            write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new"}, **baseline))
+        write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
+                                        "COMPILE_LOG": os.path.join(root, "compile-a.jsonl")}, **(baseline or {})))
         other = os.path.join(root, "ide-b")
-        write_script(other, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new"}, **(candidate or {})))
+        write_script(other, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
+                                          "COMPILE_LOG": os.path.join(root, "compile-b.jsonl")}, **(candidate or {})))
         output = os.path.join(root, "cmp")
         stdout = sys.stdout
         try:
@@ -1092,15 +1133,113 @@ class CompareFlowTests(Fakes, unittest.TestCase):
         self.assertIn("--target-minutes 0.001:", summary["plan"]["reason"])
         self.assertTrue(summary["checks"]["drift"]["checked"] is False or summary["checks"]["drift"]["subsets"][0]["n"] == 5)
 
-    def test_capabilities_detected_per_binary(self):
-        summary, report, output = self.compare(["--pairs", "2"], {"MODE": "old"})
-        self.assertTrue(summary["baseline"]["metrics_out"])
+    def compile_arguments(self, output, key):
+        with open(os.path.join(os.path.dirname(output), "compile-%s.jsonl" % key)) as handle:
+            return [json.loads(line) for line in handle]
+
+    def test_asymmetric_metrics_support_uses_matching_flags(self):
+        for unsupported in ("baseline", "candidate"):
+            with self.subTest(unsupported=unsupported):
+                arguments = ["--warmups", "2"] + (["--target-minutes", "0.001"] if unsupported == "baseline" else ["--pairs", "2"])
+                summary, report, output = self.compare(arguments, **{unsupported: {"MODE": "old"}})
+                for key, role in lab.VARIANTS:
+                    calls = self.compile_arguments(output, key)
+                    flags = [arg for call in calls for arg in call if arg.startswith("-fmetrics-out=")]
+                    # The independent, untimed capability probe is the only
+                    # flagged call; warm-ups, pilot and timed pairs match.
+                    self.assertEqual(flags, ["-fmetrics-out=" + os.path.join(output, key, "probe.ccmetrics")])
+                    self.assertEqual(len(calls), 4 + summary["plan"]["complete_pairs"])
+                    self.assertEqual(summary[role]["metrics_out_supported"], role != unsupported)
+                    self.assertEqual(summary[role]["metrics_out"], role != unsupported)
+                    self.assertFalse(summary[role]["metrics_out_enabled"])
+                    self.assertFalse(os.path.exists(os.path.join(output, "pairs", "0001-%s.ccmetrics" % key)))
+                    self.assertFalse(lab.load_meta(os.path.join(output, key))["collection"]["metrics_out"])
+                self.assertEqual(summary["phase_metrics"], {"enabled": False, "reason": "%s does not support -fmetrics-out" % unsupported})
+                self.assertIsNone(summary["phases"])
+                self.assertIn("phase metrics collection: disabled; " + summary["phase_metrics"]["reason"], report)
+                before = lab.read_text(os.path.join(output, "summary.json"))
+                self.assertEqual(lab.render_compare(output), report)
+                self.assertEqual(lab.read_text(os.path.join(output, "summary.json")), before)
+
+    def test_matched_metrics_support_controls_both_compilers(self):
+        for mode in ("new", "old"):
+            with self.subTest(mode=mode):
+                summary, report, output = self.compare(["--pairs", "2", "--warmups", "2"], {"MODE": mode}, {"MODE": mode})
+                enabled = mode == "new"
+                for key, role in lab.VARIANTS:
+                    calls = self.compile_arguments(output, key)
+                    flags = [arg for call in calls for arg in call if arg.startswith("-fmetrics-out=")]
+                    self.assertEqual(len(calls), 6)
+                    self.assertEqual(len(flags), 5 if enabled else 1)
+                    self.assertEqual([any(arg.startswith("-fmetrics-out=") for arg in call) for call in calls[2:]], [enabled] * 4)
+                    self.assertEqual(summary[role]["metrics_out_supported"], enabled)
+                    self.assertEqual(summary[role]["metrics_out_enabled"], enabled)
+                    self.assertEqual(os.path.exists(os.path.join(output, "pairs", "0001-%s.ccmetrics" % key)), enabled)
+                self.assertEqual(summary["phase_metrics"]["enabled"], enabled)
+                self.assertEqual(summary["phases"] is not None, enabled)
+                self.assertIn("phase metrics collection: " + ("enabled" if enabled else "disabled"), report)
+
+    def test_supported_flag_without_phase_records_is_still_enabled(self):
+        summary, report, output = self.compare(["--pairs", "2"], {"METRICS": "CC_METRICS wall_ns=1\n"})
+        self.assertTrue(summary["phase_metrics"]["enabled"])
+        self.assertTrue(summary["candidate"]["metrics_out_supported"])
+        self.assertTrue(summary["candidate"]["metrics_out_enabled"])
         self.assertFalse(summary["candidate"]["metrics_out"])
+        self.assertTrue(os.path.exists(os.path.join(output, "pairs", "0001-b.ccmetrics")))
         self.assertIsNone(summary["phases"])
         self.assertIn("candidate: no measured -fmetrics-out record, so no phase comparison", summary["warnings"])
-        self.assertTrue(os.path.exists(os.path.join(output, "pairs", "0001-a.ccmetrics")))
-        self.assertFalse(os.path.exists(os.path.join(output, "pairs", "0001-b.ccmetrics")))
         self.assertIn("NA -- a variant wrote no measured `-fmetrics-out` record.", report)
+
+    def test_zero_warmups_prepares_matching_references(self):
+        for a_mode, b_mode in (("new", "new"), ("new", "old"), ("old", "new"), ("old", "old")):
+            with self.subTest(a_mode=a_mode, b_mode=b_mode):
+                summary, _, output = self.compare(["--pairs", "2", "--warmups", "0"], {"MODE": b_mode}, {"MODE": a_mode})
+                enabled = a_mode == b_mode == "new"
+                self.assertEqual(summary["plan"]["complete_pairs"], 2)
+                self.assertTrue(summary["outputs_identical"])
+                self.assertEqual(summary["phase_metrics"]["enabled"], enabled)
+                self.assertEqual(lab.load_compare_meta(output)["config"]["warmups"], 0)
+                for key, role in lab.VARIANTS:
+                    calls = self.compile_arguments(output, key)
+                    self.assertEqual(len(calls), 5)  # Two probes, reference, two measured pairs.
+                    self.assertEqual([any(arg.startswith("-fmetrics-out=") for arg in call) for call in calls[2:]], [enabled] * 3)
+                    self.assertTrue(os.path.isfile(os.path.join(output, key, "reference.exe")))
+                    self.assertTrue(summary[role]["deterministic"])
+                    self.assertFalse(os.path.exists(os.path.join(output, key, "warmup-0.log")))
+                    self.assertTrue(os.path.exists(os.path.join(output, key, "reference-run.log")))
+
+    def test_zero_warmup_reference_failure_stops_before_timing(self):
+        root, ide, perf = self.fakes("new")
+        other = os.path.join(root, "ide-b")
+        write_script(other, FAKE_IDE, {"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "old", "FAIL_PLAIN": True})
+        output = os.path.join(root, "cmp")
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            with self.assertRaisesRegex(SystemExit, "compare stopped before the timed series"):
+                lab.main(["compare", "--baseline", ide, "--candidate", other, "--repo-root", root, "--cpu", "-1",
+                          "--output", output, "--perf", perf, "--pairs", "2", "--warmups", "0"])
+        state = lab.load_compare_meta(output)["steps"]["prepare"]
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("reference compile failed: cc: error: requested plain compile failure", state["note"])
+        self.assertFalse(os.path.exists(os.path.join(output, "b", "reference.exe")))
+        self.assertFalse(os.path.exists(os.path.join(output, "pairs.json")))
+
+    def test_older_directory_does_not_invent_a_shared_collection_policy(self):
+        _, _, output = self.compare(["--pairs", "2"])
+        meta = lab.load_compare_meta(output)
+        del meta["phase_metrics"]
+        lab.save_compare_meta(output, meta)
+        for key, _ in lab.VARIANTS:
+            own_meta = lab.load_meta(os.path.join(output, key))
+            del own_meta["collection"]
+            lab.write_json(os.path.join(output, key, "lab.json"), own_meta)
+        report = lab.render_compare(output)
+        summary = json.loads(lab.read_text(os.path.join(output, "summary.json")))
+        self.assertIsNone(summary["phase_metrics"]["enabled"])
+        self.assertIsNone(summary["baseline"]["metrics_out_enabled"])
+        self.assertIsNone(summary["candidate"]["metrics_out_enabled"])
+        self.assertTrue(summary["baseline"]["metrics_out_supported"])
+        self.assertIsNotNone(summary["phases"])
+        self.assertIn("phase metrics collection: unknown; collection policy not recorded (older comparison)", report)
 
     def test_require_identical_output_stops_before_timing(self):
         with self.assertRaises(SystemExit):
@@ -1499,7 +1638,7 @@ class PeakRssTests(unittest.TestCase):
         try:
             with open("/proc/%d/stat" % pid) as handle:
                 state = handle.read().split()[2]
-            self.assertEqual(state, "Z", "a live descendant survived the timeout")
+            self.assertIn(state, ("Z", "X"), "a live descendant survived the timeout")
         except (FileNotFoundError, ProcessLookupError):
             pass
 
