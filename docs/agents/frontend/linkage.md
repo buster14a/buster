@@ -179,9 +179,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unit whose only function is a static constructor came out with an empty
   `.text`. The registration is a module-level list, `IrModule.initializers`,
   for the reason aliases are: it is a relation, not a property of a symbol,
-  and nearly every module has none. And the two targets with no initializer
-  array at all -- core Wasm, which starts one function of its own, and eBPF,
-  which has no startup -- **diagnose** the attribute rather than dropping it.
+  and nearly every module has none. And the targets with no initializer
+  array at all -- wasm32 and wasm64, whose direct output is a finished module
+  that starts one function of its own, and eBPF, which has no startup --
+  **diagnose** the attribute rather than dropping it. The message names the
+  actual target (`wasm32`, `wasm64` or `eBPF`; issue 2679, covered by
+  `c_test_gnu_attribute_queries`). Clang accepts the attribute on Wasm by
+  recording `InitFunctions` (subsection 6, priority then symbol index) in the
+  relocatable object's `linking` custom section for `wasm-ld` to turn into
+  `__wasm_call_ctors`; Buster refuses instead because `wasm.c` writes no
+  relocatable object, so there is no `linking` section, symbol table or
+  `wasm-ld` step to carry the entries. Destructors stay refused: the object
+  format has no finalizer list, and Buster has no atexit-registration lowering.
 - **`__attribute__((section("name")))` places a definition in a section of
   its own name on ELF and is refused elsewhere** (issue #1276). The frontend
   records it in `IrSymbol.section_name`: from the definition, else from any

@@ -54208,10 +54208,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // initializers that share a priority; the object writer sorts by priority
     // and leaves equal priorities where it found them.
     //
-    // Two targets have no initializer array to put them in -- core Wasm starts
-    // one function of its own and eBPF has no startup at all -- so there the
-    // attribute is a refusal rather than a silently dropped marker, which is
-    // what it was everywhere before issue 771.
+    // Three targets have no initializer array to put them in -- Wasm32 and
+    // Wasm64 output is a finished module that starts one function of its own,
+    // with no relocatable `linking` section to carry InitFunctions, and eBPF
+    // has no startup at all -- so there the attribute is a refusal rather than
+    // a silently dropped marker, which is what it was everywhere before issue
+    // 771.  The refusal names the target it came from (issue 2679).
     bool initializer_target = c_attribute_native_binding_target(target);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
@@ -54234,7 +54236,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
                 .message = string_format(arena, S8("'{S8}' is declared __attribute__(({S8})), which {S8} has no initializer array for"), declaration.name,
                                          is_constructor ? S8("constructor") : S8("destructor"),
-                                         target.cpu_arch == CPU_ARCH_WASM64 ? S8("wasm64") : S8("eBPF")),
+                                         target.cpu_arch == CPU_ARCH_BPFEL ? S8("eBPF") : cpu_arch_to_string_os(target.cpu_arch)),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };

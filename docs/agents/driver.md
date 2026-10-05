@@ -690,7 +690,10 @@ Direct WebAssembly output accepts one C source for `wasm64-unknown-freestanding`
 or `wasm32-wasip1` (also spelled `wasm32-wasi`). The latter emits a WASI Preview 1
 command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
-output rejects `-emit-llvm`, native link inputs, and `-S`.
+output rejects `-emit-llvm`, native link inputs, and `-S`. It also rejects
+`__attribute__((constructor/destructor))`, naming `wasm32` or `wasm64`; the
+direct writer emits no `linking` section to hold `InitFunctions`
+(see [Linkage](frontend/linkage.md)).
 
 Wasm32 also refuses runtime function addresses, including stored/returned
 references and aliases; direct calls remain supported. The existing instruction

@@ -7088,7 +7088,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_positions(UnitTestArgume
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_attribute_queries(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    struct { String8 triple; bool weak; bool alias; bool lifecycle; } targets[] = {
+    struct { String8 triple; bool weak; bool alias; bool lifecycle; String8 lifecycle_target; } targets[] = {
         {S8("x86_64-unknown-linux-gnu"), true, true, true},
         {S8("aarch64-unknown-linux-gnu"), true, true, true},
         {S8("x86_64-apple-macos"), true, true, true},
@@ -7100,8 +7100,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_attribute_queries(UnitTestArgument
         {S8("x86_64-unknown-freestanding"), true, true, true},
         {S8("x86_64-unknown-uefi"), false, true, false},
         {S8("aarch64-unknown-uefi"), false, true, false},
-        {S8("wasm64-unknown-freestanding"), false, false, false},
-        {S8("bpfel-unknown-linux"), false, false, false},
+        {S8("wasm32-wasip1"), false, false, false, S8("wasm32")},
+        {S8("wasm64-unknown-freestanding"), false, false, false, S8("wasm64")},
+        {S8("bpfel-unknown-linux"), false, false, false, S8("eBPF")},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
     {
@@ -7183,6 +7184,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_attribute_queries(UnitTestArgument
                 for (u32 diagnostic = 0; diagnostic < lifecycle.diagnostic_count; diagnostic += 1)
                 {
                     BUSTER_TEST(arguments, lifecycle.diagnostics[diagnostic].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                }
+                // Each refusal names the target it came from: wasm32 used to be
+                // reported as eBPF (issue 2679).
+                if (lifecycle.diagnostic_count == 2)
+                {
+                    BUSTER_TEST(arguments, string_equal(lifecycle.diagnostics[0].message,
+                                                        string_format(temporary.arena,
+                                                                      S8("'init' is declared __attribute__((constructor)), which {S8} has no initializer array for"),
+                                                                      targets[index].lifecycle_target)));
+                    BUSTER_TEST(arguments, string_equal(lifecycle.diagnostics[1].message,
+                                                        string_format(temporary.arena,
+                                                                      S8("'fini' is declared __attribute__((destructor)), which {S8} has no initializer array for"),
+                                                                      targets[index].lifecycle_target)));
                 }
             }
         }
