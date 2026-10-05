@@ -3875,6 +3875,7 @@ struct CMacroDefinition
     bool variadic;
     bool pragma_like;
     bool header_query;
+    bool target_os_query;
     // Does the list hold a `##`, and a `#` that stringifies a parameter?
     // 78,3% of the expansions of a unity build have neither and 99,97% have
     // no `#` at all, and that is the whole difference between substituting
@@ -5968,6 +5969,14 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
                     argument->tokens[token_index].no_expand = true;
                 }
             }
+        }
+        // Target-OS queries compare these spellings, not their GNU macro values.
+        if (definition->target_os_query && (argument->token_count & C_MACRO_ARGUMENT_COUNT_MASK) == 1 &&
+            argument->tokens[0].token.kind == C_TOKEN_IDENTIFIER &&
+            (c_token_spelling_equal(base, argument->tokens[0].token, S8("linux")) ||
+             c_token_spelling_equal(base, argument->tokens[0].token, S8("unix"))))
+        {
+            argument->tokens[0].no_expand = true;
         }
         bool used_expanded = definition->pragma_like || definition->parameter_expand_count[continuation->argument_index] != 0;
         bool needs_expansion = false;
@@ -10239,6 +10248,17 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)lock_free_macro_names[macro_index]), lock_free_replacement, 1, 0, 0, false,
                        false);
     }
+    static char const* gcc_lock_free_macro_names[] = {
+        "__GCC_ATOMIC_BOOL_LOCK_FREE", "__GCC_ATOMIC_CHAR_LOCK_FREE", "__GCC_ATOMIC_CHAR16_T_LOCK_FREE", "__GCC_ATOMIC_CHAR32_T_LOCK_FREE",
+        "__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "__GCC_ATOMIC_SHORT_LOCK_FREE", "__GCC_ATOMIC_INT_LOCK_FREE", "__GCC_ATOMIC_LONG_LOCK_FREE",
+        "__GCC_ATOMIC_LLONG_LOCK_FREE", "__GCC_ATOMIC_POINTER_LOCK_FREE",
+    };
+    for (u32 macro_index = 0; macro_index < BUSTER_ARRAY_LENGTH(gcc_lock_free_macro_names); macro_index += 1)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)gcc_lock_free_macro_names[macro_index]),
+                       lock_free_replacement, 1, 0, 0, false, false);
+    }
+    c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL"), S8("1"));
     String8* feature_parameters = arena_allocate(arena, String8, 1);
     feature_parameters[0] = S8("feature");
     static char const* feature_macro_names[] = {
@@ -10265,6 +10285,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         };
         CMacro* feature_macro = c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, feature_name, feature_replacement, 4, feature_parameters, 1, true, false);
         feature_macro->definition.header_query = string_equal(feature_name, S8("__has_include")) || string_equal(feature_name, S8("__has_include_next"));
+        feature_macro->definition.target_os_query = string_equal(feature_name, S8("__is_target_os"));
     }
     String8* pragma_parameters = arena_allocate(arena, String8, 1);
     pragma_parameters[0] = S8("value");
@@ -10340,6 +10361,122 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     String8 signed_max_type = intmax_uses_long ? S8("long") : S8("long long");
     String8 unsigned_max_type = intmax_uses_long ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
+    if (options.target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        C_DEFINE_TYPE_MACRO("__amd64__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__amd64", S8("1"));
+        C_DEFINE_TYPE_MACRO("__x86_64", S8("1"));
+        C_DEFINE_TYPE_MACRO("__MMX__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__SSE__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__FXSR__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__SSE_MATH__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__SSE2_MATH__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__code_model_small__", S8("1"));
+        if (options.target.cpu_model == CPU_MODEL_BASELINE)
+        {
+            C_DEFINE_TYPE_MACRO("__k8", S8("1"));
+            C_DEFINE_TYPE_MACRO("__k8__", S8("1"));
+        }
+    }
+    if (options.target.cpu_arch == CPU_ARCH_X86_64 || apple_target)
+    {
+        C_DEFINE_TYPE_MACRO("__REGISTER_PREFIX__", S8(""));
+    }
+    if ((options.target.os == OPERATING_SYSTEM_LINUX || options.target.os == OPERATING_SYSTEM_ANDROID) &&
+        c_preprocess_dialect_is_gnu(options.dialect))
+    {
+        C_DEFINE_TYPE_MACRO("linux", S8("1"));
+        C_DEFINE_TYPE_MACRO("unix", S8("1"));
+    }
+    C_DEFINE_TYPE_MACRO("__STDC_UTF_16__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__STDC_UTF_32__", S8("1"));
+    if (options.dialect == C_PREPROCESS_DIALECT_GNU89)
+    {
+        C_DEFINE_TYPE_MACRO("__GNUC_GNU_INLINE__", S8("1"));
+    }
+    else
+    {
+        C_DEFINE_TYPE_MACRO("__GNUC_STDC_INLINE__", S8("1"));
+    }
+    C_DEFINE_TYPE_MACRO("__CHAR_BIT__", S8("8"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_SIZE_T__", string_format(arena, S8("{u32}"), layout.pointer.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_PTRDIFF_T__", string_format(arena, S8("{u32}"), layout.pointer.size));
+    // This is Clang-suitable alignment, intentionally not abi_max_alignment;
+    // #2513 changes that independent ABI property.
+    C_DEFINE_TYPE_MACRO("__BIGGEST_ALIGNMENT__",
+                        options.target.cpu_arch == CPU_ARCH_BPFEL || (apple_target && options.target.cpu_arch == CPU_ARCH_AARCH64) ? S8("8") : S8("16"));
+    String8 pointer_signed_max = layout.pointer.size == 8 ? S8("9223372036854775807") : S8("2147483647");
+    String8 pointer_unsigned_max = layout.pointer.size == 8 ? S8("18446744073709551615") : S8("4294967295");
+    String8 pointer_signed_suffix = string_equal(signed_pointer_type, S8("long")) ? S8("L")
+                                        : string_equal(signed_pointer_type, S8("long long")) ? S8("LL")
+                                                                                            : S8("");
+    String8 pointer_unsigned_suffix = string_equal(unsigned_pointer_type, S8("unsigned long")) ? S8("UL")
+                                          : string_equal(unsigned_pointer_type, S8("unsigned long long")) ? S8("ULL")
+                                                                                                        : string_equal(unsigned_pointer_type, S8("unsigned int")) ? S8("U") : S8("");
+    String8 int64_signed_max = int64_uses_long ? S8("9223372036854775807L") : S8("9223372036854775807LL");
+    String8 int64_unsigned_max = int64_uses_long ? S8("18446744073709551615UL") : S8("18446744073709551615ULL");
+    String8 intmax_signed_max = intmax_uses_long ? S8("9223372036854775807L") : S8("9223372036854775807LL");
+    String8 intmax_unsigned_max = intmax_uses_long ? S8("18446744073709551615UL") : S8("18446744073709551615ULL");
+    C_DEFINE_TYPE_MACRO("__SIZE_MAX__", string_format(arena, S8("{S8}{S8}"), pointer_unsigned_max, pointer_unsigned_suffix));
+    C_DEFINE_TYPE_MACRO("__UINTPTR_MAX__", string_format(arena, S8("{S8}{S8}"), pointer_unsigned_max, pointer_unsigned_suffix));
+    C_DEFINE_TYPE_MACRO("__PTRDIFF_MAX__", string_format(arena, S8("{S8}{S8}"), pointer_signed_max, pointer_signed_suffix));
+    C_DEFINE_TYPE_MACRO("__INTPTR_MAX__", string_format(arena, S8("{S8}{S8}"), pointer_signed_max, pointer_signed_suffix));
+    C_DEFINE_TYPE_MACRO("__INTMAX_MAX__", intmax_signed_max);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_MAX__", intmax_unsigned_max);
+    C_DEFINE_TYPE_MACRO("__INT64_MAX__", int64_signed_max);
+    C_DEFINE_TYPE_MACRO("__UINT64_MAX__", int64_unsigned_max);
+    C_DEFINE_TYPE_MACRO("__INT8_MAX__", S8("127"));
+    C_DEFINE_TYPE_MACRO("__INT16_MAX__", S8("32767"));
+    C_DEFINE_TYPE_MACRO("__INT32_MAX__", S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__UINT8_MAX__", S8("255"));
+    C_DEFINE_TYPE_MACRO("__UINT16_MAX__", S8("65535"));
+    C_DEFINE_TYPE_MACRO("__UINT32_MAX__", S8("4294967295U"));
+    String8 integer_widths[] = {S8("8"), S8("16"), S8("32"), S8("64")};
+    String8 signed_integer_types[] = {S8("signed char"), S8("short"), S8("int"), signed_64_type};
+    String8 unsigned_integer_types[] = {S8("unsigned char"), S8("unsigned short"), S8("unsigned int"), unsigned_64_type};
+    String8 signed_integer_maxima[] = {S8("127"), S8("32767"), S8("2147483647"), int64_signed_max};
+    String8 unsigned_integer_maxima[] = {S8("255"), S8("65535"), S8("4294967295U"), int64_unsigned_max};
+    for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(integer_widths); width_index += 1)
+    {
+        for (u32 kind_index = 0; kind_index < 2; kind_index += 1)
+        {
+            String8 family = kind_index ? S8("FAST") : S8("LEAST");
+            String8 signed_name = string_format(arena, S8("__INT_{S8}{S8}_TYPE__"), family, integer_widths[width_index]);
+            String8 unsigned_name = string_format(arena, S8("__UINT_{S8}{S8}_TYPE__"), family, integer_widths[width_index]);
+            String8 signed_max_name = string_format(arena, S8("__INT_{S8}{S8}_MAX__"), family, integer_widths[width_index]);
+            String8 unsigned_max_name = string_format(arena, S8("__UINT_{S8}{S8}_MAX__"), family, integer_widths[width_index]);
+            String8 signed_width_name = string_format(arena, S8("__INT_{S8}{S8}_WIDTH__"), family, integer_widths[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_name, signed_integer_types[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_name, unsigned_integer_types[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_max_name, signed_integer_maxima[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_max_name, unsigned_integer_maxima[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_width_name, integer_widths[width_index]);
+        }
+    }
+    C_DEFINE_TYPE_MACRO("__SIG_ATOMIC_TYPE__", wasm_target ? S8("long") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__SIG_ATOMIC_MAX__",
+                        wasm_target ? (layout.long_integer.bit_width == 64 ? S8("9223372036854775807L") : S8("2147483647L")) : S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__SIG_ATOMIC_WIDTH__", wasm_target ? string_format(arena, S8("{u32}"), layout.long_integer.bit_width) : S8("32"));
+    C_DEFINE_TYPE_MACRO("__PTRDIFF_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
+    C_DEFINE_TYPE_MACRO("__INTMAX_WIDTH__", S8("64"));
+    C_DEFINE_TYPE_MACRO("__SHRT_WIDTH__", string_format(arena, S8("{u32}"), layout.short_integer.bit_width));
+    C_DEFINE_TYPE_MACRO("__USER_LABEL_PREFIX__", apple_target ? S8("_") : S8(""));
+    C_DEFINE_TYPE_MACRO("__FINITE_MATH_ONLY__", S8("0"));
+    C_DEFINE_TYPE_MACRO("__ORDER_PDP_ENDIAN__", S8("3412"));
+    if (options.position_independent_level)
+    {
+        String8 level = string_format(arena, S8("{u32}"), options.position_independent_level);
+        C_DEFINE_TYPE_MACRO("__PIC__", level);
+        C_DEFINE_TYPE_MACRO("__pic__", level);
+        if (options.position_independent_executable)
+        {
+            C_DEFINE_TYPE_MACRO("__PIE__", level);
+            C_DEFINE_TYPE_MACRO("__pie__", level);
+        }
+    }
+    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* has no matching __sync compare-and-swap builtins,
+    // __SIZEOF_FLOAT128__ is unmodeled, __SEG_FS/__SEG_GS have no keywords,
+    // and __PRAGMA_REDEFINE_EXTNAME is an unimplemented pragma.
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);

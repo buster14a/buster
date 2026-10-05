@@ -16512,11 +16512,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
         String8 first;
         String8 second;
         bool position_independent;
-        u8 reserved[7];
+        u8 position_independent_level;
+        bool position_independent_executable;
+        u8 reserved[5];
     };
     PicModelCase model_cases[] = {
-        {S8("-fPIE"), S8("-g0"), true, {0}},    {S8("-fpie"), S8("-g0"), true, {0}},     {S8("-fPIE"), S8("-fno-pie"), false, {0}},
-        {S8("-fPIC"), S8("-fno-pie"), true, {0}}, {S8("-fpie"), S8("-fno-pic"), false, {0}}, {S8("-fno-pic"), S8("-fPIE"), true, {0}},
+        {S8("-fPIE"), S8("-g0"), true, 2, true, {0}},
+        {S8("-fpie"), S8("-g0"), true, 1, true, {0}},
+        {S8("-fPIE"), S8("-fno-pie"), false, 0, false, {0}},
+        {S8("-fPIC"), S8("-fno-pie"), true, 2, false, {0}},
+        {S8("-fpie"), S8("-fno-pic"), false, 0, false, {0}},
+        {S8("-fno-pic"), S8("-fPIE"), true, 2, true, {0}},
+        {S8("-fpic"), S8("-g0"), true, 1, false, {0}},
+        {S8("-fPIE"), S8("-fpic"), true, 1, false, {0}},
     };
     String8 model_targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-linux"), S8("x86_64-macos"), S8("x86_64-windows"), S8("x86_64-uefi")};
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(model_targets); target_index += 1)
@@ -16530,11 +16538,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
             BUSTER_TEST(arguments, invocation.error == (refused ? COMPILER_DRIVER_ERROR_ARGUMENT : COMPILER_DRIVER_ERROR_NONE));
             if (refused)
             {
-                String8 option = case_index == 5 ? model_cases[case_index].second : model_cases[case_index].first;
+                String8 option = case_index == 5 || case_index == 7 ? model_cases[case_index].second : model_cases[case_index].first;
                 BUSTER_STRING_TEST(arguments, invocation.diagnostic,
                     string_format(temporary.arena, S8("unsupported option: {S8} on AArch64 ELF"), option));
             }
             BUSTER_TEST(arguments, invocation.position_independent == model_cases[case_index].position_independent);
+            BUSTER_TEST(arguments, invocation.position_independent_level == model_cases[case_index].position_independent_level);
+            BUSTER_TEST(arguments, invocation.position_independent_executable == model_cases[case_index].position_independent_executable);
             BUSTER_TEST(arguments, invocation.image_kind == NATIVE_IMAGE_EXECUTABLE);
         }
     }
@@ -16562,6 +16572,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
         BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, invocation.image_kind == image_cases[case_index].kind);
         BUSTER_TEST(arguments, invocation.position_independent == (image_cases[case_index].kind != NATIVE_IMAGE_EXECUTABLE));
+        BUSTER_TEST(arguments, invocation.position_independent_level == (image_cases[case_index].kind != NATIVE_IMAGE_EXECUTABLE ? 2 : 0));
+        BUSTER_TEST(arguments, !invocation.position_independent_executable);
     }
     // Only x86-64 Linux has a writer for either image. Elsewhere a link that
     // asks for one is refused by name, while compiling alone ignores the
