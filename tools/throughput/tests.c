@@ -83,6 +83,12 @@ static void test_service_output_share(char const* root)
 }
 #endif
 
+enum
+{
+    TEST_BUNDLE_DISTINCT_ARTIFACTS = 12,
+    TEST_BUNDLE_NO_FUNCTION_COUNT = 13
+};
+
 static int test_bundle(char const* root, unsigned scenario)
 {
     int ok = tp_mkdirs(root) && test_text(root, "metadata.json", "{\"synthetic_test_fixture\":true}\n") &&
@@ -118,6 +124,12 @@ static int test_bundle(char const* root, unsigned scenario)
                     for (unsigned i = 0; i < TP_COUNTERS; ++i) row.process.counters[i] = NAN;
                     row.output_bytes = 4; row.source_bytes = 16; row.source_lines = 2; row.source_functions = 1;
                     memset(row.output_hash, '0', 64); row.output_hash[64] = 0;
+                    if (scenario == TEST_BUNDLE_DISTINCT_ARTIFACTS)
+                    {
+                        row.output_bytes += variant;
+                        row.output_hash[0] = variant ? '1' : '0';
+                    }
+                    if (scenario == TEST_BUNDLE_NO_FUNCTION_COUNT) row.source_functions = 0;
                     if (variant && (scenario == 1 || (scenario == 2 && round == 0))) row.process.wall_seconds = 1.3;
                     if (scenario == 3) row.process.wall_seconds = variant ? 0.0013 : 0.001;
                     if (variant && scenario == 4) row.process.wall_seconds = pair & 1 ? 1.5 : 0.8;
@@ -511,6 +523,93 @@ static unsigned test_open_descriptor_count(void)
         if (fcntl(descriptor, F_GETFD) >= 0) ++count;
     }
     return count;
+}
+
+typedef struct TpProcessGroupTestReport
+{
+    int setup_ok, raw_error, selected_error, redundant_error, wrong_group_error, other_error;
+    pid_t process_id, process_group;
+} TpProcessGroupTestReport;
+
+/* Direct children have no descendants. A retained child and a two-second
+ * parent deadline bound both the actual session-leader EPERM and wrong-group
+ * controls; no released PID/PGID is probed or signalled. */
+static void test_process_group_postcondition(void)
+{
+    unsigned descriptors = test_open_descriptor_count();
+    for (unsigned mode = 0; mode < 2; ++mode)
+    {
+        int channel[2] = {-1, -1};
+        int pipe_ok = pipe(channel) == 0;
+        CHECK(pipe_ok);
+        pid_t child = pipe_ok ? fork() : -1;
+        if (child == 0)
+        {
+            close(channel[0]);
+            TpProcessGroupTestReport report = {0};
+            report.process_id = getpid();
+            report.wrong_group_error = tp_process_group_self_error(-1, EPERM);
+            report.setup_ok = getpgrp() != report.process_id;
+            if (mode == 1 && setsid() < 0) report.setup_ok = 0;
+            int status = setpgid(0, 0);
+            report.raw_error = status == 0 ? 0 : errno;
+            report.selected_error = tp_process_group_self_error(status, report.raw_error);
+            report.redundant_error = tp_process_group_self_error(-1, EPERM);
+            report.other_error = tp_process_group_self_error(-1, EACCES);
+            report.process_group = getpgrp();
+            ssize_t written;
+            do
+            {
+                written = write(channel[1], &report, sizeof(report));
+            } while (written < 0 && errno == EINTR);
+            int closed = close(channel[1]);
+            _exit(written == (ssize_t)sizeof(report) && closed == 0 ? 0 : 3);
+        }
+        CHECK(child > 0);
+        if (channel[1] >= 0) CHECK(close(channel[1]) == 0);
+        if (child > 0)
+        {
+            u64 deadline = os_now_microseconds() + 2000000;
+            int status = 0;
+            pid_t waited = 0;
+            while (waited == 0 && os_now_microseconds() < deadline)
+            {
+                waited = waitpid(child, &status, WNOHANG);
+                if (waited < 0 && errno == EINTR) waited = 0;
+                if (waited == 0) test_delay(1);
+            }
+            int timed_out = waited == 0;
+            if (timed_out)
+            {
+                CHECK(kill(child, SIGKILL) == 0 || errno == ESRCH);
+                do
+                {
+                    waited = waitpid(child, &status, 0);
+                } while (waited < 0 && errno == EINTR);
+            }
+            CHECK(!timed_out && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+            if (waited == child)
+            {
+                TpProcessGroupTestReport report = {0};
+                ssize_t received;
+                do
+                {
+                    received = read(channel[0], &report, sizeof(report));
+                } while (received < 0 && errno == EINTR);
+                CHECK(received == (ssize_t)sizeof(report));
+                CHECK(report.setup_ok && report.process_id == child && report.process_group == child);
+                CHECK(report.raw_error == (mode == 1 ? EPERM : 0));
+                CHECK(report.selected_error == 0 && report.redundant_error == 0);
+                CHECK(report.wrong_group_error == EPERM && report.other_error == EACCES);
+                printf("THROUGHPUT_GROUP_POSTCONDITION mode=%u raw_error=%d selected_error=%d redundant_error=%d "
+                       "wrong_group_error=%d other_error=%d pid=%ld group=%ld timed_out=%d\n", mode,
+                       report.raw_error, report.selected_error, report.redundant_error,
+                       report.wrong_group_error, report.other_error, (long)report.process_id, (long)report.process_group, timed_out);
+            }
+        }
+        if (channel[0] >= 0) CHECK(close(channel[0]) == 0);
+    }
+    CHECK(test_open_descriptor_count() == descriptors);
 }
 
 /* The error channel must report preexec failure, survive repeated cleanup,
@@ -1127,6 +1226,84 @@ static void test_workload_descriptors(char const* executable, char const* root)
     }
 }
 
+/* Only an unexpected admission failure reaches this inspection. The original
+ * files stay under the test root; print their metadata and bounded text into
+ * the desktop combinations log before a later self-test can clear that root.
+ * Inspection does not rerun any child, rewrite a file or alter a test result. */
+static void test_admission_failure_diagnostic(char const* log, char const* predicate, char const* process)
+{
+    char text[8192] = {0};
+    FILE* file = fopen(log, "rb");
+    CHECK(file != NULL);
+    if (file)
+    {
+        size_t count = fread(text, 1, sizeof(text) - 1, file);
+        int read_ok = count < sizeof(text) - 1 && !ferror(file);
+        int close_ok = fclose(file) == 0;
+        CHECK(read_ok && close_ok);
+        CHECK(strstr(text, "THROUGHPUT_ADMISSION_FAILURE operation=source-to-object") &&
+              strstr(text, predicate) && strstr(text, "THROUGHPUT_ADMISSION_PROCESS") &&
+              strstr(text, process) && strstr(text, "THROUGHPUT_ADMISSION_ARGV ["));
+    }
+}
+
+static void test_admission_failure_file(char const* root, char const* leaf, int text)
+{
+    char path[TP_PATH_CAP], hash[65] = {0};
+    uint64_t bytes = 0, lines = 0;
+    int path_ok = tp_path(path, root, leaf);
+    int regular = path_ok && tp_workload_regular_file(path);
+    int hashed = regular && tp_hash_file(path, hash, &bytes, &lines);
+    fprintf(stderr, "THROUGHPUT_ADMISSION_FILE leaf=%s path=%s regular=%d hashed=%d bytes=%" PRIu64 " sha256=%s\n",
+            leaf, path_ok ? path : "unavailable", regular, hashed, bytes, hashed ? hash : "unavailable");
+    if (regular && text)
+    {
+        FILE* file = fopen(path, "rb");
+        if (file)
+        {
+            enum { TEXT_LIMIT = 65536 };
+            char chunk[4096];
+            size_t printed = 0;
+            fprintf(stderr, "THROUGHPUT_ADMISSION_FILE_BEGIN leaf=%s limit=%u\n", leaf, (unsigned)TEXT_LIMIT);
+            while (printed < TEXT_LIMIT)
+            {
+                size_t request = sizeof(chunk) < TEXT_LIMIT - printed ? sizeof(chunk) : TEXT_LIMIT - printed;
+                size_t count = fread(chunk, 1, request, file);
+                if (count) fwrite(chunk, 1, count, stderr);
+                printed += count;
+                if (count < request) break;
+            }
+            int truncated = printed == TEXT_LIMIT && fgetc(file) != EOF;
+            int read_error = ferror(file);
+            int close_error = fclose(file) != 0;
+            fprintf(stderr, "\nTHROUGHPUT_ADMISSION_FILE_END leaf=%s printed=%zu truncated=%d read_error=%d close_error=%d\n",
+                    leaf, printed, truncated, read_error, close_error);
+        }
+        else fprintf(stderr, "THROUGHPUT_ADMISSION_FILE_UNREADABLE leaf=%s errno=%d\n", leaf, errno);
+    }
+}
+
+static void test_admission_failure_files(char const* directory, char const* output)
+{
+    // The accepted fixture has exactly two object operations, then link/runtime.
+    test_admission_failure_file(directory, "admission.log", 1);
+    static char const* const leaves[] = {
+        "commands.jsonl", "object-000.log", "object-000.metrics", "object-000.o",
+        "object-001.log", "object-001.metrics", "object-001.o", "compile-link.log",
+        "compile-link.metrics", "runtime.log",
+#ifdef _WIN32
+        "program.exe"
+#else
+        "program"
+#endif
+    };
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(leaves); ++i)
+    {
+        int text = strstr(leaves[i], ".jsonl") || strstr(leaves[i], ".log") || strstr(leaves[i], ".metrics");
+        test_admission_failure_file(output, leaves[i], text);
+    }
+}
+
 static void test_workload_admission(char const* executable, char const* root)
 {
     char* missing_output[] = {"throughput", "admit-workload", "descriptor", "--source-root", "root", "--compiler", "compiler",
@@ -1211,6 +1388,10 @@ static void test_workload_admission(char const* executable, char const* root)
               !strstr(report, "}}},\"argv_identity\""));
     }
 
+    if (result.exit_code != 0 || result.signal_number || result.launch_error || result.timed_out ||
+        !strstr(report, "\"admitted\":true"))
+        test_admission_failure_files(directory, output);
+
     char failed_output[TP_PATH_CAP], failure_log[TP_PATH_CAP];
     CHECK(tp_path(failure_log, directory, "admission-failure.log"));
     CHECK(tp_path(failed_output, directory, "admission-state-oom"));
@@ -1260,6 +1441,7 @@ static void test_workload_admission(char const* executable, char const* root)
           tp_path(failed_output, directory, "compiler-failure"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
     CHECK_CHILD_EXIT(result, 2, failure_log);
+    test_admission_failure_diagnostic(failure_log, "predicate=process-pass", "exit_code=7");
     char commands[TP_PATH_CAP];
     CHECK(tp_path(commands, failed_output, "commands.jsonl"));
     file = fopen(commands, "rb");
@@ -1278,6 +1460,7 @@ static void test_workload_admission(char const* executable, char const* root)
           tp_path(failed_output, directory, "missing-artifact"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
     CHECK_CHILD_EXIT(result, 2, failure_log);
+    test_admission_failure_diagnostic(failure_log, "predicate=artifact-regular-file", "exit_code=0");
 
     CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes,
                                     "-DTP_TEST_MUTATE_PRIOR",
@@ -1437,6 +1620,69 @@ static void test_summaries(char const* root, int expected)
             struct stat info;
             int status = stat(path, &info);
             CHECK(expected ? status == 0 : status != 0 && errno == ENOENT);
+        }
+    }
+}
+
+/* Reseal each independently inconsistent probe so rejection tests semantic
+ * work identity rather than the evidence checksum. Artifact equality is
+ * per variant; unknown self-host function counts remain valid zeroes. */
+static void test_probe_identity(char const* root)
+{
+    enum { NEGATIVE_CASES = 8, DISTINCT_ARTIFACTS_CASE = 8, NO_FUNCTION_COUNT_CASE = 9, CASES = 10 };
+    for (unsigned scenario = 0; scenario < CASES; ++scenario)
+    {
+        char directory[TP_PATH_CAP], path[TP_PATH_CAP], leaf[128];
+        snprintf(leaf, sizeof(leaf), "probe-identity-%u", scenario);
+        unsigned bundle = scenario == DISTINCT_ARTIFACTS_CASE ? TEST_BUNDLE_DISTINCT_ARTIFACTS :
+                          scenario == NO_FUNCTION_COUNT_CASE ? TEST_BUNDLE_NO_FUNCTION_COUNT : 0;
+        int paths_ok = tp_path(directory, root, leaf) && test_bundle(directory, bundle) &&
+                       tp_path(path, directory, "telemetry.csv");
+        CHECK(paths_ok);
+        FILE* file = paths_ok ? fopen(path, "wb") : NULL;
+        CHECK(file != NULL);
+        if (file)
+        {
+            fputs(TP_RAW_HEADER, file);
+            for (unsigned kind = 0; kind < 2; ++kind)
+            {
+                for (unsigned repeat = 0; repeat < 3; ++repeat)
+                {
+                    for (unsigned variant = 0; variant < 2; ++variant)
+                    {
+                        TpRow row = {0};
+                        row.process.wall_seconds = 1.0;
+                        row.process.peak_rss_bytes = 67108864.0;
+                        for (unsigned i = 0; i < TP_COUNTERS; ++i) row.process.counters[i] = NAN;
+                        row.arena_calls = kind ? 3.0 : NAN;
+                        row.arena_bytes = kind ? 15.0 : NAN;
+                        row.output_bytes = 4; row.source_bytes = 16; row.source_lines = 2; row.source_functions = 1;
+                        memset(row.output_hash, '0', 64); row.output_hash[64] = 0;
+                        if (scenario == DISTINCT_ARTIFACTS_CASE)
+                        {
+                            row.output_bytes += variant;
+                            row.output_hash[0] = variant ? '1' : '0';
+                        }
+                        if (scenario == NO_FUNCTION_COUNT_CASE) row.source_functions = 0;
+                        /* 2 kinds x 2 omitted fields x 2 variants; mutate only
+                         * the final repeat, preserving parser-valid values. */
+                        if (scenario < NEGATIVE_CASES && kind == scenario / 4 && variant == scenario % 2 && repeat == 2)
+                        {
+                            if ((scenario / 2) % 2) ++row.source_functions;
+                            else ++row.output_bytes;
+                        }
+                        CHECK(tp_sample_csv(file, kind, repeat, variant, variant, 0, &row));
+                    }
+                }
+            }
+            CHECK(fclose(file) == 0);
+            CHECK(tp_completion(directory, 1, 20, 1, 1));
+            CHECK(tp_completion(directory, 1, 20, 1, 0));
+            CHECK(test_text(directory, tp_summary_names[0], "stale verdict\n"));
+            CHECK(test_text(directory, tp_summary_names[1], "stale verdict\n"));
+            CHECK(tp_compare(directory) == (scenario < NEGATIVE_CASES ? 2 : 0));
+            test_summaries(directory, scenario >= NEGATIVE_CASES);
+            CHECK(tp_completion(directory, 1, 20, 1, 0));
         }
     }
 }
@@ -1841,6 +2087,7 @@ int main(int argc, char** argv)
 #endif
         test_process_fields(root);
         test_diagnostic_probes(root);
+        test_probe_identity(root);
         test_legacy_schema(executable, root);
         test_compile_options();
 #ifdef __linux__
@@ -1859,6 +2106,7 @@ int main(int argc, char** argv)
         test_maximum_jobs(root);
         test_processes(executable, root);
 #ifndef _WIN32
+        test_process_group_postcondition();
         test_launch_errors(executable, root);
 #endif
         test_retirement_statistics();
