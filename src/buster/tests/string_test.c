@@ -43,6 +43,41 @@ BUSTER_GLOBAL_LOCAL s128 string_test_s128(u64 low, u64 high)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult string_test_sequence_benchmark(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Opt-in observations of the real, uninstrumented helper. Timing never
+    // gates correctness; serial paired baseline/candidate runs own repetition.
+    enum { STRING_SEQUENCE_BENCH_LENGTH = 256, STRING_SEQUENCE_BENCH_CALLS = 1048576 };
+    u64 lengths[] = {1, 2, 3, 7, 15, 31, 32};
+    char8 haystack_bytes[STRING_SEQUENCE_BENCH_LENGTH + 16];
+    char8 needle_bytes[32];
+    memset(haystack_bytes, 'a', sizeof(haystack_bytes));
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(lengths); index += 1)
+        {
+            u64 length = lengths[index];
+            memset(needle_bytes, 'a', sizeof(needle_bytes));
+            if (shape) needle_bytes[length - 1] = 'b';
+            String8 needle = {.pointer = needle_bytes, .length = length};
+            u64 checksum = 0;
+            TimeDataType start = timestamp_take();
+            for (u32 call = 0; call < STRING_SEQUENCE_BENCH_CALLS; call += 1)
+            {
+                String8 haystack = {.pointer = haystack_bytes + (call & 15), .length = STRING_SEQUENCE_BENCH_LENGTH};
+                checksum += string_first_sequence(haystack, needle);
+            }
+            u64 elapsed_ns = timestamp_ns_between(start, timestamp_take());
+            u64 expected = shape ? (u64)0 - STRING_SEQUENCE_BENCH_CALLS : 0;
+            BUSTER_TEST(arguments, checksum == expected);
+            string_print(S8("BENCH_STRING_SEQUENCE n={u32} m={u64} shape={u32} calls={u32} elapsed_ns={u64} checksum={u64}\n"),
+                         STRING_SEQUENCE_BENCH_LENGTH, length, shape, STRING_SEQUENCE_BENCH_CALLS, elapsed_ns, checksum);
+        }
+    }
+    return result;
+}
+
 #define BUSTER_UNICODE_ROUND_TRIP_TEST(args, arena_value, utf8_value, utf16_value)                                                                             \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
@@ -427,6 +462,16 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             string_format(arena, S8("{"));
             os_exit(0);
         }
+        if (string_equal(failure_mode, S8("string_format_fail_nested_brace")))
+        {
+            string_format(arena, S8("{u8{}}"), (u8)1);
+            os_exit(0);
+        }
+        if (string_equal(failure_mode, S8("string_format_fail_source_brace")))
+        {
+            string_format(arena, S8("struct S { char c; long l; };"));
+            os_exit(0);
+        }
         if (string_equal(failure_mode, S8("string_format_fail_type")))
         {
             string_format(arena, S8("{unknown}"));
@@ -474,6 +519,10 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         {
             String8 formatted = string_format(arena, S8("{{ {S8} }}"), S8("value"));
             BUSTER_STRING_TEST(arguments, formatted, S8("{ value }"));
+        }
+        {
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{{{{}}}}}")), S8("{{}}}"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{S8}"), S8("struct S { char c; long l; };")), S8("struct S { char c; long l; };"));
         }
         {
             String8 formatted = string_format(arena, S8("async_thread_{u64}"), (u64)7);
@@ -554,23 +603,34 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         }
         {
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
-            String8 failure_modes[] = {
-                S8("string_format_fail_brace"),
-                S8("string_format_fail_type"),
-                S8("string_format_fail_modifier"),
-                S8("string_format_fail_width_overflow"),
-                S8("string_join_fail_overflow"),
-                S8("string_duplicate_fail_null"),
+            // Check the reported cause as well as fatal status: a formatter
+            // recursion or an unrelated earlier failure must not pass.
+            typedef struct StringFormatFailureCase StringFormatFailureCase;
+            struct StringFormatFailureCase
+            {
+                String8 mode;
+                String8 diagnostic;
+            };
+            StringFormatFailureCase failure_cases[] = {
+                {S8("string_format_fail_brace"), S8("string_format: unterminated placeholder (write a literal brace as {{) at ")},
+                {S8("string_format_fail_nested_brace"), S8("string_format: nested opening brace in placeholder (write a literal brace as {{) at ")},
+                {S8("string_format_fail_type"), S8("string_format: unknown placeholder type (write a literal brace as {{) at ")},
+                {S8("string_format_fail_source_brace"), S8("string_format: unknown placeholder type (write a literal brace as {{) at ")},
+                {S8("string_format_fail_modifier"), {0}},
+                {S8("string_format_fail_width_overflow"), {0}},
+                {S8("string_join_fail_overflow"), {0}},
+                {S8("string_duplicate_fail_null"), {0}},
             };
             String8 executable = program_state->input.arguments.pointer[0];
-            for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(failure_modes); mode_index += 1)
+            for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(failure_cases); mode_index += 1)
             {
                 String8 child_arguments[] = {
                     executable,
                     S8("test"),
+                    S8("--module=string_tests"),
                 };
                 String8 environment_keys[] = {S8("BUSTER_STRING_FORMAT_FAILURE")};
-                String8 environment_values[] = {failure_modes[mode_index]};
+                String8 environment_values[] = {failure_cases[mode_index].mode};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
@@ -578,11 +638,17 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
-                    ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+                    ProcessWaitResult wait_result = os_process_wait_deadline(arena, spawn, 30000000);
                     String8 error = (String8){.pointer = (char8*)wait_result.streams[STANDARD_STREAM_ERROR].pointer,
                                              .length = wait_result.streams[STANDARD_STREAM_ERROR].length};
+                    BUSTER_TEST(arguments, !wait_result.timed_out);
                     BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
                     BUSTER_TEST(arguments, string_first_sequence(error, S8("TODO")) == BUSTER_STRING_NO_MATCH);
+                    if (failure_cases[mode_index].diagnostic.length)
+                    {
+                        BUSTER_TEST(arguments, string_starts_with_sequence(error, failure_cases[mode_index].diagnostic));
+                        BUSTER_TEST(arguments, string_ends_with_sequence(error, S8(" in string_format_va\n")));
+                    }
                 }
             }
 #endif
@@ -6808,6 +6874,109 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             String16 s = (String16){.pointer = grinning_face_raw, .length = BUSTER_ARRAY_LENGTH(grinning_face_raw) - 1};
             BUSTER_TEST(arguments, s.length == 2);
         }
+    }
+
+    {
+        // Cross-check the long-needle search against a direct scan over small alphabets and lengths.
+        u64 haystack_capacity = 192;
+        char8* haystack_bytes = arena_allocate(arena, char8, haystack_capacity);
+        char8* needle_bytes = arena_allocate(arena, char8, haystack_capacity);
+        u64 state = 0x9E3779B97F4A7C15ull;
+        u64 mismatches = 0;
+        for (u64 trial = 0; trial < 4000; trial += 1)
+        {
+            state = state * 6364136223846793005ull + 1442695040888963407ull;
+            u64 alphabet = 1 + ((state >> 33) % 3);
+            u64 needle_length = 32 + ((state >> 40) % 64);
+            u64 haystack_length = needle_length + ((state >> 48) % (haystack_capacity - needle_length + 1));
+            for (u64 index = 0; index < haystack_length; index += 1)
+            {
+                state = state * 6364136223846793005ull + 1442695040888963407ull;
+                haystack_bytes[index] = (char8)('a' + ((state >> 33) % alphabet));
+            }
+            state = state * 6364136223846793005ull + 1442695040888963407ull;
+            u64 source = (state >> 33) % (haystack_length - needle_length + 1);
+            for (u64 index = 0; index < needle_length; index += 1)
+            {
+                needle_bytes[index] = haystack_bytes[source + index];
+            }
+            if ((trial & 1) != 0)
+            {
+                state = state * 6364136223846793005ull + 1442695040888963407ull;
+                needle_bytes[(state >> 33) % needle_length] = (char8)('a' + ((state >> 40) % (alphabet + 1)));
+            }
+
+            String8 haystack = {.pointer = haystack_bytes, .length = haystack_length};
+            String8 needle = {.pointer = needle_bytes, .length = needle_length};
+            u64 expected = BUSTER_STRING_NO_MATCH;
+            for (u64 offset = 0; expected == BUSTER_STRING_NO_MATCH && offset + needle_length <= haystack_length; offset += 1)
+            {
+                if (string_equal(string_slice(haystack, offset, offset + needle_length), needle))
+                {
+                    expected = offset;
+                }
+            }
+            mismatches += string_first_sequence(haystack, needle) != expected;
+        }
+        BUSTER_TEST(arguments, mismatches == 0);
+
+        u64 long_length = 1 << 16;
+        char8* long_bytes = arena_allocate(arena, char8, long_length);
+        for (u64 index = 0; index < long_length; index += 1)
+        {
+            long_bytes[index] = 'a';
+        }
+        String8 long_haystack = {.pointer = long_bytes, .length = long_length};
+        char8* late_bytes = arena_allocate(arena, char8, long_length / 2);
+        for (u64 index = 0; index < long_length / 2; index += 1)
+        {
+            late_bytes[index] = 'a';
+        }
+        late_bytes[long_length / 2 - 1] = 'b';
+        String8 late_needle = {.pointer = late_bytes, .length = long_length / 2};
+        BUSTER_TEST(arguments, string_first_sequence(long_haystack, late_needle) == BUSTER_STRING_NO_MATCH);
+        long_bytes[long_length - 1] = 'b';
+        BUSTER_TEST(arguments, string_first_sequence(long_haystack, late_needle) == long_length / 2);
+        late_bytes[long_length / 2 - 1] = 'a';
+        BUSTER_TEST(arguments, string_first_sequence(long_haystack, late_needle) == 0);
+        late_bytes[4] = 0;
+        BUSTER_TEST(arguments, string_first_sequence(long_haystack, late_needle) == BUSTER_STRING_NO_MATCH);
+        long_bytes[100 + 4] = 0;
+        BUSTER_TEST(arguments, string_first_sequence(long_haystack, late_needle) == 100);
+    }
+
+    {
+        // Both sides of the switch retain first occurrence, byte-oriented
+        // matching and pointer-identity behavior for a complete prefix match.
+        char8 prefix_bytes[66], prefix_before[66], needle_bytes[33], needle_before[33];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(prefix_bytes); index += 1)
+        {
+            prefix_bytes[index] = (char8)(index % 33);
+        }
+        prefix_bytes[2] = prefix_bytes[35] = 0;
+        prefix_bytes[3] = prefix_bytes[36] = (char8)0x80;
+        prefix_bytes[4] = prefix_bytes[37] = (char8)0xff;
+        memcpy(needle_bytes, prefix_bytes, sizeof(needle_bytes));
+        memcpy(prefix_before, prefix_bytes, sizeof(prefix_before));
+        memcpy(needle_before, needle_bytes, sizeof(needle_before));
+        u64 lengths[] = {31, 32, 33};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(lengths); index += 1)
+        {
+            String8 haystack = {prefix_bytes, BUSTER_ARRAY_LENGTH(prefix_bytes)};
+            String8 needle = {needle_bytes, lengths[index]};
+            BUSTER_TEST(arguments, string_first_sequence(haystack, needle) == 0);
+            BUSTER_TEST(arguments, string_first_sequence(haystack, string_slice(haystack, 0, lengths[index])) == 0);
+            BUSTER_TEST(arguments, string_equal(haystack, (String8){prefix_before, BUSTER_ARRAY_LENGTH(prefix_before)}));
+            BUSTER_TEST(arguments, string_equal((String8){needle_bytes, BUSTER_ARRAY_LENGTH(needle_bytes)},
+                                               (String8){needle_before, BUSTER_ARRAY_LENGTH(needle_before)}));
+        }
+    }
+
+    if (os_get_environment_variable(S8("BUSTER_STRING_SEQUENCE_BENCH")).length)
+    {
+        UnitTestResult benchmark = string_test_sequence_benchmark(arguments);
+        result.succeeded_test_count += benchmark.succeeded_test_count;
+        result.test_count += benchmark.test_count;
     }
 
     return result;

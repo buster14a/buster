@@ -193,6 +193,8 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12,
+    // IMAGE_REL_ARM64_SECREL_HIGH12A: shifted ADD of TLS offset bits 12..23.
+    OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -214,6 +216,7 @@ BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKi
 // PE linker supplies it here after final placement is known.
 BUSTER_F_DECL bool object_aarch64_pe_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched);
 BUSTER_F_DECL bool object_aarch64_pe_tls_index_lo12_relocate(u32 word, u64 target, s64 addend, u32* patched);
+BUSTER_F_DECL bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind kind, u32 word, u64 offset, s64 addend, u32* patched);
 
 #define OBJECT_SECTION_UNDEFINED UINT32_MAX
 

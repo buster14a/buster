@@ -18,6 +18,7 @@ typedef enum JitError
     JIT_ERROR_SYMBOL_NOT_FOUND,
     JIT_ERROR_BINDING_KIND,
     JIT_ERROR_INVALID_BINDING,
+    JIT_ERROR_INIT_FINI_UNSUPPORTED,
     JIT_ERROR_COUNT,
 } JitError;
 
@@ -72,6 +73,9 @@ struct JitProgram
     JitError error;
 };
 
+// Nonempty initializer/finalizer arrays are refused before image allocation:
+// this API has no initialization/finalization execution protocol. Empty arrays
+// without relocations are inert placeholders and remain admitted.
 // The host process must permit JIT executable memory. Apple Silicon macOS code
 // starts in a nominal RWX MAP_JIT mapping and uses
 // pthread_jit_write_protect_np around construction; the call assumes write

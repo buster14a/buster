@@ -1,0 +1,1 @@
+FAIL: full DWARF range verification with required section GC; discarded-code zero-address ranges. Runtime lifecycle is a separate check. Strict full-DWARF acceptance for this target is unsupported under both tested linkers, not a PASS.
