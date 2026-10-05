@@ -38,6 +38,16 @@ Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
 `-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
 nothing per unit and leave `CompilerDriverResult.object` unset.
 
+The registered `compiler_diagnostic_tests` include a desktop flush-failure
+cleanup regression. It injects one refusal after the real staging write, checks
+source mapping and native handle balance, old-or-absent destination bytes and
+a private directory inventory, then reuses the same invocation successfully
+against an independent literal preprocessing result. Close and staging deletion
+remain native operations. Android and iOS skip this desktop observation path
+explicitly; the existing portable write-failure tests still run. This is
+controlled failure-path coverage, not a real disk-failure or crash-durability
+claim. Run `ide test --module=compiler_diagnostic_tests --verbose=1 --ci=1`.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
