@@ -147,6 +147,143 @@ account that holds only that sudo rule, with the CPU affinity above. Keep the
 tunnel credential in operator-managed storage, never in a request, the
 repository, a workspace or a log.
 
+## Refreshing an installation
+
+Every refresh follows the same order. It takes about a minute of downtime
+when the service is idle. Keep a log of each step with its timestamp.
+
+1. **Build first, change nothing.** In a fresh checkout of the merged
+   revision, as root, with the service still running and idle:
+
+   ```sh
+   clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+       -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o build/buster-bench-build
+   build/buster-bench-build bench_service capabilities
+   build/buster-bench-build bench_service self-test
+   build/buster-bench-build bench_service_broker self-test
+   clang -Isrc -DBUSTER_SINGLE_THREADED=1 -std=c11 -O2 -Wall -Wextra -Werror \
+       -fwrapv -fno-strict-aliasing -funsigned-char \
+       tools/throughput/throughput.c tools/throughput/shared.c -lm -o build/throughput
+   ```
+
+   The build driver must show a non-executable `GNU_STACK`, and the two gates
+   under `build/bench-service-tools/` must have no `INTERP` or `DYNAMIC`
+   program header. Stop if a self-test fails. The self-tests use temporary
+   directories and do not touch the installation.
+
+2. **Confirm idle, then stop.** No `buster-bench-<job>-*` unit is active and
+   nothing holds the lease (`grep ':<lease inode> ' /proc/locks` is empty).
+   Then `systemctl stop buster-bench.service buster-bench-systemd-broker.socket`.
+
+3. **Take the rollback copy** into a new operator-owned directory: every
+   `/usr/local/libexec/buster-bench-*`, the `recipes` directory, the runner
+   sudo rule and the whole queue directory. Hash it.
+
+4. **Install** each binary with `install -o root -g root -m 0755` to a
+   temporary name in the same directory, rename it into place and `cmp` it
+   with the build output:
+
+   | Build output | Installed name |
+   | --- | --- |
+   | `build/bench-service-tools/service` | `buster-bench-service` |
+   | `build/bench-service-tools/systemd-broker` | `buster-bench-systemd-broker` |
+   | `build/bench-service-tools/credential-gate` | `buster-bench-credential-gate` |
+   | `build/bench-service-tools/broker-entry-gate` | `buster-bench-broker-entry-gate` |
+   | `build/buster-bench-build` | `buster-bench-build` |
+   | `build/throughput` | `buster-bench-throughput` |
+
+   Compare the installed unit and tmpfiles definitions with
+   `tools/bench_service/deploy/`; reinstall and `daemon-reload` only if they
+   differ. Install every file under `tools/bench_service/profiles/` into the
+   `recipes` directory as `root:buster-bench` mode 0440, restoring the
+   directory to 0550 afterwards.
+
+5. **Re-pin the runner sudo rule.** It names the service binary by SHA-256.
+   Replace the old digest with the new one in a copy, check the copy with
+   `visudo -c -f`, then rename it into place and run `visudo -c`. A stale
+   digest silently breaks the Actions dispatch path.
+
+6. **Start** the broker socket, then the service. Check `gateway
+   capabilities`, and read back one old finished job with `gateway result` to
+   confirm the journal replays.
+
+7. **Prove the old path first.** Run one `validate-buster-v1` job on two
+   revisions that are already installed before submitting anything new.
+
+## Recovering a held attempt
+
+A job that cannot start, or whose cleanup cannot be proven, is not guessed
+away. It stays in `preparing` (or a later active phase) with a failure reason
+such as `cleanup-failed` or `worker-mismatch`, `result-bound=0`, and the
+service keeps the lease. Every later request is refused. This is deliberate,
+and it needs an operator.
+
+First find out why and fix that, or the next job will do the same. The
+broker's `BQ-BROKER-DIAG-V1 REQUEST` journal line shows which of
+`state_valid`, `signal_valid` and `command_valid` failed; no broker line at
+all means the service refused before asking.
+
+Then, for job `J` and attempt token `T`:
+
+1. **Record, changing nothing.** The outer unit `buster-bench-J-T.service`
+   and its stage units must be absent or failed, with no process and no
+   cgroup left. Hash the journal, `attempt-J`, `failure-J`, `worker-J` and
+   the files in the result directory. If any job process is still alive,
+   stop here: this procedure does not prove cleanup.
+2. **Stop** the service and the broker socket. Nothing may hold the lease
+   afterwards, and the hashed files must be unchanged.
+3. **Reconcile under the lease**, as the service account:
+
+   ```sh
+   sudo -u buster-bench -g buster-bench \
+       flock -n -E 75 /var/lib/buster-bench/lease/host.lock \
+       /usr/local/libexec/buster-bench-service workspace-reconcile \
+       /var/lib/buster-bench/queue /var/lib/buster-bench/workspaces J T
+   ```
+
+   It must exit 0 and print the job as `phase=finished outcome=interrupted`.
+   Only the journal may have changed; the failure record and the unbound
+   result files stay as evidence.
+4. **Reset** each failed `buster-bench-*` unit after saving its journal.
+5. **Start** the socket and the service, read the job back, and confirm the
+   lease is unheld.
+
+## Program store maintenance
+
+`queue/native-blobs` holds at most 128 entries for its lifetime, counting
+unfinished uploads (`<digest>.part`) and interrupted publications
+(`.<digest>`). Nothing removes entries automatically. With the service
+stopped, an operator may remove whole bundle directories and stale partial
+files; a removed program is simply uploaded again. Never remove an entry
+that a queued job names.
+
+A bundle sealed by a revision older than the group-readable store (owner-only
+mode 0500) cannot be read by the broker and must be removed and uploaded
+again.
+
+## Repeating the quiet-phase check
+
+After a refresh that touches the transport or the worker, repeat the check
+that #437 accepts. Run the load from a unit pinned away from the job CPU.
+
+1. Submit one `validate-buster-v1` job and wait until its outer unit is
+   active. Record the outer unit's main PID and invocation, the lease holder,
+   the service unit's `CPUUsageNSec` and the journal size.
+2. While it runs, issue 100 submit attempts and 1,000 status or log requests
+   as the service account, many at a time. Use the running job's own key for
+   most submits, so that a retry that reaches the backlog creates nothing,
+   and a few distinct cheap native submissions.
+3. Record the same facts again while the job is still active.
+4. After the job finishes, resubmit the distinct submissions with their
+   original keys and wait for them.
+
+It passes when every request during the job failed as `busy` or
+`io-uncertain` within the client bound, the recorded PID, invocation and
+lease holder are identical, the journal did not grow during the burst, the
+service's CPU time moved by no more than a few milliseconds, the job
+succeeded, and the only new jobs are the distinct submissions, finished
+after the first job's manifest was written.
+
 ## Acceptance receipts for #437
 
 Record on the issue, with the installed revision and the three digests:
@@ -159,9 +296,8 @@ Record on the issue, with the installed revision and the three digests:
    job and a `native-runtime-v1` job on the same manifest digest, and the
    archive fetched with `bench_artifact_receipt` and `bench_artifact_read`
    whose SHA-256 equals the receipt's `archive_sha256`.
-3. The amended quiet-phase test: while a job runs, 100 submit attempts and
-   1,000 status/log requests time out, the job's process tree and lease are
-   unchanged, and queued work starts only after cleanup.
+3. The amended quiet-phase test, as described under
+   [Repeating the quiet-phase check](#repeating-the-quiet-phase-check).
 4. The effective containment of a native stage unit as the manager reports
    it, and an empty process tree after the job.
 

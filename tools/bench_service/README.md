@@ -10,6 +10,9 @@ commands remain fixed. [Native execution](NATIVE_EXECUTION.md) adds private
 immutable program upload and one contained static-program recipe (#2648).
 Installed recipes require their reviewed operator-installed profiles and
 helpers before execution is available.
+[Native runtime sampling](NATIVE_RUNTIME.md) is a second recipe over the same
+upload. **To use an installed service, start with [USING.md](USING.md);** this
+file is the contract reference.
 This does not change server configuration, measure performance or qualify a
 9700X.
 Do not close #437 or accept compiler performance changes because these tests

@@ -4,18 +4,21 @@
 program through the existing contained single-job worker. The uploaded file may
 be a user-authored assembly microkernel or a prebuilt program. It is immutable
 input to a fixed recipe; it cannot supply a host command, environment, path,
-systemd property or timeout. This first slice has no arguments, archive inputs,
-dynamic dependencies, compilation, timing samples or benchmark verdict. Those
-capabilities remain unavailable. Exit zero is execution success, not a
-correctness oracle for the user's program.
+systemd property or timeout. It has no arguments, archive inputs, dynamic
+dependencies, compilation or benchmark verdict. Timing samples are the
+separate [`native-runtime-v1`](NATIVE_RUNTIME.md) recipe over the same upload.
+Exit zero is execution success, not a correctness oracle for the user's
+program. [USING.md](USING.md) is the step-by-step guide.
 
 This source change does not install or qualify a host. An installation must
 upgrade the service, broker and static credential gate together, retain the
-existing approved identities/sandbox/lease policy, and install the exact
-`BQ_NATIVE_PROFILE` bytes from `native_profile.h` as
-`/opt/buster-bench/installed/recipes/native-execute-v1.recipe` with the same
-root-owned read-only policy as the existing recipes. The source tests do not
-prove that benchpress has this installation or that its quiet window is valid.
+existing approved identities/sandbox/lease policy, and install
+`profiles/native-execute-v1.recipe`, which is byte-identical to
+`BQ_NATIVE_PROFILE` in `native_profile.h`, into
+`/opt/buster-bench/installed/recipes/` with the same root-owned read-only
+policy as the existing recipes. [deploy/SAME_HOST_MCP.md](deploy/SAME_HOST_MCP.md)
+has the procedure. The source tests do not prove that a host has this
+installation or that its quiet window is valid.
 
 ## Private upload and submission
 
@@ -141,6 +144,23 @@ forbidden selectors/identities/runtime properties, and exact cleanup names.
 
 The disposable execution fixture uses the local test identity and
 no-new-privileges. It does not substitute for an installed systemd/candidate
-account witness. On-host admission still requires the existing approved service
+account witness.
+
+Three things an installation has and the fixtures do not, each of which hid
+a defect until a job ran on a real host:
+
+- **The broker is root without capabilities, in the service group.** It can
+  read only what the group may read. Fixtures run the broker's checks as the
+  owner of every file.
+- **The candidate account may search the attempt ancestry but not list it.**
+  Code that runs as the candidate must open path components as path
+  references. `bq_test_native_search_only_ancestry` reproduces this with
+  owner-search-only parents.
+- **The production start path uses compiled paths and no test backend.**
+  Nothing in the suite reaches it, so a recipe must be recognized there
+  through the registry, never through a second list.
+
+A change to the store's modes, to code the candidate account runs, or to
+`bq_worker_run`'s production branch needs an installed job as its witness. On-host admission still requires the existing approved service
 installation and containment/cleanup evidence, followed by a bounded native
 fixture proving its transcript, final outcome and export under that installation.
