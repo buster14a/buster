@@ -608,6 +608,270 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_parenthesized_operand(Unit
     return result;
 }
 
+
+// The fixed target layouts all use four-byte int and eight-byte pointers.
+// These are independent values, not results learned from another sizeof path.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestEnumSizeofExpression CTestEnumSizeofExpression;
+    struct CTestEnumSizeofExpression
+    {
+        String8 source;
+        u64 value;
+    };
+    CTestEnumSizeofExpression accepted[] = {
+        {S8("enum { QUERY = sizeof(\"prefix\") - 1 };"), 6},
+        {S8("enum { QUERY = sizeof('a') };"), 4},
+        {S8("enum { QUERY = sizeof(1) };"), 4},
+        {S8("struct S { int m; }; enum { QUERY = sizeof(((struct S *)0)->m) };"), 4},
+        {S8("struct S { int m; } gs; enum { QUERY = sizeof(gs.m + 0) };"), 4},
+        {S8("struct S { int m; } gs; enum { A = sizeof(\"prefix\") - 1, B = sizeof('a'), C = sizeof(1), "
+            "D = sizeof(((struct S *)0)->m), E = sizeof(gs.m + 0), QUERY = A + B + C + D + E };"), 22},
+        {S8("enum { QUERY = sizeof(\"pre\" \"fix\") - 1 };"), 6},
+        {S8("enum { QUERY = sizeof((1)) };"), 4},
+        {S8("enum { QUERY = sizeof 1 };"), 4},
+        {S8("enum { PRIOR = 3, QUERY = sizeof(PRIOR + 0) };"), 4},
+        {S8("int tick(void); enum { QUERY = sizeof(tick()) };"), 4},
+        {S8("struct S { int m; } gs; enum { QUERY = sizeof(gs.m++) };"), 4},
+        {S8("struct S { int m; } gs; enum { QUERY = sizeof(&gs.m) };"), 8},
+        {S8("enum { QUERY = sizeof(1.0f) };"), 4},
+        {S8("enum { QUERY = sizeof(1.0) };"), 8},
+        {S8("struct S { _Alignas(16) char m; }; enum { QUERY = sizeof(*(struct S *)0) };"), 16},
+        {S8("int (*p)(void); enum { QUERY = sizeof(0 ? p : p) };"), 8},
+        {S8("static int table[3]; enum { QUERY = sizeof(table) / sizeof((table)[0]) };"), 3},
+    };
+    typedef struct CTestEnumSizeofRefusal CTestEnumSizeofRefusal;
+    struct CTestEnumSizeofRefusal
+    {
+        String8 source;
+        u32 line;
+        u32 column;
+    };
+    CTestEnumSizeofRefusal rejected[] = {
+        {S8("struct Incomplete;\nenum { BAD = sizeof(*(struct Incomplete *)0) };\n"), 2, 8},
+        {S8("int value;\nenum { BAD = sizeof(missing + 0) };\n"), 2, 8},
+        {S8("enum { OLDER = 1 };\nenum { BAD = sizeof(LATER + 0), LATER = 3 };\n"), 2, 8},
+        {S8("int bad(int n) {\n enum { BAD = sizeof(int[n]) };\n return 0; }\n"), 2, 9},
+        {S8("int declared(void);\nenum { BAD = sizeof(int(void)) };\n"), 2, 8},
+        {S8("int (*p)(void);\nenum { BAD = sizeof(*(0 ? p : p)) };\n"), 2, 8},
+        {S8("int declared(void);\nenum { BAD = sizeof(sizeof(int(void))) };\n"), 2, 8},
+        {S8("int (*p)(void);\nenum { BAD = sizeof(sizeof(*(0 ? p : p))) };\n"), 2, 8},
+    };
+    Target targets[6] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        targets[target_index].cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[target_index].os = target_index < 2 ? OPERATING_SYSTEM_LINUX
+                               : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(accepted); fixture += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Target target = targets[target_index];
+                    String8 source = string_format(temporary.arena, S8("{S8}\nint probe(void) {{ return QUERY; }}\n"), accepted[fixture].source);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect]});
+                    CParseResult parsed = c_parse(temporary.arena, tokens);
+                    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                    BUSTER_TEST_RAW(arguments, parsed.diagnostic_count == 0, source);
+                    if (!parsed.diagnostic_count)
+                    {
+                        bool found = false;
+                        for (u32 member_index = 0; member_index < parsed.enum_member_count; member_index += 1)
+                        {
+                            CEnumMember const* member = parsed.enum_members + member_index;
+                            if (string_equal(member->name, S8("QUERY")))
+                            {
+                                found = true;
+                                BUSTER_TEST_RAW(arguments, !member->is_negative && member->value == accepted[fixture].value, source);
+                            }
+                        }
+                        BUSTER_TEST(arguments, found);
+                    }
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-sizeof-expression.c"), tokens, parsed, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, source);
+                    if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                    scratch_end(temporary);
+                }
+                for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(rejected); fixture += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Target target = targets[target_index];
+                    CTestEnumSizeofRefusal test = rejected[fixture];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, test.source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect]});
+                    CParseResult parsed = c_parse(temporary.arena, tokens);
+                    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                    BUSTER_TEST_RAW(arguments, parsed.diagnostic_count == 1, test.source);
+                    if (parsed.diagnostic_count == 1)
+                    {
+                        BUSTER_TEST(arguments, parsed.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_CONSTEXPR);
+                        BUSTER_STRING_TEST(arguments, parsed.diagnostics[0].message, S8("enumerator 'BAD' is not an integer constant expression"));
+                        BUSTER_TEST(arguments, parsed.diagnostics[0].location.line == test.line);
+                        BUSTER_TEST(arguments, parsed.diagnostics[0].location.column == test.column);
+                    }
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-sizeof-refusal.c"), tokens, parsed, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, lowered.program == 0);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "struct S { int m; } gs;\n"
+        "static unsigned hits;\n"
+        "static int tick(void) { hits += 1; return 17; }\n"
+        "struct Aligned { _Alignas(16) char m; };\n"
+        "enum { LEN = sizeof(\"prefix\") - 1, CHAR_SIZE = sizeof('a'), NUMBER_SIZE = sizeof(1),\n"
+        " MEMBER_SIZE = sizeof(((struct S *)0)->m), ARITHMETIC_SIZE = sizeof(gs.m + 0),\n"
+        " PRIOR = 3, PENDING_SIZE = sizeof(PRIOR + 0), CALL_SIZE = sizeof(tick()),\n"
+        " UPDATE_SIZE = sizeof(gs.m++), ADDRESS_SIZE = sizeof(&gs.m),\n"
+        " SINGLE_SIZE = sizeof(1.0f), DOUBLE_SIZE = sizeof(1.0),\n"
+        " GROUP_SIZE = sizeof((1)), CONCAT_LEN = sizeof(\"pre\" \"fix\") - 1,\n"
+        " ALIGNED_SIZE = sizeof(*(struct Aligned *)0) };\n"
+        "_Static_assert(LEN == 6 && CHAR_SIZE == 4 && NUMBER_SIZE == 4 && MEMBER_SIZE == 4 && ARITHMETIC_SIZE == 4, \"original operands\");\n"
+        "static volatile unsigned observed[] = { LEN, CHAR_SIZE, NUMBER_SIZE, MEMBER_SIZE, ARITHMETIC_SIZE,\n"
+        " PENDING_SIZE, CALL_SIZE, UPDATE_SIZE, ADDRESS_SIZE, SINGLE_SIZE, DOUBLE_SIZE, GROUP_SIZE, CONCAT_LEN, ALIGNED_SIZE };\n"
+        "int main(void) {\n"
+        " unsigned ordinary = sizeof(tick()) + sizeof(gs.m++);\n"
+        " return observed[0] != 6 || observed[1] != 4 || observed[2] != 4 || observed[3] != 4 || observed[4] != 4 ||\n"
+        " observed[5] != 4 || observed[6] != 4 || observed[7] != 4 || observed[8] != 8 || observed[9] != 4 ||\n"
+        " observed[10] != 8 || observed[11] != 4 || observed[12] != 6 || observed[13] != 16 ||\n"
+        " ordinary != 8 || hits != 0 || gs.m != 0;\n"
+        "}\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("enum-sizeof-expression"), S8(".c"));
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    u64 process_timeout = 30000000;
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        FileReadResult readback = file_read_checked(arguments->arena, source, (FileReadOptions){0});
+        BUSTER_TEST(arguments, readback.status == OS_FILE_READ_OK && readback.error.v == 0);
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, readback.bytes), source_text);
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-sizeof-expression-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
+                                         S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation =
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("enum sizeof {S8} {S8} {S8}: {S8}"),
+                            dialects[dialect], modes[mode], frontends[form], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, process_timeout);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                !execution.process_group_ownership_lost,
+                                string_format(temporary.arena, S8("enum sizeof runtime {S8} {S8} {S8}: status={u32} timeout={u32}"),
+                                    dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if BUSTER_LINUX
+        String8 references[] = {S8("gcc"), S8("clang")};
+        String8 optimizations[] = {S8("-O0"), S8("-O2")};
+        u64 diagnostic_limit = BUSTER_KB(64);
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-sizeof-reference-run"), S8(".exe"));
+                    if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                    {
+                        String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"),
+                                             S8("-nostdinc"), S8("-o"), output, source};
+                        ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                  .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                                  .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = diagnostic_limit,
+                                                                                  [STANDARD_STREAM_ERROR] = diagnostic_limit},
+                                                                     .total = diagnostic_limit * 2},
+                                                  .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+                        if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                        {
+                            ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, process_timeout);
+                            String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                            bool built = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS &&
+                                !compilation.capture_failed && !compilation.output_truncated && !compilation.capture_limit_exceeded &&
+                                !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
+                                !compilation.process_group_ownership_lost;
+                            BUSTER_TEST_RAW(arguments, built,
+                                string_format(temporary.arena, S8("enum sizeof oracle {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
+                                    compiler, dialects[dialect], optimizations[optimization], compilation.platform_status,
+                                    (u32)compilation.timed_out, string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                            if (built)
+                            {
+                                String8 run[] = {output};
+                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                    (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                                {
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, process_timeout);
+                                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                        !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                        !execution.process_group_ownership_lost,
+                                        string_format(temporary.arena, S8("enum sizeof oracle run {S8} {S8} {S8}: status={u32} timeout={u32}"),
+                                            compiler, dialects[dialect], optimizations[optimization],
+                                            execution.platform_status, (u32)execution.timed_out));
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                    scratch_end(temporary);
+                }
+            }
+        }
+#endif
+    }
+    BUSTER_TEST(arguments, os_file_delete(source));
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -38590,6 +38854,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successor_limits);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);

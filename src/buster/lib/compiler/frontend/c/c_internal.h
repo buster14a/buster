@@ -1269,6 +1269,8 @@ struct CTypeParseMachine
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool type_identity_queries_active;
+    // Only the private fallback for failed ENUM sizeof expression leaves.
+    bool enum_sizeof_expression_query;
     // How many GNU `_Alignof(object)` evaluations of an object's alignment
     // records enclose this one, and whether one of them hit
     // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_parse_alignof_object_alignment.
