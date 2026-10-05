@@ -37085,6 +37085,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("array ? 3 : 4"), 3}, {S8("!array"), 0}, {S8("!callee"), 0},
         {S8("(_Bool)zero"), 0}, {S8("(_Bool)nonzero"), 1}, {S8("(_Bool)array"), 1},
         {S8("zero + 1"), 1}, {S8("nonzero != 0"), 1},
+        {S8("exact_object"), 29}, {S8("*(const int *)&exact_object"), 29},
+        {S8("((const int *)&exact_object)[0]"), 29}, {S8("*(ConstInt *)&exact_object"), 29},
+        {S8("aligned_object"), 31}, {S8("*(const int *)&aligned_object"), 31},
         {S8("null_object == 0"), 1}, {S8("address_object == &object"), 1},
         {S8("array && 1"), 1}, {S8("array || 0"), 1},
         {S8("(1 ? -1 : wide_input > 0) > 0"), 0},
@@ -37110,11 +37113,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("*(const int *volatile *)&null_object"), 0}, {S8("*(const int *_Atomic *)&null_object"), 0},
         {S8("!effect()"), 0}, {S8("effect() ? 7 : 9"), 0},
         {S8("0 ? effect() : 7"), 1}, {S8("!zero"), 1}, {S8("!array"), 1},
+        // A whole-object initializer cannot certify a different access or
+        // byte offset. These conservative queries must not perform the read.
+        {S8("((const int *)&wide_object)[0]"), 0}, {S8("((const int *)&wide_object)[1]"), 0},
+        {S8("*(const short *)&wide_object"), 0}, {S8("*(const unsigned long long *)&wide_object"), 0},
+        {S8("*(const int *)&record_object.bits"), 0}, {S8("((const int *)&exact_object)[1]"), 0},
+        {S8("*(const int *)&float_object"), 0},
+        {S8("*(const long *)&wide_object"), 0},
     };
     enum { CONSTANT_COUNT = BUSTER_ARRAY_LENGTH(constants), PREDICATE_COUNT = BUSTER_ARRAY_LENGTH(predicates) };
     TemporalArena sources = scratch_begin(&arguments->arena, 1);
     String8 definitions[CONSTANT_COUNT + PREDICATE_COUNT + 1];
     definitions[0] = S8("static const int zero = 0, nonzero = -7;\n"
+        "static const int exact_object = 29; typedef const int ConstInt;\n"
+        "static const long long wide_object = 0x1122334455667788LL;\n"
+        "typedef int AlignedInt __attribute__((aligned(16))); static const AlignedInt aligned_object = 31;\n"
+        "static const float float_object = 1.25f;\n"
+        "struct ReadOnlyRecord { long long bits; int tail; };\n"
+        "static const struct ReadOnlyRecord record_object = {0x1122334455667788LL, 19};\n"
         "static const double fzero = -0.0, fraction = 0.25;\n"
         // Binary128 scalar storage initialization is still refused. Exercise
         // its literal truth here and pin that refusal separately below.
@@ -37312,6 +37328,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         S8("static int *const u = 0; static int bad = !*(int *volatile *)&u;"),
         S8("struct S { int x; }; static struct S u; static int bad = !u;"),
         S8("struct S { int x; }; static struct S u; static int bad = u ? 3 : 4;"),
+        S8("static const long long k = 0x1122334455667788LL; static int bad = ((const int *)&k)[0];"),
+        S8("static const long long k = 0x1122334455667788LL; static int bad = ((const int *)&k)[1];"),
+        S8("static const long long k = 0x1122334455667788LL; static int bad = *(const short *)&k;"),
+        S8("static const long long k = 0x1122334455667788LL; static unsigned long long bad = *(const unsigned long long *)&k;"),
+        S8("struct S { long long bits; int tail; }; static const struct S k = {0x1122334455667788LL, 19}; static int bad = *(const int *)&k.bits;"),
+        S8("static const int k = 29; static int bad = ((const int *)&k)[1];"),
+        S8("static const float k = 1.25f; static int bad = *(const int *)&k;"),
+        S8("static const long long k = 29; static long bad = *(const long *)&k;"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
@@ -37326,6 +37350,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST(arguments, !tokens.diagnostic_count);
             BUSTER_TEST_RAW(arguments, parsed.diagnostic_count + lowered.diagnostic_count != 0, invalid[index]);
+            BUSTER_TEST_RAW(arguments, !lowered.canonical_ir_certified, invalid[index]);
             scratch_end(temporary);
         }
     }
