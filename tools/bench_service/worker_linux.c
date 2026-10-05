@@ -3982,9 +3982,9 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                           !strcmp(lease_path, "/var/lib/buster-bench/lease/host.lock"));
         if (!canonical || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
             token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) ||
-            (strcmp(finalization.recipe.name, "validate-buster-v1") &&
-             strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) &&
-             strcmp(finalization.recipe.name, BQ_NATIVE_RECIPE)) ||
+            /* Ask the registry, not a second list: a served recipe missing here
+             * is admitted, materialized and then quarantined at this point. */
+            !bq_recipe_service(bq_recipe_from_name(string_from_pointer(finalization.recipe.name))) ||
             !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
             !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
         {
