@@ -348,6 +348,12 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   the one in the instruction's IR literal (`codegen_assembly_durable_name`).
   Labels are refused inside a template rather than defined, because a template
   is emitted once per instruction rather than once per file.
+- String-literal records retain source module/function/instruction ordinals and
+  use lower-bound lookup. Function collection carries those ordinals without
+  relational comparisons across unrelated allocations; import-first function
+  numbering remains separate. `compiler_driver_test_wasm_string_records` covers
+  distinct module allocations, repeated/distinct literals, deterministic
+  Wasm32/Memory64 bytes and logarithmically bounded record probes.
 - Both WebAssembly C layouts use sixteen-byte, sixteen-byte-aligned IEEE
   binary128 `long double`, including Memory64. Layout queries and the
   `__SIZEOF_LONG_DOUBLE__` / `__LDBL_*` predefines retain that ABI independently
