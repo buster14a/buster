@@ -50,6 +50,11 @@
   `ui_core` module and an inert native renderer boundary. It is included in
   `test_all` and `test_units` when tests and libc are enabled, without adding UI
   dependencies or a descriptor to `ide`; see [graphics/UI](../projects/graphics-ui.md).
+- The desktop `test_ui_scale` component target (`ui_scale_component_test.c`)
+  counts keyed-box lookup probes and focus-navigation work against the
+  production `ui_core` and an inert renderer, with behavior controls for the box
+  table. It is part of `test_all` and `test_units` when tests and libc are
+  enabled; see [graphics/UI](../projects/graphics-ui.md).
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.

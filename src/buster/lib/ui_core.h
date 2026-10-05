@@ -347,6 +347,9 @@ struct UI_Box
     // persistent hash links
     UI_Box* hash_next;
     UI_Box* hash_prev;
+    // Key-lookup index chain. Unlike hash_next/hash_prev, which define the
+    // active-list order, this link only serves ui_box_from_key.
+    UI_Box* index_next;
 
     // per-build tree links
     UI_Box* first;
@@ -616,8 +619,16 @@ struct UI_State
     // tree has been constructed.
     UI_Box* previous_root;
     UI_Box* first_free_box;
+    // Fixed-size ordering table: it defines the active list's slot/chain order
+    // and gives O(1) append/remove, but is never searched by key.
     u64 box_table_size;
     UI_BoxHashSlot* box_table;
+    // Key-lookup index: a power-of-two array of chain heads that doubles
+    // whenever the keyed population exceeds its size, so chains stay short at
+    // any scale. box_index_shift is 64 - log2(box_index_size).
+    u64 box_index_size;
+    u64 box_index_shift;
+    UI_Box** box_index;
     // Dense view of the keyed boxes in the last completed build.  It keeps
     // the hash table's slot/chain order, but lets frame-wide passes skip the
     // empty slots and lets pre-build event routing use the preceding frame.
@@ -625,6 +636,12 @@ struct UI_State
     u64 active_box_count;
     u64 active_box_capacity;
     u64 box_count;
+    // Work counters for scalability regressions. They only ever increase and
+    // cost one add per inspected chain node or rehashed box.
+    u64 box_key_lookups;
+    u64 box_key_probes;
+    u64 box_index_grows;
+    u64 box_index_moves;
     UI_DrawCommand* draw_commands;
     u64 draw_command_count;
     u64 draw_command_capacity;

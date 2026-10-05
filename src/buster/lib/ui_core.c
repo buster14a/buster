@@ -7,6 +7,14 @@
 
 BUSTER_V_IMPL UI_State* ui_state;
 
+// The key-lookup index starts at 4096 chain heads and doubles whenever the
+// keyed box count exceeds its size, keeping the average chain at or below one
+// box. Keys are multiplied by an odd constant and the top bits select the
+// chain, so keys that agree in their low bits still spread out.
+#define UI_BOX_INDEX_INITIAL_SIZE_LOG2 12u
+#define UI_BOX_INDEX_INITIAL_SIZE (1ull << UI_BOX_INDEX_INITIAL_SIZE_LOG2)
+#define UI_BOX_INDEX_MULTIPLIER 0x9e3779b97f4a7c15ull
+
 BUSTER_GLOBAL_LOCAL void ui_prune_focus_keys(void);
 BUSTER_GLOBAL_LOCAL bool ui_box_is_current(UI_Box* box);
 BUSTER_GLOBAL_LOCAL void ui_prune_active_keys(void);
@@ -762,6 +770,9 @@ UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* w
     state->rendering_window = window;
     state->box_table_size = 4096;
     state->box_table = arena_allocate(arena, UI_BoxHashSlot, state->box_table_size);
+    state->box_index_size = UI_BOX_INDEX_INITIAL_SIZE;
+    state->box_index_shift = 64 - UI_BOX_INDEX_INITIAL_SIZE_LOG2;
+    state->box_index = arena_allocate_zeroed(arena, UI_Box*, state->box_index_size);
     state->active_box_capacity = state->box_table_size;
     state->active_boxes = arena_allocate(arena, UI_Box*, state->active_box_capacity);
 
@@ -827,14 +838,20 @@ BUSTER_GLOBAL_LOCAL u64 ui_box_slot_from_key(UI_Key key)
     return key.value & (ui_state->box_table_size - 1);
 }
 
+BUSTER_GLOBAL_LOCAL u64 ui_box_index_slot_from_key(UI_Key key)
+{
+    return (key.value * UI_BOX_INDEX_MULTIPLIER) >> ui_state->box_index_shift;
+}
+
 UI_Box* ui_box_from_key(UI_Key key)
 {
     UI_Box* result = 0;
     if (!ui_key_match(key, ui_key_zero()))
     {
-        u64 slot_index = ui_box_slot_from_key(key);
-        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        ui_state->box_key_lookups += 1;
+        for (UI_Box* box = ui_state->box_index[ui_box_index_slot_from_key(key)]; box; box = box->index_next)
         {
+            ui_state->box_key_probes += 1;
             if (ui_key_match(box->key, key))
             {
                 result = box;
@@ -843,6 +860,41 @@ UI_Box* ui_box_from_key(UI_Key key)
         }
     }
     return result;
+}
+
+// Doubles the lookup index until it covers the keyed population and rehashes
+// the present boxes into it. Box addresses and the ordering table are not
+// touched, so neither stable identity nor the active-list order can change.
+// The superseded array stays in the state arena; doubling bounds the waste to
+// the final array's size.
+BUSTER_GLOBAL_LOCAL void ui_box_index_grow(void)
+{
+    UI_Box** old_index = ui_state->box_index;
+    u64 old_size = ui_state->box_index_size;
+    u64 size = old_size;
+    u64 shift = ui_state->box_index_shift;
+    while (size < ui_state->box_count)
+    {
+        BUSTER_CHECK(shift > 1);
+        size *= 2;
+        shift -= 1;
+    }
+    UI_Box** index = arena_allocate_zeroed(ui_state->arena, UI_Box*, size);
+    ui_state->box_index = index;
+    ui_state->box_index_size = size;
+    ui_state->box_index_shift = shift;
+    ui_state->box_index_grows += 1;
+    for (u64 slot = 0; slot < old_size; slot += 1)
+    {
+        for (UI_Box *box = old_index[slot], *next = 0; box; box = next)
+        {
+            next = box->index_next;
+            u64 new_slot = ui_box_index_slot_from_key(box->key);
+            box->index_next = index[new_slot];
+            index[new_slot] = box;
+            ui_state->box_index_moves += 1;
+        }
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void ui_box_hash_push(UI_Box* box)
@@ -861,6 +913,13 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_push(UI_Box* box)
     }
     BUSTER_CHECK(ui_state->box_count != UINT64_MAX);
     ui_state->box_count += 1;
+    if (ui_state->box_count > ui_state->box_index_size)
+    {
+        ui_box_index_grow();
+    }
+    u64 index_slot = ui_box_index_slot_from_key(box->key);
+    box->index_next = ui_state->box_index[index_slot];
+    ui_state->box_index[index_slot] = box;
 }
 
 BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
@@ -884,6 +943,14 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
     }
     box->hash_next = 0;
     box->hash_prev = 0;
+    UI_Box** link = &ui_state->box_index[ui_box_index_slot_from_key(box->key)];
+    while (*link && *link != box)
+    {
+        link = &(*link)->index_next;
+    }
+    BUSTER_CHECK(*link == box);
+    *link = box->index_next;
+    box->index_next = 0;
     BUSTER_CHECK(ui_state->box_count != 0);
     ui_state->box_count -= 1;
 }
@@ -961,6 +1028,7 @@ UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key)
 
     UI_Box* hash_next = (box_is_new && key_is_zero) ? 0 : box->hash_next;
     UI_Box* hash_prev = (box_is_new && key_is_zero) ? 0 : box->hash_prev;
+    UI_Box* index_next = (box_is_new && key_is_zero) ? 0 : box->index_next;
     UI_Key old_key = box_is_new ? key : box->key;
     u64 first_touched = box_is_new ? ui_state->build_index : (box->first_touched_build_index ? box->first_touched_build_index : ui_state->build_index);
     f32 hot_t = box_is_new ? 0.0f : box->hot_t;
@@ -978,6 +1046,7 @@ UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key)
 
     box->hash_next = hash_next;
     box->hash_prev = hash_prev;
+    box->index_next = index_next;
     box->key = key_is_zero ? ui_key_zero() : old_key;
     box->first_touched_build_index = first_touched;
     box->last_touched_build_index = ui_state->build_index;

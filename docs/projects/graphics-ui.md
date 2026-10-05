@@ -43,6 +43,16 @@ the compiler has no added UI, window, or rendering dependency. The retained
 `ui_test.c` suite is not registered by this target, and these headless checks do
 not establish device rendering or a supported graphical application.
 
+`./build.sh build --config Release -t test_ui_scale` runs a headless component
+that counts `ui_core` work instead of timing it. Keyed-box lookup goes through a
+power-of-two index that doubles whenever the keyed population exceeds its size,
+so chains stay short at any scale (`UI_State.box_key_probes` per
+`box_key_lookups`). The fixed 4096-slot box table remains only as the ordering
+structure behind the dense active list, so that list's order does not change
+when the index grows. The target also checks box identity, duplicate and zero
+keys, pruning and free-list reuse, and the active-list order across growth.
+Desktop `test_all` and `test_units` include it when tests and libc are enabled.
+
 Create a feature issue for a concrete application workflow or component behavior,
 not a speculative checklist claiming that a future editor/viewer already exists.
 
