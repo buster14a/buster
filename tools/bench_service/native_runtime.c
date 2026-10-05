@@ -8,6 +8,9 @@
 #include <math.h>
 #include <inttypes.h>
 #include <limits.h>
+/* Every consumer of the row validator is Linux-only; compiling it elsewhere
+ * leaves an unused internal function under -Werror. */
+#ifdef __linux__
 #define TP_MEDIAN_ONLY 1
 #include "../throughput/stats.h"
 #undef TP_MEDIAN_ONLY
@@ -71,7 +74,6 @@ BUSTER_GLOBAL_LOCAL bool bq_native_runtime_records(char const* bytes, u32 length
     return ok;
 }
 
-#ifdef __linux__
 #define TP_PROCESS_DESCRIPTOR_ONLY 1
 #include "../throughput/platform.h"
 #undef TP_PROCESS_DESCRIPTOR_ONLY

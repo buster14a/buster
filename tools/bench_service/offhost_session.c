@@ -35,6 +35,9 @@ typedef struct BqOffhostIdentity
     u64 token;
 } BqOffhostIdentity;
 
+/* The codec has only Linux consumers; elsewhere it would be unused internal
+ * functions under -Werror. The types above stay visible to shared structs. */
+#ifdef __linux__
 BUSTER_GLOBAL_LOCAL void bq_session_packet(BqSessionPacket* packet, u32 operation, BqError error,
                                            BqOffhostIdentity const* identity, void const* body, u32 size)
 {
@@ -84,7 +87,6 @@ BUSTER_GLOBAL_LOCAL BqOffhostIdentity bq_session_identity(BqSessionPacket const*
     return identity;
 }
 
-#ifdef __linux__
 BUSTER_GLOBAL_LOCAL BqError bq_offhost_record(BqQueue* queue, char const* name, void const* bytes, u32 size)
 {
     BqError error = !name || !size || size > BQ_SESSION_BODY || queue->poisoned ? BQ_BAD_REQUEST : BQ_OK;
