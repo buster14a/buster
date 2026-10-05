@@ -193,6 +193,40 @@ UEFI retains Buster's [documented target contract](../uefi-target.md).
 Buster's first-party license remains unspecified under
 [the license inventory](../../LICENSES/README.md).
 
+## GNU-common predefined macros
+
+The C prelude supplies GCC/Clang-common atomic lock-free, UTF, inline-mode,
+integer type/limit/width, and target-feature macros. Values come from the
+target's data layout and type spellings; x86-64 feature and small-code-model
+macros are architecture-gated, while `__k8` follows the baseline CPU model.
+`linux` and `unix` are defined only for GNU dialects on Linux/Android.
+`__BIGGEST_ALIGNMENT__` follows Clang-suitable alignment (8 for BPFEL and
+Apple AArch64, 16 otherwise), independently of `abi_max_alignment`.
+PIC/PIE macros reflect the driver's `-fpic`/`-fPIC` and `-fpie`/`-fPIE`
+level and executable-mode fields.
+
+These values intentionally differ from Clang 18.1.8 in several places:
+default fixed-address output leaves PIC/PIE undefined even where Ubuntu GCC
+and Clang default to PIE, and Darwin/Windows do not inherit Clang's always-PIC
+default; Windows receives GCC atomic and inline macros because Buster defines
+`__GNUC__` on every target; `__k8` follows Buster's baseline CPU model,
+including macOS, rather than Clang's default `core2`; and
+`__SIG_ATOMIC_TYPE__` is defined, as GCC does, although Clang 18 omits it.
+Type macros use Buster's short spellings, and FAST integer types follow Clang
+(`short`/`int`) rather than GCC's `long`.
+The default native CPU model does not define `__k8`/`__k8__`; only the
+baseline CPU model does. x86-64 UEFI limits and 64-bit type spellings follow
+Buster's documented LLP64 target contract, unlike Clang 18's LP64
+`x86_64-unknown-uefi` target.
+
+The prelude omits `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_*` because `__sync`
+compare-and-swap builtins are unsupported, `__SIZEOF_FLOAT128__` because
+`__float128` is unmodeled, `__SEG_FS`/`__SEG_GS` because address-space
+keywords are unsupported, and `__PRAGMA_REDEFINE_EXTNAME` because that pragma
+is unimplemented. `c_test_gnu_common_predefined_macros` pins the reference
+spellings for thirteen target triples in GNU17 and C23, plus type/limit
+consistency, GNU89 inline, and PIC/PIE behavior.
+
 ## Trigraph translation policy
 
 Raw root and included source in strict C99, C11 and C17 modes replaces all

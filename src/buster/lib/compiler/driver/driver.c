@@ -1,7 +1,8 @@
 // The Clang-like `ide cc` driver: two public calls (driver.h) split
 // argument parsing from execution. compiler_driver_parse_arguments turns
 // argv into a CompilerDriverInvocation — dialect, target/CPU/features,
-// inputs classified as C source, objects, or archives, and every output
+// inputs classified as C source, objects, or archives, their ordered library
+// occurrences through compiler_driver_link_operation, and every output
 // mode — rejecting unknown languages and retired options explicitly
 // rather than guessing. compiler_driver_validate_request is the request
 // combination authority both calls share, so an API-built invocation is refused
@@ -357,6 +358,54 @@ BUSTER_GLOBAL_LOCAL CompilerDriverLanguage compiler_driver_input_language(Compil
     if (invocation.input_languages && input_index < invocation.input_language_count)
     {
         result = invocation.input_languages[input_index];
+    }
+    return result;
+}
+
+// Parsed streams cover both indexed arrays in their original order. A legacy
+// API invocation omits the stream and retains its file-then-library placement.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_link_operations_valid(CompilerDriverInvocation const* invocation)
+{
+    bool result = !invocation->link_operation_count ||
+                  (invocation->link_operations && (u64)invocation->link_operation_count == (u64)invocation->input_count + invocation->library_count);
+    u32 inputs = 0;
+    u32 libraries = 0;
+    for (u32 index = 0; result && index < invocation->link_operation_count; index += 1)
+    {
+        CompilerDriverLinkOperation operation = invocation->link_operations[index];
+        switch (operation.kind)
+        {
+        case COMPILER_DRIVER_LINK_OPERATION_FILE:
+            result = inputs < invocation->input_count && operation.index == inputs;
+            inputs += result;
+            break;
+        case COMPILER_DRIVER_LINK_OPERATION_LIBRARY:
+            result = libraries < invocation->library_count && operation.index == libraries;
+            libraries += result;
+            break;
+        case COMPILER_DRIVER_LINK_OPERATION_COUNT:
+        default:
+            result = false;
+            break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverLinkOperation compiler_driver_link_operation(CompilerDriverInvocation const* invocation, u64 index)
+{
+    CompilerDriverLinkOperation result;
+    if (invocation->action == COMPILER_DRIVER_ACTION_LINK && invocation->link_operation_count)
+    {
+        result = invocation->link_operations[index];
+    }
+    else if (index < invocation->input_count)
+    {
+        result = (CompilerDriverLinkOperation){.index = (u32)index, .kind = COMPILER_DRIVER_LINK_OPERATION_FILE};
+    }
+    else
+    {
+        result = (CompilerDriverLinkOperation){.index = (u32)(index - invocation->input_count), .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY};
     }
     return result;
 }
@@ -1306,6 +1355,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     }
     invocation.input_paths = arena_allocate(arena, String8, arguments.length);
     invocation.input_languages = arena_allocate(arena, CompilerDriverLanguage, arguments.length);
+    invocation.link_operations = arena_allocate(arena, CompilerDriverLinkOperation, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
     invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
     invocation.macro_operations = arena_allocate(arena, CPreprocessorOperation, arguments.length);
@@ -1342,6 +1392,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.input_paths[input_index] = argument;
             invocation.input_languages[input_index] = invocation.language;
             invocation.input_language_count = invocation.input_count;
+            invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
+                .index = input_index, .kind = COMPILER_DRIVER_LINK_OPERATION_FILE,
+            };
             continue;
         }
         if (string_equal(argument, S8("--")))
@@ -1496,7 +1549,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else if (string_equal(argument, S8("-l")))
             {
-                invocation.libraries[invocation.library_count++] = value;
+                u32 library_index = invocation.library_count++;
+                invocation.libraries[library_index] = value;
+                invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
+                    .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY,
+                };
             }
             else if (string_equal(argument, S8("-F")))
             {
@@ -2042,7 +2099,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(prefix, S8("-l")) && value.length)
         {
-            invocation.libraries[invocation.library_count++] = value;
+            u32 library_index = invocation.library_count++;
+            invocation.libraries[library_index] = value;
+            invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
+                .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY,
+            };
             continue;
         }
         if (string_equal(prefix, S8("-F")) && value.length)
@@ -2069,14 +2130,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")) || string_equal(argument, S8("-fPIE")) ||
             string_equal(argument, S8("-fpie")))
         {
+            invocation.position_independent_level = string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fPIE")) ? 2 : 1;
             invocation.position_independent = true;
             position_independent_code_option = argument;
             position_independent_executable_model = string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie"));
+            invocation.position_independent_executable = position_independent_executable_model;
             continue;
         }
         if (string_equal(argument, S8("-fno-pic")) || (string_equal(argument, S8("-fno-pie")) && position_independent_executable_model))
         {
+            invocation.position_independent_level = 0;
             invocation.position_independent = false;
+            invocation.position_independent_executable = false;
             position_independent_code_option = (String8){0};
             position_independent_executable_model = false;
             continue;
@@ -2170,7 +2235,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.image_kind != NATIVE_IMAGE_EXECUTABLE &&
         invocation.action == COMPILER_DRIVER_ACTION_LINK)
     {
-        invocation.position_independent = true;
+        if (!invocation.position_independent_level)
+        {
+            invocation.position_independent_level = 2;
+        }
+        invocation.position_independent = invocation.position_independent_level != 0;
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.plain_char_policy_explicit)
     {
@@ -4306,6 +4375,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .position_independent_level = invocation.position_independent_level,
+                                                    .position_independent_executable = invocation.position_independent_executable,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
@@ -4395,6 +4466,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .position_independent_level = invocation.position_independent_level,
+                                                    .position_independent_executable = invocation.position_independent_executable,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
@@ -5307,6 +5380,8 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
             }
             single.input_count = 1;
             single.input_language_count = single.input_languages ? 1 : 0;
+            single.link_operations = 0;
+            single.link_operation_count = 0;
             single.output_path = (String8){0};
             single.action = COMPILER_DRIVER_ACTION_OBJECT;
             bool measure = batch->invocation.collect_input_metrics;
@@ -5490,6 +5565,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         result.diagnostic = S8("per-input language selection count does not match input count");
+        goto finish;
+    }
+    if (!compiler_driver_link_operations_valid(&invocation))
+    {
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = S8("link operation stream does not cover inputs and libraries in order");
         goto finish;
     }
     compiler_driver_validate_spirv_invocation(&invocation);
@@ -5784,8 +5865,29 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     u32 batch_first = 0;
     u32 batch_end = 0;
     bool units_prewarmed = false;
-    for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
+    bool ordered_link = invocation.action == COMPILER_DRIVER_ACTION_LINK && invocation.link_operation_count;
+    u64 link_operation_count = ordered_link ? invocation.link_operation_count : (u64)invocation.input_count + invocation.library_count;
+    for (u64 operation_index = 0; operation_index < link_operation_count; operation_index += 1)
     {
+        CompilerDriverLinkOperation operation = compiler_driver_link_operation(&invocation, operation_index);
+        if (operation.kind == COMPILER_DRIVER_LINK_OPERATION_LIBRARY)
+        {
+            u32 library_index = operation.index;
+            if (static_libraries[library_index])
+            {
+                ObjectArchive* archive = &library_archives[library_index];
+                compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
+                if (archive->error != OBJECT_ERROR_NONE)
+                {
+                    result.error = COMPILER_DRIVER_ERROR_OBJECT;
+                    result.object_error = archive->error;
+                    result.diagnostic = string_format(arena, S8("could not read archive {S8}: {S8}"), library_archive_paths[library_index], archive->diagnostic);
+                    goto finish;
+                }
+            }
+            continue;
+        }
+        u32 input_index = operation.index;
         String8 input_path = invocation.input_paths[input_index];
         if (inputs && (compiler_driver_archive_input(input_path) || compiler_driver_object_input(input_path)))
         {
@@ -5833,6 +5935,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         single.input_languages = invocation.input_languages ? invocation.input_languages + input_index : 0;
         single.input_count = 1;
         single.input_language_count = single.input_languages ? 1 : 0;
+        single.link_operations = 0;
+        single.link_operation_count = 0;
         single.output_path = (String8){0};
         bool suppress_object_write = link_inputs_retained;
         if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
@@ -5876,8 +5980,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 batch_first = input_index;
                 unit_task_count = 1;
                 while (unit_task_count < unit_task_capacity && unit_task_count < invocation.input_count - input_index &&
-                       compiler_driver_parallel_c_input(invocation, input_index + unit_task_count))
+                       unit_task_count < link_operation_count - operation_index)
                 {
+                    CompilerDriverLinkOperation next_operation = compiler_driver_link_operation(&invocation, operation_index + unit_task_count);
+                    if (next_operation.kind != COMPILER_DRIVER_LINK_OPERATION_FILE || next_operation.index != input_index + unit_task_count ||
+                        !compiler_driver_parallel_c_input(invocation, next_operation.index))
+                    {
+                        break;
+                    }
                     unit_task_count += 1;
                 }
                 batch_end = batch_first + unit_task_count;
@@ -6199,22 +6309,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (result.error != COMPILER_DRIVER_ERROR_NONE)
     {
         goto finish;
-    }
-    for (u32 library_index = 0; library_index < invocation.library_count; library_index += 1)
-    {
-        if (!static_libraries[library_index])
-        {
-            continue;
-        }
-        ObjectArchive* archive = &library_archives[library_index];
-        compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
-        if (archive->error != OBJECT_ERROR_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_OBJECT;
-            result.object_error = archive->error;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: {S8}"), library_archive_paths[library_index], archive->diagnostic);
-            goto finish;
-        }
     }
     if (archive_state.arena)
     {
