@@ -165,6 +165,44 @@ BUSTER_GLOBAL_LOCAL void bq_test_native_staging_refusal(void)
     }
 }
 
+/* The installed broker is root without capabilities in the service group: it
+ * must traverse the store and read a bundle's manifest, and nothing else. */
+BUSTER_GLOBAL_LOCAL void bq_test_native_store_modes(void)
+{
+    BqFixture fixture;
+    if (bq_test_begin(&fixture))
+    {
+        u8 bytes[256], body[512] = {0}; bq_test_native_program(bytes);
+        char hash[65], manifest[BQ_NATIVE_MANIFEST_CAP], identity[65], path[160];
+        bq_native_hash(bytes, 256, hash); memcpy(body, hash, 64); bq_put64(body + 64, 256);
+        memcpy(body + 80, bytes, 256);
+        BqPacket response;
+        BQ_CHECK(bq_test_native_frame(&fixture.queue, BQ_OP_NATIVE_BEGIN, body, 72, &response) == BQ_OK &&
+                 bq_test_native_frame(&fixture.queue, BQ_OP_NATIVE_WRITE, body, 336, &response) == BQ_OK &&
+                 bq_test_native_frame(&fixture.queue, BQ_OP_NATIVE_FINISH, body, 72, &response) == BQ_OK);
+        BQ_CHECK(bq_native_manifest(manifest, body, 256, identity) > 0);
+        int store = bq_native_store(&fixture.queue);
+        struct stat root = {0}, bundle = {0}, description = {0}, program = {0};
+        BQ_CHECK(store >= 0 && fstat(store, &root) == 0 && (root.st_mode & 07777) == BQ_NATIVE_STORE_MODE &&
+                 fstatat(store, identity, &bundle, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 (bundle.st_mode & 07777) == BQ_NATIVE_BUNDLE_MODE);
+        snprintf(path, sizeof(path), "%s/manifest", identity);
+        BQ_CHECK(fstatat(store, path, &description, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 (description.st_mode & 07777) == BQ_NATIVE_MANIFEST_MODE);
+        snprintf(path, sizeof(path), "%s/program", identity);
+        BQ_CHECK(fstatat(store, path, &program, AT_SYMLINK_NOFOLLOW) == 0 && (program.st_mode & 07777) == 0400);
+        /* A store created owner-only before the broker needed it is widened. */
+        BQ_CHECK(store >= 0 && fchmod(store, 0700) == 0);
+        if (store >= 0) close(store);
+        store = bq_native_store(&fixture.queue);
+        BQ_CHECK(store >= 0 && fstat(store, &root) == 0 && (root.st_mode & 07777) == BQ_NATIVE_STORE_MODE);
+        /* An identical upload against the sealed bundle still verifies. */
+        BQ_CHECK(bq_test_native_frame(&fixture.queue, BQ_OP_NATIVE_FINISH, body, 72, &response) == BQ_OK);
+        if (store >= 0) close(store);
+        bq_test_end(&fixture);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_native_rejections(void)
 {
     for (u32 defect = 0; defect < 7; defect += 1)
