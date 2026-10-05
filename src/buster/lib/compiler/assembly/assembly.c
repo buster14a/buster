@@ -9450,15 +9450,21 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_applies(AssemblyOpcode opc
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(AssemblyInstructionInfo info, u8 suffix_width,
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(String8 mnemonic, AssemblyInstructionInfo info, u8 suffix_width,
                                                                       AssemblyOperand const* operands,
                                                                       BusterX86MetadataPhysicalOperand* physical,
                                                                       u32 operand_count)
 {
     bool saw_width_operand = false;
+    // IN/OUT are metadata-only mnemonics, so COUNT carries no operand-role
+    // identity for suffix_applies. In normalized Intel order the accumulator
+    // is first for IN and second for OUT. Its suffix describes the transferred
+    // data; the port remains DX16 or imm8 and is checked by exact metadata.
+    bool port_io = operand_count == 2 && (assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out")));
+    u32 data_operand = assembly_word_equal(mnemonic, S8("in")) ? 0 : 1;
     for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
     {
-        if (!assembly_x86_metadata_suffix_applies(info.opcode, operand_index, operand_count))
+        if ((port_io && operand_index != data_operand) || !assembly_x86_metadata_suffix_applies(info.opcode, operand_index, operand_count))
         {
             continue;
         }
@@ -9553,7 +9559,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataSelectResult assembly_x86_metadata_select_s
     {
         return selection;
     }
-    if (!assembly_x86_metadata_suffix_width_matches(suffix_info, suffix_width, operands, physical, operand_count))
+    if (!assembly_x86_metadata_suffix_width_matches(suffix_base, suffix_info, suffix_width, operands, physical, operand_count))
     {
         selection.status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
         return selection;
@@ -10700,7 +10706,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                      physical[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
                                      physical[0].reg.physical_class == physical[1].reg.physical_class &&
                                      physical[0].reg.index == physical[1].reg.index;
-    if ((suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_info, mnemonic_suffix_width, operands,
+    if ((suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_base, mnemonic_suffix_info, mnemonic_suffix_width, operands,
                                                                             physical, operand_count)) ||
         duplicate_pop2_destination)
     {
@@ -10952,12 +10958,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = true,
         .include_not64 = false,
-        .include_implicit = operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+        // XED's IN/OUT rows mark their source-spelled accumulator and DX
+        // registers IMPL. Consume the complete explicit two-operand topology;
+        // exact metadata still validates their identities and port width.
+        .include_implicit = (operand_count == 2 && (assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out")))) ||
+                            (operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
                             physical[operand_count - 1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
                             physical[operand_count - 1].reg.index == 1 && physical[operand_count - 1].reg.width == 8 &&
                             (assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
                              assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr")) ||
-                             assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd"))),
+                             assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd")))),
         .source_semantics = true,
     };
     bool relative_literal = false;
