@@ -2895,6 +2895,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(int x) { switch(x) { case x: return 1; } return 0; }\n"), false, true},
         {S8("int f(int *x) { switch(x) { case 0: return 1; } return 0; }\n"), false, true},
         {S8("int f(int n) { int a[n]; return sizeof(a); }\n"), true, true},
+        // Each declarator keeps its own pointer-to-VLA shape in the shared list.
+        {S8("int f(void) { int n = 3; int buf[9] = {0,1,2,3,4,5,6,7,8}; int (*p)[n] = (void *)buf, (*q)[n] = (void *)(buf + 3); return (*q)[0] != 3 || (*p)[2] != 2 || q[1][0] != 6; }\n"), true, true, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { int n = 3; int buf[9] = {0,1,2,3,4,5,6,7,8}; int x = 1, (*q)[n] = (void *)(buf + 3); return (*q)[0] != 3 || x != 1 || (*(q + 1))[2] != 8; }\n"), true, true, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { int n = 3; int buf[9] = {0,1,2,3,4,5,6,7,8}; int (*q)[n] = (void *)(buf + 3), x = 1; return (*q)[0] != 3 || x != 1 || q[1][0] != 6; }\n"), true, true, {0}, S8("-std=gnu17")},
         {S8("int f(void) { int *p = 0; return _Generic(p, int *: 1); }\n"), true, true},
         {S8("int f(void) { int a[2]; return _Generic(a, int *: 1); }\n"), true, true},
         {S8("int f(void) { const int x = 1; return _Generic(x, int: 1); }\n"), true, true},
@@ -9350,7 +9354,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_dynamic_stack(UnitTe
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8(
+    // Keep each literal below the portable 4095-byte translation limit.
+    String8 source_parts[] = {
+        S8(
         "extern void *malloc(__SIZE_TYPE__);\n"
         "extern void free(void *);\n"
         "static int calls;\n"
@@ -9457,14 +9463,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "    else fail = 1;\n"
         "    return fail;\n"
         "}\n"
+        ),
+        S8(
+        "static int declarator_lists(void)\n"
+        "{\n"
+        "    int fail = 0, n = 3;\n"
+        "    int buf[3][3] = {{0,1,2},{3,4,5},{6,7,8}};\n"
+        "    {\n"
+        "        int (*p)[n] = (void *)buf, (*q)[n] = (void *)(buf + 1);\n"
+        "        fail |= (*p)[2] != 2 || (*q)[0] != 3;\n"
+        "        fail |= q[1][0] != 6 || (*(q + 1))[2] != 8 || q - p != 1;\n"
+        "        n = 1;\n"
+        "        fail |= sizeof(*p) != 12 || sizeof(*q) != 12 || q[1][0] != 6;\n"
+        "        n = 3;\n"
+        "    }\n"
+        "    {\n"
+        "        int x = 1, (*q)[n] = (void *)(buf + 1);\n"
+        "        fail |= x != 1 || (*q)[0] != 3 || q[1][0] != 6 || (*(q + 1))[2] != 8;\n"
+        "    }\n"
+        "    {\n"
+        "        int (*q)[n] = (void *)(buf + 1), x = 1;\n"
+        "        fail |= x != 1 || (*q)[0] != 3 || q[1][0] != 6 || (*(q + 1))[2] != 8;\n"
+        "    }\n"
+        "    {\n"
+        "        int (*p)[n] = (void *)buf;\n"
+        "        int (*q)[n] = (void *)(buf + 1);\n"
+        "        fail |= (*p)[2] != 2 || (*q)[0] != 3 || q[1][0] != 6 || q - p != 1;\n"
+        "    }\n"
+        "    {\n"
+        "        int a[n], b[n];\n"
+        "        a[0] = 11; a[2] = 13; b[0] = 17; b[2] = 19;\n"
+        "        fail |= a[0] != 11 || a[2] != 13 || b[0] != 17 || b[2] != 19;\n"
+        "    }\n"
+        "    {\n"
+        "        calls = 0;\n"
+        "        int (*p)[three()] = (void *)buf, (*q)[three()] = (void *)(buf + 1);\n"
+        "        fail |= calls != 2 || sizeof(*p) != 12 || sizeof(*q) != 12;\n"
+        "        fail |= p[1][1] != 4 || q[1][2] != 8 || q - p != 1;\n"
+        "    }\n"
+        "    return fail;\n"
+        "}\n"
         "int main(void)\n"
         "{\n"
         "    int fail = type_names();\n"
         "    fail |= computed_operands() << 1;\n"
         "    fail |= typedef_bounds() << 2;\n"
         "    fail |= heap_and_cast() << 3;\n"
+        "    fail |= declarator_lists() << 4;\n"
         "    return fail;\n"
-        "}\n");
+        "}\n"
+        ),
+    };
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-vla-runtime-types"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
@@ -9498,7 +9548,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
                         {
                             ProcessWaitResult waited = os_process_wait_deadline(temporary.arena, spawn, 30000000);
                             String8 context = string_format(temporary.arena,
-                                S8("VLA runtime types: {S8} {S8} {S8}; native status={u32}, timeout={u32}; exit bits: type names=1, computed operands=2, typedef bounds=4, heap/casts=8"),
+                                S8("VLA runtime types: {S8} {S8} {S8}; native status={u32}, timeout={u32}; exit bits: type names=1, computed operands=2, typedef bounds=4, heap/casts=8, declarator lists=16"),
                                 optimizations[optimization], modes[mode], frontends[frontend], waited.platform_status, (u32)waited.timed_out);
                             BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS, context);
                         }
