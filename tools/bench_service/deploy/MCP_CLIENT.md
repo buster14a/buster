@@ -58,7 +58,11 @@ distinguishes that request from a confirmed terminal outcome.
 
 ## Off-host control plane
 
-The production #437 topology requires the queue, adapters, cached logs/results
+The accepted #437 deployment is same-host; follow
+[SAME_HOST_MCP.md](SAME_HOST_MCP.md) for it. The remainder of this section
+describes the optional off-host split.
+
+The off-host topology keeps the queue, adapters, cached logs/results
 and any tunnel client on a separate control machine. The worker initiates the
 fixed SSH transport; client polling must create no worker activity during
 measurement. The current local control socket cannot supply that topology by
