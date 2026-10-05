@@ -636,7 +636,14 @@ writes it, so disassemblers do not split a function at it; `.type name,@function
 executable section stays `STT_FUNC` without `.type`: the linker's entry-point
 and call checks key on the function kind, and the object reader only infers a
 function from an untyped exported label on AArch64. Buster's own `-S` output
-spells `.type` for every function symbol, so it is unaffected. A repeat or lock prefix alone on a line joins the
+spells `.type` for every function symbol, so it is unaffected. A bare section
+name used as an expression term (`.long .text - .` in the `.eh_frame` the AArch64
+`-S` printer writes) means that section's start, as in GNU as: a name no label,
+`.set` or `.globl` defined, equal to a section opened in the unit, becomes a
+local `STT_NOTYPE` symbol at offset 0 of it. Same-section differences fold, an
+unreferenced one is dropped, and a surviving relocation names this local symbol
+(the object model has no section symbol plus addend). A label the file defines
+itself, such as the x86-64 printer's `.text:`, is used as written. A repeat or lock prefix alone on a line joins the
 instruction on the next one. A same-section PC-relative reference is written
 into the bytes only when its symbol's identity cannot change at link time.
 Weak symbols, including hidden weak definitions, retain references for strong

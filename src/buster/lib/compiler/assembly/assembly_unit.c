@@ -26,6 +26,7 @@
 //   assembly_unit_instruction              the assembly_encode call
 //   assembly_unit_statement                target comments/separators and positions
 //   assembly_unit_aarch64_control_fixup     checked final-label control fixups
+//   assembly_unit_define_section_starts    a bare section name is its offset 0
 //   assembly_unit_resolve_aliases          `.set` aliases once labels are known
 //   assembly_unit_parse, assembly_unit_encode
 //
@@ -113,6 +114,9 @@ struct AssemblyUnitBuilder
     AssemblyUnitAlias* aliases;
     // `.local` marks, indexed by symbol, consumed by `.comm`.
     bool* symbol_local;
+    // Symbols that were never defined and name an opened section: they stand
+    // for that section's start, as in GNU as and llvm-mc. Indexed by symbol.
+    bool* symbol_section_start;
     u32 integer_count;
     u32 integer_capacity;
     u32 alias_count;
@@ -1095,6 +1099,37 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builde
     return valid;
 }
 
+// In GNU as and llvm-mc a section's name used as an expression term is the
+// section's start. Nothing defines such a name here, so `.long .text - .` in
+// .eh_frame would otherwise leave a GLOBAL undefined `.text` and a relocation
+// the linker cannot resolve. A name that no label, `.set`, or `.globl` claimed
+// and that equals an opened section becomes a local label at offset 0 of it,
+// which lets same-section differences fold; a relocation that must stay (from
+// another section) names this local symbol, since the object model has no
+// section symbol plus addend. A label the file wrote itself (the x86-64 object
+// printer defines `.text:`) is untouched, and an unreferenced one leaves the
+// symbol table in assembly_unit_materialize.
+BUSTER_GLOBAL_LOCAL void assembly_unit_define_section_starts(AssemblyUnitBuilder* builder)
+{
+    for (u32 index = 0; index < builder->result.symbol_count; index += 1)
+    {
+        AssemblyUnitSymbol* symbol = builder->result.symbols + index;
+        if (!symbol->defined && !symbol->global && !symbol->weak)
+        {
+            for (u32 section = 0; section < builder->result.section_count && !symbol->defined; section += 1)
+            {
+                if (string_equal(builder->result.sections[section].name, symbol->name))
+                {
+                    symbol->defined = true;
+                    symbol->section = section;
+                    symbol->value = 0;
+                    builder->symbol_section_start[index] = true;
+                }
+            }
+        }
+    }
+}
+
 // Each pass defines every alias whose target is already defined, so a chain
 // settles in at most alias_count passes; anything left names no definition.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_resolve_aliases(AssemblyUnitBuilder* builder)
@@ -1944,7 +1979,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
         AssemblyUnitSymbol* record = builder->result.symbols + index;
         bool in_text = record->defined && builder->result.sections[record->section].kind == ASSEMBLY_UNIT_SECTION_TEXT;
         record->function = record->function || in_text;
-        record->untyped = in_text && !record->typed && !record->global && !record->weak;
+        record->untyped = (in_text && !record->typed && !record->global && !record->weak) || builder->symbol_section_start[index];
     }
     // The generated names for `1:`/`1f` are assembler bookkeeping, and so is
     // every `.L` name on an ELF target (GNU as and llvm-mc both treat `.L` as
@@ -1971,7 +2006,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
     {
         AssemblyUnitSymbol symbol = builder->result.symbols[index];
         bool generated = symbol.defined && !symbol.global && !symbol.weak && !referenced[index] &&
-                         (string_starts_with_sequence(symbol.name, S8(".Lnum.")) ||
+                         (builder->symbol_section_start[index] || string_starts_with_sequence(symbol.name, S8(".Lnum.")) ||
                           (elf && string_starts_with_sequence(symbol.name, S8(".L"))) ||
                           (macho_private && string_starts_with_sequence(symbol.name, S8("L"))));
         remapped[index] = generated ? UINT32_MAX : surviving;
@@ -2103,9 +2138,14 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.alias_capacity = statement_count;
     builder.aliases = arena_allocate(arena, AssemblyUnitAlias, builder.alias_capacity);
     builder.symbol_local = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
+    builder.symbol_section_start = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
 
     assembly_unit_collect_numeric_labels(&builder, blanked);
     assembly_unit_parse(&builder, blanked);
+    if (!builder.result.diagnostic_count)
+    {
+        assembly_unit_define_section_starts(&builder);
+    }
     if (!builder.result.diagnostic_count && assembly_unit_resolve_aliases(&builder))
     {
         assembly_unit_materialize(&builder);

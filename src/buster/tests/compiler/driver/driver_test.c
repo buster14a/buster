@@ -24,6 +24,7 @@
 // compiler_driver_test_compiler_listing_round_trip covers movabs and GCC/Clang listings.
 // compiler_driver_test_aarch64_assembly_round_trip reassembles AArch64 -S listings.
 // compiler_driver_test_assembly_private_labels checks ELF .L drops and NOTYPE labels.
+// compiler_driver_test_assembly_section_start_round_trip checks -S/-c leaves no undefined `.text`.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
 // compiler_driver_test_bare_dwarf_sections checks flag-less DWARF source names
@@ -4725,6 +4726,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_private_labels(
         os_file_delete(input);
         os_file_delete(output);
     }
+    scratch_end(temporary);
+    return result;
+}
+
+// GitHub #2707: the CFI in a -S listing names `.text` as the section start. The
+// assembler must define that name locally, so -S then -c leaves no undefined
+// `.text` and the .eh_frame relocation targets a defined symbol at the start of
+// the text section, on both ELF targets.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_section_start_round_trip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    Target object_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 source = buster_test_temporary_path(arena, S8("section-start-source"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("section-start-listing"), S8(".s"));
+    String8 object = buster_test_temporary_path(arena, S8("section-start-listing"), S8(".o"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(
+        S8("int section_start_callee(int);\nint section_start_entry(int x) { return section_start_callee(x) + 1; }\n")))))
+    {
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            String8 print_command[] = {S8("-target"), targets[target], S8("-g0"), S8("-S"), source, S8("-o"), listing};
+            CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print_command)));
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+            String8 assemble_command[] = {S8("-target"), targets[target], S8("-c"), listing, S8("-o"), object};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_command)));
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE && assembled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                           assembled.has_object, assembled.diagnostic);
+            if (printed.error == COMPILER_DRIVER_ERROR_NONE && assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+            {
+                FileMapRead map = file_map_read(arena, object, (FileReadOptions){0});
+                ObjectFile round_trip = object_read(arena, map.bytes, object_targets[target]);
+                if (BUSTER_REQUIRE(arguments, round_trip.error == OBJECT_ERROR_NONE))
+                {
+                    u32 starts = 0;
+                    u32 start_relocations = 0;
+                    for (u32 index = 0; index < round_trip.symbol_count; index += 1)
+                    {
+                        ObjectSymbol const* symbol = round_trip.symbols + index;
+                        if (string_equal(symbol->name, S8(".text")))
+                        {
+                            starts += 1;
+                            BUSTER_TEST(arguments, !symbol->global && symbol->section < round_trip.section_count &&
+                                                       round_trip.sections[symbol->section].kind == OBJECT_SECTION_TEXT && symbol->value == 0);
+                        }
+                    }
+                    for (u32 index = 0; index < round_trip.relocation_count; index += 1)
+                    {
+                        ObjectRelocation const* relocation = round_trip.relocations + index;
+                        if (relocation->symbol < round_trip.symbol_count && string_equal(round_trip.symbols[relocation->symbol].name, S8(".text")))
+                        {
+                            start_relocations += round_trip.sections[relocation->section].kind == OBJECT_SECTION_UNWIND;
+                        }
+                    }
+                    BUSTER_TEST(arguments, starts == 1 && start_relocations == 1);
+                    BUSTER_TEST(arguments, !compiler_driver_test_object_symbol(&round_trip, S8("section_start_entry")) ||
+                                               compiler_driver_test_object_symbol(&round_trip, S8("section_start_entry"))->global);
+                }
+                file_map_unmap(map);
+            }
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(object);
     scratch_end(temporary);
     return result;
 }
@@ -20250,6 +20323,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_assembly_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_private_labels);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_section_start_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_pointer_addresses);

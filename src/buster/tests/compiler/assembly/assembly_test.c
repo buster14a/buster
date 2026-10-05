@@ -3335,6 +3335,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_private_labels(UnitTestArg
     return result;
 }
 
+// GitHub #2707: a section's name used as an expression term is that section's
+// start. `.long .text - .` in .eh_frame names a local symbol defined at offset 0
+// of .text, never an undefined global; a same-section difference folds and leaves
+// no symbol; a label the file defines itself (the x86-64 printer's `.text:`) wins.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_section_start_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 cross_section = S8(".text\nf:\n  nop\n.section .eh_frame,\"a\",@progbits\n  .long .text - .\n  .long \".text\" - .\n");
+    String8 same_section = S8(".data\nx:\n  .long x - .data\n  .long .data - .\n.text\nf:\n  nop\n");
+    String8 own_label = S8(".text\n.text:\nf:\n  nop\n.section .eh_frame,\"a\",@progbits\n  .long .text - .\n");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, cross_section, (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, !unit.diagnostic_count);
+        if (!unit.diagnostic_count)
+        {
+            AssemblyUnitSymbol const* start = assembly_test_unit_find_symbol(&unit, S8(".text"));
+            bool text_section = start && start->section < unit.section_count && string_equal(unit.sections[start->section].name, S8(".text"));
+            BUSTER_TEST(arguments, start && start->defined && !start->global && !start->weak && start->value == 0 && text_section);
+            BUSTER_TEST(arguments, start && start->untyped);
+            BUSTER_TEST(arguments, unit.relocation_count == 2);
+            for (u32 index = 0; index < unit.relocation_count; index += 1)
+            {
+                BUSTER_TEST(arguments, start && unit.symbols[unit.relocations[index].symbol].defined &&
+                                       string_equal(unit.symbols[unit.relocations[index].symbol].name, S8(".text")));
+            }
+            for (u32 index = 0; index < unit.symbol_count; index += 1)
+            {
+                BUSTER_TEST(arguments, unit.symbols[index].defined && !unit.symbols[index].global);
+            }
+        }
+        // x - .data and .data - . fold inside .data: no relocation, no `.data`.
+        AssemblyUnitResult folded = assembly_unit_encode(arguments->arena, same_section, (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, !folded.diagnostic_count && !folded.relocation_count && !assembly_test_unit_find_symbol(&folded, S8(".data")));
+        AssemblyUnitResult own = assembly_unit_encode(arguments->arena, own_label, (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, !own.diagnostic_count);
+        if (!own.diagnostic_count)
+        {
+            u32 named = 0;
+            for (u32 index = 0; index < own.symbol_count; index += 1)
+            {
+                named += string_equal(own.symbols[index].name, S8(".text"));
+                BUSTER_TEST(arguments, own.symbols[index].defined);
+            }
+            BUSTER_TEST(arguments, named == 1 && own.relocation_count == 1);
+        }
+    }
+    return result;
+}
+
 // `.file`, `.ident` and `.addrsig*` are dropped; `.local`+`.comm` and `.lcomm`
 // reserve private `.bss`; `.set` aliases a symbol that may be defined later.
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_compiler_directives(UnitTestArguments* arguments)
@@ -4026,6 +4080,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_private_labels);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_start_names);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
     result.test_count += suffix_aliases.test_count;
