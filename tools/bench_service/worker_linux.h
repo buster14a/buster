@@ -144,6 +144,10 @@ typedef struct BqWorkerConfig
      * satisfy every observed security property; it only replaces process
      * control in tests. */
     bool production_path;
+    /* Explicit assigned mode only: caller owns a reference to this same locked
+     * open-file description until export and durable control acknowledgment. */
+    bool assigned_attempt;
+    int retained_lease_descriptor;
 } BqWorkerConfig;
 
 BUSTER_F_DECL BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id);

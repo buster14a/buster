@@ -19,6 +19,9 @@ Campaign format: schema="buster-ci-unit-tests-campaign-v1", samples=[manifest
 paths in execution order]. All paths resolve against their declaring JSON file.
 Binary hashes/source/image are recorded provenance, not independently attested
 by this parser. An optional binary path verifies the actual retained file hash.
+Raw logs are never rewritten: human diagnostic bytes may be non-UTF-8, while
+every recognizable machine-proof line must retain valid UTF-8. BOM-marked
+UTF-16 logs retain their strict decoding contract.
 """
 import argparse
 import collections
@@ -38,6 +41,8 @@ TERMINAL = re.compile(r"^\[(\d+)/(\d+)\] (Unit|Module|External) tests"
                       r"(?: \((\d+) of (\d+) modules selected\))?$")
 PREFIX = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\S+Z ")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+INVALID_UTF8 = re.compile(r"[\udc80-\udcff]")
+PROOF_MARKERS = ("TEST_MODULE_TIMING", "CI_UNIT_", "UNIT_TEST_", "Unit tests", "Module tests", "External tests")
 
 
 class EvidenceError(ValueError):
@@ -71,10 +76,49 @@ def number(fields, name):
     return int(value)
 
 
+def possible_proof_marker(line, marker):
+    # Invalid octets may replace or interrupt marker letters. Classify that
+    # claim before decoding/normalizing could hide an extra failed record.
+    positions = {0: 0}
+    claimed = False
+    # This cheap necessary condition avoids running the marker matcher over
+    # long binary diagnostic spans with no literal proof information at all.
+    if sum(character in marker for character in line) > len(marker) // 2:
+        for character in line:
+            next_positions = {0: 0}
+            if INVALID_UTF8.fullmatch(character):
+                for position, count in positions.items():
+                    for end in range(position, len(marker) + 1):
+                        next_positions[end] = max(next_positions.get(end, 0), count)
+            else:
+                for position, count in positions.items():
+                    if position < len(marker) and marker[position] == character:
+                        next_positions[position + 1] = max(next_positions.get(position + 1, 0), count + 1)
+            # An arbitrary human octet alone does not claim a proof marker.
+            # More than half the marker must remain literally and in order.
+            if next_positions.get(len(marker), 0) > len(marker) // 2:
+                claimed = True
+                break
+            positions = {position: count for position, count in next_positions.items() if position < len(marker)}
+    return claimed
+
+
+def malformed_proof_claim(line):
+    # Inspect the original line as well as its display-normalized form. In
+    # particular, invalid bytes inside an ANSI/Actions prefix cannot disappear.
+    return any(possible_proof_marker(candidate, marker) for candidate in (line, ANSI.sub("", line)) for marker in PROOF_MARKERS)
+
+
 def read_log(path):
     raw = path.read_bytes()
-    encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
-    return [PREFIX.sub("", ANSI.sub("", line)).strip() for line in raw.decode(encoding).splitlines()]
+    utf16 = raw.startswith((b"\xff\xfe", b"\xfe\xff"))
+    text = raw.decode("utf-16") if utf16 else raw.decode("utf-8-sig", errors="surrogateescape")
+    lines = []
+    for number, line in enumerate(text.splitlines(), 1):
+        require(not INVALID_UTF8.search(line) or not malformed_proof_claim(line),
+                f"Invalid UTF-8 in machine proof record at log line {number}")
+        lines.append(PREFIX.sub("", ANSI.sub("", line)).strip())
+    return lines
 
 
 def inventory_rows(manifest):

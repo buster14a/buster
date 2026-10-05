@@ -1,0 +1,12 @@
+pinned_head=4a294d0c31bc262a64665b092c708f10fe24e445
+pinned_tree=4af0bfb4a2f1fe51ef16ca6f09d17cba59001fcb
+probe_head=4a294d0c31bc262a64665b092c708f10fe24e445
+probe_diffstat= src/buster/lib/compiler/frontend/c/c_parse.c | 2 +-  1 file changed, 1 insertion(+), 1 deletion(-)
+clang=Ubuntu clang version 21.1.8 (6ubuntu1)
+valgrind=valgrind-3.26.0
+kernel=7.0.0-1012-azure
+nproc=4
+cpu=AMD EPYC 9V74 80-Core Processor
+mem_kb=16366704
+pairs=8
+sqlite_root=/home/runner/work/buster/buster/external/sqlite-amalgamation-3530400
