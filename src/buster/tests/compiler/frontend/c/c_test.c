@@ -18258,6 +18258,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_object(UnitTestArguments* argu
     return result;
 }
 
+// GNU `__attribute__((error("message")))` (#1951): a direct call that the
+// canonical CFG reaches fails lowering with the message at the call, and the
+// attribute's own site in the text, as GCC and Clang reject it. The boundary
+// is the CFG the body builds: a call in `if (0)`, `while (0)` or the dead arm
+// of a constant conditional is never reached and is accepted, as GCC accepts
+// it. Redeclarations join the attribute; a pointer to the function, a
+// function merely named `error`, the `cleanup(error)` operand, the
+// unrelated `warning` attribute, a C23 `[[error(...)]]` outside the GNU
+// namespace (`vendor::error`, or unscoped), and an `error(...)` inside
+// another attribute's argument payload are not diagnosed.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        // Empty when the source must lower cleanly.
+        String8 message;
+        u32 line;
+        u32 column;
+    } const cases[] = {
+        {S8("void forbidden(void) __attribute__((error(\"forbidden_called\")));\nvoid trigger(void) { forbidden(); }\n"),
+         S8("call to 'forbidden' declared with attribute error: forbidden_called (attribute at error-attribute.c:1:37)"), 2, 22},
+        {S8("void f(void);\nvoid f(void) __attribute__((error(\"late\")));\nvoid t(void) { f(); }\n"), S8("error: late (attribute at error-attribute.c:2:29)"), 3, 16},
+        {S8("void f(void) __attribute__((error(\"early\")));\nvoid f(void);\nvoid t(void) { f(); }\n"), S8("error: early"), 3, 16},
+        {S8("[[gnu::error(\"c23\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: c23"), 2, 16},
+        {S8("[[__gnu__::error(\"reserved scope\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: reserved scope"), 2, 16},
+        {S8("void f(void) __attribute__((__error__(\"res\" \"erved\")));\nvoid t(void) { f(); }\n"), S8("error: reserved"), 2, 16},
+        {S8("void f(void) __attribute__((cold, error(\"listed\"), noinline));\nvoid t(void) { f(); }\n"), S8("error: listed"), 2, 16},
+        {S8("[[vendor::tag(x), gnu::error(\"after payload\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: after payload"), 2, 16},
+        {S8("[[vendor::tag(a[b[c]]), gnu::error(\"after nested\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: after nested"), 2, 16},
+        {S8("void f(void) __attribute__((error(\"m\")));\nvoid t(int x) { if (x) f(); }\n"), S8("error: m"), 2, 24},
+        {S8("int f(int) __attribute__((error(\"expr\")));\nint t(int x) { return x + f(x); }\n"), S8("error: expr"), 2, 27},
+        {S8("void a(void) __attribute__((error(\"first\"))), b(void);\nvoid t(void) { b(); a(); a(); }\n"), S8("error: first"), 2, 21},
+        {S8("void f(void) __attribute__((error(\"m\")));\nvoid t(void) { if (0) f(); while (0) f(); }\n"), S8(""), 0, 0},
+        {S8("int f(void) __attribute__((error(\"m\")));\nint t(void) { return 0 ? f() : 1; }\n"), S8(""), 0, 0},
+        {S8("void f(void) __attribute__((error(\"m\")));\nint t(void) { return 1; f(); }\n"), S8(""), 0, 0},
+        {S8("void f(void) __attribute__((error(\"m\")));\nvoid (*p)(void) = f;\nvoid t(void) { void (*q)(void) = &f; q(); p(); }\n"), S8(""), 0, 0},
+        {S8("void error(const char*);\nvoid t(void) { error(\"x\"); }\n"), S8(""), 0, 0},
+        {S8("void error(int*);\nvoid t(void) { int x __attribute__((cleanup(error))) = 0; (void)x; }\n"), S8(""), 0, 0},
+        {S8("void f(void) __attribute__((warning(\"w\")));\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[vendor::error(\"m\")]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[error(\"m\")]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[vendor::tag(gnu::error(\"m\"))]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[vendor::tag(a[b[c]]), gnu::error(\"m\")]] void f(void);\nvoid t(void) { if (0) f(); }\n"), S8(""), 0, 0},
+        {S8("[[vendor::tag(a[b[gnu::error(\"m\")]])]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[gnu::unused, vendor::tag({gnu::error(\"m\")})]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("void f(void) __attribute__((tag(error(\"m\"))));\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("void f(void) __attribute__((format(printf, 1, 2), tag(__error__(\"m\"))));\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[gnu::error(\"m\")]] void f(void);\nvoid t(void) { if (0) f(); }\n"), S8(""), 0, 0},
+        {S8("void f(void) __attribute__((error(\"m\")));\nstatic void unused(void) { f(); }\nvoid t(void) {}\n"), S8(""), 0, 0},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[index].source, (CPreprocessOptions){.source_path = S8("error-attribute.c")});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("error-attribute.c"), tokens, parse, target_native);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0, cases[index].source);
+        if (cases[index].message.length)
+        {
+            BUSTER_TEST_RAW(arguments, ir.diagnostic_count == 1, cases[index].source);
+            if (ir.diagnostic_count == 1)
+            {
+                CDiagnostic diagnostic = ir.diagnostics[0];
+                BUSTER_TEST_RAW(arguments, diagnostic.kind == C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL && diagnostic.severity == C_DIAGNOSTIC_ERROR,
+                                cases[index].source);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(diagnostic.message, cases[index].message) != BUSTER_STRING_NO_MATCH, diagnostic.message);
+                BUSTER_TEST_RAW(arguments, diagnostic.location.line == cases[index].line && diagnostic.location.column == cases[index].column,
+                                cases[index].source);
+            }
+        }
+        else
+        {
+            BUSTER_TEST_RAW(arguments, ir.diagnostic_count == 0, cases[index].source);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // #1249: final member expressions use the declaring field's placement.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* arguments)
 {
@@ -38374,6 +38455,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
+    BUSTER_TEST_FIXTURE(arguments, c_test_error_attribute_calls);
     BUSTER_TEST_FIXTURE(arguments, c_test_expression_aggregate_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_extension_constants);

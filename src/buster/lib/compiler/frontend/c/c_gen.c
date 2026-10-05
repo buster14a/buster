@@ -26,6 +26,8 @@
 // block.
 // c_ir_constant_truth certifies a scalar value before truth consumers fold;
 // its UNKNOWN outcome is distinct from a known false value.
+// c_ir_check_error_attribute_calls diagnoses a direct call to a GNU
+// `error("message")` callee when the finished body CFG reaches it.
 //
 // Source-dependent recursion is forbidden (AGENTS.md), so anything that
 // would recurse runs on an explicit machine owned by CIntegerIrBuilder:
@@ -1225,6 +1227,11 @@ struct CIrSignature
     // __declspec(noreturn) or [[noreturn]]. A call to it terminates control
     // flow, so nothing after it in the block is reachable.
     bool is_noreturn;
+    // The `error` token of the GNU `__attribute__((error("message")))` the
+    // callee carries, plus one, so zero means none. Joined across the
+    // entity's declarations like is_noreturn; see
+    // c_ir_check_error_attribute_calls.
+    u32 error_attribute_token_plus_one;
     // The callee was declared `()` before C23, so it has no parameter list of
     // its own: a call may pass any number of arguments and names their types
     // itself, after the default argument promotions. See
@@ -1617,34 +1624,83 @@ typedef enum CIrAttributeMarker
 {
     C_IR_ATTRIBUTE_MARKER_NORETURN,
     C_IR_ATTRIBUTE_MARKER_GNU_INLINE,
+    // GNU `error("message")`: a direct call to the function that survives to
+    // the canonical IR is diagnosed with the message. See
+    // c_ir_check_error_attribute_calls.
+    C_IR_ATTRIBUTE_MARKER_ERROR,
 } CIrAttributeMarker;
 
 BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttributeMarker marker)
 {
-    return marker == C_IR_ATTRIBUTE_MARKER_NORETURN ? c_ir_noreturn_spelling(spelling)
-                                                    : string_equal(spelling, S8("gnu_inline")) || string_equal(spelling, S8("__gnu_inline__"));
+    bool result = false;
+    switch (marker)
+    {
+        case C_IR_ATTRIBUTE_MARKER_NORETURN: result = c_ir_noreturn_spelling(spelling); break;
+        case C_IR_ATTRIBUTE_MARKER_GNU_INLINE: result = string_equal(spelling, S8("gnu_inline")) || string_equal(spelling, S8("__gnu_inline__")); break;
+        case C_IR_ATTRIBUTE_MARKER_ERROR: result = string_equal(spelling, S8("error")) || string_equal(spelling, S8("__error__")); break;
+    }
+    return result;
 }
 
-/* Whether an attribute in [start, end) carries `marker`. The reserved
-   noreturn spellings `_Noreturn` and `__noreturn__` mean it wherever they
-   appear in a declaration; every other spelling is an ordinary identifier, so
-   it is only read inside a GNU `__attribute__`/`__declspec` list or a C23
-   `[[...]]` list, where nothing else can be spelled that way. */
-BUSTER_C_INTERNAL bool c_ir_attribute_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end, CIrAttributeMarker marker)
+/* `error` is an ordinary identifier even inside an attribute list -- the
+   operand of `cleanup(error)` is one -- so the marker counts only where an
+   attribute name stands and only with the string-literal argument the
+   attribute requires. c_ir_attribute_marker_find offers only the list's own
+   entries, never a token inside another attribute's balanced argument
+   payload, so neither `[[vendor::tag(gnu::error("m"))]]` nor
+   `__attribute__((tag(error("m"))))` names it. In a GNU `__attribute__` list the name follows the
+   list's '(' or a ','. In a C23 `[[...]]` list only the GNU namespace means
+   it: `gnu::error` or `__gnu__::error`, whose `::` lexes as two ':' tokens.
+   An unscoped `[[error(...)]]` or another vendor's `vendor::error` is an
+   attribute GCC does not know and ignores, so it is not this one. */
+BUSTER_C_INTERNAL bool c_ir_attribute_error_marker_at(CPreprocessResult preprocess, u32 index, u32 end, bool bracketed)
 {
-    bool result = false;
+    CToken const* tokens = preprocess.tokens;
+    bool named = false;
+    if (bracketed)
+    {
+        String8 scope = index >= 3 && tokens[index - 3].kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, tokens[index - 3])
+                                                                                    : (String8){0};
+        named = index >= 3 && c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COLON) &&
+                c_token_is_punctuator(&tokens[index - 2], C_PUNCTUATOR_COLON) &&
+                (string_equal(scope, S8("gnu")) || string_equal(scope, S8("__gnu__")));
+    }
+    else
+    {
+        named = index > 0 && (c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                              c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COMMA));
+    }
+    return named && index + 2 < end && c_token_is_punctuator(&tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           tokens[index + 2].kind == C_TOKEN_STRING_LITERAL;
+}
+
+/* The token of the first attribute in [start, end) that carries `marker`, or
+   UINT32_MAX when none does. The reserved noreturn spellings `_Noreturn` and
+   `__noreturn__` mean it wherever they appear in a declaration; every other
+   spelling is an ordinary identifier, so it is only read inside a GNU
+   `__attribute__`/`__declspec` list or a C23 `[[...]]` list, where nothing
+   else can be spelled that way. */
+BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u32 start, u32 end, CIrAttributeMarker marker)
+{
+    u32 result = UINT32_MAX;
     u32 index = start;
-    while (index < end && !result)
+    while (index < end && result == UINT32_MAX)
     {
         CToken token = preprocess.tokens[index];
         u32 list_start = UINT32_MAX;
         u32 list_end = UINT32_MAX;
+        bool bracketed = false;
+        // How many groups deep the list's own entries stand: one inside the
+        // inner '(' of `__attribute__((...))`, none for `__declspec(...)`
+        // and `[[...]]`. A token deeper than that is in an entry's
+        // balanced argument payload -- `tag(error("m"))` -- not an entry.
+        u32 entry_depth = 0;
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
             if (marker == C_IR_ATTRIBUTE_MARKER_NORETURN && (string_equal(spelling, S8("_Noreturn")) || string_equal(spelling, S8("__noreturn__"))))
             {
-                result = true;
+                result = index;
             }
             else if (index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                      (string_equal(spelling, S8("__attribute__")) || string_equal(spelling, S8("__attribute")) ||
@@ -1670,31 +1726,50 @@ BUSTER_C_INTERNAL bool c_ir_attribute_marker_in_range(CPreprocessResult preproce
                 }
                 list_start = index + 2;
                 list_end = scan < end ? scan : end;
+                entry_depth = list_start < list_end && c_token_is_punctuator(&preprocess.tokens[list_start], C_PUNCTUATOR_LEFT_PARENTHESIS) ? 1 : 0;
                 index = list_end;
             }
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) && index + 1 < end &&
                  c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACKET))
         {
-            u32 scan = index + 2;
-            while (scan + 1 < end && !(c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_BRACKET) &&
-                                       c_token_is_punctuator(&preprocess.tokens[scan + 1], C_PUNCTUATOR_RIGHT_BRACKET)))
-            {
-                scan += 1;
-            }
+            // The list closes on the `]]` at bracket depth zero, the boundary
+            // the parser itself uses: `[[vendor::tag(a[b[c]]), gnu::error("m")]]`
+            // holds an earlier adjacent `]]` inside the tag's payload.
+            u32 after = end;
+            c_parse_c23_attribute_at(preprocess, index, end, &after);
+            bool closed = after >= index + 4 && after <= end && c_token_is_punctuator(&preprocess.tokens[after - 1], C_PUNCTUATOR_RIGHT_BRACKET) &&
+                          c_token_is_punctuator(&preprocess.tokens[after - 2], C_PUNCTUATOR_RIGHT_BRACKET);
             list_start = index + 2;
-            list_end = scan < end ? scan : end;
+            list_end = closed ? after - 2 : end;
+            bracketed = true;
             index = list_end;
         }
-        for (u32 marker_index = list_start; marker_index < list_end && !result; marker_index += 1)
+        u32 nesting = 0;
+        for (u32 marker_index = list_start; marker_index < list_end && result == UINT32_MAX; marker_index += 1)
         {
-            result = preprocess.tokens[marker_index].kind == C_TOKEN_IDENTIFIER &&
-                     c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[marker_index]), marker);
+            CToken const* candidate = &preprocess.tokens[marker_index];
+            bool matches = candidate->kind == C_TOKEN_IDENTIFIER &&
+                           c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, *candidate), marker) &&
+                           (marker != C_IR_ATTRIBUTE_MARKER_ERROR ||
+                            (nesting == entry_depth && c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed)));
+            result = matches ? marker_index : UINT32_MAX;
+            bool opens = c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACKET) ||
+                         c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACE);
+            bool closes = c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                          c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_BRACE);
+            nesting += opens ? 1 : 0;
+            nesting -= closes && nesting ? 1 : 0;
         }
         index += 1;
     }
 
     return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_attribute_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end, CIrAttributeMarker marker)
+{
+    return c_ir_attribute_marker_find(preprocess, start, end, marker) != UINT32_MAX;
 }
 
 BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end)
@@ -1838,7 +1913,11 @@ BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preproc
    after a call to `other` -- while a marker among the specifiers still
    reaches all of them. This is the split c_parse_local_declarations already
    makes for the block-scope declarator shapes. */
-BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
+/* The token of the first `marker` attribute that applies to `declaration`,
+   or UINT32_MAX: one in the shared specifiers before
+   c_ir_declarator_list_specifier_end, or one in the declaration's own
+   declarator range. */
+BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult preprocess, CDeclaration declaration, CIrAttributeMarker marker)
 {
     u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
     u32 body = declaration.body_token_count ? declaration.body_start : UINT32_MAX;
@@ -1853,8 +1932,18 @@ BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, 
         specifier_end = c_ir_declarator_list_specifier_end(preprocess, declaration.token_start, specifier_end);
     }
 
-    return c_ir_noreturn_marker_in_range(preprocess, declaration.token_start, specifier_end) ||
-           (declaration.declarator_count != 0 && c_ir_noreturn_marker_in_range(preprocess, declaration.declarator_start, declarator_end));
+    u32 result = c_ir_attribute_marker_find(preprocess, declaration.token_start, specifier_end, marker);
+    if (result == UINT32_MAX && declaration.declarator_count != 0)
+    {
+        result = c_ir_attribute_marker_find(preprocess, declaration.declarator_start, declarator_end, marker);
+    }
+
+    return result;
+}
+
+BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NORETURN) != UINT32_MAX;
 }
 
 BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* program, CIrPointerTypeCache* pointer_types,
@@ -2771,6 +2860,19 @@ struct CIrVlaSavedBound
     IrValueId count;
 };
 
+// One direct call to a callee declared with GNU `error("message")`, recorded
+// as it is emitted and diagnosed by c_ir_check_error_attribute_calls only if
+// its block is reachable once the body is complete.
+typedef struct CIrErrorAttributeCall CIrErrorAttributeCall;
+struct CIrErrorAttributeCall
+{
+    CIrErrorAttributeCall* next;
+    String8 callee;
+    CSourceLocation location;
+    IrBlockId block;
+    u32 attribute_token;
+};
+
 struct CIntegerIrBuilder
 {
     CIrDirectSsa* direct_ssa;
@@ -2902,6 +3004,12 @@ struct CIntegerIrBuilder
     // its own rather than a construct this frontend has not implemented.
     u32 failure_kind_plus_one;
     u32 failure_token_index;
+    // Where a failure without a token index is reported, when
+    // has_failure_location is set; the error-attribute diagnostic has the
+    // call's location but no index into the token stream.
+    CSourceLocation failure_location;
+    bool has_failure_location;
+    CIrErrorAttributeCall* error_attribute_calls;
     // A proven constraint violation is not an unresolved type-query shape:
     // keep it across fallback attempts so the legacy prediction cannot guess
     // int and accept the operand. Missing members retain their operand-start
@@ -16398,6 +16506,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     call.symbol = target->symbol;
     call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
     c_ir_append_instruction(builder, call, call_source);
+    if (signature.error_attribute_token_plus_one)
+    {
+        CIrErrorAttributeCall* error_call = arena_allocate(builder->scratch_arena, CIrErrorAttributeCall, 1);
+        *error_call = (CIrErrorAttributeCall){
+            .next = builder->error_attribute_calls,
+            .callee = target->name,
+            .location = c_ir_token_location(builder, token),
+            .block = builder->current_block,
+            .attribute_token = signature.error_attribute_token_plus_one - 1,
+        };
+        builder->error_attribute_calls = error_call;
+    }
     if (signature.returns_void && !terminates)
     {
         result = c_ir_emit_integer_value(builder, 0, false, token);
@@ -16414,6 +16534,95 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_values(CIntegerIrBuilder* builder, CT
     }
     return c_ir_emit_call_target(builder, token, builder->declaration_functions[declaration_index], builder->signatures[declaration_index], arguments,
                                  argument_count);
+}
+
+/* GCC and Clang diagnose a direct call to a function declared with
+   `__attribute__((error("message")))` when the call survives into the code
+   they generate, and say nothing of one their optimizers delete first. This
+   frontend runs no optimizer over the body, so the boundary is the canonical
+   CFG it builds: a call whose block is reachable from the entry is
+   diagnosed, and one the lowering left without a path from it is not -- the
+   body of `if (0)` or `while (0)`, whose constant condition already lowered
+   to an unconditional branch, and code after a `return`, which is never
+   emitted. A call that needs inlining or value propagation to disappear is
+   diagnosed, as GCC and Clang do at -O0. Taking the function's address and
+   calling through a pointer are not calls to it, in either compiler. The
+   first reachable call in source order is reported, at the call, with the
+   attribute's message and declaration site. */
+BUSTER_C_INTERNAL bool c_ir_check_error_attribute_calls(CIntegerIrBuilder* builder)
+{
+    bool result = true;
+    if (builder->error_attribute_calls)
+    {
+        IrFunction* function = builder->function;
+        u32 block_count = function->block_count;
+        u8* reachable = arena_allocate(builder->scratch_arena, u8, block_count ? block_count : 1);
+        u32* worklist = arena_allocate(builder->scratch_arena, u32, block_count ? block_count : 1);
+        memset(reachable, 0, block_count ? block_count : 1);
+        u32 reachable_count = 0;
+        if (function->entry.value < block_count)
+        {
+            reachable[function->entry.value] = 1;
+            worklist[reachable_count++] = function->entry.value;
+        }
+        for (u32 index = 0; index < reachable_count; index += 1)
+        {
+            IrBlock* block = function->blocks + worklist[index];
+            if (block->last_instruction.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrInstruction* terminator = function->instructions + block->last_instruction.value;
+                for (u32 target = 0; target < terminator->target_count; target += 1)
+                {
+                    u32 successor = terminator->targets[target].value;
+                    if (successor < block_count && !reachable[successor])
+                    {
+                        reachable[successor] = 1;
+                        worklist[reachable_count++] = successor;
+                    }
+                }
+            }
+        }
+        // The list is newest first, so the last reachable entry is the
+        // earliest call.
+        CIrErrorAttributeCall* reported = 0;
+        for (CIrErrorAttributeCall* call = builder->error_attribute_calls; call; call = call->next)
+        {
+            reported = call->block.value < block_count && reachable[call->block.value] ? call : reported;
+        }
+        if (reported)
+        {
+            CPreprocessResult* preprocess = &builder->preprocess;
+            u32 token_count = preprocess->token_count < UINT32_MAX ? (u32)preprocess->token_count : UINT32_MAX;
+            // The literal is the attribute's operand; adjacent literals
+            // concatenate as everywhere else. Only the bytes between the
+            // quotes are kept: the message is reported, not evaluated.
+            String8 message = {0};
+            for (u32 index = reported->attribute_token + 2; index < token_count && preprocess->tokens[index].kind == C_TOKEN_STRING_LITERAL; index += 1)
+            {
+                String8 spelling = c_token_spelling(preprocess->spelling_base, preprocess->tokens[index]);
+                u64 open = 0;
+                while (open < spelling.length && spelling.pointer[open] != '"')
+                {
+                    open += 1;
+                }
+                u64 close = spelling.length && spelling.pointer[spelling.length - 1] == '"' ? spelling.length - 1 : spelling.length;
+                String8 content = open < close ? string_slice(spelling, open + 1, close) : (String8){0};
+                message = string_format(builder->arena, S8("{S8}{S8}"), message, content);
+            }
+            CSourceLocation declared = c_preprocess_token_location(preprocess, preprocess->tokens[reported->attribute_token]);
+            String8 path = declared.file < preprocess->file_count ? preprocess->files[declared.file] : S8("<unknown>");
+            builder->failure_message =
+                string_format(builder->arena, S8("call to '{S8}' declared with attribute error: {S8} (attribute at {S8}:{u32}:{u32})"), reported->callee,
+                              message, path, declared.line, declared.column);
+            builder->failure_kind_plus_one = (u32)C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL + 1;
+            builder->failure_token_index = UINT32_MAX;
+            builder->failure_location = reported->location;
+            builder->has_failure_location = true;
+            result = false;
+        }
+    }
+
+    return result;
 }
 
 // Emit one compiler-runtime call whose ABI is fixed by the compiler rather
@@ -53093,9 +53302,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // declarations here rather than moving that resolution, which answers a
     // different question (the unprototyped-candidate rule in
     // c_ir_build_function_name_index).
+    // GNU `error` joins the same way, and the first declaration that carries
+    // it names the message and the location the call diagnostic cites.
     u32 entity_noreturn_count = parse.entity_count ? parse.entity_count : 1;
     bool* entity_noreturn = arena_allocate(temporary_arena, bool, entity_noreturn_count);
     memset(entity_noreturn, 0, sizeof(*entity_noreturn) * entity_noreturn_count);
+    u32* entity_error_attribute_plus_one = arena_allocate(temporary_arena, u32, entity_noreturn_count);
+    memset(entity_error_attribute_plus_one, 0, sizeof(*entity_error_attribute_plus_one) * entity_noreturn_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -53104,9 +53317,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             signatures[declaration_index] = c_ir_function_signature(arena, program, &pointer_types, &wide_float_cache, &parse, declaration,
                                                                      c_type_ir_map, s32_type, f64_type, target);
             signatures[declaration_index].is_noreturn = c_ir_declaration_is_noreturn(preprocess, declaration);
+            signatures[declaration_index].error_attribute_token_plus_one =
+                c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_ERROR) + 1;
             if (declaration.entity.value < parse.entity_count)
             {
                 entity_noreturn[declaration.entity.value] |= signatures[declaration_index].is_noreturn;
+                u32* entity_error = entity_error_attribute_plus_one + declaration.entity.value;
+                *entity_error = *entity_error ? *entity_error : signatures[declaration_index].error_attribute_token_plus_one;
             }
         }
     }
@@ -53116,6 +53333,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         if (declaration.kind == C_DECLARATION_FUNCTION && declaration.entity.value < parse.entity_count)
         {
             signatures[declaration_index].is_noreturn |= entity_noreturn[declaration.entity.value];
+            signatures[declaration_index].error_attribute_token_plus_one = entity_error_attribute_plus_one[declaration.entity.value];
         }
     }
     bool* function_needed = arena_allocate(arena, bool, parse.declaration_count);
@@ -53886,11 +54104,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             builder.failure_message = S8("could not initialize cleanup state");
         }
+        // The error-attribute check reads the CFG the body built, before SSA
+        // completion and construction rewrite it.
         if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || builder.lower_machine.failed || !c_ir_lower_body(&builder, declaration, false, 0) ||
-            !c_ir_atomic_aggregate_accesses_lowerable(&builder) || !c_ir_ssa_finish(&builder, &result.direct_ssa) ||
-            !c_ir_finish_construction(&builder))
+            !c_ir_check_error_attribute_calls(&builder) || !c_ir_atomic_aggregate_accesses_lowerable(&builder) ||
+            !c_ir_ssa_finish(&builder, &result.direct_ssa) || !c_ir_finish_construction(&builder))
         {
-            CSourceLocation failure_location = c_preprocess_site_location(&preprocess, declaration.location);
+            CSourceLocation failure_location = builder.has_failure_location ? builder.failure_location
+                                                                            : c_preprocess_site_location(&preprocess, declaration.location);
             String8 failure_token = {0};
             if (builder.failure_token_index < preprocess.token_count)
             {
