@@ -107,13 +107,15 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_protocol(void)
             BQ_CHECK(bq_mcp_text(&json, bq_mcp_member(&json, i, S8("name")), &name));
             u32 operation = bq_mcp_tool(name), annotations = bq_mcp_member(&json, i, S8("annotations"));
             u32 readonly = bq_mcp_member(&json, annotations, S8("readOnlyHint"));
-            u32 expected = count <= 6 ? count : BQ_OP_NATIVE_BEGIN + count - 7;
-            bool write = operation == BQ_OP_SUBMIT || operation == BQ_OP_CANCEL || operation >= BQ_OP_NATIVE_BEGIN;
+            u32 expected = count <= 6 ? count : count <= 9 ? BQ_OP_NATIVE_BEGIN + count - 7 :
+                           BQ_MCP_ARTIFACT_RECEIPT + count - 10;
+            bool write = operation == BQ_OP_SUBMIT || operation == BQ_OP_CANCEL ||
+                         (operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH);
             BQ_CHECK(operation == expected && readonly < json.count && string_equal(json.tokens[readonly].text,
                 write ? S8("false") : S8("true")));
         }
     }
-    BQ_CHECK(count == 9);
+    BQ_CHECK(count == 11);
     char const* invalid_envelopes[] = {
         "[]", "null", "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"ping\"}",
         "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}",

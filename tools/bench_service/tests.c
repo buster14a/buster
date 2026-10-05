@@ -1969,7 +1969,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_prefixes_and_corruption(void)
         u8 invalid_reservation[16] = {0};
         bq_put64(invalid_reservation, 999);
         bq_put64(invalid_reservation + 8, 2);
-        bq_frame(corrupt + stable, BQ_RESERVE, 2, invalid_reservation, sizeof(invalid_reservation));
+        bq_frame_schema(corrupt + stable, BQ_SCHEMA, BQ_RESERVE, 2, invalid_reservation, sizeof(invalid_reservation));
         bq_test_image(&fixture, corrupt, stable + BQ_HEADER_SIZE + sizeof(invalid_reservation));
         BQ_CHECK(bq_open(queue, fixture.path) == BQ_CORRUPT);
         bq_test_end(&fixture);

@@ -623,11 +623,6 @@ BUSTER_GLOBAL_LOCAL void bq_frame_schema(u8 frame[BQ_RECORD_CAP], u32 schema, Bq
     memcpy(frame + BQ_HEADER_SIZE, body, size);
 }
 
-BUSTER_GLOBAL_LOCAL void bq_frame(u8 frame[BQ_RECORD_CAP], BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
-{
-    bq_frame_schema(frame, BQ_SCHEMA, kind, sequence, body, size);
-}
-
 #ifndef _WIN32
 BUSTER_GLOBAL_LOCAL bool bq_read(int fd, u8* bytes, u32 size, u64 offset)
 {
