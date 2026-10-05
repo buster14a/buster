@@ -1148,6 +1148,18 @@ BUSTER_GLOBAL_LOCAL void nrc_write_argv(NrcSettings* settings, String8 prefix, S
     d_write(&settings->child, path, (String8){.pointer = (char8*)serialized, .length = bytes});
 }
 
+// The frozen registry has its own identities and count rules. Live
+// differential indices must never interpret a historical four-mode row.
+BUSTER_GLOBAL_LOCAL bool nrc_verification(DSettings* settings, DObservation* observation, u32 mode, u32 functions)
+{
+    bool valid = mode < BUSTER_ARRAY_LENGTH(nrc_allocators);
+    if (valid)
+    {
+        valid = d_verification_allocator(settings, observation, nrc_allocators[mode], mode == 0 || functions == 0);
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 target, u32 frontend, u32 pic, u64 group)
 {
     Arena* arena = settings->child.arena;
@@ -1308,7 +1320,7 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
                        identity_bytes == object_bytes && identity_hash == object_hash;
         }
         bool success = d_success(observed) && artifact && statistics.valid && target_valid && records_valid && statistics.fallbacks == 0 &&
-                       d_verification(&child, &observed, (DConfig){.allocator = mode});
+                       nrc_verification(&child, &observed, mode, statistics.functions);
         String8 disposition;
         if (!mode)
         {
@@ -1433,6 +1445,42 @@ BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
     u32 failures = 0;
     failures += BUSTER_ARRAY_LENGTH(nrc_allocators) != 4 ||
                 !string_equal(nrc_allocators[0], S8("none")) || !string_equal(nrc_allocators[3], S8("quality"));
+    DSettings verification_settings = {.arena = arena};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(nrc_allocators); mode += 1)
+    {
+        String8 marker = string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=4 scheduled=1 allocator={S8}\n"), nrc_allocators[mode]);
+        DObservation observation = {.output = string_format(arena, S8("prefix\n{S8}suffix\n"), marker), .error = S8("warning\n")};
+        failures += !nrc_verification(&verification_settings, &observation, mode, 4) ||
+                    !string_equal(observation.output, S8("prefix\nsuffix\n")) || !string_equal(observation.error, S8("warning\n"));
+        marker = string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]);
+        observation.output = marker;
+        bool direct = nrc_verification(&verification_settings, &observation, mode, 4);
+        failures += direct != (mode == 0) || (!direct && !string_equal(observation.output, marker));
+        observation.output = marker;
+        failures += !nrc_verification(&verification_settings, &observation, mode, 0) || observation.output.length != 0;
+        String8 invalid[] = {
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=0 mir=0 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=1 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=4 scheduled=5 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=4 scheduled=0 allocator={S8}\n"), nrc_allocators[(mode + 1) % BUSTER_ARRAY_LENGTH(nrc_allocators)]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=4294967296 mir=0 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=-1 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=2 ir=1 mir=0 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("{S8}{S8}"), marker, marker),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator={S8} trailing\n"), nrc_allocators[mode]),
+            S8("ordinary output\n"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            observation.output = invalid[index];
+            failures += nrc_verification(&verification_settings, &observation, mode, 0) ||
+                        !string_equal(observation.output, invalid[index]) || !string_equal(observation.error, S8("warning\n"));
+        }
+    }
+    DObservation invalid_mode = {.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=fast\n")};
+    failures += nrc_verification(&verification_settings, &invalid_mode, BUSTER_ARRAY_LENGTH(nrc_allocators), 1) ||
+                nrc_verification(&verification_settings, &invalid_mode, UINT32_MAX, 1);
     failures += !nrc_legacy_allocator_removed(S8("unsupported register allocator: none\n"));
     failures += !nrc_legacy_allocator_removed(S8("unsupported register allocator: mir-stack\n"));
     failures += nrc_legacy_allocator_removed(S8("compiler exited with status 1\n"));

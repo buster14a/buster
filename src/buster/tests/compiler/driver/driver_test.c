@@ -7897,7 +7897,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
                             {
                                 String8 mixed_object = buster_test_temporary_path(temporary.arena, S8("buster-f128-mixed"), S8(".o"));
                                 String8 mixed[] = {S8("-c"), S8("-g0"), image_modes[mode], frontends[frontend], positions[position],
-                                    strict, S8("-fverify-codegen"), S8("-DBUSTER_F128_FENV=1"),
+                                    S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-DBUSTER_F128_FENV=1"),
                                     direction ? S8("-DBUSTER_F128_CLIENT=1") : S8("-DBUSTER_F128_LIBRARY=1"),
                                     fixtures[fixture], S8("-o"), mixed_object};
                                 CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,

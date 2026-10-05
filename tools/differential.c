@@ -940,14 +940,12 @@ BUSTER_GLOBAL_LOCAL bool d_number(String8 text, u32* value)
 
 // Remove exactly one explicit telemetry line, never arbitrary diagnostics.
 // Verification counts and allocator identity are a fail-closed protocol.
-BUSTER_GLOBAL_LOCAL bool d_verification(DSettings* settings, DObservation* observation, DConfig config)
+BUSTER_GLOBAL_LOCAL bool d_verification_allocator(DSettings* settings, DObservation* observation, String8 expected, bool allow_zero_mir)
 {
     bool valid = false;
     String8 text = observation->output;
     u64 offset = 0, remove_from = 0, remove_to = 0;
     u32 matches = 0;
-    String8 expected = d_allocators[config.allocator];
-    if (string_equal(expected, S8("default"))) { expected = S8("fast"); }
     while (offset < text.length)
     {
         u64 end = offset;
@@ -973,10 +971,10 @@ BUSTER_GLOBAL_LOCAL bool d_verification(DSettings* settings, DObservation* obser
                 }
             }
             String8 allocator = string_format(settings->arena, S8("allocator={S8}"), expected);
-            // Both native allocators select MIR; nonempty cases must retain
-            // positive canonical and selected-function verification counts.
+            // Live differential cases require selected MIR. Frozen census
+            // callers alone may admit direct NONE or authenticated empty units.
             valid &= string_equal(string_slice(line, cursor, line.length), allocator) && values[0] == 1 && values[1] > 0 &&
-                     values[2] > 0 && values[3] <= values[2];
+                     (allow_zero_mir || values[2] > 0) && values[3] <= values[2];
             remove_from = offset;
             remove_to = end < text.length ? end + 1 : end;
         }
@@ -989,6 +987,18 @@ BUSTER_GLOBAL_LOCAL bool d_verification(DSettings* settings, DObservation* obser
         if (remove_from) { memcpy(normalized, text.pointer, (size_t)remove_from); }
         if (text.length > remove_to) { memcpy(normalized + remove_from, text.pointer + remove_to, (size_t)(text.length - remove_to)); }
         observation->output = (String8){.pointer = normalized, .length = remove_from + text.length - remove_to};
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_verification(DSettings* settings, DObservation* observation, DConfig config)
+{
+    bool valid = config.allocator < BUSTER_ARRAY_LENGTH(d_allocators);
+    if (valid)
+    {
+        String8 expected = d_allocators[config.allocator];
+        if (string_equal(expected, S8("default"))) { expected = S8("fast"); }
+        valid = d_verification_allocator(settings, observation, expected, false);
     }
     return valid;
 }
@@ -2785,6 +2795,17 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         errors += d_verification(&settings, &telemetry, config);
         telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=2 scheduled=1 allocator=quality\n");
         errors += !d_verification(&settings, &telemetry, config) || telemetry.output.length != 0;
+        config.allocator = BUSTER_ARRAY_LENGTH(d_allocators) - 1;
+        telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=fast\n");
+        errors += !d_verification(&settings, &telemetry, config) || telemetry.output.length != 0;
+        u32 invalid_allocators[] = {BUSTER_ARRAY_LENGTH(d_allocators), UINT32_MAX};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_allocators); index += 1)
+        {
+            config.allocator = invalid_allocators[index];
+            String8 unchanged = S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=fast\n");
+            telemetry.output = unchanged;
+            errors += d_verification(&settings, &telemetry, config) || !string_equal(telemetry.output, unchanged);
+        }
         // A stale object plus a failed launch must never publish a caller.
         DSettings missing_caller = settings;
         missing_caller.cc = path_join(arena, directory, S8("missing-compiler"));

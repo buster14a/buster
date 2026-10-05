@@ -605,8 +605,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
         BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, readback.bytes), source);
         source_ready &= readback.status == OS_FILE_READ_OK && readback.error.v == 0 &&
                         string_equal(BYTE_SLICE_TO_STRING(8, readback.bytes), source);
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
         for (u32 mode = 0; admission && source_ready && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
@@ -622,7 +621,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                 for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
                 {
                     String8 command[] = {S8("-target"), S8("aarch64-linux"), S8("-nostdinc"), S8("-g0"), actions[action],
-                                         modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), outputs[action], source_path};
+                                         modes[mode], frontends[form], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), outputs[action], source_path};
                     CompilerDriverInvocation invocation =
                         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
