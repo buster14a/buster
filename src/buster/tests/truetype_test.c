@@ -7,6 +7,8 @@
 #if BUSTER_INCLUDE_TESTS
 // truetype_test_kerning covers subtable composition using synthetic cmap/kern bytes.
 #include <buster/lib/truetype_internal.h>
+#include <buster/lib/file.h>
+#include <buster/lib/os.h>
 
 BUSTER_GLOBAL_LOCAL void truetype_test_u16(u8* bytes, u32 offset, s32 value)
 {
