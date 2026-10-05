@@ -35519,7 +35519,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members(UnitTestArguments* ar
 }
 
 BUSTER_GLOBAL_LOCAL String8 const c_test_constexpr_integer_types_source = S8_INITIALIZER(
-    "enum NegativeValue { ENUM_NEGATIVE = -3 }; enum UnsignedValue { ENUM_UNSIGNED = 0x80000000U };\n"
+    "enum NegativeValue { ENUM_NEGATIVE = -3 }; enum UnsignedValue : unsigned int { ENUM_UNSIGNED = 0x80000000U };\n"
     "constexpr unsigned char wrapped_byte = (unsigned char)300;\n"
     "constexpr int signed_cast = (int)-1U;\n"
     "constexpr signed char signed_byte = (signed char)255U;\n"
@@ -35655,11 +35655,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
         String8 diagnostic;
         bool negative;
         bool check_int128_bytes;
+        bool windows_only;
+        bool non_windows_only;
     } cases[] = {
         {S8("constexpr int value = sizeof(int) - 5;"), 0, false, false, false},
         {S8("constexpr int value = -1U;"), 0, false, false, false},
         {S8("constexpr int value = (unsigned int)0 - 1;"), 0, false, false, false},
-        {S8("enum U { HIGH = 0x80000000U }; constexpr int value = HIGH;"), 0, false, false, false},
+        {S8("enum U : unsigned int { HIGH = 0x80000000U }; constexpr int value = HIGH;"), 0, false, false, false},
+        // Ordinary MSVC enum completion publishes signed int; other targets
+        // retain the unsigned high value and refuse its constexpr int use.
+        {.source = S8("enum U { HIGH = 0x80000000U }; constexpr int value = HIGH; "
+                      "static_assert(value == (-2147483647 - 1)); "
+                      "static_assert(_Generic(value, int: 1, default: 0)); "
+                      "static_assert(_Generic(HIGH, int: 1, default: 0));"),
+            .expected = UINT64_C(2147483648), .valid = true, .negative = true, .windows_only = true},
+        // The complementary unsigned destination retains its representability
+        // refusal on Windows, where HIGH has the negative int image.
+        {.source = S8("enum U { HIGH = 0x80000000U }; constexpr unsigned int value = HIGH;"),
+            .expected = UINT64_C(2147483648), .valid = true, .non_windows_only = true},
         {S8("constexpr unsigned char value = 300;"), 0, false, false, false},
         {S8("constexpr unsigned char value = -1;"), 0, false, false, false},
         {S8("constexpr signed char value = 128;"), 0, false, false, false},
@@ -35694,6 +35707,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
                 continue;
             }
             bool valid = cases[row].valid && (!cases[row].long64_only || layout.long_integer.size == 8);
+            valid = valid && (!cases[row].windows_only || target.os == OPERATING_SYSTEM_WINDOWS) &&
+                    (!cases[row].non_windows_only || target.os != OPERATING_SYSTEM_WINDOWS);
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             CPreprocessResult tokens = c_preprocess(temporary.arena, cases[row].source,
                 (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_GNU23});
