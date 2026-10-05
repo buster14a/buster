@@ -120,7 +120,6 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_test_bytes(Arena* arena, O
     return result;
 }
 
-<<<<<<< HEAD
 
 // CLI ordering is observed through real serialized archives and final links;
 // the expected stream and provider bytes below are independent literal oracles.
@@ -656,12 +655,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_execution(UnitT
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_arguments);
-    BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_execution);
-=======
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_archive_test_default_link(Arena* arena, String8 target, String8 sysroot,
                                                                                  String8 input, String8 library, String8 explicit_root,
                                                                                  String8 output)
@@ -959,7 +952,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArg
     UnitTestResult native = compiler_driver_archive_test_default_native(arguments);
     result.test_count += native.test_count;
     result.succeeded_test_count += native.succeeded_test_count;
->>>>>>> origin/main
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_execution);
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
     for (u32 format = 0; format < BUSTER_ARRAY_LENGTH(systems); format += 1)
     {
