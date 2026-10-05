@@ -274,6 +274,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
             "__LINE__(_Pragma(\"pop_macro(\\\"__LINE__\\\")\") 1,2) __LINE__\n"), .expected = S8("1 + 2 4")},
         {.source = S8("#pragma push_macro(\"__LINE__\")\n#undef __LINE__\n"
             "#define __LINE__ _Pragma(\"pop_macro(\\\"__LINE__\\\")\") __LINE__\n__LINE__\n"), .expected = S8("4")},
+        // One argument prescan is shared by ordinary uses in the replacement list.
+        {.source = S8("#define TWICE(x) x x\n#define STR(x) #x x\nTWICE(__COUNTER__) STR(__COUNTER__) __COUNTER__\n"),
+         .expected = S8("0 0 \"__COUNTER__\" 1 2")},
+        // Pasted identifiers observe a fresh counter value on each invocation.
+        {.source = S8("#define CAT_(a,b) a##b\n#define CAT(a,b) CAT_(a,b)\n#define UNIQ(p) CAT(p,__COUNTER__)\nUNIQ(v) UNIQ(v)\n"),
+         .expected = S8("v0 v1")},
+        // Conditional evaluation advances the counter and exposes builtin definitions.
+        {.source = S8("#if __COUNTER__ == 0 && defined(__COUNTER__) && defined(__INCLUDE_LEVEL__) && defined(__BASE_FILE__) && defined __TIMESTAMP__\nyes __COUNTER__ __INCLUDE_LEVEL__\n#endif\n"),
+         .expected = S8("yes 1 0")},
         // GCC 15 loops emitting newlines for SAME; the isolated hosted oracle
         // recorded nontermination. Keep Buster and Clang checks for that case.
         // Alias __LINE__ above has a separate observed GCC expectation (3).
@@ -485,6 +494,56 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments
                 }
                 scratch_end(temporary);
             }
+        }
+    }
+    scratch_end(files);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_dynamic_builtin_macro_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena files = scratch_begin(&arguments->arena, 1);
+    String8 root = buster_test_temporary_path(files.arena, S8("dynamic-builtins"), S8(".dir"));
+    String8 header = string_format_z(files.arena, S8("{S8}/counter-included.h"), root);
+    bool files_ready = root.pointer && os_make_directory_attempt(root) &&
+        file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(S8("#define HEADER_NAME __FILE_NAME__\n"
+                                                          "header __COUNTER__ __INCLUDE_LEVEL__ __FILE_NAME__ __BASE_FILE__\n")));
+    if (BUSTER_REQUIRE(arguments, files_ready))
+    {
+        String8 source = S8("__COUNTER__ __INCLUDE_LEVEL__\n"
+                            "#include <counter-included.h>\n"
+                            "__COUNTER__ __INCLUDE_LEVEL__ HEADER_NAME __FILE_NAME__ __BASE_FILE__ __TIMESTAMP__\n"
+                            "#line 9 \"dir/renamed.c\"\n"
+                            "__FILE__ __FILE_NAME__ __BASE_FILE__\n");
+        String8 expected_source = S8("0 0 header 1 1 \"counter-included.h\" \"dir/dynamic-builtins.c\" "
+                                     "2 0 \"dynamic-builtins.c\" \"dynamic-builtins.c\" \"dir/dynamic-builtins.c\" "
+                                     "\"Thu Jan  1 00:00:00 1970\" \"dir/renamed.c\" \"renamed.c\" \"dir/dynamic-builtins.c\"");
+        for (u32 run = 0; run < 2; run += 1)
+        {
+            TemporalArena temporary = scratch_begin(&files.arena, 1);
+            CPreprocessResult actual = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.source_path = S8("dir/dynamic-builtins.c"), .include_paths = &root, .include_path_count = 1});
+            CLexResult expected = c_lex(temporary.arena, expected_source);
+            BUSTER_TEST_RAW(arguments, actual.error_count == 0, S8("dynamic builtin preprocessing"));
+            BUSTER_TEST(arguments, actual.token_count == expected.token_count);
+            if (BUSTER_REQUIRE(arguments, actual.tokens && actual.spelling_base && expected.tokens && expected.spelling_base &&
+                               actual.error_count == 0 && expected.diagnostic_count == 0))
+            {
+                for (u64 index = 0; index < actual.token_count && index < expected.token_count; index += 1)
+                {
+                    BUSTER_TEST(arguments, actual.tokens[index].kind == expected.tokens[index].kind);
+                    BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[index]),
+                                       c_token_spelling(expected.spelling_base, expected.tokens[index]));
+                }
+            }
+            if (actual.recovery)
+            {
+                arena_destroy(actual.recovery->spelling_arena, 1);
+                arena_destroy(actual.recovery->token_arena, 1);
+                arena_destroy(actual.recovery->token_shape_arena, 1);
+            }
+            scratch_end(temporary);
         }
     }
     scratch_end(files);
@@ -823,6 +882,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_skipped_group_text_tests);
     BUSTER_TEST_FIXTURE(arguments, c_punctuator_separator_tests);
     BUSTER_TEST_FIXTURE(arguments, c_trigraph_preprocess_tests);
+    BUSTER_TEST_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
     UnitTestResult demand = c_macro_argument_demand_tests(arguments);
     result.test_count += demand.test_count;
     result.succeeded_test_count += demand.succeeded_test_count;
