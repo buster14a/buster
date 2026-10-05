@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
-"""Offline regressions for hosted differential CI policies."""
+"""Offline regressions for differential CI and independent oracle predicates."""
 
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
+import io
 from pathlib import Path
+import subprocess
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
+
+import differential_c_harness as harness
+import reduce_differential_case as reducer
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +67,298 @@ class DifferentialCIPolicyTests(unittest.TestCase):
         self.assertIn("$env:VS_ARCH -eq 'arm64'", step)
         self.assertIn("test_differential --self-test --reference-timeout 1", step)
         self.assertIn("DIFFERENTIAL_TIMEOUT_CONTROL reference_timeout_seconds=1 result=timeout", step)
+
+
+class DifferentialOracleTests(unittest.TestCase):
+    def observations(self, status=37, output=b"U0 123\n"):
+        return [harness.Observation(label, True, "", 0, status, output)
+                for label in ("clang-O0", "clang-O2", "ide-fast", "ide-quality")]
+
+    def test_matching_normal_nonzero_exit_is_valid(self):
+        for status in (0, 37, 255):
+            with self.subTest(status=status):
+                result = harness.classify("control", 7, self.observations(status))
+                self.assertEqual(result.category, "ok")
+
+    def test_matching_crashes_and_missing_results_never_pass(self):
+        for status in (-11, None, 0xC0000005):
+            with self.subTest(status=status):
+                result = harness.classify("control", 7, self.observations(status, b""))
+                self.assertEqual(result.category, "generator")
+
+    def test_either_incomplete_reference_invalidates_comparison(self):
+        for index in (0, 1):
+            for status in (-11, None, 0xC0000005):
+                with self.subTest(index=index, status=status):
+                    observations = self.observations()
+                    observations[index] = replace(observations[index], run_returncode=status)
+                    self.assertEqual(harness.classify("control", 7, observations).category, "generator")
+
+    def test_reference_compile_failure_timeout_and_disagreement_fail_closed(self):
+        for index in (0, 1):
+            for changed in (
+                {"compile_ok": False, "compile_returncode": 1},
+                {"run_timeout": True},
+                {"run_stdout": b"wrong\n"},
+                {"run_returncode": 38},
+            ):
+                with self.subTest(index=index, changed=changed):
+                    observations = self.observations()
+                    observations[index] = replace(observations[index], **changed)
+                    self.assertEqual(harness.classify("control", 7, observations).category, "generator")
+
+    def test_wrong_subject_output_and_crashes_are_detected(self):
+        for index in (2, 3):
+            for changed, category in (
+                ({"run_stdout": b"wrong\n"}, "behavior"),
+                ({"run_returncode": 0}, "behavior"),
+                ({"run_timeout": True}, "behavior"),
+                ({"run_returncode": -11}, "run-crash"),
+                ({"run_returncode": 0xC0000005}, "run-crash"),
+                ({"compile_ok": False, "compile_returncode": 1,
+                  "compile_output": "error: original rejection"}, "rejects"),
+                ({"compile_ok": False, "compile_returncode": -11}, "ide-crash"),
+            ):
+                with self.subTest(index=index, changed=changed):
+                    observations = self.observations()
+                    observations[index] = replace(observations[index], **changed)
+                    result = harness.classify("control", 7, observations)
+                    self.assertEqual(result.category, category)
+                    if changed.get("run_returncode") == 0xC0000005:
+                        self.assertIn("runtime status 3221225477", result.detail)
+                        self.assertNotIn("signal", result.detail)
+
+    def test_both_reference_argv_match_buster_semantic_profile(self):
+        modes = harness.modes(SimpleNamespace(cc="reference-compiler", ide="subject-compiler"))
+        for label, command in modes[:2]:
+            with self.subTest(label=label):
+                for flag in ("-fwrapv", "-fno-strict-aliasing", "-funsigned-char"):
+                    self.assertIn(flag, command)
+
+
+class DifferentialReducerTests(unittest.TestCase):
+    # These are controlled phase observations, not a second compiler oracle.
+    # A reference hash exit of 37 is deliberately valid.
+    def observe(self, changed=None, ide_modes=("ide-fast", "ide-quality")):
+        specifications = {
+            label: (0, "", 37, b"reference\n")
+            for label in ("clang-O0", "clang-O2", "ide-fast", "ide-quality")
+        }
+        if changed:
+            specifications.update(changed)
+        calls = []
+        self.compile_commands = []
+
+        def compile_one(command, source, binary):
+            label = Path(binary).name.removeprefix("candidate.")
+            calls.append(label)
+            self.compile_commands.append((label, command))
+            return specifications[label][:2]
+
+        def run_one(binary):
+            label = Path(binary).name.removeprefix("candidate.")
+            return specifications[label][2:]
+
+        with tempfile.TemporaryDirectory() as directory:
+            checker = reducer.Checker("subject-compiler", directory)
+            with mock.patch.object(checker, "compile_one", side_effect=compile_one), \
+                    mock.patch.object(checker, "run_one", side_effect=run_one):
+                result = checker.observe("int main(void) { return 37; }\n", ide_modes=ide_modes)
+        return result, calls
+
+    def test_matching_subject_keeps_lazy_optimized_reference(self):
+        result, calls = self.observe()
+        self.assertEqual(result, ("ok", ""))
+        self.assertEqual(calls, ["clang-O0", "ide-fast", "ide-quality"])
+
+    def test_bad_initial_reference_never_becomes_interesting(self):
+        for status in (-11, None, "timeout", 0xC0000005):
+            with self.subTest(status=status):
+                result, calls = self.observe({"clang-O0": (0, "", status, b"reference\n")})
+                self.assertEqual(result[0], "invalid")
+                self.assertEqual(calls, ["clang-O0"])
+
+    def test_rejection_and_compiler_crash_require_optimized_reference(self):
+        subjects = (
+            (1, "error: original rejection", None, b""),
+            (-11, "", None, b""),
+        )
+        controls = (
+            (1, "error: oracle rejected", None, b""),
+            (None, "", None, b""),
+            (0, "", -11, b"reference\n"),
+            (0, "", None, b"reference\n"),
+            (0, "", "timeout", b"reference\n"),
+            (0, "", 0xC0000005, b"reference\n"),
+            (0, "", 37, b"changed\n"),
+            (0, "", 38, b"reference\n"),
+        )
+        for subject in subjects:
+            for control in controls:
+                with self.subTest(subject=subject[0], control=control):
+                    result, calls = self.observe({"ide-fast": subject, "clang-O2": control})
+                    self.assertEqual(result[0], "invalid")
+                    self.assertIn("clang-O2", calls)
+
+    def test_valid_optimized_reference_preserves_divergence_categories(self):
+        for subject, category in (
+            ((1, "error: original rejection", None, b""), "rejects"),
+            ((-11, "", None, b""), "ide-crash"),
+            ((0xC0000005, "", None, b""), "ide-crash"),
+            ((0, "", -11, b""), "run-crash"),
+            ((0, "", 0xC0000005, b""), "run-crash"),
+            ((0, "", "timeout", b""), "behavior"),
+            ((0, "", 37, b"changed\n"), "behavior"),
+        ):
+            with self.subTest(category=category, subject=subject):
+                result, calls = self.observe({"ide-fast": subject})
+                self.assertEqual(result[0], category)
+                self.assertIn("clang-O2", calls)
+                if category == "rejects":
+                    self.assertEqual(result[1], "ide-fast: error: original rejection")
+
+    def test_compile_timeout_is_not_a_source_rejection(self):
+        result, calls = self.observe({"ide-fast": (None, "", None, b"")})
+        self.assertEqual(result[0], "invalid")
+        self.assertIn("compilation timed out", result[1])
+        self.assertIn("clang-O2", calls)
+
+    def test_actual_compile_timeout_result_cannot_preserve_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checker = reducer.Checker("subject-compiler", directory)
+            with mock.patch.object(reducer.subprocess, "run",
+                                   side_effect=subprocess.TimeoutExpired(["subject-compiler"], 30)):
+                self.assertEqual(checker.compile_one(["subject-compiler"], "input.c", "output"), (None, ""))
+
+    def test_reducer_reference_argv_match_buster_semantic_profile(self):
+        result, _ = self.observe({"ide-fast": (0, "", 37, b"changed\\n")})
+        self.assertEqual(result[0], "behavior")
+        references = [(label, command) for label, command in self.compile_commands
+                      if label.startswith("clang-")]
+        self.assertEqual([label for label, _ in references], ["clang-O0", "clang-O2"])
+        for label, command in references:
+            with self.subTest(label=label):
+                for flag in ("-fwrapv", "-fno-strict-aliasing", "-funsigned-char"):
+                    self.assertIn(flag, command)
+
+    def test_second_subject_rejection_retains_mode_and_diagnostic(self):
+        result, calls = self.observe({"ide-quality": (1, "error: original rejection", None, b"")})
+        self.assertEqual(result, ("rejects", "ide-quality: error: original rejection"))
+        self.assertEqual(calls, ["clang-O0", "ide-fast", "ide-quality", "clang-O2"])
+
+    def test_second_subject_mode_obeys_same_reference_gate(self):
+        result, calls = self.observe({
+            "ide-quality": (1, "error: original rejection", None, b""),
+            "clang-O2": (0, "", 37, b"changed\n"),
+        })
+        self.assertEqual(result[0], "invalid")
+        self.assertEqual(calls, ["clang-O0", "ide-fast", "ide-quality", "clang-O2"])
+
+
+    def test_final_reduction_observation_keeps_quality_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "quality.c"
+            output = Path(directory) / "quality.min.c"
+            source.write_text("int main(void) { return 0; }\n")
+            checker = mock.Mock()
+            checker.attempts = 2
+            checker.observe.side_effect = [
+                ("behavior", "ide-quality output differs"),
+                ("behavior", "ide-quality output differs"),
+            ]
+            arguments = ["reduce_differential_case.py", "--source", str(source),
+                         "--ide", "compiler", "--out", str(output)]
+            with mock.patch.object(reducer.sys, "argv", arguments), \
+                 mock.patch.object(reducer.os, "chdir"), \
+                 mock.patch.object(reducer.os, "makedirs"), \
+                 mock.patch.object(reducer, "Checker", return_value=checker), \
+                 mock.patch.object(reducer, "reduce_lines", return_value=source.read_text().splitlines()), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(reducer.main(), 0)
+            self.assertEqual(checker.observe.call_count, 2)
+            self.assertEqual(checker.observe.call_args.kwargs, {"ide_modes": ("ide-quality",)})
+
+
+class DifferentialCampaignTests(unittest.TestCase):
+    def run_main(self, extra=(), category="ok", units=()):
+        whole = harness.CaseResult("enum_sizeof", 7, category, "controlled outcome")
+        output = io.StringIO()
+        errors = io.StringIO()
+        argv = ["differential-c", "--count", "1", "--units", "1", "--jobs", "1",
+                "--families", "enum_sizeof", "--seed", "7", "--ide", "subject", *extra]
+        with mock.patch.object(harness.sys, "argv", argv), \
+                mock.patch.object(harness.os, "chdir"), \
+                mock.patch.object(harness.os.path, "exists", return_value=True), \
+                mock.patch.object(harness.os, "makedirs") as directories, \
+                mock.patch.object(harness, "evaluate_case",
+                                  return_value=(whole, "fixture.c", "original source")) as evaluate, \
+                mock.patch.object(harness, "divergent_units", return_value=list(units)), \
+                mock.patch.object(harness, "run_one", return_value=(whole, [])) as run, \
+                redirect_stdout(output), redirect_stderr(errors):
+            try:
+                status = harness.main()
+            except SystemExit as error:
+                status = error.code
+            except ValueError as error:
+                # Legacy invalid worker counts raise instead of reaching the
+                # argument guard. Preserve that as a failing legacy outcome.
+                status = 1
+                errors.write("uncaught worker argument error: " + str(error))
+        return status, output.getvalue(), errors.getvalue(), directories, evaluate, run
+
+    def test_zero_or_negative_work_arguments_are_rejected_before_work(self):
+        for option in ("--count", "--units", "--jobs"):
+            for value in ("0", "-1"):
+                with self.subTest(option=option, value=value):
+                    status, _, error, directories, evaluate, run = self.run_main((option, value))
+                    self.assertEqual(status, 2)
+                    self.assertIn("must be positive", error)
+                    directories.assert_not_called()
+                    evaluate.assert_not_called()
+                    run.assert_not_called()
+
+    def test_empty_family_selection_is_rejected_before_work(self):
+        for families in ("", " , "):
+            with self.subTest(families=families):
+                status, _, error, directories, evaluate, run = self.run_main(("--families", families))
+                self.assertEqual(status, 2)
+                self.assertIn("at least one generator", error)
+                directories.assert_not_called()
+                evaluate.assert_not_called()
+                run.assert_not_called()
+
+    def test_one_real_task_selection_remains_successful(self):
+        status, output, error, _, evaluate, run = self.run_main()
+        self.assertEqual((status, error), (0, ""))
+        self.assertIn("ok=1", output)
+        evaluate.assert_not_called()
+        run.assert_called_once()
+        arguments = run.call_args.args
+        self.assertEqual(arguments[1:3], ("enum_sizeof", 7))
+        self.assertEqual(arguments[0].units, 1)
+
+    def test_isolate_success_remains_successful(self):
+        status, output, error, _, evaluate, run = self.run_main(("--isolate", "enum_sizeof:7"))
+        self.assertEqual((status, error), (0, ""))
+        self.assertIn("whole program: ok", output)
+        evaluate.assert_called_once()
+        run.assert_not_called()
+
+    def test_isolate_whole_case_failure_propagates_status(self):
+        for category in ("behavior", "rejects", "ide-crash", "run-crash", "generator"):
+            with self.subTest(category=category):
+                status, output, error, _, _, run = self.run_main(
+                    ("--isolate", "enum_sizeof:7"), category=category)
+                self.assertEqual((status, error), (2, ""))
+                self.assertIn("whole program: " + category, output)
+                run.assert_not_called()
+
+    def test_isolate_unit_only_failure_propagates_status(self):
+        status, output, error, _, _, _ = self.run_main(
+            ("--isolate", "enum_sizeof:7"), units=((0, "behavior", "wrong output"),))
+        self.assertEqual((status, error), (2, ""))
+        self.assertIn("whole program: ok", output)
+        self.assertIn("unit 0: behavior", output)
 
 
 if __name__ == "__main__":
