@@ -1,0 +1,518 @@
+{
+  "source_sha256": "1e342096a6ac646e2aac82cd547f8646d84782a876b9867849d8917bb82f5b61",
+  "baseline_sha256": "9fd5acd8fcae1a5996f0b07e06839a89b3b8a0996e96d04f5204aee413f26be7",
+  "candidate_sha256": "0c210cf5002fa7ba6b8984c3ecfe644bbc0dc84b6b3257fd3053f82be734ee00",
+  "expected_stdout": "0d3a9414381d8163\n",
+  "all_8_runtime_cases_pass": true,
+  "unchanged_allocator_objects_identical": true,
+  "object_hashes": {
+    "a-none": "9aced2d1e21a5b22455a6e9d8d38eeba9840ab1e744c3eb325fad47ecc957dba",
+    "b-none": "9aced2d1e21a5b22455a6e9d8d38eeba9840ab1e744c3eb325fad47ecc957dba",
+    "a-mir-stack": "9aced2d1e21a5b22455a6e9d8d38eeba9840ab1e744c3eb325fad47ecc957dba",
+    "b-mir-stack": "9aced2d1e21a5b22455a6e9d8d38eeba9840ab1e744c3eb325fad47ecc957dba",
+    "a-fast": "078a2a50494dcbf1ad14286c83b62b78016f2a587a1c241a63d0c609809fc9b2",
+    "b-fast": "9c2392a567a4384a164f595f8ad50fa1943c183e21ec1949b7fac3a2271798ca",
+    "a-quality": "935d134ceb28b083d800489b3a534b8b237ba7a0607323f1539b6fcb776a8d44",
+    "b-quality": "9a7cf229a20fba42d2390617b176220d519fadf93d3547a45bed30e7c0e2f275"
+  },
+  "commands": [
+    {
+      "label": "gcc-compile",
+      "argv": [
+        "/usr/bin/gcc",
+        "-O2",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/gcc-oracle"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "gcc-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/gcc-oracle"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-none-compile",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/perf-main2f00/ide-base",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=none",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-none.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-none-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-none.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-none-object",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/perf-main2f00/ide-base",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=none",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-none.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-none-sections",
+      "argv": [
+        "/usr/bin/readelf",
+        "-SW",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-none.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "ce506cc933d6240fa911e365f8384e1313ee019ab51c3ac0e80cfb5d3e343b47",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-none-compile",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-frozen-perf/ide-cand-samepath",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=none",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-none.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-none-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-none.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-none-object",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-frozen-perf/ide-cand-samepath",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=none",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-none.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-none-sections",
+      "argv": [
+        "/usr/bin/readelf",
+        "-SW",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-none.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "ce506cc933d6240fa911e365f8384e1313ee019ab51c3ac0e80cfb5d3e343b47",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-mir-stack-compile",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/perf-main2f00/ide-base",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=mir-stack",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-mir-stack.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-mir-stack-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-mir-stack.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-mir-stack-object",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/perf-main2f00/ide-base",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=mir-stack",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-mir-stack.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-mir-stack-sections",
+      "argv": [
+        "/usr/bin/readelf",
+        "-SW",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-mir-stack.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "ce506cc933d6240fa911e365f8384e1313ee019ab51c3ac0e80cfb5d3e343b47",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-mir-stack-compile",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-frozen-perf/ide-cand-samepath",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=mir-stack",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-mir-stack.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-mir-stack-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-mir-stack.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-mir-stack-object",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-frozen-perf/ide-cand-samepath",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=mir-stack",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-mir-stack.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-mir-stack-sections",
+      "argv": [
+        "/usr/bin/readelf",
+        "-SW",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-mir-stack.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "ce506cc933d6240fa911e365f8384e1313ee019ab51c3ac0e80cfb5d3e343b47",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-fast-compile",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/perf-main2f00/ide-base",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=fast",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-fast.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-fast-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-fast.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-fast-object",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/perf-main2f00/ide-base",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=fast",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-fast.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-fast-sections",
+      "argv": [
+        "/usr/bin/readelf",
+        "-SW",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-fast.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e1cd95c3822fc3e7399a4171ce6057228251ef9f10e903ae93368ea570da70c2",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-fast-compile",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-frozen-perf/ide-cand-samepath",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=fast",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-fast.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-fast-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-fast.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-fast-object",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-frozen-perf/ide-cand-samepath",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=fast",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-fast.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-fast-sections",
+      "argv": [
+        "/usr/bin/readelf",
+        "-SW",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-fast.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "c4d9187822d10c39a5bfe7e89e39f96af376009072a3f7d02439d1931d034751",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-quality-compile",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/perf-main2f00/ide-base",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=quality",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-quality.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-quality-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-quality.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-quality-object",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/perf-main2f00/ide-base",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=quality",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-quality.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "a-quality-sections",
+      "argv": [
+        "/usr/bin/readelf",
+        "-SW",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/a-quality.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "0308349454f8983cb631410960b02907e5765d34fd41553eaa6fea2cb444d256",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-quality-compile",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-frozen-perf/ide-cand-samepath",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=quality",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-quality.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-quality-run",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-quality.exe"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "91baaaf30704c93bd51d9690f0d88ab57c231ceff4ce2b4d6761dcff642fee1f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-quality-object",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-frozen-perf/ide-cand-samepath",
+        "cc",
+        "-g0",
+        "-O2",
+        "-fno-frontend-ssa",
+        "-fregister-allocator=quality",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-constrained-runtime.c",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-quality.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "b-quality-sections",
+      "argv": [
+        "/usr/bin/readelf",
+        "-SW",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-runtime-matched-ast/b-quality.o"
+      ],
+      "cwd": "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622-baseline",
+      "exit": 0,
+      "stdout_sha256": "c4d9187822d10c39a5bfe7e89e39f96af376009072a3f7d02439d1931d034751",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

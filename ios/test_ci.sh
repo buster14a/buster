@@ -88,6 +88,10 @@ cmake --warn-uninitialized -Werror=dev \
     -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
     -DBUSTER_DEVELOPER_TARGETS=OFF
 echo "TIMING_IOS configure_seconds=$((SECONDS - configure_started))"
+if [[ ${BUSTER_CI_CONDITIONS_EVIDENCE:-0} == 1 ]]; then
+    python3 tools/ci_checks_tools.py --tool ninja --cmake-cache "$build_directory/CMakeCache.txt" \
+        --output "${RUNNER_TEMP:?}/buster-ci/selected-ninja.json"
+fi
 
 app_paths=()
 for build_config in "${build_configs[@]}"; do

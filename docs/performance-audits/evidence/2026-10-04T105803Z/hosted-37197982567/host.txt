@@ -1,0 +1,14 @@
+schema=IR_LAYOUT_LAB_HOST_V1
+source_sha=b2d452bdef7b1cd979e0bcb268f53364b0918b06
+tree_sha=6ca44ddce8ffa61044b8b9c180e792daebf457ea
+lab_source_sha256=ba28a28838b6572cfc5ec746d06bbfce73316bdd9d5696f345b76a01d33efb5c
+ImageOS=ubuntu26 ImageVersion=20260927.149.1 RUNNER_ARCH=X64
+kernel=Linux 7.0.0-1012-azure #12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026
+nproc=4
+model name	: AMD EPYC 9V74 80-Core Processor
+cache size	: 1024 KB
+MemTotal:       16366708 kB
+MemAvailable:   14906668 kB
+always [madvise] never
+Ubuntu clang version 21.1.8 (6ubuntu1)
+valgrind-3.26.0
