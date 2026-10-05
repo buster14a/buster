@@ -2995,6 +2995,10 @@ struct CIntegerIrBuilder
     IrInstructionId previous_instruction;
     bool previous_instruction_known;
     String8 failure_message;
+    // Nonzero only while a required initializer is being folded. General
+    // constant probes decline unsupported address conversions without a
+    // diagnostic; the initializer supplies its source token, biased by one.
+    u32 static_initializer_token_plus_one;
     // Set by c_ir_construction_refused; see there.
     bool construction_refused;
     // The CDiagnosticKind `failure_message` deserves, biased by one so a
@@ -14323,6 +14327,7 @@ struct CIrExpressionCoreState
     IrSourceRange* operation_sources;
     IrTypeId* operation_cast_types;
     u32 index;
+    u32 capacity;
     u32 value_count;
     u32 operation_count;
     u32 pending_start;
@@ -18847,6 +18852,48 @@ BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPrepar
     return true;
 }
 
+BUSTER_C_INTERNAL u32 c_ir_call_argument_count(CIntegerIrBuilder* builder, CIrPreparedCall* call)
+{
+    u32 count = call->open_index + 1 < call->close_index ? 1 : 0;
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    for (u32 index = call->open_index + 1; index < call->close_index; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
+        {
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
 typedef struct CIrTypeCompatibilityTask CIrTypeCompatibilityTask;
 struct CIrTypeCompatibilityTask
 {
@@ -22053,7 +22100,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                selected->arguments = arena_allocate(builder->arena, IrValueId, selected->close_index - selected->token_index);
+                u32 argument_capacity = c_ir_call_argument_count(builder, selected);
+                selected->arguments = arena_allocate(builder->arena, IrValueId, argument_capacity ? argument_capacity : 1);
                 argument_count = 0;
             }
             while (argument_index < argument_end)
@@ -22115,6 +22163,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             remaining -= 1;
             continue;
         }
+        TemporalArena call_argument_temporary = arena_begin_temporal(builder->temporary_arena);
         u32 argument_capacity = selected->close_index - selected->open_index;
         u32* argument_starts = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
         u32* argument_ends = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
@@ -22161,6 +22210,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             if (separator == predicted_argument_index || predicted_argument_count >= argument_capacity)
             {
+                scratch_end(call_argument_temporary);
                 return false;
             }
             argument_starts[predicted_argument_count] = predicted_argument_index;
@@ -22171,6 +22221,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             selected->indirect ? UINT32_MAX
                                : c_ir_find_function_for_call(builder, token.symbol, c_token_spelling(builder->preprocess.spelling_base, token),
                                                              argument_starts, argument_ends, predicted_argument_count);
+        scratch_end(call_argument_temporary);
         IrValueId indirect_callee = IR_VALUE_ID_INVALID;
         CIrSignature signature = {0};
         if (selected->indirect)
@@ -22411,7 +22462,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         }
         if (continuation != C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT)
         {
-            selected->arguments = arena_allocate(builder->arena, IrValueId, selected->close_index - selected->token_index);
+            selected->arguments = arena_allocate(builder->arena, IrValueId, predicted_argument_count ? predicted_argument_count : 1);
             frame->as.prepared_call.state->argument_count = 0;
             frame->as.prepared_call.state->argument_index = selected->open_index + 1;
             frame->as.prepared_call.state->declaration_index = declaration_index;
@@ -29242,6 +29293,33 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_vla_suffix_evaluated(CIntegerIrBuilder* build
     return result;
 }
 
+#define C_IR_EXPRESSION_CORE_STACK_SLACK 8u
+#define C_IR_EXPRESSION_CORE_ITERATION_PUSHES 4u
+
+// One stack slot per token the evaluator visits; prepared calls contribute only their result.
+BUSTER_C_INTERNAL u32 c_ir_expression_core_capacity(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 visited = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        visited += 1;
+        CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, index);
+        if (prepared_call && prepared_call->close_index >= end)
+        {
+            prepared_call = 0;
+        }
+        if (prepared_call)
+        {
+            prepared_call = c_ir_prepared_call_chained(builder, prepared_call, end);
+        }
+        if (prepared_call)
+        {
+            index = prepared_call->close_index;
+        }
+    }
+    return visited + C_IR_EXPRESSION_CORE_STACK_SLACK;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -29585,7 +29663,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         c_ir_lower_expression_core_root_update_resume(builder, state);
         return;
     }
-    u32 capacity = end - start + 1;
+    u32 capacity = c_ir_expression_core_capacity(builder, start, end);
     values = arena_allocate(builder->temporary_arena, IrValueId, capacity);
     operations = arena_allocate(builder->temporary_arena, CConditionalOperator, capacity);
     operation_sources = arena_allocate(builder->temporary_arena, IrSourceRange, capacity);
@@ -29594,11 +29672,20 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     state->operations = operations;
     state->operation_sources = operation_sources;
     state->operation_cast_types = operation_cast_types;
+    state->capacity = capacity;
     index = start;
     expect_operand = true;
 c_ir_expression_core_loop:
     for (; index < end; index += 1)
     {
+        if (value_count + C_IR_EXPRESSION_CORE_ITERATION_PUSHES > state->capacity ||
+            operation_count + C_IR_EXPRESSION_CORE_ITERATION_PUSHES > state->capacity)
+        {
+            builder->failure_message = S8("C expression operand stack exceeds its lowering capacity");
+            builder->failure_token_index = index;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
         builder->failure_token_index = index;
         CToken token = builder->preprocess.tokens[index];
         IrSourceRange source = c_ir_token_source_range(builder, token);
@@ -36604,6 +36691,9 @@ BUSTER_C_INTERNAL bool c_ir_builder_controlled_body_range(CIntegerIrBuilder* bui
 
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
+#define C_IR_SWITCH_CHUNK_VALUE_CAPACITY (UINT16_MAX - 1u)
+
+// target_count = values + 1 must fit in u16.
 BUSTER_C_INTERNAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrValueId switched, CIrSwitchCase* cases, u32 case_count, IrBlockId default_block,
                                                IrSourceRange source)
 {
@@ -36612,31 +36702,50 @@ BUSTER_C_INTERNAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrValue
     {
         value_count += !cases[index].is_default;
     }
-    if (value_count >= UINT16_MAX)
+    u32 emitted_value_count = 0;
+    u32 case_index = 0;
+    bool complete = false;
+    bool result = true;
+    while (!complete && result)
     {
-        return false;
-    }
-    IrSourceRange instruction_source = source;
-    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_SWITCH, builder->void_type);
-    instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
-    instruction.operands[0] = switched;
-    instruction.operand_count = 1;
-    instruction.targets = arena_allocate(builder->arena, IrBlockId, value_count + 1);
-    instruction.immediates = arena_allocate(builder->arena, u64, value_count);
-    u32 value_index = 0;
-    for (u32 index = 0; index < case_count; index += 1)
-    {
-        if (!cases[index].is_default)
+        u32 chunk_value_count = BUSTER_MIN(value_count - emitted_value_count, C_IR_SWITCH_CHUNK_VALUE_CAPACITY);
+        bool has_next_chunk = emitted_value_count + chunk_value_count < value_count;
+        IrBlockId next_chunk = has_next_chunk ? c_ir_block_create(builder) : default_block;
+        if (next_chunk.value == IR_ID_UNDERLYING_INVALID)
         {
-            instruction.targets[value_index] = cases[index].block;
-            instruction.immediates[value_index] = cases[index].value;
-            value_index += 1;
+            result = false;
+        }
+        else
+        {
+            IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_SWITCH, builder->void_type);
+            instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+            instruction.operands[0] = switched;
+            instruction.operand_count = 1;
+            instruction.targets = arena_allocate(builder->arena, IrBlockId, chunk_value_count + 1);
+            instruction.immediates = arena_allocate(builder->arena, u64, chunk_value_count);
+            u32 chunk_index = 0;
+            for (; case_index < case_count && chunk_index < chunk_value_count; case_index += 1)
+            {
+                if (!cases[case_index].is_default)
+                {
+                    instruction.targets[chunk_index] = cases[case_index].block;
+                    instruction.immediates[chunk_index] = cases[case_index].value;
+                    chunk_index += 1;
+                }
+            }
+            instruction.targets[chunk_value_count] = next_chunk;
+            instruction.target_count = (u16)(chunk_value_count + 1);
+            instruction.immediate_count = (u16)chunk_value_count;
+            result = c_ir_append_instruction(builder, instruction, source).value != IR_ID_UNDERLYING_INVALID;
+            if (result && has_next_chunk)
+            {
+                result = c_ir_switch_block(builder, next_chunk);
+            }
+            emitted_value_count += chunk_value_count;
+            complete = emitted_value_count == value_count;
         }
     }
-    instruction.targets[value_count] = default_block;
-    instruction.target_count = (u16)(value_count + 1);
-    instruction.immediate_count = (u16)value_count;
-    return c_ir_append_instruction(builder, instruction, instruction_source).value != IR_ID_UNDERLYING_INVALID;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_switch_promoted_type(CIntegerIrBuilder* builder, IrTypeId type_id)
@@ -37411,6 +37520,24 @@ BUSTER_C_SHARED bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_
     return valid;
 }
 
+// These unions admit an existing fixed register in every case. Select that
+// member rather than representing an immediate or memory alternative in IR.
+// Target validation still applies to the selected x86 register class.
+BUSTER_C_SHARED u64 c_semantic_asm_register_alternative(String8 text, bool output)
+{
+    u64 result = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+    if (output && text.length >= 3 && (text.pointer[0] == '=' || text.pointer[0] == '+'))
+    {
+        u64 prefix = text.pointer[1] == '&' ? 2 : 1;
+        if (string_equal(string_slice(text, prefix, text.length), S8("am"))) result = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+    }
+    else if (!output && string_equal(text, S8("dN")))
+    {
+        result = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+    }
+    return result;
+}
+
 // The x86-64 register names a local register variable may bind, paired with the
 // operand class that pins an asm operand to them. The set is the emitter's
 // caller-saved asm pool; rbx and r12-r15 are callee-saved and are left out
@@ -37592,7 +37719,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     bool early_clobber = false;
     bool matching = false;
     u32 match_index = UINT32_MAX;
-    if (output)
+    u64 alternative = c_semantic_asm_register_alternative((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, output);
+    if (alternative != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+    {
+        constraint = alternative;
+        read_write = output && bytes.pointer[0] == '+';
+        early_clobber = output && bytes.pointer[1] == '&';
+    }
+    else if (output)
     {
         bool modifier_shape = bytes.length == 2 || (bytes.length == 3 && bytes.pointer[1] == '&');
         if (!modifier_shape || (bytes.pointer[0] != '=' && bytes.pointer[0] != '+'))
@@ -37849,8 +37983,16 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     return true;
 }
 
+BUSTER_C_SHARED String8 c_semantic_asm_clobber_name(Target target, String8 clobber)
+{
+    // GNU x86 register number zero denotes AX, independently of operand ties.
+    String8 result = target.cpu_arch == CPU_ARCH_X86_64 && string_equal(clobber, S8("0")) ? S8("rax") : clobber;
+    return result;
+}
+
 BUSTER_C_SHARED bool c_semantic_asm_clobber_valid(Target target, String8 clobber)
 {
+    clobber = c_semantic_asm_clobber_name(target, clobber);
     bool result = false;
     if (string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")))
     {
@@ -37935,6 +38077,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
                 .pointer = (char8*)name.pointer,
                 .length = name.length,
             };
+            clobber = c_semantic_asm_clobber_name(builder->target, clobber);
             if (!c_semantic_asm_clobber_valid(builder->target, clobber))
             {
                 return false;
@@ -37965,6 +38108,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
 
 BUSTER_C_SHARED bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint)
 {
+    clobber = c_semantic_asm_clobber_name(target, clobber);
     bool matches = false;
     if (target.cpu_arch == CPU_ARCH_AARCH64 && IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint))
     {
@@ -42540,6 +42684,21 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     {
                         return false;
                     }
+                    if (converted.kind == C_IR_CONSTANT_POINTER)
+                    {
+                        if (!c_ir_constant_type_is_integer(type) || type->layout.size != program->data_layout.pointer.size || task.is_bit_field ||
+                            c_ir_symbol_is_thread_local(builder, converted.symbol) || !relocations || !relocation_count ||
+                            *relocation_count >= relocation_capacity || relocation_base > UINT64_MAX - task.offset)
+                        {
+                            return false;
+                        }
+                        relocations[(*relocation_count)++] = (IrGlobalRelocation){
+                            .symbol = converted.symbol,
+                            .addend = converted.addend,
+                            .offset = relocation_base + task.offset,
+                        };
+                        continue;
+                    }
                     u64 bits = 0;
                     bool sign_extend = false;
                     bool binary128 = type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && c_ir_binary128_static_target(builder->target, type);
@@ -45752,7 +45911,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             // type; everything read and written here spans that unit.
             u64 unit = selected_field->access_size ? selected_field->access_size : child->layout.size;
             if (!c_ir_constant_evaluate(builder, value_start, value_end, &value) ||
-                !c_ir_constant_cast(builder, &value, child_type, &converted) || !c_ir_constant_type_is_integer(child) || !child->layout.resolved ||
+                !c_ir_constant_cast(builder, &value, child_type, &converted) || converted.kind != C_IR_CONSTANT_INTEGER ||
+                !c_ir_constant_type_is_integer(child) || !child->layout.resolved ||
                 selected_field->bit_width > 64 || !selected_field->bit_width || selected_field->bit_width > child->layout.size * 8 ||
                 selected_field->bit_offset + selected_field->bit_width > unit * 8 || child_offset > byte_count ||
                 unit > byte_count - child_offset)
@@ -46948,6 +47108,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
                     .type = pointer_type,
                     .symbol = builder->entity_symbols[entity_id.value],
                     .kind = C_IR_CONSTANT_POINTER,
+                    .function_designator = true,
                 };
                 return result->symbol.value != IR_ID_UNDERLYING_INVALID;
             }
@@ -47028,22 +47189,53 @@ BUSTER_C_INTERNAL bool c_ir_constant_index(CIntegerIrBuilder* builder, CIrConsta
     return valid;
 }
 
+// Canonical scalar aliases may differ only in declared alignment. Reading
+// those preserves the value; changing width, kind, signedness or rank does not.
+BUSTER_C_INTERNAL bool c_ir_constant_access_type_matches(IrType const* access, IrType const* declared)
+{
+    bool matches = access && declared && access->id.value == declared->id.value;
+    if (!matches && access && declared && access->kind == declared->kind)
+    {
+        switch (access->kind)
+        {
+        case IR_TYPE_BOOLEAN:
+        case IR_TYPE_INTEGER:
+            matches = access->bit_width == declared->bit_width && access->is_signed == declared->is_signed &&
+                      access->integer_conversion_rank == declared->integer_conversion_rank;
+            break;
+        case IR_TYPE_FLOAT:
+            matches = access->bit_width == declared->bit_width && access->float_format == declared->float_format;
+            break;
+        case IR_TYPE_POINTER:
+            matches = access->element_type.value == declared->element_type.value && access->is_nullptr == declared->is_nullptr;
+            break;
+        default:
+            break;
+        }
+    }
+    return matches;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrConstantValue* value)
 {
-    if (value->kind != C_IR_CONSTANT_UNKNOWN)
+    bool valid = value->kind != C_IR_CONSTANT_INVALID;
+    if (value->kind == C_IR_CONSTANT_LVALUE)
     {
-        if (value->kind != C_IR_CONSTANT_LVALUE)
-        {
-            return value->kind != C_IR_CONSTANT_INVALID;
-        }
         IrType* access = ir_type_from_id(&builder->program->types, value->type);
-        if (!access || access->is_volatile || access->is_atomic || !c_ir_constant_from_global(builder, value->symbol, value))
+        CIrConstantValue stored = {0};
+        if (value->addend || !access || access->is_volatile || access->is_atomic ||
+            !c_ir_constant_from_global(builder, value->symbol, &stored) ||
+            !c_ir_constant_access_type_matches(access, ir_type_from_id(&builder->program->types, stored.type)))
         {
             value->kind = C_IR_CONSTANT_UNKNOWN;
         }
+        else
+        {
+            stored.type = value->type;
+            *value = stored;
+        }
     }
-
-    return true;
+    return valid;
 }
 
 // IEEE-754 binary16 -- the representation of `_Float16` -- as bits and back.
@@ -47974,7 +48166,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                 }
                 else if (c_ir_constant_type_is_integer(target))
                 {
-                    if (source.kind == C_IR_CONSTANT_FLOAT)
+                    if (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        u32 pointer_bits = builder->program->data_layout.pointer.bit_width;
+                        success = target->bit_width == pointer_bits && target->layout.size == builder->program->data_layout.pointer.size;
+                        if (success)
+                        {
+                            // The carrier still owns S+A, but its C type is
+                            // now integer: subsequent arithmetic uses bytes.
+                            source.type = target_type;
+                            *result = source;
+                        }
+                        else if (builder->static_initializer_token_plus_one)
+                        {
+                            c_ir_constant_initializer_fail(builder,
+                                target->bit_width < pointer_bits ? S8("an address cannot initialize an integer type narrower than pointer")
+                                                               : S8("an address relocation requires an integer type exactly as wide as pointer"),
+                                builder->static_initializer_token_plus_one - 1);
+                        }
+                    }
+                    else if (source.kind == C_IR_CONSTANT_FLOAT)
                     {
                         CIrWideInteger integer = {0};
                         success = source_type && source_type->bit_width > 64
@@ -48051,6 +48262,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
                 value->kind = C_IR_CONSTANT_POINTER;
             }
         }
+        else if (value->function_designator && value->kind == C_IR_CONSTANT_POINTER && value->symbol.value != IR_ID_UNDERLYING_INVALID &&
+                 !value->addend)
+        {
+            // A function designator has already decayed to its address, and
+            // `&f` names that same address.
+            success = true;
+        }
     }
     else if (operation == C_CONDITIONAL_LOGICAL_NOT)
     {
@@ -48094,6 +48312,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
                     else value->floating = -value->floating;
                 }
                 success = true;
+            }
+            else if (c_ir_constant_type_is_integer(type) && value->kind == C_IR_CONSTANT_POINTER)
+            {
+                // Unary plus preserves S+A. Negation and complement cannot
+                // be represented by one absolute symbol relocation.
+                success = operation == C_CONDITIONAL_UNARY_PLUS;
+                if (success)
+                {
+                    IrTypeId promoted = c_ir_constant_common_type(builder, value->type, value->type);
+                    success = c_ir_constant_cast(builder, value, promoted, value);
+                }
             }
             else if (c_ir_constant_type_is_integer(type))
             {
@@ -48236,6 +48465,38 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     // Adding a type may have grown the table, so re-resolve both operands.
     left_type = ir_type_from_id(&builder->program->types, left.type);
     right_type = ir_type_from_id(&builder->program->types, right.type);
+    bool left_integer_address = left_pointer && c_ir_constant_type_is_integer(left_type);
+    bool right_integer_address = right_pointer && c_ir_constant_type_is_integer(right_type);
+    if (left_integer_address || right_integer_address)
+    {
+        // Address-to-integer arithmetic follows integer conversions and has
+        // byte scale one. Two symbols and nonlinear operations stay refused.
+        bool address_left = left_integer_address;
+        CIrConstantValue address = address_left ? left : right;
+        CIrConstantValue offset = address_left ? right : left;
+        IrTypeId common = c_ir_constant_common_type(builder, left.type, right.type);
+        if (left_integer_address == right_integer_address || offset.kind != C_IR_CONSTANT_INTEGER ||
+            (operation != C_CONDITIONAL_ADD && operation != C_CONDITIONAL_SUBTRACT) ||
+            (operation == C_CONDITIONAL_SUBTRACT && !address_left) ||
+            !c_ir_constant_cast(builder, &address, common, &address) || !c_ir_constant_cast(builder, &offset, common, &offset))
+        {
+            return false;
+        }
+        IrType* common_type = ir_type_from_id(&builder->program->types, common);
+        s64 count = c_ir_integer_signed_value(offset.integer, common_type);
+        if (operation == C_CONDITIONAL_SUBTRACT)
+        {
+            if (count == INT64_MIN) return false;
+            count = -count;
+        }
+        if ((count > 0 && address.addend > INT64_MAX - count) || (count < 0 && address.addend < INT64_MIN - count))
+        {
+            return false;
+        }
+        address.addend += count;
+        *result = address;
+        return true;
+    }
     if ((left_pointer || (left_type && left_type->kind == IR_TYPE_POINTER)) || (right_pointer || (right_type && right_type->kind == IR_TYPE_POINTER)))
     {
         if (!left_pointer && left.kind == C_IR_CONSTANT_INTEGER && left.integer == 0 && left.integer_high == 0)
@@ -49170,6 +49431,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
             }
             if (success)
             {
+                selected.function_designator = false;
                 values[(*value_count)++] = selected;
             }
         }
@@ -49177,6 +49439,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
     else if (c_conditional_is_unary(operation.operation))
     {
         success = *value_count && c_ir_constant_apply_unary(builder, operation.operation, operation.cast_type, &values[*value_count - 1]);
+        if (success)
+        {
+            values[*value_count - 1].function_designator = false;
+        }
     }
     else if (*value_count >= 2)
     {
@@ -49186,6 +49452,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
         success = c_ir_constant_apply_binary(builder, operation.operation, &left, &right, &result);
         if (success)
         {
+            result.function_designator = false;
             values[(*value_count)++] = result;
         }
     }
@@ -49874,7 +50141,7 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
                 return false;
             }
             CIrConstantValue converted = {0};
-            if (!c_ir_constant_cast(builder, &value, global->type, &converted))
+            if (!c_ir_constant_cast(builder, &value, global->type, &converted) || converted.kind != C_IR_CONSTANT_POINTER)
             {
                 return false;
             }
@@ -49895,7 +50162,9 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
             return true;
         }
         CIrConstantValue converted = {0};
-        if (c_ir_constant_cast(builder, &value, global->type, &converted))
+        if (c_ir_constant_cast(builder, &value, global->type, &converted) &&
+            (converted.kind == C_IR_CONSTANT_INTEGER || converted.kind == C_IR_CONSTANT_FLOAT ||
+             (converted.kind == C_IR_CONSTANT_POINTER && c_ir_constant_type_is_integer(type))))
         {
             if (type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && c_ir_binary128_static_target(builder->target, type))
             {
@@ -49959,6 +50228,22 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
             }
             if (c_ir_constant_type_is_integer(type))
             {
+                if (converted.kind == C_IR_CONSTANT_POINTER)
+                {
+                    if (type->layout.size != builder->program->data_layout.pointer.size || c_ir_symbol_is_thread_local(builder, converted.symbol))
+                    {
+                        return false;
+                    }
+                    global->bytes = (ByteSlice){
+                        .pointer = arena_allocate_zeroed(builder->arena, u8, type->layout.size),
+                        .length = type->layout.size,
+                    };
+                    global->relocations = arena_allocate(builder->arena, IrGlobalRelocation, 1);
+                    global->relocations[0] = (IrGlobalRelocation){.symbol = converted.symbol, .addend = converted.addend};
+                    global->relocation_count = 1;
+                    global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+                    return true;
+                }
                 if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128 && type->layout.size == 16)
                 {
                     u8* bytes = arena_allocate(builder->arena, u8, 16);
@@ -50305,7 +50590,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_flexible_initializer_type(CIntegerIrBuilder* bui
     return ir_program_add_type(program, clone);
 }
 
-BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
+BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
 {
     Arena* arena = builder->arena;
     IrProgram* program = builder->program;
@@ -50320,6 +50605,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
         return true;
     }
+    builder->static_initializer_token_plus_one = start + 1;
     for (u32 index = start; index < end; index += 1)
     {
         if (c_ir_label_address_prefix(builder, start, index) && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
@@ -50831,6 +51117,15 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
     }
     return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
+{
+    u32 previous_initializer = builder->static_initializer_token_plus_one;
+    builder->static_initializer_token_plus_one = 0;
+    bool result = c_ir_global_initializer_impl(builder, declaration, type, global);
+    builder->static_initializer_token_plus_one = previous_initializer;
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
