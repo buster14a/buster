@@ -64,6 +64,23 @@ struct OsError
     u32 v;
 };
 
+// Filled only when an OS virtual-memory commit fails. The Windows values are
+// best-effort observations taken after the native error has already been
+// captured; zero observation flags mean that the platform did not provide the
+// corresponding context, not that its resource values were zero.
+typedef struct OsCommitFailureContext OsCommitFailureContext;
+struct OsCommitFailureContext
+{
+    OsError error;
+    u64 page_size;
+    u64 system_commit_limit_bytes;
+    u64 system_commit_available_bytes;
+    u64 physical_available_bytes;
+    u64 process_commit_bytes;
+    bool system_memory_observed;
+    bool process_memory_observed;
+};
+
 typedef enum OsFileKind
 {
     OS_FILE_KIND_MISSING,
@@ -215,7 +232,8 @@ struct ProcessSpawnResult
     // On POSIX, the child is the leader of a fresh process group. On Windows,
     // it was assigned to a kill-on-close Job Object before its first instruction.
     u64 process_group : 1;
-    u64 reserved : 63;
+    u64 observe_resources : 1;
+    u64 reserved : 62;
 };
 
 typedef struct ProcessSpawnOptions ProcessSpawnOptions;
@@ -232,16 +250,44 @@ struct ProcessSpawnOptions
     // pipe or platform spawn object is created. Direct execution never asks an
     // OS API to search PATH.
     u64 search_path : 1;
-    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 3;
+    // Optional OS accounting for this child. Does not add process-tree
+    // sampling, change capture/cleanup, or measure simultaneous tree RSS.
+    u64 observe_resources : 1;
+    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 4;
     ProcessCaptureLimits capture_limits;
     OsFileDescriptor* capture_overflow_files[(size_t)STANDARD_STREAM_COUNT];
     ProcessCaptureOverflowPolicy capture_overflow_policy;
+};
+
+typedef enum ProcessResourceStatus
+{
+    PROCESS_RESOURCE_UNKNOWN,
+    PROCESS_RESOURCE_OBSERVED,
+    PROCESS_RESOURCE_ERROR,
+    PROCESS_RESOURCE_UNSUPPORTED,
+} ProcessResourceStatus;
+
+typedef struct ProcessResourceUsage ProcessResourceUsage;
+struct ProcessResourceUsage
+{
+    // Values are valid only for OBSERVED. wait4 CPU includes the child and
+    // descendants it waited for; Windows process times are leader-only.
+    u64 user_cpu_us;
+    u64 system_cpu_us;
+    // Linux/macOS: ru_maxrss, the largest individual high water in that
+    // accounting scope. Windows: the leader's peak working set, not commit.
+    u64 peak_memory_bytes;
+    ProcessResourceStatus cpu_status;
+    ProcessResourceStatus memory_status;
+    OsError cpu_error;
+    OsError memory_error;
 };
 
 typedef struct ProcessWaitResult ProcessWaitResult;
 struct ProcessWaitResult
 {
     ByteSlice streams[(size_t)STANDARD_STREAM_COUNT];
+    ProcessResourceUsage resources;
     // observed = every byte drained; captured = the returned prefix; streamed
     // = overflow written to the configured descriptor; dropped = the rest.
     u64 observed_bytes[(size_t)STANDARD_STREAM_COUNT];
@@ -629,6 +675,8 @@ BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection,
 // succeeded and its outcome is not folded into this result, so a refused or
 // unavailable prefault can neither fail a good commit nor stand in for a
 // failed one. Call os_prefault directly when the outcome matters.
+BUSTER_F_DECL bool os_commit_diagnose(void* address, u64 size, ProtectionFlags protection, bool prefault,
+                                     OsCommitFailureContext* failure_context);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault);
 BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
@@ -647,6 +695,9 @@ BUSTER_F_DECL u32 os_get_logical_thread_count(void);
 BUSTER_F_DECL u64 os_get_page_size(void);
 BUSTER_F_DECL u64 os_get_physical_memory_size(void);
 BUSTER_F_DECL u64 os_get_resident_memory_size(void);
+// The process's resident high water in bytes: getrusage's ru_maxrss on Linux
+// and Apple, the peak working set on Windows; 0 where unavailable.
+BUSTER_F_DECL u64 os_get_peak_resident_memory_size(void);
 BUSTER_F_DECL u64 os_get_current_process_id(void);
 BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle(void);
 BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle(void);

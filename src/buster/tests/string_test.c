@@ -427,6 +427,16 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             string_format(arena, S8("{"));
             os_exit(0);
         }
+        if (string_equal(failure_mode, S8("string_format_fail_nested_brace")))
+        {
+            string_format(arena, S8("{u8{}}"), (u8)1);
+            os_exit(0);
+        }
+        if (string_equal(failure_mode, S8("string_format_fail_source_brace")))
+        {
+            string_format(arena, S8("struct S { char c; long l; };"));
+            os_exit(0);
+        }
         if (string_equal(failure_mode, S8("string_format_fail_type")))
         {
             string_format(arena, S8("{unknown}"));
@@ -474,6 +484,10 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         {
             String8 formatted = string_format(arena, S8("{{ {S8} }}"), S8("value"));
             BUSTER_STRING_TEST(arguments, formatted, S8("{ value }"));
+        }
+        {
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{{{{}}}}}")), S8("{{}}}"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{S8}"), S8("struct S { char c; long l; };")), S8("struct S { char c; long l; };"));
         }
         {
             String8 formatted = string_format(arena, S8("async_thread_{u64}"), (u64)7);
@@ -554,23 +568,34 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         }
         {
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
-            String8 failure_modes[] = {
-                S8("string_format_fail_brace"),
-                S8("string_format_fail_type"),
-                S8("string_format_fail_modifier"),
-                S8("string_format_fail_width_overflow"),
-                S8("string_join_fail_overflow"),
-                S8("string_duplicate_fail_null"),
+            // Check the reported cause as well as fatal status: a formatter
+            // recursion or an unrelated earlier failure must not pass.
+            typedef struct StringFormatFailureCase StringFormatFailureCase;
+            struct StringFormatFailureCase
+            {
+                String8 mode;
+                String8 diagnostic;
+            };
+            StringFormatFailureCase failure_cases[] = {
+                {S8("string_format_fail_brace"), S8("string_format: unterminated placeholder (write a literal brace as {{) at ")},
+                {S8("string_format_fail_nested_brace"), S8("string_format: nested opening brace in placeholder (write a literal brace as {{) at ")},
+                {S8("string_format_fail_type"), S8("string_format: unknown placeholder type (write a literal brace as {{) at ")},
+                {S8("string_format_fail_source_brace"), S8("string_format: unknown placeholder type (write a literal brace as {{) at ")},
+                {S8("string_format_fail_modifier"), {0}},
+                {S8("string_format_fail_width_overflow"), {0}},
+                {S8("string_join_fail_overflow"), {0}},
+                {S8("string_duplicate_fail_null"), {0}},
             };
             String8 executable = program_state->input.arguments.pointer[0];
-            for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(failure_modes); mode_index += 1)
+            for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(failure_cases); mode_index += 1)
             {
                 String8 child_arguments[] = {
                     executable,
                     S8("test"),
+                    S8("--module=string_tests"),
                 };
                 String8 environment_keys[] = {S8("BUSTER_STRING_FORMAT_FAILURE")};
-                String8 environment_values[] = {failure_modes[mode_index]};
+                String8 environment_values[] = {failure_cases[mode_index].mode};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
@@ -578,11 +603,17 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
-                    ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+                    ProcessWaitResult wait_result = os_process_wait_deadline(arena, spawn, 30000000);
                     String8 error = (String8){.pointer = (char8*)wait_result.streams[STANDARD_STREAM_ERROR].pointer,
                                              .length = wait_result.streams[STANDARD_STREAM_ERROR].length};
+                    BUSTER_TEST(arguments, !wait_result.timed_out);
                     BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
                     BUSTER_TEST(arguments, string_first_sequence(error, S8("TODO")) == BUSTER_STRING_NO_MATCH);
+                    if (failure_cases[mode_index].diagnostic.length)
+                    {
+                        BUSTER_TEST(arguments, string_starts_with_sequence(error, failure_cases[mode_index].diagnostic));
+                        BUSTER_TEST(arguments, string_ends_with_sequence(error, S8(" in string_format_va\n")));
+                    }
                 }
             }
 #endif

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Evidence-integrity controls for the opt-in offline unit-test measurement tool."""
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -67,7 +68,10 @@ class MeasurementTests(unittest.TestCase):
         text = parallel_log() if grouped else serial_log()
         if log is not None:
             text = log
-        (self.root / f"{name}.log").write_text(text)
+        if isinstance(text, bytes):
+            (self.root / f"{name}.log").write_bytes(text)
+        else:
+            (self.root / f"{name}.log").write_text(text, encoding="utf-8")
         manifest = dict(schema="buster-ci-unit-tests-measure-v1", arm=arm, mode="groups" if grouped else "serial",
                         identity=copy.deepcopy(IDENTITY if identity is None else identity), inventory=copy.deepcopy(INVENTORY),
                         log=f"{name}.log", exit_code=0, test_workers=4 if grouped else 2,
@@ -115,6 +119,98 @@ class MeasurementTests(unittest.TestCase):
         text = "".join("2026-09-30T12:00:00.0000000Z " + line + "\r\n" for line in serial_log().splitlines())
         (self.root / "sample.log").write_bytes(text.encode("utf-16"))
         self.assertEqual(MEASURE.validate_sample(path)["assertions"], 18)
+
+    def test_invalid_utf16_payload_is_not_repaired(self):
+        for suffix in (b"\x00", b"\x00\xd8"):
+            with self.subTest(suffix=suffix):
+                path = self.sample(log=serial_log().encode("utf-16") + suffix)
+                with self.assertRaises(UnicodeDecodeError):
+                    MEASURE.validate_sample(path)
+                output = self.root / "result.json"
+                self.assertEqual(MEASURE.main(["sample", str(path), "--output", str(output)]), 1)
+                self.assertFalse(json.loads(output.read_text())["measurement_review_ready"])
+
+    def test_invalid_human_utf8_retains_bytes_and_native_evidence(self):
+        diagnostic = b"command: test --\xff\xc2\n"
+        for arm, original in (("baseline", serial_log()), ("candidate", parallel_log())):
+            with self.subTest(arm=arm):
+                raw = diagnostic + original.encode("utf-8")
+                path = self.sample(arm=arm, log=raw)
+                retained = self.root / "sample.log"
+                digest = hashlib.sha256(retained.read_bytes()).hexdigest()
+                result = MEASURE.validate_sample(path)
+                self.assertEqual(result["assertions"], 18)
+                self.assertEqual(retained.read_bytes(), raw)
+                self.assertEqual(hashlib.sha256(retained.read_bytes()).hexdigest(), digest)
+                self.assertEqual(MEASURE.read_log(retained)[0].encode("utf-8", errors="surrogateescape"), diagnostic.rstrip(b"\n"))
+
+    def test_invalid_machine_proof_utf8_cannot_hide_extra_record(self):
+        markers = {line.split()[0]: line for line in parallel_log().splitlines() if line.startswith(("CI_UNIT_", "TEST_MODULE_TIMING"))}
+        markers["UNIT_TEST_FAILURE"] = "UNIT_TEST_FAILURE status=fail"
+        for marker, record in markers.items():
+            for index in range(len(marker)):
+                for replace in (False, True):
+                    with self.subTest(marker=marker, index=index, replace=replace):
+                        raw = record.encode("utf-8")
+                        corrupted = raw[:index] + b"\xff" + raw[index + int(replace):]
+                        path = self.sample(arm="candidate", log=parallel_log().encode("utf-8") + corrupted + b"\n")
+                        with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                            MEASURE.validate_sample(path)
+
+    def test_invalid_terminal_utf8_cannot_hide_extra_summary(self):
+        for original in terminal(18, 2).splitlines():
+            for index in range(len(original)):
+                for replace in (False, True):
+                    with self.subTest(original=original, index=index, replace=replace):
+                        raw = original.encode("utf-8")
+                        corrupted = raw[:index] + b"\xff" + raw[index + int(replace):]
+                        path = self.sample(log=serial_log().encode("utf-8") + corrupted + b"\n")
+                        with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                            MEASURE.validate_sample(path)
+
+    def test_invalid_utf8_in_proof_wrappers_and_fields_fails(self):
+        for extra in (b"2026-09-30T12:00:00.\xffZ " + module(0, "c_frontend_tests", 11).encode("utf-8"),
+                      b"\x1b[\xff31m" + module(0, "c_frontend_tests", 11).encode("utf-8"),
+                      b"\x1b[31\xffm" + module(0, "c_frontend_tests", 11).encode("utf-8"),
+                      module(0, "c_frontend_tests", 11).encode("utf-8").replace(b"status=pass", b"status=\xffpass"),
+                      parallel_log().encode("utf-8").replace(b"exit=0", b"exit=\xff0", 1)):
+            with self.subTest(extra=extra):
+                path = self.sample(log=serial_log().encode("utf-8") + extra)
+                with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                    MEASURE.validate_sample(path)
+
+    def test_corrupted_ansi_wrapper_cannot_hide_failed_proofs(self):
+        proofs = (module(0, "c_frontend_tests", 11).replace("status=pass", "status=fail"),
+                  "CI_UNIT_PLAN_V1 status=fail\n", "UNIT_TEST_FAILURE status=fail\n", "[0/1] Unit tests\n")
+        wrapper = b"\x1b[31m"
+        for index in range(len(wrapper)):
+            for replace in (False, True):
+                prefix = wrapper[:index] + b"\xff" + wrapper[index + int(replace):]
+                for proof in proofs:
+                    with self.subTest(index=index, replace=replace, proof=proof):
+                        path = self.sample(log=serial_log().encode("utf-8") + prefix + proof.encode("utf-8"))
+                        with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                            MEASURE.validate_sample(path)
+
+    def test_corrupted_wrapper_and_machine_prefix_cannot_hide_record(self):
+        wrapper = b"\x1b[31m"
+        proof = b"CI_UNIT_PLAN_V1 status=fail\n"
+        for wrapper_index in range(len(wrapper)):
+            prefix = wrapper[:wrapper_index] + b"\xff" + wrapper[wrapper_index + 1:]
+            for marker_index in range(len(b"CI_UNIT_PLAN_V1")):
+                with self.subTest(wrapper_index=wrapper_index, marker_index=marker_index):
+                    corrupted = proof[:marker_index] + b"\xff" + proof[marker_index + 1:]
+                    path = self.sample(log=serial_log().encode("utf-8") + prefix + corrupted)
+                    with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                        MEASURE.validate_sample(path)
+
+    def test_invalid_proof_encoding_returns_structured_cli_failure(self):
+        path = self.sample(log=serial_log().encode("utf-8") + b"CI_UNI\xff_PLAN_V1 status=fail\n")
+        output = self.root / "result.json"
+        self.assertEqual(MEASURE.main(["sample", str(path), "--output", str(output)]), 1)
+        result = json.loads(output.read_text())
+        self.assertIn("Invalid UTF-8 in machine proof", result["error"])
+        self.assertFalse(result["measurement_review_ready"])
 
     def test_missing_terminal_fails(self):
         with self.assertRaisesRegex(MEASURE.EvidenceError, "Missing terminal"):
