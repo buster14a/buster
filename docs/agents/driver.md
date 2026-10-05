@@ -660,9 +660,10 @@ archive wins over a later default shared library. `-l:FILE.a` searches the
 exact archive name without that shared-library probe and retains its existing
 bare-path fallback. A little-endian ELF64 shared candidate naming a different
 CPU is skipped before archive selection, allowing an archive in the same or
-a later directory to satisfy the request. Unrecognized or malformed shared
-files retain the existing export-discovery refusal. Other target search
-policies are unchanged.
+a later directory to satisfy the request. Files without that recognized
+foreign shared header retain the existing export-discovery refusal. The probe
+does not validate the complete foreign object. Other target search policies
+are unchanged.
 
 `compiler_driver_archive_test_default_roots`, invoked by the registered lazy
 archive fixture, checks both ELF CPUs and all six literal sysroot roots,

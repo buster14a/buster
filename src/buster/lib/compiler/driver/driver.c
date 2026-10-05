@@ -3213,8 +3213,8 @@ BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8
 }
 
 // An ELF64 shared header with a foreign machine cannot satisfy this target.
-// Leave unrecognized/malformed files to export discovery's existing refusal
-// instead of silently treating them as a missing shared-library candidate.
+// Files without that recognized header still enter export discovery; this
+// header discrimination is not full validation of an alien shared object.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_shared_is_incompatible(ByteSlice bytes, Target target)
 {
     u16 type = 0;
