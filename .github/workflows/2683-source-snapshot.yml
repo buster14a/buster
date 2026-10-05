@@ -1,0 +1,25 @@
+name: Analyzer repair source snapshot
+on:
+  push:
+    branches: [codex/2683-source-snapshot]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Archive the pinned repair inputs
+        run: |
+          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" 2ad6834d391e1f4f518d28a8283671c540914202 AGENTS.md PROJECTS.md build.c build.sh build.ps1 CMakeLists.txt src tools tests cmake .github LICENSES docs/agents docs/clang-analyze-shards.md docs/project-tracking.md docs/ci-checks-population.md docs/ci-workflow-audit.md docs/ci-combination-shards.md docs/ci-suite-partition.md
+          sha256sum "$RUNNER_TEMP/buster-source.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: analyzer-repair-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/buster-source.tar.gz
+          retention-days: 3
+          if-no-files-found: error
