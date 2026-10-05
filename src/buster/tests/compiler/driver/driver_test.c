@@ -17822,7 +17822,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_guard(Uni
         "    int *automatic = (int[]){17,23,31} + 1;\n"
         "    return constant == 0 && (float)half == 1.5f && automatic[0] == 23 && automatic[1] == 31;\n"
         "}\n"
-        "int main(void) { return 0; }\n");
+        "int main(void) { return literal_probe_half() != 1; }\n");
     String8 refusal = S8("nested compound literal objects in a general static address expression are not supported");
     TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
     if (BUSTER_REQUIRE(arguments, target.error == TARGET_PARSE_ERROR_NONE))
