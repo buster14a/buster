@@ -1,26 +1,99 @@
-name: Analyzer repair source snapshot
+name: Analyzer single-pass repair validation
 on:
   push:
     branches: [codex/2683-source-snapshot]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 2ad6834d391e1f4f518d28a8283671c540914202
+          path: transfer
           persist-credentials: false
-      - name: Archive the pinned repair inputs
-        run: |
-          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD AGENTS.md PROJECTS.md build.c build.sh build.ps1 CMakeLists.txt src tools tests cmake .github LICENSES docs/agents docs/clang-analyze-shards.md docs/project-tracking.md docs/ci-checks-population.md docs/ci-workflow-audit.md docs/ci-combination-shards.md docs/ci-suite-partition.md
-          sha256sum "$RUNNER_TEMP/buster-source.tar.gz"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          name: analyzer-repair-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/buster-source.tar.gz
-          retention-days: 3
+          ref: 2ad6834d391e1f4f518d28a8283671c540914202
+          path: subject
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Apply the exact cloud-tested change
+        working-directory: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/analyzer-repair"
+          printf '0ea73c45eb1bc94c35e403464ae3e7a6f1c75ecbf1f0e188b783a842010bb1c5  %s\n' "$GITHUB_WORKSPACE/transfer/2683-repair.patch" | sha256sum --check
+          git apply --check "$GITHUB_WORKSPACE/transfer/2683-repair.patch"
+          git apply "$GITHUB_WORKSPACE/transfer/2683-repair.patch"
+          git diff --check
+          git add .github/workflows/ci.yml docs/clang-analyze-shards.md tests/ci_tools_test.py tools/analyzer_reference.py tools/analyzer_selection_test.py tools/clang_analyze.c tools/github_ci_time.py tools/main_ci_reuse.py tools/main_ci_reuse_test.py
+          test "$(git diff --cached --name-only | wc -l)" -eq 9
+          git diff --cached --binary > "$RUNNER_TEMP/analyzer-repair/change.patch"
+          git write-tree | tee "$RUNNER_TEMP/analyzer-repair/local-tree.txt"
+      - name: Native build and analyzer controls
+        working-directory: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang --version | tee "$RUNNER_TEMP/analyzer-repair/clang.txt"
+          gcc --version | tee "$RUNNER_TEMP/analyzer-repair/gcc.txt"
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-driver
+          build/analyzer-driver clang_analyze --self-test 2>&1 | tee "$RUNNER_TEMP/analyzer-repair/native-clang.log"
+          gcc -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-gcc
+          build/analyzer-gcc clang_analyze --self-test 2>&1 | tee "$RUNNER_TEMP/analyzer-repair/native-gcc.log"
+      - name: Single-pass and consumer regression suites
+        working-directory: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          for suite in tools/analyzer_selection_test.py tools/main_ci_reuse_test.py tools/analyzer_worker_budget_test.py tools/ci_checks_sample_test.py tools/ci_checks_population_test.py tests/action_pins_test.py; do
+            if ! python3 -B "$suite" -v 2>&1 | tee "$RUNNER_TEMP/analyzer-repair/$(basename "$suite").log"; then
+              failed=1
+            fi
+          done
+          if ! python3 -B tests/ci_tools_test.py WorkflowPolicyTests TimingTests -v 2>&1 | tee "$RUNNER_TEMP/analyzer-repair/ci-tools.log"; then
+            failed=1
+          fi
+          if ! python3 -B tools/check_action_pins.py 2>&1 | tee "$RUNNER_TEMP/analyzer-repair/action-pins.log"; then
+            failed=1
+          fi
+          if ! python3 -B tools/check_markdown_links.py 2>&1 | tee "$RUNNER_TEMP/analyzer-repair/markdown-links.log"; then
+            failed=1
+          fi
+          git diff --exit-code
+          exit "$failed"
+      - name: Publish tested Git objects without updating any ref
+        working-directory: subject
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          entries="$RUNNER_TEMP/analyzer-repair/tree-entries.jsonl"
+          : > "$entries"
+          while IFS= read -r -d '' path; do
+            expected="$(git hash-object "$path")"
+            mode="$(git ls-files --stage -- "$path" | cut -d ' ' -f 1)"
+            blob="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" -f encoding=utf-8 -F "content=@$path" --jq .sha)"
+            test "$blob" = "$expected"
+            jq -n --arg path "$path" --arg mode "$mode" --arg sha "$blob" '{path:$path,mode:$mode,type:"blob",sha:$sha}' >> "$entries"
+          done < <(git diff --cached --name-only -z)
+          jq -s --arg base_tree 6ffe2bdeb686aed4cadbe1dd1966a3e900c78706 '{base_tree:$base_tree,tree:.}' "$entries" > "$RUNNER_TEMP/analyzer-repair/tree-request.json"
+          remote_tree="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/trees" --input "$RUNNER_TEMP/analyzer-repair/tree-request.json" --jq .sha)"
+          test "$remote_tree" = "$(git write-tree)"
+          printf 'CANDIDATE_TREE=%s\n' "$remote_tree" | tee "$RUNNER_TEMP/analyzer-repair/published-tree.txt"
+          git diff --cached --stat
+      - name: Retain validation and exact source evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: analyzer-single-pass-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/analyzer-repair/
+          retention-days: 7
           if-no-files-found: error
