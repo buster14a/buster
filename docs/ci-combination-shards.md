@@ -7,14 +7,19 @@ sanitizer/fuzzer policy, deadlines and production backend dispatch do not change
 
 ## Ownership
 
-Each of the five retained runner labels has two jobs, named `<platform> release`
-and `<platform> checks`. The workflow's `lane` × `shard` axes form ten jobs;
-the include entries add metadata by lane rather than creating extra jobs.
+The five retained runner labels form sixteen desktop jobs. Linux x86-64,
+Linux AArch64 and Windows x86-64 each have `release`, `sanitized-debug`,
+`sanitized-release` and `portability` owners. macOS AArch64 and Windows AArch64
+retain `release` and grouped `checks`. Include entries add metadata by lane.
+The historical combined layout remains an explicit qualification cohort.
 
 | Shard | Work |
 | --- | --- |
 | `release` | The one unsanitized Clang Release/unity tree, its runtime tests, canonical unity analysis/table audits, and supported artifact-fanout self-host/fixed-point/census consumers. Shared native diagnostics, throughput/service self-tests, workflow-tool and wrapper regressions also run here once per platform. |
 | `checks` | Sanitized Clang Debug/Release and the existing non-Clang portability Debug trees. Windows ARM64 still has its nonempty MSVC Debug shard and explicit unsupported GCC/Zig/sanitizer/fuzzer exclusions. |
+| `sanitized-debug` | Original sanitized Clang Debug/fuzz configurations, with the full runner worker budget. |
+| `sanitized-release` | Original sanitized Clang Release configurations, with the full runner worker budget. |
+| `portability` | Original noncanonical compiler/configuration rows; compilation-only policy is unchanged. |
 
 | Platform | Release configurations | Checks configurations | Total required |
 | --- | ---: | ---: | ---: |
@@ -29,8 +34,9 @@ a test-name prefix. Excluded rows have explicit owners too, but never count
 as execution. The native partition validator requires exactly one canonical
 Release configuration, a nonempty checks selection, and intact shared trees.
 In particular, the macOS sanitized Debug/Release configurations stay in the
-same CMake multi-config tree. Both shards together schedule each original
-required configuration exactly once.
+same CMake multi-config tree. The scheduled owners together execute each
+original required configuration exactly once. Grouped `checks` remains the
+exact union of the three check owners.
 
 The canonical producer and all its consumers remain in one job: there is no
 cross-job compiler artifact handoff or second canonical compiler build.
@@ -43,26 +49,28 @@ unit checks. See [Apple CI policy](apple-ci-policy.md). The exact Windows mode
 and compiler/configuration contract is documented in
 [Windows CI coverage](windows-ci-coverage.md).
 
-The wrapper step keeps its checkout/cancellation lifecycle guard on both
-shards. Its checks-shard body reports `owned-by-release-shard` and exits
+The wrapper step keeps its checkout/cancellation lifecycle guard on every
+owners. Every check owner's body reports `owned-by-release-shard` and exits
 without running the suite or writing a wrapper-test verdict; only Release
 requires that verdict. Verified-Zig setup creates its own log directory and
 does not depend on a Release-only preflight side effect.
 
 Shards necessarily duplicate runner allocation, checkout, the small hosted
 build-driver bootstrap, tool discovery and verified-Zig setup. They keep full
-compiler capability detection/re-probing against the original policy in both
-jobs. Only verified download archives are cached; build trees, compiler outputs
+compiler capability detection/re-probing against the original policy in every
+job. Only verified download archives are cached; build trees, compiler outputs
 and test verdicts are not. The extra setup and queue cost must be included in
 qualification, not assumed free.
 
 ## Coverage and completion proof
 
-`BUSTER_MATRIX_SHARD=release|checks` selects a shard. An absent value or `all`
+`BUSTER_MATRIX_SHARD=release|checks|sanitized-debug|sanitized-release|portability`
+selects an owner. An absent value or `all`
 runs the original unsharded matrix (`combinations` in the manifest). Invalid
 values fail before compiler discovery, preflight or build-tree mutation.
-Default shard tree prefixes are `build/build-release-` and
-`build/build-checks-`; an explicit build-directory prefix remains supported.
+Default tree prefixes include `build/build-release-`, `build/build-checks-`,
+`build/build-sanitized-debug-`, `build/build-sanitized-release-` and
+`build/build-portability-`; an explicit build-directory prefix remains supported.
 
 Every manifest retains the **entire** expected/detected policy. Row IDs stay
 in the original `desktop/combinations/...` namespace, so all six independently
@@ -78,8 +86,8 @@ validated on the executing runner. A checks completion explicitly says
 
 * All six job groups (`lint`, `test`, `native`, `mobile`, `uefi`, `analyzer`)
   must succeed, with the existing real-shell negative controls retained.
-* The read-only Actions job inventory must contain the exact 21 expected job
-  identities: all ten desktop shard names, all five native names, two
+* The read-only Actions job inventory must contain the exact 27 expected job
+  identities: all sixteen desktop shard names, all five native names, two
   mobile names, UEFI, analyzer, lint and the active aggregate. Every completed
   job must succeed. Each desktop job must complete its applicable matrix,
   coverage summary, tool setup, shared regressions and log upload; each native
@@ -87,8 +95,9 @@ validated on the executing runner. A checks completion explicitly says
   complete the differential result.
 
 For a platform's unchanged full required set E, the native producer and
-independent consumer agree on disjoint selections R and C with R ∪ C = E.
-Successful, correctly named R and C jobs therefore prove the full set, without
+independent consumer agree on Release selection R and the check-owner union C,
+with R ∪ C = E and disjoint selections. Successful, correctly named Release
+and all scheduled check owners prove the full set, without
 moving foreign-platform binaries to an aggregate runner for a fictitious
 re-probe. Missing matrix entries cannot turn a smaller surviving group green.
 The job inventory is retained as `desktop-partitions-<run>-<attempt>`.
@@ -96,9 +105,11 @@ The job inventory is retained as `desktop-partitions-<run>-<attempt>`.
 For a main push with [admitted exact queue evidence](ci-main-reuse.md), the
 native, mobile and UEFI groups are skipped on main and the aggregate verifies
 their eight actual queue job executions, artifacts and retained current-run
-inventory. The full 21-job inventory remains mandatory on all other
-events and on main whenever admission falls back. The desktop partition
-proof and main-only effects still execute on main.
+inventory. The full 27-job inventory remains mandatory on ordinary non-reuse
+events and on main whenever admission falls back. Exact combined qualification
+dispatch refs retain their explicit 21-job inventory. The aggregate rechecks
+every source desktop partition and the main cache-only effects; it does not
+claim that desktop validation executes twice.
 
 The inventory reader paginates **all attempts of the same immutable run** and
 selects each job's highest attempt, never its most recent *successful* attempt.
@@ -205,13 +216,13 @@ python3 tools/github_ci_time.py summarize candidate-runs.json --output candidate
 ```
 
 The collector understands the historical 6/11/15/17/23-job layouts and the
-current 21-job layout. All 21 execution intervals count toward candidate runner
+current 27-job layout. All 27 execution intervals count toward candidate runner
 seconds, including both Windows mode lanes and the aggregate inventory check.
 It reports whole-workflow elapsed time, execution span, initial queue delay,
 individual job durations and job queue delays when API creation timestamps
 exist (otherwise `null`, never imputed zero). Missing successful steps or shard
 identities reject a sample, so draft runs with deferred macOS lanes are never
-timing samples. Historical 23-/25-job and current 21-job workflow blobs
+timing samples. Historical 21-/23-/25-job and current 27-job workflow blobs
 remain separate cohorts.
 
 Compare medians and retain individual shard distributions. Inspect
@@ -276,6 +287,14 @@ four-CPU budget; builds may still overlap a test phase, which the
 
 ## Further checks partition qualification (#2120)
 
+The historical exact-nine contract below remains unchanged. The explicitly
+approved replacement for standard-hosted native-profile variation is the
+[prospective population comparison](ci-checks-population.md), owned by #2610.
+Its separate reader retains complete per-profile assertion obligations and
+requires a frozen declaration, exhaustive dispatch history and population/
+operational disposition; it does not reinterpret historical samples or
+establish performance acceptance by itself.
+
 Partition version 2 assigns every original policy row to one of four owners:
 `release` (unsanitized optimized Clang), `sanitized-debug`, `sanitized-release`,
 and `portability`. `checks` selects the union of the three non-Release owners;
@@ -284,9 +303,9 @@ The original row IDs, policy version, counts and fingerprints are unchanged.
 The consumer independently derives owners and rejects missing, foreign,
 duplicated and empty completions.
 
-The default workflow retains ten desktop jobs. The split qualification replaces
-grouped checks on Linux x86-64, Linux AArch64 and Windows x86-64 with three
-independent jobs, giving sixteen desktop jobs and an exact 27-job required
+The default workflow replaces grouped checks on Linux x86-64, Linux AArch64
+and Windows x86-64 with three independent jobs, giving sixteen desktop jobs
+and an exact 27-job required
 inventory (plus the main-reuse decision job). macOS retains its shared sanitizer
 tree and Windows AArch64 retains grouped MSVC portability checks. Individual
 Apple sanitizer selections and empty Windows AArch64 sanitizer selections fail
@@ -300,20 +319,66 @@ CMake diagnostics for each split owner, excludes superbuild trees, and fails
 when no matrix configure trees are present.
 
 Qualification uses manual dispatch of the existing `ci.yml` on three branches
-pointing to **the same immutable commit**. Pushes and pull requests keep defaults.
+pointing to **the same immutable commit**. Ordinary pushes, pull requests,
+merge groups, tags and default manual runs use the split layout.
 
-| Branch | Checks layout | Windows grouped-checks admission |
-| --- | --- | --- |
-| `codex/ci-checks-combined-overlap` | Combined | Overlap |
-| `codex/ci-checks-combined-all-builds` | Combined | All builds first |
-| `codex/ci-checks-split-overlap` | Split | Overlap |
+| Cohort | Branch | Checks layout | Windows grouped-checks admission |
+| --- | --- | --- | --- |
+| `legacy-v1` | `codex/ci-checks-combined-overlap` | Combined | Overlap |
+| `legacy-v1` | `codex/ci-checks-combined-all-builds` | Combined | All builds first |
+| `legacy-v1` | `codex/ci-checks-split-overlap` | Split | Overlap |
+| `issue2120-evidence-v2` | `codex/2120-evidence-v2-combined-overlap` | Combined | Overlap |
+| `issue2120-evidence-v2` | `codex/2120-evidence-v2-combined-all-builds` | Combined | All builds first |
+| `issue2120-evidence-v2` | `codex/2120-evidence-v2-split-overlap` | Split | Overlap |
+
+The historical refs remain frozen at
+`e424b387fcb51b00c1d19e87e2d369ae8a212792`; new measurements use the three
+prospective refs after the accepted evidence producers share one source.
+The prospective campaign must declare its immutable source and workflow blob
+before sampling, in addition to the unchanged schema, repository and samples:
+
+```json
+"cohort": {
+  "name": "issue2120-evidence-v2",
+  "head_sha": "<exact 40 lowercase hex source commit>",
+  "workflow_blob_sha": "<exact 40 lowercase hex ci.yml blob>"
+}
+```
+
+Each of the nine samples must match both declared pins and its exact
+cohort/variant branch. Mutually consistent samples at a different source or
+workflow do not satisfy the declaration. Missing, malformed or unknown
+declarations cannot admit the new refs. An omitted `cohort` preserves the
+historical `legacy-v1` reader behavior; an explicit `legacy-v1` declaration
+requires both pins and keeps the old refs. Cohorts cannot mix. The verdict
+retains the validated declaration; declared pins do not authenticate invented
+API or artifact records.
+
+Use the existing sequential order A1 → B1 → C1 → B2 → C2 → A2 → C3 → A3 → B3,
+where A is combined overlap, B is combined all-builds and C is split overlap.
+Leave `cmake_profile` and `analyzer_comparison` false. Investigate any failure,
+source drift or incomparable conditions/census before progressing; retain all
+failed, cancelled and retried attempts separately from successful first-attempt
+samples. A replacement or sampling extension needs a prospective disposition,
+not a relabelled retry or dispatches until green.
+
+The prospective `codex/2120-evidence-v2-*` refs use the same three suffixes and
+layouts after their evidence producers are integrated. Only manual dispatch on
+the four exact `refs/heads/` combined refs overrides the split default. The API
+job gate also requires that full event ref to match the API branch; a same-named
+tag cannot activate a combined override. Historical 21-job evidence retains its
+explicit inventory and cannot satisfy the current split queue-to-main proof.
 
 The original dispatch inputs and reviewed support ledger stay intact. Ordinary
-dispatches already bypass main-push reuse. Split completion additionally checks
-the exact API branch identity. Historical timing keeps combined and split job
-cohorts separate; admission A/B conclusions require native phase metadata.
+dispatches already bypass main-push reuse. Ordinary split completion requires no
+campaign branch; only a combined manual override requires a matching full event
+ref and API branch. Historical timing keeps combined and split job cohorts
+separate; admission A/B conclusions require native phase metadata.
+The generic `github_ci_time.py` summary groups by workflow blob and runner
+inventory, so its descriptive medians can pool A and B. Use the qualification
+reader's explicit per-variant medians for the admission comparison.
 
-Only the combination steps on these exact dispatch refs enable
+Only the combination steps on these six exact dispatch refs enable
 `BUSTER_CI_CHECKS_EVIDENCE=1`. The native phase observer then retains each
 runtime invocation's independent module inventory, binary SHA-256 and test log
 in `unit-observations/<task-id>/` beside `matrix-phases/`. These receipts bind
@@ -361,10 +426,40 @@ controls do not assert a measured speedup or close either research issue.
 retained evidence and emits an independent timing/census verdict. Its module
 docstring defines the campaign format. Missing or incomparable observations
 remain `pending`; complete campaigns can meet or reject each timing threshold.
-Native phase CPU time and peak RSS remain unknown, so positive timing leaves
-overall qualification `pending` and `performance_accepted=false`. Actual
-resource observations and a resource/deadline/cleanup/reliability comparison
-are still required before either issue can be accepted.
+Historical native phase CPU time and peak RSS remain unknown, so positive
+timing alone leaves overall qualification `pending` and
+`performance_accepted=false`. Actual resource observations and a
+resource/deadline/cleanup/reliability comparison are still required before
+either issue can be accepted.
+
+The three new `codex/2120-evidence-v2-*` dispatch refs additionally enable the
+[external resource observer](ci-checks-resources.md). Separate bounded start
+and stop steps surround the unchanged combination workflow steps on every
+desktop role. Their window includes the complete step and runner scheduling
+gaps, including Windows' existing bootstrap/differential setup. The observer
+does not launch, contain, signal or change the payload. Its readiness and final
+completion are separate required evidence outcomes; a successful payload
+cannot replace missing, failed or skipped observer steps. Stop precedes
+configure postprocessing, log sanitization and the existing artifact upload.
+
+The retained source/run/attempt/matrix-role-bound journal contains OS-instance
+busy CPU counters and 200 ms sequential readable-process resident-set scans.
+Busy CPU includes OS, background and observer work. The maximum observed scan
+sum is not an exact simultaneous peak or a guaranteed lower bound: reads are
+non-atomic, shared pages are counted repeatedly, short-lived processes may be
+missed, and denied/vanished/error reads remain explicit. Each scan retains its
+actual duration and gap. Numeric Actions job IDs and assigned-runner/image
+facts must be joined independently with the exact job inventory; a label or
+CPU model alone does not establish host isolation or feature comparability.
+
+These observations supplement the scoped native child witnesses. Neither
+their presence nor controlled completion automatically establishes no resource
+regression. The owning issues still require a comparative resource and
+lifecycle verdict, including incomplete visibility, gaps, deadlines, capture,
+cleanup and every failed/cancelled attempt. Missing or inconclusive evidence
+remains pending; existing timing/runner thresholds are unchanged. The timing
+qualifier continues to report resource review pending until that separate
+review is recorded; do not turn its Boolean into acceptance without evidence.
 The tool records invocation binary/driver hashes within each sample while
 comparing source/policy, toolchains, conditions and exact census across runs;
 it does not require independently linked executables to have identical bytes.
@@ -380,7 +475,7 @@ requires Clang/CMake/Ninja, and UEFI requires compiler/CMake/Ninja plus both QEM
 versions. CI complete and the optional executed reuse decision keep explicit
 empty tool/cache maps. Every job retains its actual image and assigned label.
 
-The three qualification dispatch refs also enable the separate
+The six qualification dispatch refs also enable the separate
 `BUSTER_CI_CONDITIONS_EVIDENCE=1` in five selected setup/payload steps.
 `tools/ci_checks_tools.py` records Go before actionlint, Ninja selected by the
 actual generated `CMAKE_MAKE_PROGRAM` in iOS/analyzer/UEFI, and adb after the
@@ -414,3 +509,85 @@ even when source, compiler and CPU model names match. Neither model names nor
 assertion totals may reconstruct a missing host profile or normalize differing
 censuses. Historical archives without measured host/resource evidence remain
 diagnostic; qualification requires a prospectively declared comparable cohort.
+
+
+### Actual job environment receipts
+
+The unchanged six exact qualification dispatch refs also opt in to
+`tools/ci_job_environment.py` immediately after checkout in Workflow lint,
+UEFI firmware boot, Clang analyzer shards and CI complete. The executed Main CI
+reuse job has the same wiring; its push/main guard stays intact, so the intended
+manual campaign skips it. Each job retains the bounded JSON in its existing
+artifact even when later work fails. CI complete collects under `always()` plus
+the opt-in and includes the receipt in its desktop-partition inventory artifact.
+
+The receipt records only exact repository/source/run/attempt/workflow-job
+bindings and the actual whitelisted job environment: requested runner label,
+runner OS/architecture/instance name, ImageOS/ImageVersion and raw workflow
+provenance. `GITHUB_JOB` is not a numeric API job ID. `GITHUB_WORKFLOW_SHA` is a
+workflow commit, not the ci.yml blob. Join actual source/workflow/API job and
+artifact identities during readback. Keep requested runner label distinct from
+RUNNER_NAME; the latter is instance provenance, not cross-sample equality.
+
+Receipt `status=complete` means every recorded binding/observation is available,
+not that the job or campaign is accepted. Missing, blank, whitespace-only and
+padded unknown sentinels remain verbatim with `status=incomplete`. Readback must
+require complete status before projecting image facts into conditions; the
+unchanged qualifier does not strip strings for the collector. No Setup preamble,
+API label or requested runner value substitutes for actual image environment.
+No API request, executable probe, cache decision or tool-map change runs here.
+CI complete and an executed reuse role still have empty tool/cache maps.
+
+With the same exact opt-in, the Android SDK installer appends a bounded
+`ANDROID_SDK_SYSTEM_IMAGE_REVISION` JSON witness to its existing retained SDK
+log and stdout after structurally validated preinstalled success and validated
+zero-exit installation success. It reads only the same requested system image's
+actual source.properties, retains that file's path/size/SHA-256 and its single
+positive whole Pkg.Revision, and binds source/run/attempt/workflow job. Valid
+preinstalled images are not reinstalled when another package needs repair.
+Missing, duplicate, malformed, oversized, symlinked or changing metadata stays
+unknown; package/API level is not a revision. Default setup outputs, package
+validation, request classification, retries, deadlines and exit policy stay
+intact. The existing strict revision/tool/cache contracts remain unchanged.
+
+This extends the owned prospective #2427 source before the separate observer
+#2430 workflow delta. Final actual main/source/workflow pins, retained receipt
+readbacks and all required role joins must be independently checked before A1.
+Historical cohorts and failed/retried receipts retain their original meanings.
+
+### Offline assembly of one retained sample
+
+`tools/ci_checks_sample.py` derives the runtime manifests needed by the strict
+qualification reader without launching a compiler, test or workflow. It depends
+on the prospective cohort reader introduced by #2427. Prepare one input JSON
+object with `schema=buster-ci-checks-sample-input-v1`, the declared `cohort`,
+`variant`, digest-bound `run` and `conditions` references, and `desktops` entries
+containing exactly `job`, `coverage`, `result`, `phases` and `phase_directory`.
+The run reference contains one run object, not the collector's outer runs array.
+Retain the actual API/artifact bytes and verify downloaded archive digests before
+assembly. SHA-256 integrity alone cannot authenticate invented observations.
+
+```sh
+python3 -B tools/ci_checks_sample.py retained/input-123.json --output sample-123.json
+python3 -B tools/ci_checks_sample_test.py -v
+```
+
+Every input reference and nested selected-tool receipt remains relative to the
+input directory. The output must be a fresh JSON filename in that same directory;
+its sibling `sample-123-tests/` contains the derived runtime manifests. Insert
+the emitted sample object in the campaign's `samples` array and preserve its
+declared cohort in a campaign located in that same directory. Moving only the
+sample or conditions file changes reference roots and is unsupported.
+
+The assembler replays phase journals, derives every selected runtime row from
+actual coverage/capability/inventory/observation records, retains raw log hashes
+and the measured host profile, and preserves audit policy and low-core serial
+fallback. It rejects duplicate capability rows and caller-supplied runtime
+manifests. Existing `qualification.sample()` validates the entire assembled
+sample before publication; missing or unknown conditions fail. Fresh generated
+outputs are removed on rejection while retained inputs remain unchanged.
+Successful assembly is evidence preparation only: the full nine-run comparison,
+resource/deadline/cleanup/reliability review remain requirements for a measured
+performance claim. The maintainer directed the split-overlap default rollout on
+2026-10-04 without waiting for that research; the actual speedup remains
+unqualified. Current CI coverage and protected merge-queue checks still apply.

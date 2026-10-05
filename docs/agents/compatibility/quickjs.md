@@ -122,10 +122,10 @@ says which directories they did not run and why.
 Compiler cost and generated-code quality are reported separately and must not
 be conflated. `QUICKJS_METRIC` carries per-unit compiler wall time beside
 Clang's for the same unit, the `-fsource-metrics=` source metrics, and the
-count of functions the machine backend handed to the canonical emitter;
+retained legacy fallback count, which stays zero under MIR-only generation;
 `QUICKJS_STAGE` sums them per stage; `QUICKJS_WORKLOAD` and `QUICKJS_CODEGEN`
 report the workload's wall time and instructions retired; `QUICKJS_MEMORY`
-reports the engine's own allocation report. One recorded run compiled the
+reports the engine's own allocation report. One pre-cutover recorded run compiled the
 6-unit library in 0,90 s under FAST against Clang's 10,1 s for the same
 sources — `quickjs.c` alone is 2,9 MB of source, 86.791 lines, 469.236 tokens,
 and Buster compiles it in 0,60 s where Clang takes 8,6 — while the workload ran

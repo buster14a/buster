@@ -20,7 +20,6 @@ preprocess + parse
             machine selection -> optional MIR verification
             -> placement + optional quality scheduling
             -> encoding, relocations, unwind and debug publication
-            OR canonical frame/ABI plan -> block emission and patching
        -> remaining assembly, relocation check, code image publication
   -> CodegenModule
 ```
@@ -37,22 +36,23 @@ preprocess + parse
 | Native validation and preparation | Program ABI contexts, module IR, target and options | `ir_prepare_canonical_module` accepts the module before backend consumption; predeclared assembly labels stabilize ELF call references | Wrapper returns `CODEGEN_ERROR_INVALID_IR` or capacity |
 | Native global layout (`codegen_layout_globals`) | Validated globals, section groups and target layout | Indexed global descriptors, three initialized data images and two zero-fill extents; the caller then appends initializer relocations | Helper returns `CodegenError`; attempt arena owns any partial images on error |
 | Native module planning (`codegen_plan_module_capacity`) | Function IR, per-type slot costs, assembly lengths and debug option | Pure instruction, frame, assembly and debug capacity plan; the caller reserves relocation, line and code buffers | Helper returns capacity or invalid IR without publishing a partial plan |
-| Native function ABI/storage | One validated function, target ABI and allocator option | Machine placement frame or canonical value slots/call layouts | Canonical and machine paths share the function descriptor |
-| Machine selection, scheduling and allocation | Canonical function and machine scratch arena | Selected MIR and a valid placement; scheduler is conditional under QUALITY | One `CodegenFallbackReason` for every discarded machine function |
+| Native function ABI/storage | One validated function, target ABI and allocator option | Machine placement frame and call layouts | Machine selection and placement own the function descriptor |
+| Machine selection, scheduling and allocation | Canonical function and machine scratch arena | Selected MIR and a valid placement; scheduler is conditional under QUALITY | A structured `CodegenError`, precise refusal and active phase for every failed machine function |
 | Encoding and publication | Placement, module code buffer, relocations and debug sink | Retained bytes, unwind, line and debug rows agree on code offsets | Retry rewinds the entire attempt for code-buffer exhaustion; other failures return |
 
 The per-attempt arena owns global images, descriptors, relocations, code bytes
 and debug arrays. The wrapper owns the ABI and slot-cost caches across attempts;
 the machine path uses a per-function scratch arena. A failed attempt is discarded
-by rewinding the arena. A machine failure may instead fall back to canonical
-emission for that function, so its partially written code and unwind state must
-not be published. The canonical emitter's flat instruction and value loops are
-intentional; moving a boundary must keep their iteration and data layout.
+by rewinding the arena. Every retained native allocator spelling uses MIR;
+`none` aliases MIR_STACK.
+A machine failure fails the complete module. The wrapper clears unpublished
+code, data, relocations and debug/unwind tables while preserving diagnostics,
+attempted-work counters and the active failure phase. Moving a boundary must
+keep the machine path's flat iteration and data layout.
 
 The public native result identifies a failing function, instruction and opcode
-for many backend errors, counts machine fallbacks by reason, and names the
-active native owner in `CodegenModule.failed_phase`. A successful result reports
-`CODEGEN_PHASE_NONE`; a successful canonical fallback is still a success. The
-frontend has no comparable phase error field, and neither side yet reports
+for many backend errors and names the active native owner in
+`CodegenModule.failed_phase`. A successful result reports `CODEGEN_PHASE_NONE`;
+the retained legacy fallback counters stay zero. The frontend has no comparable phase error field, and neither side yet reports
 per-phase time and arena high-water. Those require more explicit boundary
 results rather than inferring success from shared partially mutated arrays.
