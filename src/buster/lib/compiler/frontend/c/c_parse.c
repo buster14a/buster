@@ -360,8 +360,8 @@ struct CParseValidationCapacities
     (C_SYMBOL_WELL_KNOWN_BIT(VOLATILE) | C_SYMBOL_WELL_KNOWN_BIT(VOLATILE_GNU_ALT) | C_SYMBOL_WELL_KNOWN_BIT(INLINE) | \
      C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT) | C_SYMBOL_WELL_KNOWN_BIT(GOTO))
 
-// The two spellings of thread storage a block-scope declaration may carry;
-// the C23 `thread_local` is a file-scope-only addition its one scan adds.
+// Preprocessing canonicalizes C23 `thread_local` to `_Thread_local`.
+// A remaining `thread_local` spelling is an ordinary pre-C23 identifier.
 #define C_PARSE_THREAD_LOCAL_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU))
 
 // The storage-class words the block-scope declaration walk folds into flags
@@ -8789,6 +8789,16 @@ BUSTER_C_INTERNAL bool c_parse_initializer_value_is_aggregate_expression(CTypePa
     return kind == C_TYPE_ARRAY || kind == C_TYPE_VECTOR || kind == C_TYPE_STRUCT || kind == C_TYPE_UNION;
 }
 
+// C11 6.7.9p14: a string literal initializes an array of scalars whole; brace
+// elision descends through any other aggregate until it reaches one.
+// c_ir_initializer_type_takes_string answers the same question for IR types.
+BUSTER_C_INTERNAL bool c_parse_initializer_type_takes_string(CParseResult* result, CType* type)
+{
+    CTypeKind element = type->kind == C_TYPE_ARRAY && type->element_type.value < result->type_count ? result->types[type->element_type.value].kind
+                                                                                                    : C_TYPE_ARRAY;
+    return element != C_TYPE_ARRAY && element != C_TYPE_VECTOR && element != C_TYPE_STRUCT && element != C_TYPE_UNION;
+}
+
 BUSTER_C_INTERNAL bool c_parse_initializer_string_element_compatible(CPreprocessResult preprocess, CParseResult* result, CTypeId element_type,
                                                                        CIrDecodedString decoded)
 {
@@ -8937,6 +8947,35 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             }
         }
         u64 slots = frame->slots;
+        // An explicit brace list containing only one string initializes the
+        // entire character array, including when that array is nested. An
+        // array of pointers retains its ordinary element-initializer walk.
+        if (!frame->borrowed && !frame->next_index && frame->type.value < result->type_count &&
+            result->types[frame->type.value].kind == C_TYPE_ARRAY && frame->cursor < frame->limit)
+        {
+            u32 string_limit = frame->limit;
+            if (c_token_is_punctuator(&preprocess.tokens[string_limit - 1], C_PUNCTUATOR_COMMA)) string_limit -= 1;
+            CIrDecodedString decoded = {0};
+            CTypeId string_element = result->types[frame->type.value].element_type;
+            bool string_contents = frame->cursor < string_limit &&
+                c_ir_tokens_are_string_literals(preprocess, frame->cursor, string_limit) &&
+                c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, frame->cursor,
+                                                           string_limit, result->string_literals, &decoded) &&
+                c_parse_initializer_string_element_compatible(preprocess, result, string_element, decoded);
+            if (string_contents)
+            {
+                if (decoded.element_count == UINT64_MAX || decoded.element_count > slots)
+                {
+                    // Reuse the ordinary excess-element diagnostic below.
+                    frame->next_index = slots;
+                }
+                else
+                {
+                    frame->cursor = frame->limit;
+                    continue;
+                }
+            }
+        }
         if (!slots && frame->borrowed && frame->cursor < frame->limit)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[frame->cursor]),
@@ -9015,8 +9054,9 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             };
             continue;
         }
-        if (aggregate && !c_ir_tokens_are_string_literals(preprocess, designator.value_start, frame->limit) &&
-            !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end))
+        bool string_value = c_ir_tokens_are_string_literals(preprocess, designator.value_start, value_end);
+        if (aggregate && !(string_value && c_parse_initializer_type_takes_string(result, value_type)) &&
+            (string_value || !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end)))
         {
             if (frame_count + designator.continuation_count >= capacity)
             {
@@ -22891,7 +22931,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
     }
     else if (integer)
     {
-        if (result->types[destination.value].kind == C_TYPE_BOOL)
+        // Fixed-underlying enums use the resolved scalar's conversion,
+        // including Bool's whole-value truth test rather than bit masking.
+        if (scalar.kind == IR_TYPE_BOOLEAN)
         {
             value.integer = c_parse_constant_truth(value);
             value.integer_high = 0;
@@ -25680,7 +25722,14 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
     for (u32 cursor = start; numeric && cursor < end; cursor += 1)
     {
         CToken token = preprocess.tokens[cursor];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
+        // Enum tags belong to the type specifier, not to value lookup.
+        // The typed fold below still resolves and validates the full cast.
+        if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM) && cursor + 1 < end &&
+            preprocess.tokens[cursor + 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            cursor += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
         else if (token.kind == C_TOKEN_IDENTIFIER && (!c_parse_declaration_keyword_at(result, preprocess, cursor) ||
                  string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) ||
                  c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))))
@@ -29068,7 +29117,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                      c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(STATIC));
                 is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&
                                    c_token_in_well_known_set(preprocess.spelling_base, token,
-                                                             C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
+                                                             C_PARSE_THREAD_LOCAL_KEYWORDS);
             }
         }
         declaration->entity = entity;

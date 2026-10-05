@@ -569,7 +569,21 @@ without facts for identical bitcode and diagnostics.
   truncates fractions before checking the destination range, and refuses
   nonfinite or unrepresentable conversions without executing an undefined host
   cast. Automatic nested initializers recognize a string as its whole array
-  subobject before brace elision. Pin these paths with independent object bytes
+  subobject before brace elision. Semantic inference applies the same rule to
+  an explicit nested array brace list containing one compatible string range,
+  with an optional trailing comma. Adjacent literals form one range; comma-
+  separated strings remain separate elements and are diagnosed for character
+  arrays. A literal may fill every array element without its terminator, but
+  its nonterminator element count must fit. Pointer arrays retain ordinary
+  element initialization. `c_test_braced_string_initializers` covers semantic
+  and canonical routes on six desktop layouts, exact global bytes, narrow and
+  UTF-16 strings, and malformed neighbors; `c_test_braced_string_runtime`
+  exercises automatic and static storage in every native allocator and both
+  frontend forms; hosted Linux x86-64 also requires GCC and Clang to compile
+  and execute that self-checking source. The driver's syntax/object equivalence
+  table includes the
+  aggregate member and self-test vector-table forms (GitHub #1408).
+  Pin these paths with independent object bytes
   as well as runtime comparisons: the initializer fixtures also exposed a
   selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
   2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
@@ -817,7 +831,14 @@ without facts for identical bitcode and diagnostics.
   values even after a bound variable changes.
   `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
   row casts at O0/O2 in both frontend forms with FAST and QUALITY. It also
-  checks nested call arguments and the effects of VLA-valued `typeof` operands.
+  checks pointer/pointer, scalar/pointer and pointer/scalar declarator lists,
+  including row stepping, pointer differences, saved bounds and per-declarator
+  bound side effects. The single and list paths both flatten a pointer-to-VLA
+  carrier and attach its declaration's runtime shape before initialization;
+  #2062 supplied the list path that was missing in #1390. The syntax/object
+  diagnostic-equivalence corpus retains all three original accepted forms.
+  The runtime fixture also checks nested call arguments and the effects of
+  VLA-valued `typeof` operands.
   Object and typedef declarations evaluate VLA-valued `typeof` operands before
   capturing their layout. Nested pointer-to-VLA casts receive a diagnostic
   until their indirect shape can be retained.
@@ -1252,6 +1273,24 @@ checking. Range failures diagnose the enumerator's name and invalidate its ICE,
 so following implicit members stay invalid until an explicit reset. The declared
 base and the original ICE's magnitude/type are never widened or narrowed to make
 an invalid value fit. GNU17's fixed-base extension and GNU23 use this same rule.
+
+Conversions to a fixed enum use its resolved underlying scalar type. For a
+Bool underlying type, both the parse constant evaluator and canonical lowering
+apply the whole-value truth test, including nonzero fractional values and a
+nonzero high integer limb; they do not truncate the value to a bit (#1252).
+This follows [N3096](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)
+6.7.2.2p15 and footnote 155. `c_test_enum_bool_conversion` fixes the expected
+values independently of conflicting older compiler implementations. It checks
+C23/GNU23 enumerator facts and semantic-analysis/canonical parity across six
+native target layouts in both frontend forms. Desktop execution checks direct
+cast array extents, static initializers, typedef/qualified casts and volatile
+runtime operands under every allocator. Semantic `sizeof` over cast-spelled
+array bounds remains a separate layout limitation (#1238/#1247); the execution
+fixture still checks both exact extents. Fixed-base
+initializer representability and implicit-successor diagnostics retain their
+separate declaration constraints. Static scalar validation skips enum tag names
+as type-specifier tokens before the typed fold; a tag is not an ordinary value
+identifier. Unknown and nonconstant value operands remain refused.
 
 Pending lookup respects lexical scope and declaration order, including a nearer
 ordinary identifier shadowing an outer enumerator. Published names use ordinary
