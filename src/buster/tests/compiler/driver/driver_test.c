@@ -18,6 +18,7 @@
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 // compiler_driver_test_wasm_string_records checks multi-module lookup scaling.
 // compiler_driver_test_wasm_signature_interning checks hashed signature numbering.
+// compiler_driver_test_wasm_export_names checks hashed export-name uniqueness.
 // compiler_driver_test_wasm_function_addresses checks escaping function markers and direct calls.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
@@ -13864,6 +13865,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_signature_interning
     return result;
 }
 
+// Export-name uniqueness: one void() function per name, exported under the
+// text after any `module#` prefix. Validation hashes each name once in record
+// order, so cost stays linear and the later record of a pair is the one named.
+BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_export_program(Arena* arena, u32 pointer_size, String8 const* names, u32 count,
+                                                                       IrSymbolId* symbols, bool* committed_out)
+{
+    IrProgram program = ir_program_initialize(arena, 1, 2, count, 0);
+    Target target = {.cpu_arch = pointer_size == 4 ? CPU_ARCH_WASM32 : CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING};
+    program.data_layout = target_data_layout(target);
+    IrModule* module = program.modules;
+    module->name = S8("wasm-exports");
+    IrTypeLayout pointer_layout = {.size = pointer_size, .alignment = pointer_size, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true};
+    IrTypeId void_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+    IrTypeId signature = ir_program_add_type(&program,
+        (IrType){.kind = IR_TYPE_FUNCTION, .return_type = void_type, .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+    bool committed = true;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        String8 internal_name = string_format(arena, S8("exported_{u32}"), index);
+        symbols[index] = ir_program_add_symbol(&program,
+            (IrSymbol){.name = internal_name, .link_name = names[index], .type = signature, .kind = IR_SYMBOL_FUNCTION,
+                       .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+        IrFunction* function = ir_module_add_function(arena, module,
+            (IrFunction){.name = internal_name, .symbol = symbols[index], .canonical_type = signature, .entry = {.value = 0},
+                         .state = IR_FUNCTION_LOWERED});
+        ir_function_add_block(arena, function,
+            (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+        IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+        IrInstructionId id = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0},
+            compiler_driver_test_wasm_canonical_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID), (IrSourceRange){0}, &refusal);
+        committed &= refusal == IR_COMMIT_ACCEPTED && id.value == 0;
+    }
+    *committed_out = committed;
+    return program;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_export_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 populations[] = {64, 256, 1024, 4096, 16384};
+    for (u32 width = 4; width <= 8; width += 4)
+    {
+        for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(populations); population += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            u32 count = populations[population];
+            String8* names = arena_allocate(arena, String8, count);
+            IrSymbolId* symbols = arena_allocate(arena, IrSymbolId, count);
+            for (u32 index = 0; index < count; index += 1)
+            {
+                // Half the names carry an import-style prefix that is stripped.
+                names[index] = index % 2 ? string_format(arena, S8("module#name_{u32}"), index) : string_format(arena, S8("name_{u32}"), index);
+            }
+            bool committed = false;
+            IrProgram program = compiler_driver_test_wasm_export_program(arena, width, names, count, symbols, &committed);
+            if (BUSTER_REQUIRE(arguments, committed))
+            {
+                WasmOptions options = WASM_OPTIONS_DEFAULT;
+                options.pointer_size = (u8)width;
+                WasmArtifact first = wasm_emit_program(arena, &program, options);
+                WasmArtifact second = wasm_emit_program(arena, &program, options);
+                BUSTER_TEST_RAW(arguments, first.success && second.success,
+                                first.error.diagnostic.length ? first.error.diagnostic : first.error.message);
+                if (BUSTER_REQUIRE(arguments, first.success && second.success))
+                {
+                    BUSTER_TEST(arguments, first.stats.export_count == count + 1);
+                    // A unique name never reaches an exact comparison unless its
+                    // full 64-bit hash matches another's.
+                    BUSTER_TEST(arguments, first.stats.export_name_comparisons == 0);
+                    BUSTER_TEST(arguments, first.stats.export_name_probes <= (u64)count);
+                    BUSTER_TEST(arguments, first.stats.export_name_probes == second.stats.export_name_probes);
+                    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                                           memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                    arguments->show(arguments, S8("WASM_EXPORT_NAMES width={u32} exports={u32} probes={u64} comparisons={u64}\n"), width, count,
+                                    first.stats.export_name_probes, first.stats.export_name_comparisons);
+                }
+            }
+            scratch_end(temporary);
+        }
+        // Refusals: the later record of the first repeated name is reported,
+        // whichever spelling each side uses, and an empty or reserved name is
+        // refused at its own record.
+        enum { REFUSAL_COUNT = 4 };
+        String8 messages[REFUSAL_COUNT] = {
+            S8("duplicate WebAssembly export name"), S8("duplicate WebAssembly export name"),
+            S8("empty or reserved WebAssembly export name"), S8("empty or reserved WebAssembly export name"),
+        };
+        u32 culprits[REFUSAL_COUNT] = {40, 20, 7, 12};
+        for (u32 scenario = 0; scenario < REFUSAL_COUNT; scenario += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            enum { REFUSAL_FUNCTIONS = 64 };
+            String8 names[REFUSAL_FUNCTIONS];
+            IrSymbolId symbols[REFUSAL_FUNCTIONS];
+            for (u32 index = 0; index < REFUSAL_FUNCTIONS; index += 1)
+            {
+                names[index] = string_format(arena, S8("unique_{u32}"), index);
+            }
+            if (scenario == 0)
+            {
+                names[5] = S8("module#shared");
+                names[40] = S8("shared");
+                names[50] = S8("other#shared");
+            }
+            else if (scenario == 1)
+            {
+                names[3] = S8("pair");
+                names[8] = S8("first#pair2");
+                names[20] = S8("pair");
+                names[30] = S8("pair2");
+            }
+            else if (scenario == 2)
+            {
+                names[7] = S8("module#");
+            }
+            else
+            {
+                names[12] = S8("memory");
+                names[30] = S8("memory");
+            }
+            bool committed = false;
+            IrProgram program = compiler_driver_test_wasm_export_program(arena, width, names, REFUSAL_FUNCTIONS, symbols, &committed);
+            if (BUSTER_REQUIRE(arguments, committed))
+            {
+                WasmOptions options = WASM_OPTIONS_DEFAULT;
+                options.pointer_size = (u8)width;
+                WasmArtifact artifact = wasm_emit_program(arena, &program, options);
+                BUSTER_TEST(arguments, !artifact.success);
+                BUSTER_TEST(arguments, artifact.error.code == WASM64_ERROR_DUPLICATE_SYMBOL);
+                BUSTER_TEST(arguments, string_equal(artifact.error.message, messages[scenario]));
+                BUSTER_TEST(arguments, artifact.error.symbol.value == symbols[culprits[scenario]].value);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_bit_counts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -20616,6 +20757,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_records);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_signature_interning);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_export_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);

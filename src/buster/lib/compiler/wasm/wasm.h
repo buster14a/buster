@@ -76,6 +76,9 @@ struct Wasm64Stats
     // run only after a full structural hash match.
     u64 signature_lookup_probes;
     u64 signature_comparisons;
+    // Export-name uniqueness: hash-slot visits and exact byte comparisons.
+    u64 export_name_probes;
+    u64 export_name_comparisons;
 };
 
 typedef struct Wasm64Artifact Wasm64Artifact;

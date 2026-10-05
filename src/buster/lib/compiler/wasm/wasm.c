@@ -20,8 +20,8 @@
 // and deliberate stack traps. Dynamic allocations may publish odd end pointers.
 // wasm64_signature_add interns signatures through an open-addressing table
 // keyed by a structural hash, resolved by exact equality, and numbers types in
-// first-use order, so type numbering and lookup cost do not depend on how many
-// signatures came before.
+// first-use order; wasm64_build_export_payload checks export-name uniqueness
+// with a hash set filled in record order, so both stay linear in the module.
 // wasm64_build_name_payload names the data segments of section-attributed
 // data in the name section.
 // Memory64 scalar function pointers are i64 handles into a private i32-indexed
@@ -82,6 +82,14 @@ struct Wasm64SignatureSlot
 enum
 {
     WASM64_SIGNATURE_SLOTS_INITIAL = 16,
+    WASM64_EXPORT_SLOTS_INITIAL = 16,
+};
+
+typedef struct Wasm64ExportNameSlot Wasm64ExportNameSlot;
+struct Wasm64ExportNameSlot
+{
+    u64 hash;
+    String8 name; // an exported name is never empty, so length zero marks a free slot
 };
 
 typedef enum Wasm64SyntheticFunction
@@ -1929,15 +1937,16 @@ static bool wasm64_build_global_payload(Wasm64Context* context)
 static bool wasm64_build_export_payload(Wasm64Context* context)
 {
     String8 memory_name = context->options.memory_export_name.length ? context->options.memory_export_name : wasm64_s8("memory");
-    u32 export_count = context->options.export_memory ? 1 : 0;
+    u32 function_export_count = 0;
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         Wasm64FunctionRecord* record = context->functions + index;
         if (record->exported)
         {
-            export_count += 1;
+            function_export_count += 1;
         }
     }
+    u32 export_count = function_export_count + (context->options.export_memory ? 1 : 0);
     wasm64_buffer_u32_leb(&context->export_payload, export_count);
     if (context->options.export_memory)
     {
@@ -1945,8 +1954,24 @@ static bool wasm64_build_export_payload(Wasm64Context* context)
         wasm64_buffer_u8(&context->export_payload, 0x02); // memory
         wasm64_buffer_u32_leb(&context->export_payload, 0);
     }
+    // Names are hashed once, in record order, into a set sized for every
+    // exported function at no more than half load, so the first record whose
+    // name repeats an earlier one is the one reported.
+    u32 slot_capacity = 0;
+    Wasm64ExportNameSlot* slots = 0;
+    if (function_export_count)
+    {
+        slot_capacity = WASM64_EXPORT_SLOTS_INITIAL;
+        while (slot_capacity / 2 < function_export_count && slot_capacity <= UINT32_MAX / 2)
+        {
+            slot_capacity *= 2;
+        }
+        slots = arena_allocate_zeroed(context->arena, Wasm64ExportNameSlot, slot_capacity);
+    }
+    u32 mask = slot_capacity - 1;
     u32 emitted = 0;
-    for (u32 index = 0; index < context->function_count; index += 1)
+    bool valid = true;
+    for (u32 index = 0; valid && index < context->function_count; index += 1)
     {
         Wasm64FunctionRecord* record = context->functions + index;
         if (!record->exported)
@@ -1958,27 +1983,50 @@ static bool wasm64_build_export_payload(Wasm64Context* context)
         {
             wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("empty or reserved WebAssembly export name"), record->function, 0, 0,
                         record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
-            return false;
+            valid = false;
         }
-        // Export names must be unique.  A duplicate is an error rather than a
-        // silently replaced entry, which would make link order observable.
-        for (u32 previous = 0; previous < index; previous += 1)
+        else
         {
-            Wasm64FunctionRecord* prior = context->functions + previous;
-            if (prior->exported && wasm64_string_equal(name, wasm64_function_export_name(prior)))
+            // Export names must be unique.  A duplicate is an error rather than a
+            // silently replaced entry, which would make link order observable.
+            u64 hash = buster_hash_64((u8*)name.pointer, name.length);
+            u32 slot = (u32)hash & mask;
+            bool duplicate = false;
+            while (!duplicate && slots[slot].name.length)
+            {
+                context->stats.export_name_probes += 1;
+                if (slots[slot].hash == hash)
+                {
+                    context->stats.export_name_comparisons += 1;
+                    duplicate = wasm64_string_equal(slots[slot].name, name);
+                }
+                if (!duplicate)
+                {
+                    slot = (slot + 1) & mask;
+                }
+            }
+            if (duplicate)
             {
                 wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("duplicate WebAssembly export name"), record->function, 0, 0,
                             record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
-                return false;
+                valid = false;
+            }
+            else
+            {
+                slots[slot].hash = hash;
+                slots[slot].name = name;
+                wasm64_buffer_string(&context->export_payload, name);
+                wasm64_buffer_u8(&context->export_payload, 0x00); // function
+                wasm64_buffer_u32_leb(&context->export_payload, record->function_index);
+                emitted += 1;
             }
         }
-        wasm64_buffer_string(&context->export_payload, name);
-        wasm64_buffer_u8(&context->export_payload, 0x00); // function
-        wasm64_buffer_u32_leb(&context->export_payload, record->function_index);
-        emitted += 1;
     }
-    context->stats.export_count = emitted + (context->options.export_memory ? 1 : 0);
-    return true;
+    if (valid)
+    {
+        context->stats.export_count = emitted + (context->options.export_memory ? 1 : 0);
+    }
+    return valid;
 }
 
 static void wasm64_fe_u8(Wasm64FunctionEmitter* emitter, u8 value)
