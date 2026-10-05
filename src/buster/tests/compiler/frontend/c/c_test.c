@@ -17595,6 +17595,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
            "_Static_assert(__alignof__((((struct S){0})++).x) == 16, \"aggregate update is invalid\");"),
         S8("struct S { int x __attribute__((aligned(16))); };"
            "enum { E = __alignof__((((struct S){0})++).x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); }; _Complex double make(void);"
+           "_Static_assert(__alignof__(((struct S *)(__UINTPTR_TYPE__)((__real__ make())++))->x) == 16, \"rvalue projection update is invalid\");"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
     {

@@ -12038,7 +12038,7 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
         CTypeId type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
         bool valid = type.value < frame->result->type_count;
         if (valid && !machine->expression_constraint.length &&
-            !c_parse_update_operand_modifiable(frame->result, *frame->preprocess, frame->start, frame->end - 1, type))
+            !c_parse_update_operand_modifiable(frame->result, *frame->preprocess, frame->start, frame->end - 1, type, machine->result_nonplace_projection))
         {
             machine->expression_constraint = S8("increment or decrement operand is not a modifiable place");
             machine->expression_constraint_token = frame->start;
