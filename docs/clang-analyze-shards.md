@@ -95,83 +95,55 @@ Clang control checks relative includes and confirms a changed transitive header
 is reanalyzed. Every desktop combination entrypoint and the independent analyzer
 job run these controls.
 
-The analyzer CI job resolves both the checked-out candidate and requested
-reference to commit and tree identities before selecting a campaign. Each driver
-compile emits a Clang `-MMD` dependency file under the exact bootstrap command
-profile. `tools/analyzer_reference.py` normalizes the compiler-selected local
-dependencies, requires regular non-symlink materializations whose bytes match the
-selected Git blobs, adds the workflow and policy helper identities, and hashes
-that versioned closure. The compiler, rather than a changed-file heuristic,
-therefore defines which transitive build-driver inputs are relevant.
+The required analyzer job executes **one complete candidate analysis**, followed
+by independent aggregation of its retained results. Pull requests, merge groups,
+main/tag pushes and manual runs all use that same path. Changes to `build.c`, its
+dependencies, the analyzer or the workflow cannot select a reference pass.
+There is no `analyzer_comparison` workflow input or `--baseline-driver` CLI option;
+removed comparison options are rejected rather than silently ignored. Existing
+exact queue-to-main reuse remains separate: a valid reuse receipt can replace
+fresh execution, but never an incomplete candidate run.
 
-A same-revision push or workflow dispatch without an explicit comparison records
-`selection=skip` and `reason=same-revision`, does not materialize or compile a
-second driver, and executes the complete candidate split-source analysis and
-fail-closed aggregate once. Pull requests materialize their base with `git
-archive`, reject symlinks, and compile the reference wholly inside that frozen
-tree. A complete byte-identical driver closure records `selection=skip` and
-`reason=unchanged-driver-closure`; a changed closure selects comparison, and any
-incomplete or unprovable provenance selects comparison conservatively with
-`reason=provenance-uncertain`. A merge group at the exact same revision may record `selection=skip` and
-`reason=same-driver-merge-group` only with complete dependency/policy provenance
-and byte-identical manifests binding one shared candidate executable. The V2
-manifest binds that executable's SHA-256, Clang's resolved path, binary and
-version hashes, the actual bootstrap command, the absolute build/output paths,
-and a hash of compiler/driver environment inputs. `bootstrap` executes the
-recorded compile profile itself and checks Clang identity before and after the
-compile; `manifest --driver` independently reconstructs it before analysis.
-Environment values are not retained: compiler/search/locale keys and `BUSTER_*`
-inputs are hashed, excluding unrelated runner metadata and credentials.
+`Bootstrap and identify candidate build driver` compiles one driver with Clang's
+`-MMD` dependency output. The existing `tools/analyzer_reference.py` helper now
+owns candidate provenance only: it verifies compiler-selected repository inputs
+against their Git blobs and binds the commit/tree, dependency/policy hashes,
+executable SHA-256, resolved Clang identity/version, exact bootstrap command and
+hashed compiler/driver environment. Missing policy inputs or incomplete provenance
+fail bootstrap. No historical source tree or reference executable is created.
+The module name and its read-only `load_selection` decoder remain for historical
+source-pinned measurement readers; the comparison selector/materializer and their
+CLI commands have been removed.
 
-This is an explicit A/A policy: both selected roles use the exact same retained
-executable in the candidate checkout, on the same authoritative database and
-analyzer command projection. It does not infer equivalence of two separately
-compiled executables, their build roots, or two complete provenance manifests.
-The reference is not compiled or run; its manifest is an explicit alias of the
-candidate manifest. Full candidate execution and independent aggregation are
-still mandatory, and no reference success or `ANALYZE_BASELINE` is fabricated.
-Unknown context, incomplete provenance, mismatched commands/toolchains/paths,
-distinct merge-group revisions, distinct unclassified events, and same-revision
-events outside this narrow policy keep comparison. A manual
-workflow dispatch with `analyzer_comparison=true` always selects comparison and
-records `reason=requested`. Both workflow steps ask
-`tools/analyzer_reference.py materialization` whether the reference must be
-materialized; both the same-revision and proven same-driver rules are shared
-with `select`. The campaign first reconstructs its candidate manifest, then
-recomputes materialization from that fresh proof; bootstrap exports cannot steer
-the verifier.
+`Analyze candidate and aggregate all module shards` independently rebuilds that
+manifest immediately before launching the candidate and requires byte equality
+with the bootstrap record. Missing, symlinked, changed or stale evidence, source,
+executable, Clang or environment fails before analysis. Every event binds the
+executable context. This verifies the actual candidate, not equivalence to any
+other driver. The native analyzer's command projection, selected TU set, worker
+budget, deadlines and failure controls are unchanged.
 
-Immediately before analysis, the campaign re-resolves both revisions, regenerates
-both manifests from the retained dependency files and materialized trees, and
-requires their bytes, the versioned V3 selection record, and all exported fields
-to agree exactly. Missing, extra, malformed, tampered, stale, NUL-containing or
-symlinked evidence fails before an analyzer launches. The historical source tree
-is removed after this revalidation so it is not retained as a large artifact.
-The skip path refuses any reference-driver path, including a dangling symlink,
-while comparison requires a regular, executable, non-symlink reference driver.
+The workflow then invokes `clang_analyze` once for execution and once with
+`--aggregate` to independently verify the reports. Aggregation does not launch
+Clang. `ANALYZER_POLICY candidate-only-v1` makes the policy visible in the job
+log; `ANALYZE_RUN` records the complete candidate wall microseconds. No reference
+result or `ANALYZE_BASELINE` success is fabricated. Historical comparison logs
+retain their original meanings and are never relabeled as candidate-only data.
+The frozen #2610/#2119/#2120 population reader still requires its original source,
+producer blobs, dispatch inputs and selection-record schema; this removal does
+not amend or qualify that historical campaign. Replay it at its pinned revision.
+The generic timing reader accepts either historical or current campaign step
+names, refuses missing/duplicate campaign steps and keeps different workflow
+blobs in different measurement cohorts.
 
-When comparison is selected, `--baseline-driver` runs the executable compiled
-from the full frozen reference tree first against the **same candidate split
-database** and records metrics in `baseline.log` (diagnostics remain in the full
-CI log); its failure fails the comparison. Passing `--baseline-driver` directly
-remains the reproducible opt-in path, while the manual workflow input provides an
-explicit hosted comparative campaign. The retained revision, Clang identity,
-dependency files, manifests and selection record bind the source, command and
-configuration used by both paths. No historical issue timing is presented as a
-current measurement.
-
-`ANALYZE_BASELINE` is present only when comparison was selected;
-`ANALYZE_RUN` records the candidate's complete wall microseconds in both modes.
-The baseline reports host logical CPU capacity, not an inferred limit for an
-arbitrary reference driver; the candidate records its configured worker limit.
 `peak_pending_workers` is launched-but-not-yet-reaped worker concurrency;
 actual analyzer overlap can be lower, particularly for empty or tiny shards.
-On Linux, both runs also sample the coordinator and its descendants every
-25 ms: `peak_live_processes` and `sampled_peak_tree_rss_bytes` report observed
-process concurrency and summed resident memory. Shared resident pages count in
-each process; sampling and process-exit races make this a lower bound on the
-actual peak, not a PSS or physical-memory measurement. Other hosts report zero
-samples for unavailable tree metrics.
+On Linux the coordinator and descendants are also sampled every 25 ms:
+`peak_live_processes` and `sampled_peak_tree_rss_bytes` report observed process
+concurrency and summed resident memory. Shared resident pages count in each
+process; sampling and process-exit races make this a lower bound on the actual
+peak, not a PSS or physical-memory measurement. Other hosts report zero samples
+for unavailable tree metrics.
 
 `ANALYZE_SHARD` and `ANALYZE_AGGREGATE` record the largest child high-water RSS
 from POSIX `getrusage`, in bytes. It is **not a sum of simultaneous process-tree
@@ -182,15 +154,19 @@ Clang version, database, CMake cache, manifest, shard reports and logs.
 The initial complete comparison and its measurement limits are recorded in
 [the CI performance audit](performance-audits/2026-09-12T192036Z.md).
 
-`python3 tools/analyzer_selection_test.py -v` exercises both extracted workflow
-steps, proof mismatches, unknown/incomplete proof, wrong events/revisions, forced
-comparison and stale/tampered source, executable, Clang, environment and evidence.
-Rollback is focused: disable `same_driver_skip` in `tools/analyzer_reference.py`;
-both call sites then materialize and compare merge groups again. Revert the PR to
-restore the previous evidence schemas as well. No cache or analysis-scope change
-is involved. Hosted timings must distinguish analyzer execution, total runner
-work and whole-CI completion; removing one measured reference pass does not
-establish an end-to-end speedup while another lane controls completion.
+`python3 tools/analyzer_selection_test.py -v` executes the actual bootstrap and
+campaign bodies with a logging compiler/driver. It covers each event, changed
+root/transitive/analyzer/workflow inputs, one bootstrap and one candidate
+execution, independent aggregation, stale/tampered provenance and fatal candidate
+or aggregate failures. The native `clang_analyze --self-test` additionally rejects
+both spellings of the retired reference option and retains all real child and
+coverage controls.
+
+A deliberate analyzer performance comparison can invoke separately built native
+drivers explicitly outside required CI. Such an experiment is not a correctness
+prerequisite and cannot automatically reinstate a reference pass. Removing the
+measured reference work reduces this job's work; it does not establish the same
+whole-CI latency saving when another required job controls completion.
 
 ## Opt-in worker-budget qualification
 
@@ -198,7 +174,7 @@ The routine default remains two workers. `--qualify-workers` runs four complete
 candidate-only inventories sequentially in fixed `2,4,4,2` order through the
 ordinary native scheduler. It requires at least four reported host logical CPUs
 and four shards, and refuses `--jobs`, independent worker/prepare/aggregate modes,
-self-tests and a baseline driver. Host logical CPU count is only a preflight;
+and self-tests. Host logical CPU count is only a preflight;
 affinity, quota, physical topology and memory still need independent inspection.
 
 ```sh

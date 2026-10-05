@@ -20,7 +20,6 @@ struct ClangAnalyzeOptions
     String8 config;
     String8 clang;
     String8 results;
-    String8 baseline_driver;
     u64 shards;
     u64 jobs;
     u64 shard;
@@ -631,49 +630,6 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_sample_pause(void)
 #endif
 }
 
-BUSTER_GLOBAL_LOCAL bool clang_analyze_baseline(Arena* arena, ClangAnalyzeOptions options, ClangAnalyzePlan plan)
-{
-    OsArgumentBuilder builder = os_argument_builder_start(arena);
-    os_argument_builder_append(&builder, options.baseline_driver);
-    os_argument_builder_append(&builder, S8("clang_analyze"));
-    os_argument_builder_append(&builder, options.database);
-    os_argument_builder_append(&builder, S8("--quiet"));
-    if (options.config.length)
-    {
-        os_argument_builder_append(&builder, S8("--config"));
-        os_argument_builder_append(&builder, options.config);
-    }
-    if (options.clang.length)
-    {
-        os_argument_builder_append(&builder, S8("--clang"));
-        os_argument_builder_append(&builder, options.clang);
-    }
-    u64 start = os_now_microseconds();
-    ProcessSpawnResult spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
-    ClangAnalyzeResources resources = {0};
-    while (!clang_analyze_finished(spawn) && os_now_microseconds() - start < 3600ull * 1000000)
-    {
-        clang_analyze_sample_resources(&resources);
-        clang_analyze_sample_pause();
-    }
-    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 1);
-    u64 elapsed = os_now_microseconds() - start;
-    u64 rss = clang_analyze_child_peak_rss();
-    String8 out = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
-    String8 err = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length};
-    // A later reference may itself use shard workers. Host CPU capacity is
-    // known here; the external driver's actual scheduling limit is not.
-    String8 metric = string_format(arena, S8("ANALYZE_BASELINE eligible={u64} elapsed_us={u64} host_logical_cpus={u32} peak_child_rss_bytes={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} status={S8}\n"),
-        plan.count, elapsed, os_get_logical_thread_count(), rss, resources.samples, resources.peak_processes, resources.peak_tree_rss, wait.result == PROCESS_RESULT_SUCCESS ? S8("pass") : S8("fail"));
-    String8 pieces[] = {metric, out, err};
-    bool written = clang_analyze_write(arena, path_join(arena, options.results, S8("baseline.log")),
-                                      string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pieces), true));
-    string_print(S8("{S8}"), metric);
-    bool result = wait.result == PROCESS_RESULT_SUCCESS && written;
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions options)
 {
     u64 setup_start = os_now_microseconds();
@@ -694,7 +650,6 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
         if (success && !options.prepare)
         {
             u64 setup_us = os_now_microseconds() - setup_start;
-            bool baseline = !options.baseline_driver.length || clang_analyze_baseline(arena, options, plan);
             u64 start = os_now_microseconds();
             u64 peak_pending = 0;
             u64 next_shard = 0;
@@ -736,7 +691,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
             }
             // Always aggregate, even when a worker failed or never launched.
             bool aggregate = clang_analyze_aggregate(arena, options, plan);
-            success = success && aggregate && baseline;
+            success = success && aggregate;
             String8 record = string_format(arena, S8("ANALYZE_RUN elapsed_us={u64} peak_pending_workers={u64} jobs={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} results={S8} status={S8}\n"),
                          os_now_microseconds() - start + setup_us, peak_pending, options.jobs, resources.samples, resources.peak_processes, resources.peak_tree_rss,
                          options.results, success ? S8("pass") : S8("fail"));
@@ -839,7 +794,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_main(Arena* arena, SliceString8 
             else if (string_equal(argument, S8("--clang"))) options.clang = value;
             else if (string_equal(argument, S8("--results"))) options.results = value;
             else if (string_equal(argument, S8("--build-directory"))) options.database = value;
-            else if (string_equal(argument, S8("--baseline-driver"))) options.baseline_driver = value;
             else
             {
                 u64 number = 0;
@@ -865,8 +819,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_main(Arena* arena, SliceString8 
             options.timeout && options.timeout <= 86400 && (!options.worker || options.shard < options.shards) &&
             ((u32)options.prepare + (u32)options.aggregate + (u32)options.worker <= 1) &&
             (!(options.prepare || options.aggregate || options.worker) || options.results.length) &&
-            (!options.baseline_driver.length || !(options.prepare || options.aggregate || options.worker)) &&
-            (!options.qualify_workers || !(options.prepare || options.aggregate || options.worker || options.self_test || jobs_set || options.baseline_driver.length));
+            (!options.qualify_workers || !(options.prepare || options.aggregate || options.worker || options.self_test || jobs_set));
     if (valid && options.self_test)
     {
         valid = arguments.length == 1 && clang_analyze_self_test(arena);
@@ -932,6 +885,14 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_test_check(bool condition, String8 name, 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
 {
     u64 failures = 0;
+    // Retired comparison options must fail before preparing an inventory or
+    // launching a child, including both accepted option-value spellings.
+    String8 retired[] = {S8("--baseline-driver"), S8("unused-reference")};
+    String8 retired_inline[] = {S8("--baseline-driver=unused-reference")};
+    clang_analyze_test_check(clang_analyze_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(retired)) == PROCESS_RESULT_FAILED,
+                             S8("reference-driver-option-refused"), &failures);
+    clang_analyze_test_check(clang_analyze_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(retired_inline)) == PROCESS_RESULT_FAILED,
+                             S8("reference-driver-inline-option-refused"), &failures);
     bool split_valid = true;
     SliceString8 split = shell_split(arena, S8("\"clang tool\" \"-DBUSTER_HOST_C_COMPILER=\\\"C:/Program Files/clang.exe\\\"\" -I\"dir with spaces\" -c \"source file.c\" -o output.o"), &split_valid);
     String8 expected_macro = S8("-DBUSTER_HOST_C_COMPILER=\"C:/Program Files/clang.exe\"");
