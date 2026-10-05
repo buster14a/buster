@@ -3,6 +3,9 @@
  */
 #include "queue.h"
 #include "zen5_calibration_profile.h"
+#include "native_profile.h"
+BUSTER_GLOBAL_LOCAL char const bq_native_profile[] = BQ_NATIVE_PROFILE;
+BUSTER_GLOBAL_LOCAL char const bq_runtime_profile[] = BQ_RUNTIME_PROFILE;
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
@@ -139,6 +142,8 @@ BqRecipe bq_recipe_from_name(String8 name)
                       string_equal(name, S8("validate-buster-v1")) ? BQ_RECIPE_VALIDATE_BUSTER :
                       string_equal(name, S8("native-retirement-performance-v1")) ?
                       BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED :
+                      string_equal(name, S8(BQ_NATIVE_RECIPE)) ? BQ_RECIPE_NATIVE_EXECUTE :
+                      string_equal(name, S8(BQ_RUNTIME_RECIPE)) ? BQ_RECIPE_NATIVE_RUNTIME :
                       string_equal(name, S8("zen5-calibration-v1")) ? BQ_RECIPE_ZEN5_CALIBRATION : BQ_RECIPE_UNKNOWN;
     return result;
 }
@@ -157,6 +162,8 @@ String8 bq_recipe_name(BqRecipe recipe)
     else if (recipe == BQ_RECIPE_VALIDATE_BUSTER) result = S8("validate-buster-v1");
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = S8("native-retirement-performance-v1");
+    else if (recipe == BQ_RECIPE_NATIVE_EXECUTE) result = S8(BQ_NATIVE_RECIPE);
+    else if (recipe == BQ_RECIPE_NATIVE_RUNTIME) result = S8(BQ_RUNTIME_RECIPE);
     else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION) result = S8("zen5-calibration-v1");
     return result;
 }
@@ -169,6 +176,10 @@ String8 bq_recipe_profile(BqRecipe recipe)
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = (String8){(char8*)bq_native_retirement_blocked_profile,
                            sizeof(bq_native_retirement_blocked_profile) - 1};
+    else if (recipe == BQ_RECIPE_NATIVE_EXECUTE)
+        result = (String8){(char8*)bq_native_profile, sizeof(bq_native_profile) - 1};
+    else if (recipe == BQ_RECIPE_NATIVE_RUNTIME)
+        result = (String8){(char8*)bq_runtime_profile, sizeof(bq_runtime_profile) - 1};
     else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION)
         result = (String8){(char8*)bq_zen5_calibration_profile, sizeof(bq_zen5_calibration_profile) - 1};
     return result;
@@ -179,10 +190,12 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
     String8 name = bq_recipe_name(recipe);
     char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
     char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" :
-                          recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" : "";
+                          recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" :
+                          recipe == BQ_RECIPE_NATIVE_EXECUTE ? "native-driver" :
+                          recipe == BQ_RECIPE_NATIVE_RUNTIME ? "native-runtime-driver" : "";
     bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
                                recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ||
-                               recipe == BQ_RECIPE_ZEN5_CALIBRATION);
+                               recipe == BQ_RECIPE_ZEN5_CALIBRATION || bq_recipe_native(recipe));
     if (files) *files = (BqRecipeFiles){0};
     int name_length = described && name.length <= BQ_RECIPE_NAME_CAP ?
                       snprintf(files->name, sizeof(files->name), "%.*s", (int)name.length, name.pointer) : -1;
@@ -208,13 +221,21 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
 bool bq_recipe_admitted(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
-                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
+                  bq_recipe_native(recipe);
+    return result;
+}
+
+bool bq_recipe_native(BqRecipe recipe)
+{
+    bool result = recipe == BQ_RECIPE_NATIVE_EXECUTE || recipe == BQ_RECIPE_NATIVE_RUNTIME;
     return result;
 }
 
 bool bq_recipe_service(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
+                  bq_recipe_native(recipe);
     return result;
 }
 
@@ -249,6 +270,8 @@ bool bq_request_valid(BqRequest const* request)
               /* zen5-calibration-v1 measures one immutable source named twice. */
               (bq_recipe_from_name(recipe) != BQ_RECIPE_ZEN5_CALIBRATION ||
                (base.length == 40 && string_equal(base, candidate))) &&
+              (!bq_recipe_native(bq_recipe_from_name(recipe)) ||
+               (base.length == 64 && string_equal(base, candidate))) &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
     return ok;
 }
@@ -354,10 +377,31 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
 {
     BqError error = BQ_OK;
     BqJob* job = NULL;
-    if ((schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA) || (state->journal_schema && schema < state->journal_schema) ||
-        sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_RESULT_BIND)
+    if ((schema < BQ_SCHEMA_LEGACY || (schema > BQ_SCHEMA && schema != BQ_SCHEMA_ASSIGNED)) || (state->journal_schema && schema < state->journal_schema) ||
+        sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_ASSIGN_IMPORT)
     {
         error = BQ_INVALID_TRANSITION;
+    }
+    else if (kind == BQ_ASSIGN_IMPORT)
+    {
+        BqRequest request = {.size = size >= 20 ? bq_u32(body + 16) : 0};
+        u64 id = size >= 20 ? bq_u64(body) : 0;
+        u64 token = size >= 20 ? bq_u64(body + 8) : 0;
+        if (schema != BQ_SCHEMA_ASSIGNED || !id || !token || size < 20 || request.size > BQ_REQUEST_CAP ||
+            size != 20 + request.size || state->active_id || bq_job(state, id) || state->job_count == BQ_JOB_CAP)
+            error = BQ_INVALID_TRANSITION;
+        else
+        {
+            memcpy(request.bytes, body + 20, request.size);
+            if (!bq_request_valid(&request) || !bq_recipe_service(bq_request_recipe(&request))) error = BQ_BAD_REQUEST;
+            else
+            {
+                job = state->jobs + state->job_count++;
+                *job = (BqJob){.id = id, .token = token, .phase = BQ_RESERVED, .request = request};
+                bq_request_digest(&request, job->digest);
+                state->active_id = id;
+            }
+        }
     }
     else if (kind == BQ_SUBMIT)
     {
@@ -370,7 +414,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
         {
             request.size = size;
             memcpy(request.bytes, body, size);
-            if (!bq_request_valid(&request) || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real(&request)))
+            if (!bq_request_valid(&request) || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real(&request)) ||
+                (schema < BQ_SCHEMA_NATIVE && bq_recipe_native(bq_request_recipe(&request))) ||
+                (schema < BQ_SCHEMA_RUNTIME && bq_request_recipe(&request) == BQ_RECIPE_NATIVE_RUNTIME))
             {
                 error = BQ_BAD_REQUEST;
             }
@@ -497,13 +543,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 bool advance = next == (u32)job->phase + 1 && next <= BQ_FINISHED;
                 bool cancel_cleanup = job->cancel_requested && job->phase < BQ_CLEANING && next == BQ_CLEANING;
                 bool failure_outcome = outcome == (u32)(job->cancel_requested ? BQ_CANCELLED : BQ_FAILED) ||
-                                       (schema == BQ_SCHEMA && !job->cancel_requested && outcome == BQ_INTERRUPTED);
+                                       (schema >= BQ_SCHEMA_WORKER && !job->cancel_requested && outcome == BQ_INTERRUPTED);
                 bool failure_cleanup = schema >= BQ_SCHEMA_MATERIALIZATION && bq_recipe_real(&job->request) &&
                                        job->phase < BQ_CLEANING && next == BQ_CLEANING &&
                                        failure_outcome;
                 if (next == BQ_FINALIZING)
                 {
-                    bool worker_terminal = schema == BQ_SCHEMA && bq_recipe_real(&job->request) &&
+                    bool worker_terminal = schema >= BQ_SCHEMA_WORKER && bq_recipe_real(&job->request) &&
                                            outcome == BQ_SUCCEEDED;
                     expected = worker_terminal ? (BqOutcome)outcome :
                                string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
@@ -512,7 +558,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 {
                     expected = BQ_CANCELLED;
                 }
-                if (schema == BQ_SCHEMA && !job->cancel_requested && bq_recipe_real(&job->request) && job->phase == BQ_CLEANING &&
+                if (schema >= BQ_SCHEMA_WORKER && !job->cancel_requested && bq_recipe_real(&job->request) && job->phase == BQ_CLEANING &&
                     next == BQ_FINISHED && outcome == BQ_INTERRUPTED)
                 {
                     expected = BQ_INTERRUPTED;
@@ -575,11 +621,6 @@ BUSTER_GLOBAL_LOCAL void bq_frame_schema(u8 frame[BQ_RECORD_CAP], u32 schema, Bq
     bq_header_digest(frame, digest);
     memcpy(frame + 32, digest, 64);
     memcpy(frame + BQ_HEADER_SIZE, body, size);
-}
-
-BUSTER_GLOBAL_LOCAL void bq_frame(u8 frame[BQ_RECORD_CAP], BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
-{
-    bq_frame_schema(frame, BQ_SCHEMA, kind, sequence, body, size);
 }
 
 #ifndef _WIN32
@@ -681,10 +722,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             u32 kind = bq_u32(frame + 12);
             u64 sequence = bq_u64(frame + 24);
             u32 schema = bq_u32(frame + 8);
-            if (memcmp(frame, "BQJNL001", 8) || schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA ||
+            if (memcmp(frame, "BQJNL001", 8) || schema < BQ_SCHEMA_LEGACY || (schema > BQ_SCHEMA && schema != BQ_SCHEMA_ASSIGNED) ||
                 (queue->state.journal_schema && schema < queue->state.journal_schema) || bq_u32(frame + 20) ||
-                length > BQ_JOURNAL_BODY_CAP || kind < BQ_SUBMIT || kind > BQ_RESULT_BIND ||
-                (kind != BQ_RESULT_BIND && length > BQ_REQUEST_CAP) ||
+                length > BQ_JOURNAL_BODY_CAP || kind < BQ_SUBMIT || kind > BQ_ASSIGN_IMPORT ||
+                (kind != BQ_RESULT_BIND && kind != BQ_ASSIGN_IMPORT && length > BQ_REQUEST_CAP) ||
                 sequence != queue->state.sequence + 1 || memcmp(frame + 32, digest, 64))
             {
                 error = BQ_CORRUPT;
@@ -816,12 +857,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_append(BqQueue* queue, BqRecordKind kind, u8 cons
     BqState next = queue->state;
     if (error == BQ_OK)
     {
-        error = bq_apply(&next, BQ_SCHEMA, kind, next.sequence + 1, body, size);
+        error = bq_apply(&next, next.journal_schema == BQ_SCHEMA_ASSIGNED || kind == BQ_ASSIGN_IMPORT ? BQ_SCHEMA_ASSIGNED : BQ_SCHEMA, kind, next.sequence + 1, body, size);
     }
     if (error == BQ_OK)
     {
         u8 frame[BQ_RECORD_CAP];
-        bq_frame(frame, kind, next.sequence, body, size);
+        bq_frame_schema(frame, next.journal_schema, kind, next.sequence, body, size);
 #ifndef _WIN32
         if (!bq_write(queue, frame, BQ_HEADER_SIZE + size) || queue->fault.before_sync || queue->fault.sync_error ||
             fsync(queue->journal_fd) != 0 || queue->fault.after_sync)
@@ -896,6 +937,26 @@ BqError bq_reserve(BqQueue* queue, u64* id, u64* token)
                 }
             }
         }
+    }
+    return error;
+}
+
+BqError bq_assigned_import(BqQueue* queue, BqRequest const* request, u64 id, u64 token)
+{
+    BqJob* existing = bq_job(&queue->state, id);
+    BqError error = !request || !id || !token || !bq_request_valid(request) ? BQ_BAD_REQUEST :
+                    queue->poisoned ? BQ_IO : BQ_OK;
+    if (error == BQ_OK && existing)
+        error = existing->token == token && existing->request.size == request->size &&
+                !memcmp(existing->request.bytes, request->bytes, request->size) ? BQ_OK : BQ_CONFLICT;
+    else if (error == BQ_OK)
+    {
+        u8 body[BQ_JOURNAL_BODY_CAP];
+        bq_put64(body, id);
+        bq_put64(body + 8, token);
+        bq_put32(body + 16, request->size);
+        memcpy(body + 20, request->bytes, request->size);
+        error = bq_append(queue, BQ_ASSIGN_IMPORT, body, 20 + request->size);
     }
     return error;
 }

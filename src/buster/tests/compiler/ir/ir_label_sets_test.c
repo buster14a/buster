@@ -297,11 +297,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_label_sets(UnitTestArguments* argumen
         // Shape uses this same calling-thread scratch selection. Rewinds
         // preserve its observed high water without retaining any copied set.
         TemporalArena measurement = scratch_begin(0, 0);
-        u64 previous_high_water = measurement.arena->test_high_water;
-        measurement.arena->test_high_water = measurement.arena->position;
+        u64 previous_high_water = measurement.arena->high_water;
+        measurement.arena->high_water = measurement.arena->position;
         bool shared_valid = ir_label_metadata_shape_valid(&program, &function, metadata_id);
-        u64 shared_peak = BUSTER_MAX(measurement.arena->test_high_water, measurement.arena->position);
-        measurement.arena->test_high_water = BUSTER_MAX(previous_high_water, shared_peak);
+        u64 shared_peak = BUSTER_MAX(measurement.arena->high_water, measurement.arena->position);
+        measurement.arena->high_water = BUSTER_MAX(previous_high_water, shared_peak);
         BUSTER_TEST(arguments, shared_valid);
         BUSTER_TEST(arguments, measurement.arena->position == measurement.position);
         // Aggregate and one path each need two ID copies, plus coverage and

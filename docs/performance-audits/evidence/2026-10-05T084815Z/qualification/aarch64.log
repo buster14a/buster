@@ -1,0 +1,72 @@
+TEST_FIXTURE_WATCHDOG_V1 status=armed deadline_seconds=1800
+TEST_FIXTURE_START_V1 kind=module module=aarch64_encoding_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_encoding_tests fixture=body index=0 arena_slot=0 start=4648 end=13684 retained_bytes=9036 high_water=13684 peak_bytes=9036 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_encoding_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_encoding_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_encoding_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_exact_bridge_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_exact_bridge_tests fixture=body index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_exact_bridge_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_exact_bridge_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_exact_bridge_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_control_semantics_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_control_semantics_tests fixture=body index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_control_semantics_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_control_semantics_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_control_semantics_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_system_registers_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_system_registers_tests fixture=body index=0 arena_slot=0 start=4648 end=4660 retained_bytes=12 high_water=4660 peak_bytes=12 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_system_registers_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_system_registers_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_system_registers_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_semantics_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_semantics_tests fixture=body index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_semantics_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_semantics_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_semantics_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_system_semantics_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_system_semantics_tests fixture=body index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_system_semantics_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_system_semantics_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_system_semantics_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_syntax_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_syntax_tests fixture=body index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_syntax_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_syntax_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_syntax_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_semantic_vm_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_semantic_vm_tests fixture=body index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_semantic_vm_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_semantic_vm_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_semantic_vm_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_PARALLEL_GANG_V1 status=started module_count=3 modules=aarch64_direct_simd_tests,aarch64_complex_simd_tests,aarch64_memory_semantics_tests
+TEST_FIXTURE_START_V1 kind=module module=aarch64_direct_simd_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_direct_simd_tests fixture=body index=0 arena_slot=0 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_direct_simd_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_direct_simd_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_direct_simd_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_complex_simd_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_complex_simd_tests fixture=body index=0 arena_slot=0 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_complex_simd_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_complex_simd_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_complex_simd_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_memory_semantics_tests fixture=body index=0
+A64_MEMORY_CENSUS rows=559 source_rows=559 seed_rows=559 representative_ok=480 representative_range=56 representative_reserved=23 representative_target_mismatch=0 representative_other=0 generated_words=5814 legal_candidates=4820 exercised_rows=535
+TEST_ARENA_V1 kind=module module=aarch64_memory_semantics_tests fixture=body index=0 arena_slot=0 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_memory_semantics_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_memory_semantics_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_memory_semantics_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_PARALLEL_GANG_V1 status=completed module_count=3 modules=aarch64_direct_simd_tests,aarch64_complex_simd_tests,aarch64_memory_semantics_tests
+TEST_FIXTURE_START_V1 kind=module module=aarch64_alias_projection_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_alias_projection_tests fixture=body index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_alias_projection_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_alias_projection_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_alias_projection_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=aarch64_stride_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=aarch64_stride_tests fixture=body index=0 arena_slot=0 start=4648 end=8360468 retained_bytes=8355820 high_water=8360468 peak_bytes=8355820 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=aarch64_stride_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=119780 peak_bytes=119652 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=aarch64_stride_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=96 peak_bytes=32 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=aarch64_stride_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+[263633/263633] Unit tests (13 of 57 modules selected)
+[13/13] Module tests
+[0/0] External tests

@@ -495,6 +495,12 @@ struct TargetStringSplit
 // target string at all, and a CPU model never belongs in one — `-march=` owns
 // that. Both are diagnosed instead of dropped, because dropping them leaves
 // baseline code generation behind with no hint that the request was ignored.
+// The one environment that is not free-form is MinGW: `mingw32` and a
+// GNU-flavoured environment on a Windows target (`windows-gnu`, `-gnullvm`)
+// name GCC's `ms_struct` ABI, which differs from the MSVC ABI every Buster
+// Windows target implements (empty records, packed bit-field records, enum
+// width). Those spellings are rejected rather than silently treated as MSVC
+// (#1492).
 enum
 {
     TARGET_TRIPLE_COMPONENT_LIMIT = 4,
@@ -508,6 +514,7 @@ typedef enum TargetParseError
     TARGET_PARSE_ERROR_OPERATING_SYSTEM,
     TARGET_PARSE_ERROR_CPU_MODEL,
     TARGET_PARSE_ERROR_EXCESS_COMPONENT,
+    TARGET_PARSE_ERROR_ENVIRONMENT,
     TARGET_PARSE_ERROR_COUNT,
 } TargetParseError;
 

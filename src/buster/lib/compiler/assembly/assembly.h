@@ -65,6 +65,9 @@ typedef enum AssemblyRelocationKind
     ASSEMBLY_RELOCATION_AARCH64_CONDBR19,
     ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19,
     ASSEMBLY_RELOCATION_AARCH64_TESTBR14,
+    // LDR (literal) to a unit label; resolved by the unit like the short
+    // branches above and never retained in an object.
+    ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19,
     ASSEMBLY_RELOCATION_AARCH64_PREL32,
     ASSEMBLY_RELOCATION_AARCH64_PREL64,
     ASSEMBLY_RELOCATION_COUNT,
