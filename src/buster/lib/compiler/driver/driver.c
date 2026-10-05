@@ -803,6 +803,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverLanguage language
 BUSTER_GLOBAL_LOCAL bool compiler_driver_object_input(String8 path);
 BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_input(String8 path);
 BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocessed_assembly_input(String8 path);
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_native_pic_invocation(Arena* arena, CompilerDriverInvocation* invocation, String8 option);
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_spirv_invocation(CompilerDriverInvocation* invocation)
 {
     if (invocation->target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE && invocation->error == COMPILER_DRIVER_ERROR_NONE)
@@ -1258,6 +1259,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     // Whether the code model in force came from -fPIE/-fpie, which is what
     // -fno-pie cancels; -fno-pie after -fPIC leaves -fPIC's model alone.
     bool position_independent_executable_model = false;
+    String8 position_independent_code_option = {0};
     // The -shared or -pie spelling that asked for a position-independent
     // image, kept for the diagnostic on a target with no writer for one.
     String8 position_independent_image_option = {0};
@@ -1999,12 +2001,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             string_equal(argument, S8("-fpie")))
         {
             invocation.position_independent = true;
+            position_independent_code_option = argument;
             position_independent_executable_model = string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie"));
             continue;
         }
         if (string_equal(argument, S8("-fno-pic")) || (string_equal(argument, S8("-fno-pie")) && position_independent_executable_model))
         {
             invocation.position_independent = false;
+            position_independent_code_option = (String8){0};
             position_independent_executable_model = false;
             continue;
         }
@@ -2191,6 +2195,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             compiler_driver_argument_error(arena, &invocation, S8("unsupported linker argument for this output: {S8}"), unsupported);
         }
     }
+    compiler_driver_validate_native_pic_invocation(arena, &invocation, position_independent_code_option);
     return invocation;
 
 }
@@ -2278,6 +2283,36 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_input(String8 path)
     return path.length >= 4 && path.pointer[path.length - 4] == '.' && (path.pointer[path.length - 3] == 'l' || path.pointer[path.length - 3] == 'L') &&
            (path.pointer[path.length - 2] == 'i' || path.pointer[path.length - 2] == 'I') &&
            (path.pointer[path.length - 1] == 'b' || path.pointer[path.length - 1] == 'B');
+}
+
+// Refuse a model the native AArch64 ELF emitter cannot represent before any
+// source is mapped or output is published. Assembly and prebuilt inputs have
+// their own relocation spelling; only an actual C generation route needs it.
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_native_pic_invocation(Arena* arena, CompilerDriverInvocation* invocation, String8 option)
+{
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->position_independent &&
+        invocation->target.cpu_arch == CPU_ARCH_AARCH64 && object_format_for_target(invocation->target) == OBJECT_FORMAT_ELF64 &&
+        !invocation->has_gpu_target && !invocation->emit_llvm_bitcode &&
+        (invocation->action == COMPILER_DRIVER_ACTION_OBJECT || invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
+         invocation->action == COMPILER_DRIVER_ACTION_LINK))
+    {
+        bool c_input = false;
+        for (u32 input_index = 0; invocation->input_paths && input_index < invocation->input_count && !c_input; input_index += 1)
+        {
+            String8 path = invocation->input_paths[input_index];
+            CompilerDriverLanguage language = compiler_driver_input_language(*invocation, input_index);
+            c_input = compiler_driver_c_input(language, path) && !compiler_driver_object_input(path) &&
+                !compiler_driver_archive_input(path) && !compiler_driver_assembly_input(language, path) &&
+                !compiler_driver_preprocessed_assembly_input(path);
+        }
+        if (c_input)
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = option.length ? string_format(arena, S8("unsupported option: {S8} on AArch64 ELF"), option) :
+                S8("position-independent code generation is unsupported on AArch64 ELF");
+        }
+    }
+    return;
 }
 
 typedef struct CompilerDriverDynamicLibraries CompilerDriverDynamicLibraries;
@@ -5425,6 +5460,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         goto finish;
     }
     compiler_driver_validate_spirv_invocation(&invocation);
+    compiler_driver_validate_native_pic_invocation(arena, &invocation, (String8){0});
     if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         result.error = invocation.error;
