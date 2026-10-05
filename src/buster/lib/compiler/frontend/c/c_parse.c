@@ -21460,13 +21460,11 @@ BUSTER_C_SHARED void c_parse_index_scope_children(CParseResult* result, Arena* a
 // next sibling's start)) within its parent's share: an empty, shorter or
 // overlapped sibling hands the rest back to the parent, and a child reaching
 // past its parent is clipped to it. Its own children subdivide that share
-// the same way, and each scope is visited once.
+// the same way, and each scope is visited once. A scope writes only the
+// tokens of its share that none of its children owns, so every token is
+// stored once however deep the nesting (#2676).
 BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* scratch, CScopeId root, u32 start, u32 count, u32* scopes)
 {
-    for (u32 offset = 0; offset < count; offset += 1)
-    {
-        scopes[offset] = root.value;
-    }
     u32 capacity = 64;
     u32* pending = arena_allocate(scratch, u32, capacity * 3);
     u32 pending_count = 1;
@@ -21480,6 +21478,9 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
         u32 low = pending[pending_count * 3 + 1];
         u32 high = pending[pending_count * 3 + 2];
         u32 limit = result->scope_children_offsets[parent + 1];
+        // Siblings are ordered and their shares end at the next one's start, so
+        // the shares ascend and `owned` is the first token no child has taken.
+        u32 owned = low;
         for (u32 entry = result->scope_children_offsets[parent]; entry < limit; entry += 1)
         {
             u32 child = result->scope_children[entry];
@@ -21488,10 +21489,12 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
             u32 share_end = BUSTER_MIN(BUSTER_MIN(result->scopes[child].token_end, next_start), high);
             if (share_start < share_end)
             {
-                for (u32 token = share_start; token < share_end; token += 1)
+                for (u32 token = owned; token < share_start; token += 1)
                 {
-                    scopes[token - start] = child;
+                    scopes[token - start] = parent;
                 }
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_BODY_SCOPE_STORES, share_start > owned ? share_start - owned : 0);
+                owned = BUSTER_MAX(owned, share_end);
                 if (pending_count == capacity)
                 {
                     u32* grown = arena_allocate(scratch, u32, capacity * 6);
@@ -21505,6 +21508,11 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
                 pending_count += 1;
             }
         }
+        for (u32 token = owned; token < high; token += 1)
+        {
+            scopes[token - start] = parent;
+        }
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_BODY_SCOPE_STORES, high > owned ? high - owned : 0);
     }
 }
 

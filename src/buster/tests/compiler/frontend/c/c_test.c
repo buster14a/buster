@@ -24843,6 +24843,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArg
         u64 lookups = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_CALL_LOOKUPS);
         BUSTER_TEST_RAW(arguments, skipped != UINT64_MAX && skipped >= DEEP && lookups == 0,
                         string_format(arguments->arena, S8("call keywords family={u32} skipped={u64} lookups={u64}"), family, skipped, lookups));
+        // Each token of the body is stored once in the scope map, whatever
+        // the nesting above it.
+        u64 stores_shallow = c_test_nested_control_work(family, SHALLOW, C_TEST_PARSE_NESTING_BODY_SCOPE_STORES);
+        u64 stores_deep = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_BODY_SCOPE_STORES);
+        BUSTER_TEST_RAW(arguments, stores_shallow != UINT64_MAX && stores_deep != UINT64_MAX && stores_shallow >= SHALLOW &&
+                            stores_deep <= stores_shallow * 5 && stores_deep <= DEEP * 24,
+                        string_format(arguments->arena, S8("body scope stores family={u32} shallow={u64} deep={u64}"), family, stores_shallow, stores_deep));
     }
     return result;
 }
