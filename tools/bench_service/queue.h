@@ -200,7 +200,10 @@ BUSTER_F_DECL String8 bq_recipe_name(BqRecipe recipe);
 BUSTER_F_DECL String8 bq_recipe_profile(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files);
 BUSTER_F_DECL bool bq_recipe_admitted(BqRecipe recipe);
+/* Linux-only, like every consumer; an unused internal prototype fails -Werror. */
+#ifdef __linux__
 BUSTER_GLOBAL_LOCAL bool bq_native_runtime_records(char const* bytes, u32 length, char const* identity, int cpu, bool require_success, BqRuntimeSummary* summary);
+#endif
 BUSTER_F_DECL bool bq_recipe_native(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_service(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_blocked(BqRecipe recipe);
