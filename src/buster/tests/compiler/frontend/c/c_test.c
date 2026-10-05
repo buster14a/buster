@@ -18172,8 +18172,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_object(UnitTestArguments* argu
 // of a constant conditional is never reached and is accepted, as GCC accepts
 // it. Redeclarations join the attribute; a pointer to the function, a
 // function merely named `error`, the `cleanup(error)` operand, the
-// unrelated `warning` attribute, and a C23 `[[error(...)]]` outside the GNU
-// namespace (`vendor::error`, or unscoped) are not diagnosed.
+// unrelated `warning` attribute, a C23 `[[error(...)]]` outside the GNU
+// namespace (`vendor::error`, or unscoped), and an `error(...)` inside
+// another attribute's argument payload are not diagnosed.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18192,6 +18193,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArgument
         {S8("[[gnu::error(\"c23\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: c23"), 2, 16},
         {S8("[[__gnu__::error(\"reserved scope\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: reserved scope"), 2, 16},
         {S8("void f(void) __attribute__((__error__(\"res\" \"erved\")));\nvoid t(void) { f(); }\n"), S8("error: reserved"), 2, 16},
+        {S8("void f(void) __attribute__((cold, error(\"listed\"), noinline));\nvoid t(void) { f(); }\n"), S8("error: listed"), 2, 16},
+        {S8("[[vendor::tag(x), gnu::error(\"after payload\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: after payload"), 2, 16},
         {S8("void f(void) __attribute__((error(\"m\")));\nvoid t(int x) { if (x) f(); }\n"), S8("error: m"), 2, 24},
         {S8("int f(int) __attribute__((error(\"expr\")));\nint t(int x) { return x + f(x); }\n"), S8("error: expr"), 2, 27},
         {S8("void a(void) __attribute__((error(\"first\"))), b(void);\nvoid t(void) { b(); a(); a(); }\n"), S8("error: first"), 2, 21},
@@ -18204,6 +18207,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArgument
         {S8("void f(void) __attribute__((warning(\"w\")));\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
         {S8("[[vendor::error(\"m\")]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
         {S8("[[error(\"m\")]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[vendor::tag(gnu::error(\"m\"))]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[gnu::unused, vendor::tag({gnu::error(\"m\")})]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("void f(void) __attribute__((tag(error(\"m\"))));\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("void f(void) __attribute__((format(printf, 1, 2), tag(__error__(\"m\"))));\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
         {S8("[[gnu::error(\"m\")]] void f(void);\nvoid t(void) { if (0) f(); }\n"), S8(""), 0, 0},
         {S8("void f(void) __attribute__((error(\"m\")));\nstatic void unused(void) { f(); }\nvoid t(void) {}\n"), S8(""), 0, 0},
     };

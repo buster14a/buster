@@ -1645,7 +1645,10 @@ BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttri
 /* `error` is an ordinary identifier even inside an attribute list -- the
    operand of `cleanup(error)` is one -- so the marker counts only where an
    attribute name stands and only with the string-literal argument the
-   attribute requires. In a GNU `__attribute__` list the name follows the
+   attribute requires. c_ir_attribute_marker_find offers only the list's own
+   entries, never a token inside another attribute's balanced argument
+   payload, so neither `[[vendor::tag(gnu::error("m"))]]` nor
+   `__attribute__((tag(error("m"))))` names it. In a GNU `__attribute__` list the name follows the
    list's '(' or a ','. In a C23 `[[...]]` list only the GNU namespace means
    it: `gnu::error` or `__gnu__::error`, whose `::` lexes as two ':' tokens.
    An unscoped `[[error(...)]]` or another vendor's `vendor::error` is an
@@ -1687,6 +1690,11 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
         u32 list_start = UINT32_MAX;
         u32 list_end = UINT32_MAX;
         bool bracketed = false;
+        // How many groups deep the list's own entries stand: one inside the
+        // inner '(' of `__attribute__((...))`, none for `__declspec(...)`
+        // and `[[...]]`. A token deeper than that is in an entry's
+        // balanced argument payload -- `tag(error("m"))` -- not an entry.
+        u32 entry_depth = 0;
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
@@ -1718,6 +1726,7 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
                 }
                 list_start = index + 2;
                 list_end = scan < end ? scan : end;
+                entry_depth = list_start < list_end && c_token_is_punctuator(&preprocess.tokens[list_start], C_PUNCTUATOR_LEFT_PARENTHESIS) ? 1 : 0;
                 index = list_end;
             }
         }
@@ -1735,12 +1744,21 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
             bracketed = true;
             index = list_end;
         }
+        u32 nesting = 0;
         for (u32 marker_index = list_start; marker_index < list_end && result == UINT32_MAX; marker_index += 1)
         {
-            bool matches = preprocess.tokens[marker_index].kind == C_TOKEN_IDENTIFIER &&
-                           c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[marker_index]), marker) &&
-                           (marker != C_IR_ATTRIBUTE_MARKER_ERROR || c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed));
+            CToken const* candidate = &preprocess.tokens[marker_index];
+            bool matches = candidate->kind == C_TOKEN_IDENTIFIER &&
+                           c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, *candidate), marker) &&
+                           (marker != C_IR_ATTRIBUTE_MARKER_ERROR ||
+                            (nesting == entry_depth && c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed)));
             result = matches ? marker_index : UINT32_MAX;
+            bool opens = c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACKET) ||
+                         c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACE);
+            bool closes = c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                          c_token_is_punctuator(candidate, C_PUNCTUATOR_RIGHT_BRACE);
+            nesting += opens ? 1 : 0;
+            nesting -= closes && nesting ? 1 : 0;
         }
         index += 1;
     }
