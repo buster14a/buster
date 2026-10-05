@@ -17173,8 +17173,12 @@ BUSTER_C_INTERNAL CTypeSelfVerdict c_parse_types_self_compatible(CParseResult* r
     return verdict;
 }
 
+// `ignore_array_qualifiers` compares the pair as C11 6.7.3p9 reads array
+// qualification -- an array of qualified elements is itself qualified -- so
+// the qualifiers of the pair and of every array element beneath it are
+// ignored. Pointer pointees and function parameters keep theirs.
 BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
-                                                       CTypeId left, CTypeId right)
+                                                       CTypeId left, CTypeId right, bool ignore_array_qualifiers)
 {
     Arena* conflicts[] = {
         result_arena,
@@ -17185,6 +17189,7 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
     stack[stack_count++] = (CTypePair){
         .left = left,
         .right = right,
+        .ignore_qualifiers = ignore_array_qualifiers,
     };
     bool compatible = true;
     WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_CALLS, 1);
@@ -17280,6 +17285,7 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             stack[stack_count++] = (CTypePair){
                 .left = left_type.element_type,
                 .right = right_type.element_type,
+                .ignore_qualifiers = pair.ignore_qualifiers && ignore_array_qualifiers,
             };
             break;
         }
@@ -17459,9 +17465,19 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParse
     bool compatible = self == C_TYPE_SELF_COMPATIBLE;
     if (self == C_TYPE_SELF_UNDECIDED)
     {
-        compatible = c_parse_types_compatible_walk(result_arena, result, preprocess, left, right);
+        compatible = c_parse_types_compatible_walk(result_arena, result, preprocess, left, right, false);
     }
     return compatible;
+}
+
+// Pointee compatibility for an assignment whose pointees are arrays: the
+// qualifiers an array carries -- on the array or on any element beneath it --
+// are a conversion's business (C11 6.5.16.1p1) and not part of the shape, so
+// `char[2][3]` and `char const[2][3]` agree here and nowhere else.
+BUSTER_C_INTERNAL bool c_parse_array_pointees_compatible(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess,
+                                                           CTypeId left, CTypeId right)
+{
+    return c_parse_types_compatible_walk(result_arena, result, preprocess, left, right, true);
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -17472,7 +17488,7 @@ bool c_test_types_compatible(Arena* arena, CParseResult* result, CPreprocessResu
 
 bool c_test_types_compatible_walk(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right)
 {
-    return c_parse_types_compatible_walk(arena, result, preprocess, left, right);
+    return c_parse_types_compatible_walk(arena, result, preprocess, left, right, false);
 }
 
 bool c_test_parse_reserve_types(CParseResult* result, u32 additional)
@@ -24629,18 +24645,55 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_function_initializer(CTypeParseMachi
 BUSTER_C_INTERNAL bool c_parse_local_type_is_variable_length(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                                CScopeId scope, CTypeId type_id);
 
-BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, CParseResult* result, CTypeId type_id, bool decay)
+// The qualifiers `type_id` presents to a pointer that points at it: its own
+// and, for an array, those of every array level and of the element beneath
+// (C11 6.7.3p9). `seed` carries qualifiers already owed to it, such as a
+// decayed array's own.
+BUSTER_C_INTERNAL CType c_parse_array_element_qualifiers(CParseResult* result, CTypeId type_id, CType seed)
+{
+    CType qualifiers = seed;
+    bool walking = true;
+    for (u32 steps = 0; walking && steps <= result->type_count; steps += 1)
+    {
+        walking = false;
+        if (type_id.value < result->type_count)
+        {
+            CType type = result->types[type_id.value];
+            qualifiers.is_const |= type.is_const;
+            qualifiers.is_volatile |= type.is_volatile;
+            qualifiers.is_restrict |= type.is_restrict;
+            qualifiers.is_atomic |= type.is_atomic;
+            type_id = type.element_type;
+            walking = type.kind == C_TYPE_ARRAY;
+        }
+    }
+    return qualifiers;
+}
+
+// Names a type for a conversion diagnostic: pointer levels are counted and an
+// array shows its bounds, so `char (*)[3]` and `char (*)[4]` read differently
+// where both used to read `array *`. A bound is its inferred count or its
+// spelling; an array's qualifiers are named on the element they apply to.
+BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                                   CTypeId type_id, bool decay)
 {
     String8 name = {0};
     CType type = {0};
     u32 pointer_depth = 0;
+    u32 element_pointer_depth = 0;
+    String8 bounds = {0};
+    CType array_qualifiers = {0};
     bool valid = type_id.value < result->type_count;
     if (valid)
     {
         type = result->types[type_id.value];
         if (decay && (type.kind == C_TYPE_ARRAY || type.kind == C_TYPE_FUNCTION))
         {
-            if (type.kind == C_TYPE_ARRAY) type_id = type.element_type;
+            if (type.kind == C_TYPE_ARRAY)
+            {
+                array_qualifiers = type;
+                type_id = type.element_type;
+            }
             pointer_depth += 1;
             valid = type_id.value < result->type_count;
         }
@@ -24659,9 +24712,35 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, 
             done = true;
         }
     }
+    for (u32 steps = 0; valid && type.kind == C_TYPE_ARRAY && steps <= result->type_count; steps += 1)
+    {
+        CArrayBound bound = type.array_bound < result->array_bound_count ? result->array_bounds[type.array_bound] : (CArrayBound){0};
+        String8 bound_text = bound.is_star ? S8("*") : bound.has_inferred_count ? string_format(arena, S8("{u64}"), bound.inferred_count) : (String8){0};
+        for (u32 token_index = 0; !bound_text.length && token_index < bound.token_count && bound.token_start + token_index < preprocess.token_count; token_index += 1)
+        {
+            bound_text = string_format(arena, S8("{S8}{S8}"), bound_text,
+                                       c_token_spelling(preprocess.spelling_base, preprocess.tokens[bound.token_start + token_index]));
+        }
+        bounds = string_format(arena, S8("{S8}[{S8}]"), bounds, bound_text);
+        array_qualifiers.is_const |= type.is_const;
+        array_qualifiers.is_volatile |= type.is_volatile;
+        array_qualifiers.is_restrict |= type.is_restrict;
+        type_id = type.element_type;
+        valid = type_id.value < result->type_count;
+        if (valid) type = result->types[type_id.value];
+    }
+    while (valid && bounds.length && type.kind == C_TYPE_POINTER && type.element_type.value < result->type_count)
+    {
+        type_id = type.element_type;
+        type = result->types[type_id.value];
+        element_pointer_depth += 1;
+    }
     if (valid)
     {
         type = result->types[type_id.value];
+        type.is_const |= array_qualifiers.is_const;
+        type.is_volatile |= array_qualifiers.is_volatile;
+        type.is_restrict |= array_qualifiers.is_restrict;
         switch (type.kind)
         {
         case C_TYPE_VOID: name = S8("void"); break;
@@ -24708,14 +24787,32 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, 
         {
             name = pointer_depth == 1 ? S8("function pointer") : S8("pointer to function pointer");
         }
-        else if (pointer_depth)
+        else
         {
-            u64 length = name.length + (u64)pointer_depth + 1;
-            char8* bytes = arena_allocate(arena, char8, length);
-            memcpy(bytes, name.pointer, (size_t)name.length);
-            bytes[name.length] = ' ';
-            memset(bytes + name.length + 1, '*', pointer_depth);
-            name = (String8){.pointer = bytes, .length = length};
+            // `T`, `T *`, `T[3]`, `T (*)[3]`, `T *[3]`: the element's own
+            // pointers sit beside it and the outer ones inside the parentheses.
+            u64 stars = (u64)element_pointer_depth + (bounds.length ? 0u : (u64)pointer_depth);
+            if (stars)
+            {
+                u64 length = name.length + stars + 1;
+                char8* bytes = arena_allocate(arena, char8, length);
+                memcpy(bytes, name.pointer, (size_t)name.length);
+                bytes[name.length] = ' ';
+                memset(bytes + name.length + 1, '*', stars);
+                name = (String8){.pointer = bytes, .length = length};
+            }
+            if (bounds.length && pointer_depth)
+            {
+                u64 length = name.length + (u64)pointer_depth + 3;
+                char8* bytes = arena_allocate(arena, char8, length);
+                memcpy(bytes, name.pointer, (size_t)name.length);
+                bytes[name.length] = ' ';
+                bytes[name.length + 1] = '(';
+                memset(bytes + name.length + 2, '*', pointer_depth);
+                bytes[name.length + 2 + pointer_depth] = ')';
+                name = (String8){.pointer = bytes, .length = length};
+            }
+            if (bounds.length) name = string_format(arena, S8("{S8}{S8}"), name, bounds);
         }
     }
     if (!name.length) name = S8("unknown type");
@@ -24740,15 +24837,15 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
         bool source_integer = c_parse_expression_integer_kind(from.kind);
         if (!message.length && source_pointer && target_integer && target.kind != C_TYPE_BOOL)
         {
-            String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, source, true);
-            String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, destination, false);
+            String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, source, true);
+            String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, destination, false);
             message = string_format(result->arena, S8("cannot convert from '{S8}' to '{S8}'"), source_name, target_name);
         }
         else if (!message.length && target_pointer && source_integer &&
                  !c_parse_range_is_null_pointer_constant(machine->scratch_arena, preprocess, result, scope, source, start, end))
         {
-            String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, source, true);
-            String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, destination, false);
+            String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, source, true);
+            String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, destination, false);
             message = string_format(result->arena, S8("cannot convert from '{S8}' to '{S8}'"), source_name, target_name);
         }
         else if (!message.length && target_pointer && source_pointer &&
@@ -24771,13 +24868,23 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
                 bool function_void_compatible = c_preprocess_dialect_is_gnu(preprocess.dialect) && native_callback_storage &&
                                                 ((target_element.kind == C_TYPE_VOID && source_element.kind == C_TYPE_FUNCTION) ||
                                                  (source_element.kind == C_TYPE_VOID && target_element.kind == C_TYPE_FUNCTION));
-                bool drops_qualifier = (source_element.is_const && !target_element.is_const) ||
-                                       (source_element.is_volatile && !target_element.is_volatile) ||
-                                       (source_element.is_restrict && !target_element.is_restrict) ||
-                                       (!object_void_compatible && source_element.is_atomic && !target_element.is_atomic);
+                // C11 6.7.3p9: qualifiers of an array type apply to its elements, so a
+                // row of a const array -- `k->s` through a const struct -- points at
+                // const elements even though the row type carries no flag of its own.
+                CType source_qualifiers = c_parse_array_element_qualifiers(result, source_pointee,
+                                                                           from.kind == C_TYPE_ARRAY ? from : (CType){0});
+                CType target_qualifiers = c_parse_array_element_qualifiers(result, target_pointee, (CType){0});
+                bool drops_qualifier = (source_qualifiers.is_const && !target_qualifiers.is_const) ||
+                                       (source_qualifiers.is_volatile && !target_qualifiers.is_volatile) ||
+                                       (source_qualifiers.is_restrict && !target_qualifiers.is_restrict) ||
+                                       (!object_void_compatible && source_qualifiers.is_atomic && !target_qualifiers.is_atomic);
                 bool compatible = object_void_compatible || function_void_compatible ||
                                   c_parse_types_compatible(machine->scratch_arena, result, preprocess,
                                       c_parse_unqualified_type(result, target_pointee), c_parse_unqualified_type(result, source_pointee));
+                if (!compatible && target_element.kind == C_TYPE_ARRAY && source_element.kind == C_TYPE_ARRAY)
+                {
+                    compatible = c_parse_array_pointees_compatible(machine->scratch_arena, result, preprocess, target_pointee, source_pointee);
+                }
                 if (!compatible && target_element.kind == C_TYPE_ARRAY && source_element.kind == C_TYPE_ARRAY &&
                     c_parse_local_type_is_variable_length(machine, result, preprocess, scope, target_pointee) &&
                     c_parse_local_type_is_variable_length(machine, result, preprocess, scope, source_pointee))
@@ -24787,8 +24894,8 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
                 }
                 if (!compatible || drops_qualifier)
                 {
-                    String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, source, true);
-                    String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, destination, false);
+                    String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, source, true);
+                    String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, destination, false);
                     bool function_pointers = target_element.kind == C_TYPE_FUNCTION && source_element.kind == C_TYPE_FUNCTION;
                     message = string_format(result->arena,
                         function_pointers ? S8("cannot convert from '{S8}' to '{S8}': incompatible function pointer type")
