@@ -1,6 +1,0 @@
-# Historical hash-indexed receipts and patches retain their original bytes,
-# including diagnostic trailing spaces, patch context and final blank lines.
-# This applies only to archived evidence, not production source or tests.
-*.log -text -whitespace
-*.patch -text -whitespace
-*.json -text -whitespace

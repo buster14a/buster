@@ -1,7 +1,0 @@
-Claiming the unclaimed native stdio MCP client slice for #437 on `codex/437-native-mcp-client`, based on main `1d4898682304cc7e50ed4a112d08dd39ef257bce` (tree `b8df8b52f8fb8227ed9b6faca983941829aae961`). Current source, latest #437/#880/#881 comments, AGENTS/build/testing/workflow guides, and all-state MCP/stdio PR searches were inspected before editing.
-
-Scope: bounded JSON-RPC/MCP lifecycle, six typed bench tools, and registered protocol/client regression tests, forwarding only the current authenticated public control protocol. No new dependencies, caller-selected commands, privilege changes, queue writer, measurement policy, or native-retirement generated binding. The current deployment principal/authentication contract remains explicit. Buster first-party licensing is unselected per LICENSES/README.md.
-
-Subagents will implement and independently review separate owned worktrees; this parent session owns the published branch. Existing #1507 ownership of retained failed broker terminal witnesses is respected. #881 has since been closed as superseded; the independent #437 service requirements remain open.
-
-The operator supplied `tailscale ssh david@benchpress` for worker access. Any host inspection will first check current execution ownership; implementation validation runs locally. This slice alone cannot claim the separate off-host cached control plane, quiet-phase stress, real ChatGPT write-capable connection, or physical qualification. Exact revision, tests and remaining acceptance gates will be recorded before handoff.
