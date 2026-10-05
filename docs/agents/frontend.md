@@ -24,6 +24,24 @@ allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
 The cross-frontend/backend ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+## Conditional directive comments
+
+The `#if`/`#elif` operand range ends at the first newline outside a block comment.
+The lexer retains physical newline rows for source metrics and locations;
+`c_preprocess_directive_line_end` applies the same comment-gap policy as `#define`
+after either the class-mask or row-scan physical endpoint. Conditional wrapping
+drops interior newline rows before `defined`, feature-query and macro processing,
+and keeps a physical-line stamp for builtin locations such as `__LINE__`.
+The top-level driver and conditionals encountered inside a multiline macro
+invocation both advance to the complete operand endpoint.
+
+`c_test_multiline_comment_conditionals` fixes the expected branch and canonical
+constant in both frontend forms for operator, parenthesized, leading, trailing,
+repeated, `defined` and CRLF comments, with line-comment and one-line controls.
+It also covers builtin line attribution and conditionals inside a macro invocation.
+The existing `c_test_pp_class_masks_agree` seam compares the physical and extended
+directive endpoints supplied by the mask and row paths.
+
 ## Preprocessor include identity
 
 The once-file index shared by `#import`, `#pragma once` and proven whole-file

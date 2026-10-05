@@ -14972,6 +14972,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_intern_scan_by_shape(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_multiline_comment_conditionals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 expression;
+        bool value;
+    } cases[] = {
+        {S8("0 /* before\n operator */ || 1"), true},
+        {S8("1 && /* after\n operator */ 0"), false},
+        {S8("(0 /* inside\n parentheses */ || 1)"), true},
+        {S8("/* leading\n comment */ 1"), true},
+        {S8("1 /* trailing\n comment */"), true},
+        {S8("0 /* many\n\n\n lines */ || /* second\n comment */ 1"), true},
+        {S8("1 /* // is still\n a block comment */ && 0"), false},
+        {S8("defined /* before\n operand */ (PRESENT)"), true},
+        {S8("defined(PRESENT) && /* CRLF\r\n continuation */ 1"), true},
+        {S8("'/' == '/' /* literal boundary\n continuation */ && 1"), true},
+        {S8("0 // /* this is a line comment"), false},
+        {S8("1 /* a single line */ && 0"), false},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 elif = 0; elif < 2; elif += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                String8 source = string_format(temporary.arena,
+                    S8("#define PRESENT 1\n{S8} {S8}\nint selected(void) {{ return 1; }}\n"
+                       "#else\nint selected(void) {{ return 0; }}\n#endif\n"),
+                    elif ? S8("#if 0\nint unused(void);\n#elif") : S8("#if"), cases[case_index].expression);
+                BUSTER_TEST_RAW(arguments, c_test_pp_class_masks_agree(temporary.arena, source), source);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.source_path = S8("comment-conditionals.c"), .target = target_native,
+                                         .data_layout = target_data_layout(target_native)});
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+                u32 numbers = 0;
+                for (u64 token = 0; token < tokens.token_count; token += 1)
+                {
+                    if (tokens.tokens[token].kind == C_TOKEN_PREPROCESSING_NUMBER)
+                    {
+                        c_test_preprocessed_token(arguments, &result, tokens, token, C_TOKEN_PREPROCESSING_NUMBER,
+                                                  cases[case_index].value ? S8("1") : S8("0"));
+                        numbers += 1;
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, numbers == 1, source);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("comment-conditionals.c"), tokens, syntax,
+                    target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0, source);
+                if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, module->function_count == 1);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    u32 constants = 0;
+                    for (u32 function = 0; function < module->function_count; function += 1)
+                    {
+                        IrFunction* lowered_function = module->functions + function;
+                        for (u32 instruction = 0; instruction < lowered_function->instruction_count; instruction += 1)
+                        {
+                            IrInstruction row = lowered_function->instructions[instruction];
+                            if (row.opcode == IR_OPCODE_CONSTANT_INTEGER)
+                            {
+                                BUSTER_TEST_RAW(arguments, row.immediates[0] == (cases[case_index].value ? 1u : 0u), source);
+                                constants += 1;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, constants == 1);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    String8 line_source = S8("#if 1 && /* first\n second */ __LINE__ == 2\nkept\n#else\ndropped\n#endif\n");
+    CPreprocessResult lines = c_preprocess(arguments->arena, line_source, (CPreprocessOptions){.source_path = S8("comment-lines.c")});
+    BUSTER_TEST(arguments, lines.diagnostic_count == 0 && lines.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, lines, 0, C_TOKEN_IDENTIFIER, S8("kept"));
+    String8 nested_source = S8("#define PICK(x) x\nPICK(\n#if 0\nunused\n#elif 0 /* one\n two */ || 1\nkept\n#else\ndropped\n#endif\n)\n");
+    CPreprocessResult nested = c_preprocess(arguments->arena, nested_source, (CPreprocessOptions){.source_path = S8("comment-rescan.c")});
+    BUSTER_TEST(arguments, nested.diagnostic_count == 0 && nested.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, nested, 0, C_TOKEN_IDENTIFIER, S8("kept"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pp_class_masks(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14992,6 +15080,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pp_class_masks(UnitTestArguments* argu
         if (item % 5 == 0)
         {
             c_test_append_source(source_bytes, source_capacity, &source_length, S8("\n"));
+        }
+        if (item % 7 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 S8("#if 0 /* first\n second */ || 1\nkept\n#endif\n"));
         }
     }
     BUSTER_TEST(arguments, source_length > BUSTER_KB(8));
@@ -38360,6 +38453,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_search_scratch);
     BUSTER_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
+    BUSTER_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
