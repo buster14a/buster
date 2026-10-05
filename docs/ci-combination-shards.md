@@ -7,14 +7,20 @@ sanitizer/fuzzer policy, deadlines and production backend dispatch do not change
 
 ## Ownership
 
-Each of the five retained runner labels has two jobs, named `<platform> release`
-and `<platform> checks`. The workflow's `lane` × `shard` axes form ten jobs;
-the include entries add metadata by lane rather than creating extra jobs.
+The five retained runner labels form eighteen desktop jobs. Linux x86-64,
+Linux AArch64, macOS AArch64 and Windows x86-64 each have `release`,
+`sanitized-debug`, `sanitized-release` and `portability` owners (macOS since
+#2659). Windows AArch64 retains `release` and grouped `checks`. Include entries
+add metadata by lane. The historical combined layout remains an explicit
+qualification cohort.
 
 | Shard | Work |
 | --- | --- |
 | `release` | The one unsanitized Clang Release/unity tree, its runtime tests, canonical unity analysis/table audits, and supported artifact-fanout self-host/fixed-point/census consumers. Shared native diagnostics, throughput/service self-tests, workflow-tool and wrapper regressions also run here once per platform. |
-| `checks` | Sanitized Clang Debug/Release and the existing non-Clang portability Debug trees. Windows ARM64 still has its nonempty MSVC Debug shard and explicit unsupported GCC/Zig/sanitizer/fuzzer exclusions. |
+| `checks` | Sanitized Clang Debug/Release and the existing non-Clang portability Debug trees: the exact union of the three owners below. Scheduled only on Windows ARM64, whose nonempty MSVC Debug shard keeps explicit unsupported GCC/Zig/sanitizer/fuzzer exclusions; elsewhere it remains a grouped diagnostic selection. |
+| `sanitized-debug` | Original sanitized Clang Debug/fuzz configurations, with the full runner worker budget. macOS has no fuzz support, so its row is sanitized Debug runtime only. |
+| `sanitized-release` | Original sanitized Clang Release configurations, with the full runner worker budget. |
+| `portability` | Original noncanonical compiler/configuration rows; compilation-only policy is unchanged. |
 
 | Platform | Release configurations | Checks configurations | Total required |
 | --- | ---: | ---: | ---: |
@@ -27,10 +33,13 @@ Selection is semantic: Clang + unsanitized + optimized belongs to `release`;
 the other rows belong to `checks`. It is not an ordinal/modulo partition or
 a test-name prefix. Excluded rows have explicit owners too, but never count
 as execution. The native partition validator requires exactly one canonical
-Release configuration, a nonempty checks selection, and intact shared trees.
-In particular, the macOS sanitized Debug/Release configurations stay in the
-same CMake multi-config tree. Both shards together schedule each original
-required configuration exactly once.
+Release configuration, a nonempty checks selection, and exactly one owner per
+CMake tree. Every sanitized Clang configuration therefore has its own
+single-configuration tree on every host, including macOS where no fuzz split
+existed before #2659; no two owners configure, build or test one directory.
+The scheduled owners together execute each original required configuration
+exactly once. Grouped `checks` remains the exact union of the three check
+owners, now as separate trees in one job.
 
 The canonical producer and all its consumers remain in one job: there is no
 cross-job compiler artifact handoff or second canonical compiler build.
@@ -43,26 +52,28 @@ unit checks. See [Apple CI policy](apple-ci-policy.md). The exact Windows mode
 and compiler/configuration contract is documented in
 [Windows CI coverage](windows-ci-coverage.md).
 
-The wrapper step keeps its checkout/cancellation lifecycle guard on both
-shards. Its checks-shard body reports `owned-by-release-shard` and exits
+The wrapper step keeps its checkout/cancellation lifecycle guard on every
+owners. Every check owner's body reports `owned-by-release-shard` and exits
 without running the suite or writing a wrapper-test verdict; only Release
 requires that verdict. Verified-Zig setup creates its own log directory and
 does not depend on a Release-only preflight side effect.
 
 Shards necessarily duplicate runner allocation, checkout, the small hosted
 build-driver bootstrap, tool discovery and verified-Zig setup. They keep full
-compiler capability detection/re-probing against the original policy in both
-jobs. Only verified download archives are cached; build trees, compiler outputs
+compiler capability detection/re-probing against the original policy in every
+job. Only verified download archives are cached; build trees, compiler outputs
 and test verdicts are not. The extra setup and queue cost must be included in
 qualification, not assumed free.
 
 ## Coverage and completion proof
 
-`BUSTER_MATRIX_SHARD=release|checks` selects a shard. An absent value or `all`
+`BUSTER_MATRIX_SHARD=release|checks|sanitized-debug|sanitized-release|portability`
+selects an owner. An absent value or `all`
 runs the original unsharded matrix (`combinations` in the manifest). Invalid
 values fail before compiler discovery, preflight or build-tree mutation.
-Default shard tree prefixes are `build/build-release-` and
-`build/build-checks-`; an explicit build-directory prefix remains supported.
+Default tree prefixes include `build/build-release-`, `build/build-checks-`,
+`build/build-sanitized-debug-`, `build/build-sanitized-release-` and
+`build/build-portability-`; an explicit build-directory prefix remains supported.
 
 Every manifest retains the **entire** expected/detected policy. Row IDs stay
 in the original `desktop/combinations/...` namespace, so all six independently
@@ -78,8 +89,8 @@ validated on the executing runner. A checks completion explicitly says
 
 * All six job groups (`lint`, `test`, `native`, `mobile`, `uefi`, `analyzer`)
   must succeed, with the existing real-shell negative controls retained.
-* The read-only Actions job inventory must contain the exact 21 expected job
-  identities: all ten desktop shard names, all five native names, two
+* The read-only Actions job inventory must contain the exact 29 expected job
+  identities: all eighteen desktop shard names, all five native names, two
   mobile names, UEFI, analyzer, lint and the active aggregate. Every completed
   job must succeed. Each desktop job must complete its applicable matrix,
   coverage summary, tool setup, shared regressions and log upload; each native
@@ -87,8 +98,9 @@ validated on the executing runner. A checks completion explicitly says
   complete the differential result.
 
 For a platform's unchanged full required set E, the native producer and
-independent consumer agree on disjoint selections R and C with R ∪ C = E.
-Successful, correctly named R and C jobs therefore prove the full set, without
+independent consumer agree on Release selection R and the check-owner union C,
+with R ∪ C = E and disjoint selections. Successful, correctly named Release
+and all scheduled check owners prove the full set, without
 moving foreign-platform binaries to an aggregate runner for a fictitious
 re-probe. Missing matrix entries cannot turn a smaller surviving group green.
 The job inventory is retained as `desktop-partitions-<run>-<attempt>`.
@@ -96,9 +108,11 @@ The job inventory is retained as `desktop-partitions-<run>-<attempt>`.
 For a main push with [admitted exact queue evidence](ci-main-reuse.md), the
 native, mobile and UEFI groups are skipped on main and the aggregate verifies
 their eight actual queue job executions, artifacts and retained current-run
-inventory. The full 21-job inventory remains mandatory on all other
-events and on main whenever admission falls back. The desktop partition
-proof and main-only effects still execute on main.
+inventory. The full 29-job inventory remains mandatory on ordinary non-reuse
+events and on main whenever admission falls back. Exact combined qualification
+dispatch refs retain their explicit 21-job inventory. The aggregate rechecks
+every source desktop partition and the main cache-only effects; it does not
+claim that desktop validation executes twice.
 
 The inventory reader paginates **all attempts of the same immutable run** and
 selects each job's highest attempt, never its most recent *successful* attempt.
@@ -205,14 +219,15 @@ python3 tools/github_ci_time.py summarize candidate-runs.json --output candidate
 ```
 
 The collector understands the historical 6/11/15/17/23-job layouts and the
-current 21-job layout. All 21 execution intervals count toward candidate runner
+pre-#2659 27-job split layout and the current 29-job layout. All 29 execution
+intervals count toward candidate runner
 seconds, including both Windows mode lanes and the aggregate inventory check.
 It reports whole-workflow elapsed time, execution span, initial queue delay,
 individual job durations and job queue delays when API creation timestamps
 exist (otherwise `null`, never imputed zero). Missing successful steps or shard
 identities reject a sample, so draft runs with deferred macOS lanes are never
-timing samples. Historical 23-/25-job and current 21-job workflow blobs
-remain separate cohorts.
+timing samples. Historical 21-/23-/25-/27-job and current 29-job workflow
+blobs remain separate cohorts.
 
 Compare medians and retain individual shard distributions. Inspect
 `result.json` cache/image fields and `BUSTER_MATRIX_PARTITION`/step logs for
@@ -276,6 +291,14 @@ four-CPU budget; builds may still overlap a test phase, which the
 
 ## Further checks partition qualification (#2120)
 
+The historical exact-nine contract below remains unchanged. The explicitly
+approved replacement for standard-hosted native-profile variation is the
+[prospective population comparison](ci-checks-population.md), owned by #2610.
+Its separate reader retains complete per-profile assertion obligations and
+requires a frozen declaration, exhaustive dispatch history and population/
+operational disposition; it does not reinterpret historical samples or
+establish performance acceptance by itself.
+
 Partition version 2 assigns every original policy row to one of four owners:
 `release` (unsanitized optimized Clang), `sanitized-debug`, `sanitized-release`,
 and `portability`. `checks` selects the union of the three non-Release owners;
@@ -284,14 +307,16 @@ The original row IDs, policy version, counts and fingerprints are unchanged.
 The consumer independently derives owners and rejects missing, foreign,
 duplicated and empty completions.
 
-The default workflow retains ten desktop jobs. The split qualification replaces
-grouped checks on Linux x86-64, Linux AArch64 and Windows x86-64 with three
-independent jobs, giving sixteen desktop jobs and an exact 27-job required
-inventory (plus the main-reuse decision job). macOS retains its shared sanitizer
-tree and Windows AArch64 retains grouped MSVC portability checks. Individual
-Apple sanitizer selections and empty Windows AArch64 sanitizer selections fail
-before native build-tree mutation. Only Release owns preflight and canonical
-producer obligations. Each isolated sanitizer job receives its full host budget.
+The #2120 rollout replaced grouped checks on Linux x86-64, Linux AArch64 and
+Windows x86-64 with three independent jobs, giving sixteen desktop jobs and an
+exact 27-job required inventory (plus the main-reuse decision job); macOS then
+kept a shared sanitizer tree. #2659 later split macOS AArch64 the same way
+(eighteen desktop jobs, 29 required jobs; see Ownership). The #2120 cohorts and
+their readers (`ci_checks_qualification.cohort_jobs`) keep that historical
+27-job split inventory. Windows AArch64 retains grouped MSVC portability
+checks, and its empty sanitizer selections fail before native build-tree
+mutation. Only Release owns preflight and canonical producer obligations. Each
+isolated sanitizer job receives its full host budget.
 
 The configure-evidence collector recognizes the native default compiler-tree
 prefixes for `sanitized-debug`, `sanitized-release`, and `portability` alongside
@@ -300,7 +325,8 @@ CMake diagnostics for each split owner, excludes superbuild trees, and fails
 when no matrix configure trees are present.
 
 Qualification uses manual dispatch of the existing `ci.yml` on three branches
-pointing to **the same immutable commit**. Pushes and pull requests keep defaults.
+pointing to **the same immutable commit**. Ordinary pushes, pull requests,
+merge groups, tags and default manual runs use the split layout.
 
 | Cohort | Branch | Checks layout | Windows grouped-checks admission |
 | --- | --- | --- | --- |
@@ -342,10 +368,18 @@ failed, cancelled and retried attempts separately from successful first-attempt
 samples. A replacement or sampling extension needs a prospective disposition,
 not a relabelled retry or dispatches until green.
 
+The prospective `codex/2120-evidence-v2-*` refs use the same three suffixes and
+layouts after their evidence producers are integrated. Only manual dispatch on
+the four exact `refs/heads/` combined refs overrides the split default. The API
+job gate also requires that full event ref to match the API branch; a same-named
+tag cannot activate a combined override. Historical 21-job evidence retains its
+explicit inventory and cannot satisfy the current split queue-to-main proof.
+
 The original dispatch inputs and reviewed support ledger stay intact. Ordinary
-dispatches already bypass main-push reuse. Split completion additionally checks
-the exact API branch identity. Historical timing keeps combined and split job
-cohorts separate; admission A/B conclusions require native phase metadata.
+dispatches already bypass main-push reuse. Ordinary split completion requires no
+campaign branch; only a combined manual override requires a matching full event
+ref and API branch. Historical timing keeps combined and split job cohorts
+separate; admission A/B conclusions require native phase metadata.
 The generic `github_ci_time.py` summary groups by workflow blob and runner
 inventory, so its descriptive medians can pool A and B. Use the qualification
 reader's explicit per-variant medians for the admission comparison.
@@ -559,4 +593,7 @@ manifests. Existing `qualification.sample()` validates the entire assembled
 sample before publication; missing or unknown conditions fail. Fresh generated
 outputs are removed on rejection while retained inputs remain unchanged.
 Successful assembly is evidence preparation only: the full nine-run comparison,
-resource/deadline/cleanup/reliability review and default-promotion gate remain.
+resource/deadline/cleanup/reliability review remain requirements for a measured
+performance claim. The maintainer directed the split-overlap default rollout on
+2026-10-04 without waiting for that research; the actual speedup remains
+unqualified. Current CI coverage and protected merge-queue checks still apply.

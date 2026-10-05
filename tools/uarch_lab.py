@@ -11,16 +11,21 @@ fixed sequence of steps, keeps every raw file in an output directory, and
 renders `report.md` and `summary.json` from those raw files alone, so
 `report DIR` reproduces both without re-running anything.
 
-    python3 tools/uarch_lab.py run --ide build/Release/ide --repo-root . \\
-        --cpu 2 --output /tmp/lab [--target-minutes 15 | --runs N] [--sudo] \\
+Use the session-owned worktree and session_root from
+`docs/agents/workflow.md` (parallel sessions); build the trusted performance
+compiler with tests off as described in `docs/agents/benchmarking.md`. Every
+attempt gets a new output directory, retained until its users finish.
+
+    python3 tools/uarch_lab.py run --ide "$session_root/src/build/Release/ide" --repo-root "$session_root/src" \\
+        --cpu 2 --output "$session_root/lab-attempt-1" [--target-minutes 15 | --runs N] [--sudo] \\
         [--skip STEP ...] [--no-fresh-copy] [--perf PATH] [-- extra compile args]
     python3 tools/uarch_lab.py compare --baseline A_IDE --candidate B_IDE \\
-        --repo-root . --cpu 2 --output /tmp/ab [--target-minutes 15 | --pairs N] \\
+        --repo-root "$session_root/src" --cpu 2 --output "$session_root/ab-attempt-1" [--target-minutes 15 | --pairs N] \\
         [--profile-steps topdown,sampling] [--sudo] [--seed N] \\
         [--min-effect PCT] [--no-fresh-copy] [--require-identical-output] \\
         [--perf PATH] [-- extra compile args]
     python3 tools/uarch_lab.py retirement --baseline A_IDE --candidate B_IDE \\
-        --repo-root . --cpu 2 --output /tmp/retirement \\
+        --repo-root "$session_root/src" --cpu 2 --output "$session_root/retirement-attempt-1" \\
         [--target-minutes-per-cell 12 | --pairs N] [--modes none,mir-stack,fast,quality]
     python3 tools/uarch_lab.py report DIR [--perf PATH]     (run, compare or retirement)
 

@@ -28,12 +28,15 @@
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_semantics.h>
+#if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
+#endif
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_alias_projection.h>
+#include <buster/lib/compiler/assembly/aarch64_base_assembly.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
@@ -110,12 +113,16 @@
 #include <buster/lib/compiler/assembly/aarch64_system_registers.c>
 #include <buster/lib/compiler/assembly/aarch64_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_system_semantics.c>
+#if BUSTER_INCLUDE_TESTS
+// The AArch64 syntax model has only test consumers (#1315).
 #include <buster/lib/compiler/assembly/aarch64_syntax.c>
+#endif
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.c>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_alias_projection.c>
+#include <buster/lib/compiler/assembly/aarch64_base_assembly.c>
 #include <buster/lib/compiler/assembly/assembly.c>
 #include <buster/lib/compiler/assembly/assembly_unit.c>
 #include <buster/lib/compiler/assembly/x86_64_metadata.c>

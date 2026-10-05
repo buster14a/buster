@@ -124,7 +124,7 @@ def assemble(path, output_name):
     qualification.timing(run, specification["variant"], declaration["name"])
     conditions, _ = qualification.conditions(root, specification["conditions"], run)
     inputs = specification["desktops"]
-    names = qualification.github.SPLIT_COMBINATION_PLATFORMS if specification["variant"] == "split-overlap" else qualification.github.COMBINATION_PLATFORMS
+    names = qualification.cohort_desktop_jobs(specification["variant"])
     qualification.require(isinstance(inputs, list) and Counter(item["job"] for item in inputs) == Counter(names),
                           "missing or duplicate exact desktop artifact")
     qualification.require(isinstance(output_name, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]*\.json", output_name),

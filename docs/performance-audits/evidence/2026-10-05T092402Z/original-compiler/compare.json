@@ -1,0 +1,63 @@
+{
+ "config": {
+  "command": "IDE cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT",
+  "cpu": 2,
+  "extra": [],
+  "fresh_copy": true,
+  "min_effect_percent": 0.5,
+  "pairs": 6,
+  "perf": "perf",
+  "profile_steps": [],
+  "repo_root": "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_ready/review-2478",
+  "require_identical_output": true,
+  "seed": 20261003,
+  "sudo": false,
+  "target_minutes": 15.0,
+  "warmups": 1
+ },
+ "mode": "compare",
+ "outputs_identical": true,
+ "phase_metrics": {
+  "enabled": true,
+  "reason": "both compilers support -fmetrics-out"
+ },
+ "plan": {
+  "fresh_copy": true,
+  "order": "ABBA",
+  "pairs": 6,
+  "reason": "--pairs 6"
+ },
+ "steps": {
+  "env": {
+   "elapsed_s": 0.1,
+   "note": "1 metric groups selected",
+   "status": "ok"
+  },
+  "prepare": {
+   "elapsed_s": 18.0,
+   "note": "baseline and candidate outputs identical",
+   "status": "ok"
+  },
+  "timed": {
+   "elapsed_s": 78.1,
+   "note": "6 pairs (--pairs 6)",
+   "status": "ok"
+  }
+ },
+ "total_s": 96.3,
+ "variants": {
+  "a": {
+   "ide": "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-matched/baseline-ide",
+   "role": "baseline",
+   "sha256": "53ed4e8927d75ffab1167bb5c888ea2ead2a77390a47d9d8a66802fd7f0a7c27",
+   "size_bytes": 53496576
+  },
+  "b": {
+   "ide": "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-matched/candidate-ide",
+   "role": "candidate",
+   "sha256": "52cefa56df4ece05b8c85376a6b33f73751aef40a9365d09ba47c7fbe5a8484a",
+   "size_bytes": 53499368
+  }
+ },
+ "version": 1
+}
