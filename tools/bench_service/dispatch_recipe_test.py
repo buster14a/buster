@@ -87,6 +87,7 @@ class DispatchRecipeTest(unittest.TestCase):
 
     def test_unknown_recipes_are_refused_without_outputs(self):
         for recipe in ("", "zen5-calibration-v2", "native-retirement-performance-v1", "fake-success-v1",
+                       "native-execute-v1", "native-runtime-v1",
                        "Validate-buster-v1", "validate-buster-v1 ", "validate-buster-v1\n", " zen5-calibration-v1",
                        "$(touch pwned)", "validate-buster-v1;true", "*"):
             with self.subTest(recipe=recipe):
@@ -159,7 +160,18 @@ class InstalledCapabilityTest(unittest.TestCase):
 
     def test_served_recipes_are_accepted_by_the_real_capabilities(self):
         capabilities = service_capabilities()
-        self.assertIn("service-recipes=validate-buster-v1,zen5-calibration-v1 ", capabilities)
+        # Compare membership, not the whole field: the registry grows with
+        # recipes that this workflow deliberately does not dispatch.
+        fields = re.findall(r"(?:^|\s)service-recipes=(\S*)", capabilities)
+        self.assertEqual(len(fields), 1, capabilities)
+        served = fields[0].split(",")
+        self.assertEqual(len(served), len(set(served)), served)
+        self.assertNotIn("", served)
+        for recipe, _ in policy.REVIEWED_RECIPES:
+            self.assertIn(recipe, served)
+        self.assertNotIn("native-retirement-performance-v1", served)
+        blocked = re.findall(r"(?:^|\s)blocked-recipes=(\S*)", capabilities)
+        self.assertEqual(blocked, ["native-retirement-performance-v1"])
         self.assertNotIn("profile=smoke", capabilities)
         script = 'grep -Eq "' + MEMBERSHIP.group(1) + '" <<<"$capabilities"'
         for recipe, expected in (("validate-buster-v1", True), ("zen5-calibration-v1", True),

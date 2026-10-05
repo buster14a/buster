@@ -1,0 +1,14 @@
+uarch_lab: compare output /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-uarch; 6 pairs (--pairs)
+uarch_lab: env ok in 0.2 s 1 metric groups selected
+[compare] baseline warm-up 3.68 s
+[compare] candidate warm-up 3.64 s
+uarch_lab: prepare ok in 22.4 s baseline and candidate outputs differ
+[compare] pair 1/6 AB: A 2.6460 s, B 2.4928 s, B/A 0.9421
+[compare] pair 2/6 BA: A 2.5026 s, B 2.4902 s, B/A 0.9950
+[compare] pair 3/6 AB: A 3.3161 s, B 3.5185 s, B/A 1.0610
+[compare] pair 4/6 BA: A 3.1106 s, B 4.2699 s, B/A 1.3727
+[compare] pair 5/6 AB: A 3.3200 s, B 4.0297 s, B/A 1.2138
+[compare] pair 6/6 BA: A 3.2945 s, B 3.9841 s, B/A 1.2093
+uarch_lab: timed ok in 40.4 s 6 pairs (--pairs 6)
+uarch_lab: total 63.0 s; NO DETECTABLE DIFFERENCE: wall time B/A 1.1352, 95% CI [0.9421, 1.3727] includes 1.0 over 6 pairs; any real change is within about +/-37.27% (wider than the 0.5% practical floor: more pairs are needed to rule out an effect of that size). Detectable moves (CI excludes 1; they explain, they do not decide): instructions +0.11%.
+uarch_lab: report /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-uarch/report.md, summary /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-uarch/summary.json
