@@ -1,0 +1,9 @@
+TEST_FIXTURE_WATCHDOG_V1 status=armed deadline_seconds=1800
+TEST_FIXTURE_START_V1 kind=module module=target_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=target_tests fixture=body index=0 arena_slot=0 start=4648 end=33108 retained_bytes=28460 high_water=33108 peak_bytes=28460 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=target_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=target_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=target_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+[6746/6746] Unit tests (1 of 57 modules selected)
+[1/1] Module tests
+[0/0] External tests

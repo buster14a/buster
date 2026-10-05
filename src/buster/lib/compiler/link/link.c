@@ -3177,6 +3177,10 @@ ObjectFile link_windows_libc_runtime_object(Arena* arena, Target target)
 //     REX.W 03 modrm(00 reg 101) disp32   add reg, [rip + sym@GOTTPOFF]
 //   becomes
 //     REX.W 81 modrm(11 000 reg) imm32    add reg, tpoff
+//   or the foreign compiler's initial-exec load:
+//     REX.W 8b modrm(00 reg 101) disp32   mov reg, [rip + sym@GOTTPOFF]
+//   becomes
+//     REX.W c7 modrm(11 000 reg) imm32    mov reg, tpoff
 //   The GOT operand's register is the modrm reg field and the immediate
 //   form's is the rm field, so REX.R moves to REX.B with it.
 //
@@ -3708,11 +3712,16 @@ void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, OsError* error)
+BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, NativeExecutableLinkResult* result)
 {
     FilePublishResult published = file_publish_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
-    *error = published.error;
-    return published.status == FILE_PUBLISH_PUBLISHED;
+    bool success = published.status == FILE_PUBLISH_PUBLISHED;
+    if (!success)
+    {
+        result->write_error = published.error;
+        result->write_unsupported_destination = published.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION;
+    }
+    return success;
 }
 
 BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)
@@ -5419,7 +5428,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -6914,7 +6923,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         memcpy(layout_section_offsets, section_offsets, sizeof(section_offsets));
     }
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -7057,7 +7066,8 @@ struct LinkElfPicImage
     LinkError error;
     bool shared;
     bool static_tls;
-    u8 reserved[2];
+    bool requires_position_independent_objects;
+    u8 reserved[1];
 };
 
 BUSTER_GLOBAL_LOCAL bool link_elf_symbol_is_thread_local(ObjectSymbol const* symbol)
@@ -7261,6 +7271,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
         bool is_thread_local = valid && link_elf_symbol_is_thread_local(symbol);
         bool imported = (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_COPIED)) == LINK_ELF_PIC_SYMBOL_IMPORTED;
         bool bound_elsewhere = link_elf_pic_bound_elsewhere(symbol_class);
+        bool requires_position_independent_objects = false;
         if (!valid)
         {
             link_elf_pic_fail(image, LINK_ERROR_RELOCATION, (String8){0});
@@ -7292,6 +7303,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                               (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64));
                 }
                 if (bound_elsewhere && symbol->kind == OBJECT_SYMBOL_FUNCTION && !link_elf_x86_function_plt_reference(object, relocation)) valid = false;
+                requires_position_independent_objects = !is_thread_local && bound_elsewhere && symbol->kind == OBJECT_SYMBOL_DATA;
                 action = LINK_ELF_PIC_ACTION_PC32;
                 break;
             case OBJECT_RELOCATION_X86_64_GOTPCREL:
@@ -7322,11 +7334,13 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                                           relocation->section == OBJECT_SECTION_INIT_ARRAY || relocation->section == OBJECT_SECTION_FINI_ARRAY ||
                                           relocation->section == OBJECT_SECTION_THREAD_LOCAL_DATA);
                 image->dynamic_relocation_count += valid && (bound_elsewhere || !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO));
+                requires_position_independent_objects = !is_thread_local && relocation->section == OBJECT_SECTION_TEXT;
                 action = LINK_ELF_PIC_ACTION_ABSOLUTE64;
                 break;
             case OBJECT_RELOCATION_ABSOLUTE32:
             case OBJECT_RELOCATION_X86_64_ABSOLUTE32S:
                 valid = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) != 0;
+                requires_position_independent_objects = !is_thread_local;
                 action = LINK_ELF_PIC_ACTION_ABSOLUTE32_ZERO;
                 break;
             case OBJECT_RELOCATION_X86_64_TPOFF32:
@@ -7375,6 +7389,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
             if (!valid)
             {
                 link_elf_pic_fail(image, LINK_ERROR_RELOCATION, symbol->name);
+                image->requires_position_independent_objects = requires_position_independent_objects;
             }
         }
         image->actions[index] = (u8)action;
@@ -7787,6 +7802,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         link_elf_pic_plan(&image);
         result.error = image.error;
         result.symbol = image.symbol;
+        result.requires_position_independent_objects = image.requires_position_independent_objects;
     }
     String8 soname = shared ? link_elf_linker_argument_soname(options) : (String8){0};
     u32 needed_library_count = options.dynamic_library_count + 1;
@@ -8211,7 +8227,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                                           .dynamic = true,
                                       });
     }
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -8546,7 +8562,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -8962,7 +8978,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         }
         link_write_u32(bytes, output_offset, patched);
     }
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -10635,7 +10651,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                         link_write_u32(bytes, output_offset, encoded);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
                 {
                     if (symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO)
                     {
@@ -10651,8 +10668,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     {
                         u32 instruction = link_read_u32(bytes, output_offset);
                         u32 encoded = 0;
-                        if (!object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, instruction, output_offset, tls_offset,
-                                                              relocation->addend, &encoded))
+                        if (!object_aarch64_pe_tls_offset_relocate(relocation->kind, instruction, tls_offset, relocation->addend, &encoded))
                         {
                             result.error = LINK_ERROR_RELOCATION;
                         }
@@ -11100,12 +11116,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     }
     if (result.error == LINK_ERROR_NONE)
     {
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = options.output_path;
         }
-        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result.write_error))
+        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = result.pdb_path;
@@ -11142,6 +11158,7 @@ BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
            kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
            kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
            kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ||
            kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12;
 }
 
@@ -12298,12 +12315,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
     }
     if (result.error == LINK_ERROR_NONE)
     {
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = options.output_path;
         }
-        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result.write_error))
+        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = result.pdb_path;
@@ -14155,7 +14172,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             u64 page_size = BUSTER_MIN((u64)MACH_CODE_PAGE_SIZE, signature_offset - page_offset);
             link_sha256(arena, bytes + page_offset, page_size, bytes + hash_offset + slot * 32);
         }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = options.output_path;
@@ -14241,7 +14258,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
             memset(bytes + string_table_offset + 1, 0, sizeof("libc.so.6"));
             memcpy(bytes + string_table_offset + 1, library, sizeof(library));
         }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = options.output_path;

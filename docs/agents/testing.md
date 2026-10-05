@@ -53,6 +53,20 @@
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
+- The Linux x86-64 parameter-alignment driver regression uses a separately
+  host-compiled caller and observer with the Buster-compiled callee at every
+  registered optimization level and allocator. Its expanded caller, callee
+  and header are private fixture inputs under
+  `src/buster/tests/compiler/driver/fixtures/parameter_alignment/`; the frozen
+  `tests/basic_c_parameter_alignment*` corpus stays byte-for-byte unchanged.
+  The existing host observer remains shared because its ABI is unchanged.
+  These files are loaded by the registered driver test, not compiled as test
+  modules. The regression asserts the selected
+  allocator after parsing, verifies every function through MIR without native
+  fallback (including the NONE compatibility spelling for MIR-stack), and executes aligned
+  parameter reads/writes after integer, vector and combined bank exhaustion.
+  Volatile caller objects independently check that callee writes stay in the
+  callee's by-value copies.
 - Dormant `.bbb` fixtures remain under `tests/` as preservation material. Do
   not register, compile, parse, benchmark, package, or execute them in the
   default build or CI until the custom frontend is deliberately reactivated.
@@ -74,6 +88,24 @@
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
+- Modules with only test consumers join `ide` through
+  `BUSTER_COMPILER_TEST_MODULES` and a matching `#if BUSTER_INCLUDE_TESTS`
+  unity include. `truetype` and the AArch64 syntax model (`aarch64_syntax.c`
+  and its generated table) follow this rule; `aarch64_syntax.c` fails with
+  `#error` in a tests-disabled compile, so self-host stage 1 cannot silently
+  regain it.
+- Place additions by name, not after the newest neighbour, so independent PRs
+  land at different anchors and merge in either order. In
+  `src/buster/lib/compiler/frontend/c/c_parse_internal.h`, each seam group
+  (comment, types, declarations) is one blank-line-separated block ordered by
+  the byte (`LC_ALL=C sort`) order of its first `c_test_` function name; insert
+  a new group at its sorted position or extend the owning group, and do not
+  enumerate groups in the file comment. `c_frontend_tests` in
+  `src/buster/tests/compiler/frontend/c/c_test.c` registers every
+  `BUSTER_TEST_FIXTURE` in one block sorted the same way, so fixtures must not
+  depend on run order; inline assertions follow that block. Define a new test
+  function next to the tests of the feature it covers, not after the most
+  recently added one. Names that sort adjacently can still conflict.
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
@@ -116,6 +148,12 @@
   For cancelled current-PR validation, see [bounded CI recovery](../ci-cancellation-recovery.md)
   and its offline checks: `python3 tests/ci_recovery_test.py` and
   `python3 .github/scripts/test_merge_queue_fail_fast.py`.
+  The lint job's `Validate the performance audit index` step also runs
+  `tools/check_markdown_links.py`: every relative inline link, image and
+  reference definition in tracked Markdown must resolve to a tracked path.
+  Fenced code, code spans, URL schemes and `#anchor` fragments are not checked,
+  and audit records get no exemption, so deleting a linked file fails with
+  `file:line: target`.
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
@@ -222,7 +260,10 @@
   records, including matching helper/invocation statuses. Private fixed-order
   Bash `SECONDS` stages observe setup, monitor launch, interpreter handoff and
   publication without changing either clock or authorizing admission. Builtin
-  path trimming and caller writes remove known external launches; a retained
+  path trimming and caller writes remove known external launches. The seven
+  private IPC endpoints use the same fresh generation directory as the receipts,
+  removing a redundant directory-process launch before monitor/helper startup;
+  the existing clocks and descriptor protocol are unchanged. A retained
   late-start failure does not establish the cause of its post-setup delay or
   a hosted speed improvement. Startup refusal preserves any already observed
   command-monitor deadline even when the caller is then lost.
@@ -230,6 +271,10 @@
   [`-S`](https://docs.python.org/3/using/cmdline.html#cmdoption-S), which disables
   automatic [`site`](https://docs.python.org/3/library/site.html) initialization
   and its customization hooks. Payload arguments and environment are unchanged.
+  The dedicated keeper enters its unchanged ready/control/acknowledgment protocol
+  after importing only `os`, `signal` and `sys`; owner-only imports are skipped.
+  Its two private descriptor arguments are validated before descriptor access.
+  Imported-module and owner entry paths retain their ordinary initialization.
   A finite thirteen-second site hook remains unentered while both roles complete
   and are reaped; separate retained counterfactuals show this is a reachable
   startup delay class, not the established cause of the hosted late-start failure.
@@ -328,6 +373,17 @@
   retain real selected Go/Ninja/adb receipts. No compiler build or measurement
   dispatch is needed to run these controls. Missing historical observations
   remain pending; see [checks qualification](../ci-combination-shards.md#further-checks-partition-qualification-2120).
+- The same opt-in retains `buster-ci/ios-simulator-selection.json` from the
+  selected discovery record, or the arguments and UUID of an actual creation.
+  `tools/ci_ios_simulator.py` adds no simulator query and preserves the launcher's
+  first available name match. Explicit UUIDs and missing observed fields remain
+  unknown. `python3 -B tools/ci_ios_simulator_test.py -v` checks this producer with
+  finite JSON; workflow lint also runs it. Qualification requires a digest-bound
+  `simulator_selection` reference with matching source/run/attempt/mobile-job
+  identity. Runtime and device type are comparable; the initial UUID remains
+  provenance. The CI batch selects once for Debug and Release; collection must
+  join that UUID to the initial launcher log, reject retention failures or
+  repeated selection, and retain any distinct replacement UUID from recovery.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
@@ -416,7 +472,17 @@ OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 `./build.sh bench_service self-test` (and its `--sanitize` variant) runs the
 POSIX queue, materializer, journal-replay and fake-worker regressions plus the
 Linux lease-handoff and result-evidence suites; see
-`tools/bench_service/README.md` for the full contract. Interrupted workers
+`tools/bench_service/README.md` for the full contract. `mcp_tests.c` is included
+by this same registered suite: it checks bounded JSON/Unicode/duplicate keys,
+lifecycle and tool schemas, no-ID write suppression, uint64 string identities,
+validated receipt privacy and a real authenticated Unix-socket daemon with a
+disposable journal and no worker configuration. Socket cases cover the six
+job tools and program upload, lost-reply idempotency/reconnect,
+conflicting-key refusal, foreign-job privacy, durable cancellation and
+disconnected-service errors. Artifact receipt/slice retrieval is covered at
+the codec and reply-binding level only. None of this proves an off-host
+cache, a web/Codex installation or retrieval from a real installed job.
+Interrupted workers
 retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
 index, a bundle-only crash prefix completes idempotently, and invalid
 published controls are never repaired. The coordinator removes the
@@ -455,8 +521,9 @@ module-local function through all four allocator modes, requires PLT32 for the
 import and PC32 for the local call, and links/runs each default-model object
 with the configured host compiler as a PIE. It also verifies that a direct-call
 only function value leaves no separate address relocation. The argument-policy
-regression requires `-fPIE` and `-fpie` to be rejected on x86-64 ELF and remain
-accepted on Mach-O, COFF, UEFI, eBPF and Wasm. The existing fixtures preserve
+regression requires `-fPIE` and `-fpie` to select the position-independent model
+on every target, with the last positive spelling winning and `-fno-pie`
+cancelling only a PIE spelling. The existing fixtures preserve
 signed absolute `R_X86_64_32S` and GOTPCREL coverage; the indexed fixture makes
 both GCC and Clang produce those forms.
 The fixture is compiled `-O2`, because that is where both narrow an address to
@@ -509,8 +576,9 @@ it does not replace target-matrix execution or the seeded differential corpus.
 
 Allocator-matrix commands place optimization flags before the explicit allocator
 flag because the last allocator-affecting option wins. Assert the parsed allocator
-on the invocation passed to execution; retain `-fverify-codegen` and allow machine
-fallback for NONE, while requiring strict machine coverage on applicable MIR rows.
+on the invocation passed to execution; retain `-fverify-codegen` and
+`-fno-machine-fallback` on applicable native rows in every mode. NONE retains its
+parsed spelling but selects MIR-stack, so it has no direct-emitter exception.
 
 ## Oracle independence
 
@@ -564,6 +632,15 @@ The existing static-type oracle is format/consumer coverage without inferior
 execution and does not replace these checks. Selector stack-slot aliases,
 sibling lexical blocks and optimized constant reconstruction are outside this
 bounded vreg-home slice.
+
+## Canonical IR executable oracle
+
+The test-only `ir_oracle_tests` module provides an independent bounded canonical
+IR interpreter and isolated native comparison. Run
+`build/Release/ide test --ci=1 --verbose=1 --module=ir_oracle_tests`.
+See [canonical IR oracle](../canonical-ir-oracle.md) for the admitted subset,
+resource bounds, observable results, mutation controls and unavailable native
+legs. The private `ir_oracle_native_tests` module is an internal child payload.
 
 ## Constant name-binding oracle
 
@@ -639,8 +716,11 @@ compiler-global metadata and persistent lane contexts keep their existing owners
 `test_arena_self_test` runs as a fail-closed harness check without changing
 registered assertion/module counts. It covers nested and empty scopes, retained
 scopes, an internal rewind, decommit, dirty-byte zeroing, quiet mode, and buffered
-failure diagnostics surviving a rewind and overwrite. Observation uses separate
-arena header storage in test-enabled builds and adds no allocation-path work.
+failure diagnostics surviving a rewind and overwrite. Observation uses the
+scoped `Arena.high_water` header field, separate from `dirty_position`, and adds
+no allocation-path work; rewinds fold the cursor into it in every build, and
+the driver's per-input metrics save and restore it around a unit in the same
+way.
 
 
 Fatal-output regressions in `os_tests` run raw and formatted reporters in
@@ -748,6 +828,26 @@ have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
 classes, scale mismatches and malformed sites; `link_tests` derives patched
 addresses from static/dynamic section tables and imported-data copy slots.
 
+## Wasm function-address capability
+
+`compiler_driver_test_wasm_function_addresses` constructs and validates canonical
+IR before emission for both pointer widths. Four topologies cover first-index
+imports/definitions and later definitions. Six escape paths use pointer FUNCTION,
+place FUNCTION/address-of, void-pointer/integer round trips, volatile storage,
+returned pointers and address/dereference aliases. Wasm32 must refuse these
+runtime addresses with instruction attribution and empty artifact aliases;
+Wasm64 keeps its nonzero handles. Direct CALL and unused inert references are
+accepted controls. Independent Node checks use the original module SHA-256,
+repeated emission equality and file readbacks, with the existing deadline and
+exact terminal marker. Baseline modules that are incorrectly admitted are still
+executed, so null collisions are observable rather than hidden by a refusal check.
+
+`compiler_driver_test_wasm_function_address_outputs` checks both frontend forms
+through the actual Wasm32 driver: alias, storage/return, indirect-call and static
+relocation refusals preserve absent/existing output destinations. Both direct
+Wasm targets retain successful C direct-call controls. Inline source/oracle bytes
+leave the frozen support inventory and startup shims unchanged.
+
 ## Wasm object-address alignment
 
 `compiler_driver_test_wasm_stack_alignment` lowers both C frontend forms for
@@ -847,3 +947,21 @@ Tracked-drift, source-identity, and checkout-race controls still exercise the
 production validator against those private checkouts.
 
 `node tools/wasm_integer_execution_startup_test.js` checks the real frozen oracle against an independently emitted Wasm fixture, buffered-output and live-resource controls, arithmetic/load/output failures, and an implicit-exit mutation that must time out. The focused hosted workflow runs these controls on Linux and Windows; the full driver policy still rejects deliberate hangs, nonzero exits, stderr and missing summaries.
+
+## Binary-coverage inventory controls
+
+The native build driver's `binary_coverage_inventory --self-test` runs in the
+existing Release/combinations preflight. Its hand-authored ELF fixture has
+independent expected identity/range values; malformed/truncated/overflowed and
+unsupported ELF inputs fail rather than producing a partial denominator.
+Regenerated-report comparisons reject omitted artifact/range, wrong-build hash,
+fabricated instruction/edge counts, missing MC/DC pair/completeness claims, and
+incomplete-collection claims. These are report-gate controls, not trace collector
+validation or test sensitivity evidence for the inventoried binary.
+
+Linux x86-64 also inventories the actual running native driver from
+`/proc/self/exe` into its ordinary combination log. Every executable byte stays
+unclassified, and instruction execution, machine edges, MC/DC and functional
+assertions each stay unmeasured. No percentages or approved tracing capability
+are inferred from a successful preflight. See
+[the exact-artifact pilot command and gaps](build.md#exact-artifact-binary-coverage-pilot).

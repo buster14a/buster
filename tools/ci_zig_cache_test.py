@@ -20,16 +20,17 @@ class ZigCachePolicyTests(unittest.TestCase):
     manifest_hash = "1" * 64
 
     def policy(self, *, event="workflow_dispatch", ref="refs/heads/main",
-               mode="ordinary", namespace="", shard="release"):
+               mode="ordinary", namespace="", shard="release",
+               runner_os="Linux", runner_arch="X64", target="x86_64-linux"):
         return ci_zig_cache.resolve_policy(
             event,
             ref,
             "main",
             mode,
             namespace,
-            "Linux",
-            "X64",
-            "x86_64-linux",
+            runner_os,
+            runner_arch,
+            target,
             self.manifest_hash,
             shard,
         )
@@ -55,13 +56,54 @@ class ZigCachePolicyTests(unittest.TestCase):
     def test_cohort_modes_are_dispatch_only(self):
         for event in ("pull_request", "push", "merge_group"):
             for mode in ("prime", "read"):
-                with self.subTest(event=event, mode=mode):
-                    with self.assertRaisesRegex(ValueError, "workflow_dispatch"):
-                        self.policy(
-                            event=event,
-                            mode=mode,
-                            namespace="issue709-control-v1",
-                        )
+                for shard in sorted(ci_zig_cache.SHARDS):
+                    with self.subTest(event=event, mode=mode, shard=shard):
+                        with self.assertRaisesRegex(ValueError, "workflow_dispatch"):
+                            self.policy(
+                                event=event,
+                                mode=mode,
+                                namespace="issue709-control-v1",
+                                shard=shard,
+                            )
+
+    def test_ordinary_split_events_keep_supported_target_keys_and_save_policy(self):
+        cases = (
+            ("pull_request", "refs/pull/7/merge", False),
+            ("push", "refs/heads/main", True),
+            ("push", "refs/heads/topic", False),
+            ("push", "refs/tags/v1", False),
+            ("merge_group", "refs/heads/gh-readonly-queue/main/pr-7", False),
+            ("workflow_dispatch", "refs/heads/main", False),
+            ("workflow_dispatch", "refs/tags/v1", False),
+        )
+        targets = (
+            ("Linux", "X64", "x86_64-linux"),
+            ("Linux", "ARM64", "aarch64-linux"),
+            ("macOS", "ARM64", "aarch64-macos"),
+            ("Windows", "X64", "x86_64-windows"),
+        )
+        for runner_os, runner_arch, target in targets:
+            expected = f"zig-archive-v1-{runner_os}-{runner_arch}-{target}-{self.manifest_hash}"
+            for event, ref, saves in cases:
+                for shard in sorted(ci_zig_cache.SPLIT_CHECK_SHARDS):
+                    with self.subTest(target=target, event=event, ref=ref, shard=shard):
+                        policy = self.policy(event=event, ref=ref, shard=shard,
+                                             runner_os=runner_os, runner_arch=runner_arch, target=target)
+                        release = self.policy(event=event, ref=ref, runner_os=runner_os,
+                                              runner_arch=runner_arch, target=target)
+                        self.assertEqual(policy, release)
+                        self.assertEqual(policy.key, expected)
+                        self.assertEqual(policy.save, saves)
+                        self.assertFalse(policy.require_hit)
+                        self.assertFalse(policy.publication_proof_required)
+
+    def test_split_owners_reject_unsupported_targets_on_every_event(self):
+        for event in sorted(ci_zig_cache.EVENTS):
+            for shard in sorted(ci_zig_cache.SPLIT_CHECK_SHARDS):
+                for target in ("aarch64-windows", "x86_64-macos"):
+                    with self.subTest(event=event, shard=shard, target=target):
+                        with self.assertRaisesRegex(ValueError, "supported split target"):
+                            self.policy(event=event, target=target, shard=shard)
 
     def test_split_owners_share_exact_archive_but_never_publish_a_cohort(self):
         for shard in sorted(ci_zig_cache.SPLIT_CHECK_SHARDS):
@@ -78,14 +120,6 @@ class ZigCachePolicyTests(unittest.TestCase):
                 self.assertEqual(read.key, release.key)
                 self.assertTrue(read.require_hit)
                 self.assertFalse(read.save)
-                for event in ("pull_request", "push", "merge_group"):
-                    with self.assertRaisesRegex(ValueError, "workflow_dispatch"):
-                        self.policy(event=event, shard=shard)
-                for target in ("aarch64-macos", "aarch64-windows"):
-                    with self.assertRaisesRegex(ValueError, "supported split target"):
-                        ci_zig_cache.resolve_policy(
-                            "workflow_dispatch", "refs/heads/main", "main", "ordinary", "",
-                            "Windows", "ARM64", target, self.manifest_hash, shard)
         for shard in ("all", "sanitized", "unknown", ""):
             with self.assertRaisesRegex(ValueError, "unsupported desktop shard"):
                 self.policy(shard=shard)

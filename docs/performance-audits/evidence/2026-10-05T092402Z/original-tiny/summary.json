@@ -1,0 +1,320 @@
+{
+  "specification": {
+    "pairs": 6,
+    "warmups_per_variant": 1,
+    "order": [
+      "AB",
+      "BA",
+      "AB",
+      "BA",
+      "AB",
+      "BA"
+    ],
+    "cpu": 2,
+    "cells": {
+      "n": 256,
+      "m": [
+        1,
+        2,
+        3,
+        7,
+        15,
+        31,
+        32
+      ],
+      "shape": [
+        0,
+        1
+      ],
+      "calls": 1048576
+    },
+    "source_binary_sha256": {
+      "baseline": "53ed4e8927d75ffab1167bb5c888ea2ead2a77390a47d9d8a66802fd7f0a7c27",
+      "candidate": "52cefa56df4ece05b8c85376a6b33f73751aef40a9365d09ba47c7fbe5a8484a"
+    },
+    "interval": "pointwise min/max of six paired ratios (96.875% sign-order coverage under independent continuous pairs); not simultaneous across 14 cells",
+    "limits": "shared host; no dedicated-host admission, speed/equivalence claim, adaptive extension or timing gate"
+  },
+  "cells": [
+    {
+      "n": 256,
+      "m": 1,
+      "shape": 0,
+      "baseline_median_ns_per_call": 6.278907775878906,
+      "candidate_median_ns_per_call": 10.956066131591797,
+      "paired_ratio_median": 1.2668531569685841,
+      "pointwise_ratio_interval": [
+        0.5848658545429584,
+        3.3609628571232597
+      ],
+      "paired_ratios": [
+        1.5100489578035448,
+        1.0339587607460141,
+        1.2113533421660678,
+        1.3223529717711002,
+        0.5848658545429584,
+        3.3609628571232597
+      ]
+    },
+    {
+      "n": 256,
+      "m": 1,
+      "shape": 1,
+      "baseline_median_ns_per_call": 1002.009575843811,
+      "candidate_median_ns_per_call": 1603.8687753677368,
+      "paired_ratio_median": 1.1294079524913032,
+      "pointwise_ratio_interval": [
+        0.7925737389287806,
+        2.6740358716234964
+      ],
+      "paired_ratios": [
+        1.1366218868609588,
+        1.3881632963474266,
+        0.891300164641831,
+        1.1221940181216477,
+        0.7925737389287806,
+        2.6740358716234964
+      ]
+    },
+    {
+      "n": 256,
+      "m": 2,
+      "shape": 0,
+      "baseline_median_ns_per_call": 6.543763637542725,
+      "candidate_median_ns_per_call": 10.37137746810913,
+      "paired_ratio_median": 1.163403777195592,
+      "pointwise_ratio_interval": [
+        0.624974611734753,
+        3.2076736761088043
+      ],
+      "paired_ratios": [
+        1.4167025280198229,
+        1.0155133576319268,
+        0.9664967327877076,
+        1.3112941967592573,
+        0.624974611734753,
+        3.2076736761088043
+      ]
+    },
+    {
+      "n": 256,
+      "m": 2,
+      "shape": 1,
+      "baseline_median_ns_per_call": 1065.315724849701,
+      "candidate_median_ns_per_call": 1594.7356262207031,
+      "paired_ratio_median": 0.9798660688179224,
+      "pointwise_ratio_interval": [
+        0.7311414457654626,
+        2.4552750993767023
+      ],
+      "paired_ratios": [
+        1.0001257639244845,
+        1.4347915942451857,
+        0.820338095159133,
+        0.9596063737113601,
+        0.7311414457654626,
+        2.4552750993767023
+      ]
+    },
+    {
+      "n": 256,
+      "m": 3,
+      "shape": 0,
+      "baseline_median_ns_per_call": 6.442189693450928,
+      "candidate_median_ns_per_call": 10.710188865661621,
+      "paired_ratio_median": 1.2075360884882786,
+      "pointwise_ratio_interval": [
+        0.5337547324249409,
+        3.230238243134604
+      ],
+      "paired_ratios": [
+        1.6884520829497216,
+        0.6834692371583065,
+        1.117074087028339,
+        1.2979980899482184,
+        0.5337547324249409,
+        3.230238243134604
+      ]
+    },
+    {
+      "n": 256,
+      "m": 3,
+      "shape": 1,
+      "baseline_median_ns_per_call": 916.2179460525513,
+      "candidate_median_ns_per_call": 1755.8542609214783,
+      "paired_ratio_median": 1.0094691787338694,
+      "pointwise_ratio_interval": [
+        0.5756018158657593,
+        2.3292267245326608
+      ],
+      "paired_ratios": [
+        1.0852828927508602,
+        2.3292267245326608,
+        0.7735794973476992,
+        0.9336554647168787,
+        0.5756018158657593,
+        2.218868190312878
+      ]
+    },
+    {
+      "n": 256,
+      "m": 7,
+      "shape": 0,
+      "baseline_median_ns_per_call": 6.59550666809082,
+      "candidate_median_ns_per_call": 11.20006275177002,
+      "paired_ratio_median": 1.2767921118327679,
+      "pointwise_ratio_interval": [
+        0.5706423237014563,
+        4.300458688168103
+      ],
+      "paired_ratios": [
+        1.65543127507291,
+        0.9761068979102125,
+        1.147445253988307,
+        1.4061389696772286,
+        0.5706423237014563,
+        4.300458688168103
+      ]
+    },
+    {
+      "n": 256,
+      "m": 7,
+      "shape": 1,
+      "baseline_median_ns_per_call": 906.4651727676392,
+      "candidate_median_ns_per_call": 1549.3040657043457,
+      "paired_ratio_median": 0.9513083199592945,
+      "pointwise_ratio_interval": [
+        0.38194191789536847,
+        2.241725903614038
+      ],
+      "paired_ratios": [
+        0.9233579946029637,
+        2.241725903614038,
+        0.9792586453156253,
+        0.8717916555410634,
+        0.38194191789536847,
+        2.0834164880348864
+      ]
+    },
+    {
+      "n": 256,
+      "m": 15,
+      "shape": 0,
+      "baseline_median_ns_per_call": 6.39338493347168,
+      "candidate_median_ns_per_call": 10.606462955474854,
+      "paired_ratio_median": 1.2849271257867847,
+      "pointwise_ratio_interval": [
+        0.5436493371555627,
+        3.0983565003496136
+      ],
+      "paired_ratios": [
+        1.6410487522750326,
+        0.9174726654401061,
+        1.168920174580413,
+        1.4009340769931566,
+        0.5436493371555627,
+        3.0983565003496136
+      ]
+    },
+    {
+      "n": 256,
+      "m": 15,
+      "shape": 1,
+      "baseline_median_ns_per_call": 993.634379863739,
+      "candidate_median_ns_per_call": 1507.7400183677673,
+      "paired_ratio_median": 1.1646704109929766,
+      "pointwise_ratio_interval": [
+        0.6284575925869819,
+        3.2540538579066363
+      ],
+      "paired_ratios": [
+        0.8328768978837247,
+        3.2540538579066363,
+        1.0473654590852306,
+        0.6284575925869819,
+        1.281975362900723,
+        2.0466311502396017
+      ]
+    },
+    {
+      "n": 256,
+      "m": 31,
+      "shape": 0,
+      "baseline_median_ns_per_call": 6.648799419403076,
+      "candidate_median_ns_per_call": 10.705996036529541,
+      "paired_ratio_median": 1.196768159842627,
+      "pointwise_ratio_interval": [
+        0.5837221033411097,
+        3.262035309147727
+      ],
+      "paired_ratios": [
+        1.655819802166005,
+        0.9527113842693823,
+        1.1270763799956207,
+        1.2664599396896332,
+        0.5837221033411097,
+        3.262035309147727
+      ]
+    },
+    {
+      "n": 256,
+      "m": 31,
+      "shape": 1,
+      "baseline_median_ns_per_call": 1131.9498810768127,
+      "candidate_median_ns_per_call": 1151.8072762489319,
+      "paired_ratio_median": 1.2925562519234444,
+      "pointwise_ratio_interval": [
+        0.3046463079880367,
+        1.9753092386779323
+      ],
+      "paired_ratios": [
+        0.8692182252579991,
+        1.9753092386779323,
+        1.2490114245716706,
+        0.3046463079880367,
+        1.5542390040029817,
+        1.3361010792752182
+      ]
+    },
+    {
+      "n": 256,
+      "m": 32,
+      "shape": 0,
+      "baseline_median_ns_per_call": 6.425745487213135,
+      "candidate_median_ns_per_call": 198.73981523513794,
+      "paired_ratio_median": 21.54664363253371,
+      "pointwise_ratio_interval": [
+        10.810014697181204,
+        66.39068683982374
+      ],
+      "paired_ratios": [
+        28.091713857940885,
+        10.810014697181204,
+        18.969487679786806,
+        24.12379958528061,
+        11.156070587434295,
+        66.39068683982374
+      ]
+    },
+    {
+      "n": 256,
+      "m": 32,
+      "shape": 1,
+      "baseline_median_ns_per_call": 1168.817440032959,
+      "candidate_median_ns_per_call": 527.621618270874,
+      "paired_ratio_median": 0.5314934331718164,
+      "pointwise_ratio_interval": [
+        0.09824020898406886,
+        0.7829172633158749
+      ],
+      "paired_ratios": [
+        0.4474971698879066,
+        0.6154896964557262,
+        0.7829172633158749,
+        0.09824020898406886,
+        0.6270337733617849,
+        0.41239311714515686
+      ]
+    }
+  ]
+}
