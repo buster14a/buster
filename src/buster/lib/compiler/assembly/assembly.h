@@ -101,7 +101,11 @@ struct AssemblyEncodeOptions
     // all labels and bindings are known. This does not enable object/link
     // relocation support or change private inline branch expansion.
     bool unit_control_relocations;
-    u8 reserved[2];
+    // Explicit GNU inline templates may authorize instruction-local feature
+    // rows whose execution is guarded by the caller. Standalone/module
+    // assembly keeps the target feature policy. Currently only RDTSCP uses it.
+    bool inline_assembly;
+    u8 reserved[1];
 };
 
 typedef struct AssemblyEncodeResult AssemblyEncodeResult;

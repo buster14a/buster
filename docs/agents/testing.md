@@ -30,9 +30,11 @@
   `python3 tools/bootstrap_wrapper_cases_test.py -v` on each Release lane,
   covering deadlines, launch/startup failures, cancellation, descendant cleanup,
   failure status and stable diagnostics. See [wrapper CI](../ci-bootstrap-wrapper.md).
-  The whole original suite's obsolete workflow assertions remain tracked by
-  [#1835](https://github.com/buster14a/buster/issues/1835); they are not an executed
-  CI contract.
+  `python3 tests/bootstrap_wrapper_test.py -v` runs the full local behavior,
+  child-process and immutable-driver build-graph harness. The authoritative
+  workflow guard, budgets, logs and required-summary failure checks live in
+  `tools/ci_zig_cache_test.py`, which the policy step executes on each Release
+  lane. The wrapper module has no duplicate workflow contract.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
@@ -51,6 +53,20 @@
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
+- The Linux x86-64 parameter-alignment driver regression uses a separately
+  host-compiled caller and observer with the Buster-compiled callee at every
+  registered optimization level and allocator. Its expanded caller, callee
+  and header are private fixture inputs under
+  `src/buster/tests/compiler/driver/fixtures/parameter_alignment/`; the frozen
+  `tests/basic_c_parameter_alignment*` corpus stays byte-for-byte unchanged.
+  The existing host observer remains shared because its ABI is unchanged.
+  These files are loaded by the registered driver test, not compiled as test
+  modules. The regression asserts the selected
+  allocator after parsing, verifies every function through MIR without native
+  fallback (including the NONE compatibility spelling for MIR-stack), and executes aligned
+  parameter reads/writes after integer, vector and combined bank exhaustion.
+  Volatile caller objects independently check that callee writes stay in the
+  callee's by-value copies.
 - Dormant `.bbb` fixtures remain under `tests/` as preservation material. Do
   not register, compile, parse, benchmark, package, or execute them in the
   default build or CI until the custom frontend is deliberately reactivated.
@@ -62,11 +78,24 @@
   `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
   with normal assertion accounting, evaluates it once, and skips only the
   guarded body when it fails; unrelated fixtures and modules continue.
+- With a debugger attached, assertion failures stop through `os_fail()` after
+  reporting the diagnostic. The arena, fixture-timing, and prerequisite harness
+  self-tests set `UnitTestArguments.suppress_debugger_break` only around their
+  deliberately failed assertions and clear it before any dependent body or
+  later assertion. Failure counts and diagnostics remain unchanged.
+  `test_debugger_failure_self_test` checks debugger-present/absent decisions,
+  restoration, and argument-free failures without changing registered totals.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
+- Modules with only test consumers join `ide` through
+  `BUSTER_COMPILER_TEST_MODULES` and a matching `#if BUSTER_INCLUDE_TESTS`
+  unity include. `truetype` and the AArch64 syntax model (`aarch64_syntax.c`
+  and its generated table) follow this rule; `aarch64_syntax.c` fails with
+  `#error` in a tests-disabled compile, so self-host stage 1 cannot silently
+  regain it.
 - Active CI is defined under `.github/workflows/`; the current tree has no
-  Forgejo workflow definitions. The historical source-free broker contract is
+  Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
   runs the combination matrix, execution-mode matrix, Android and iOS on
   GitHub standard runners. Its five desktop lanes cover Linux and Windows at
@@ -107,6 +136,12 @@
   For cancelled current-PR validation, see [bounded CI recovery](../ci-cancellation-recovery.md)
   and its offline checks: `python3 tests/ci_recovery_test.py` and
   `python3 .github/scripts/test_merge_queue_fail_fast.py`.
+  The lint job's `Validate the performance audit index` step also runs
+  `tools/check_markdown_links.py`: every relative inline link, image and
+  reference definition in tracked Markdown must resolve to a tracked path.
+  Fenced code, code spans, URL schemes and `#anchor` fragments are not checked,
+  and audit records get no exemption, so deleting a linked file fails with
+  `file:line: target`.
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
@@ -116,10 +151,12 @@
   push runs, revalidates exact-key Zig archive caches, and treats UBSan reports
   as failures. Independent later suites run after earlier test failures;
   captured logs and fail-closed summaries remain outside generated build trees.
-  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions. Do not add source mirroring, Actions artifacts/caches,
-  durable GitHub-side credentials, verbose broker logs, or untrusted-PR
-  triggers to the broker; see
-  `docs/ci-github-hosted-runners.md`.
+  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions.
+  The removed Forgejo broker has no current setup or validation commands.
+  Its regression source is preserved as
+  `tests/retired/github_runner_bridge_test.py.txt`, outside Python discovery,
+  with the same dependency-only support identity. It is historical input,
+  not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
 
 - The workflow-tools aggregate regression executes the actual `CI complete`
   shell body for all 633 shard outcomes. Git Bash on Windows has a 120-second
@@ -170,9 +207,107 @@
   process-table, unified-log and crash-report probes retain separate bounded
   lifecycle receipts and up to 64 KiB of stdout/stderr per command, with
   native exit, timeout/helper status and capture completion distinguished.
-  Probe failure does not establish an app crash. The additive
-  `bash ios/launch_diagnostics_mock_test.sh` attached-monitor controls
-  cover rejection, native exit 124, watchdog expiry, large output and cleanup.
+  `ios/lifecycle_capture_bridge.sh` starts GNU command and capture clocks before
+  interpreter startup. The launcher and caller-clock controls share
+  `ios/gnu_timeout.py`: it prefers `gnutimeout`/`gtimeout`, verifies bounded
+  GNU `--version` output with its own clock and owned probe cleanup, then uses
+  one absolute executable path and retains that path/version. Bare `timeout`
+  is admitted only after the same verification. Unknown, malformed, oversized,
+  hanging or nonzero providers refuse selection; unresolved probe cleanup is
+  fatal. The hosted Linux fixture installs `gnu-coreutils` aliases only when
+  existing providers cannot be verified, preserving its system coreutils
+  provider. `python3 ios/gnu_timeout_test.py -v` covers those boundaries.
+  Those timers own only bootstrap/collector groups; the
+  initialized `ios/lifecycle_capture.py` owner detaches before admitting a
+  keeper or native command. The owner anchors its private command group with a
+  deliberately unreaped keeper and retains a separate owned native handle for
+  a command that leaves that group. Native exit/signal, command-clock result,
+  real output EOF and owned cleanup remain separate facts. Late native exit 0
+  does not turn a deadline into success. The first 64 KiB are retained while
+  remaining output is drained. The existing command, at-most-ten-second TERM
+  grace and absolute capture budgets remain; loss of the collector's lifetime
+  pipe triggers final owned dispatch without a new post-cap grace period.
+  Native completion without observed EOF triggers owned cleanup; that
+  observation alone does not prove a descendant is alive. Escaped grandchildren
+  remain outside signal authority and can yield incomplete capture at the bound.
+  Complete capture requires a real zero-byte output read before the capture
+  bound. Ordinary keeper release also waits for one complete, authenticated
+  command-monitor result and final protocol EOF. The collector requires a
+  complete helper token, real completion-pipe EOF and matching actual invocation
+  wait status. It snapshots only that closed private generation before writing
+  its admission receipt. One batch copies the valid regular, non-symlink
+  snapshot files, including binary output, within the existing caller clock;
+  symlink or nonregular stable destinations and failed or interrupted copies
+  refuse admission. This removes repeated
+  copy/rename launches after an observed interruption during stable receipt
+  promotion, without establishing the runner's delay cause or a future native
+  result. Expiry, cancellation, malformed handoffs or a shim's
+  mismatched exit refuse admission; a residual old owner can only publish in
+  its old generation. The two caller records use guarded builtin writes;
+  admission requires the actual collector exit zero and both complete matching
+  records, including matching helper/invocation statuses. Private fixed-order
+  Bash `SECONDS` stages observe setup, monitor launch, interpreter handoff and
+  publication without changing either clock or authorizing admission. Builtin
+  path trimming and caller writes remove known external launches. The seven
+  private IPC endpoints use the same fresh generation directory as the receipts,
+  removing a redundant directory-process launch before monitor/helper startup;
+  the existing clocks and descriptor protocol are unchanged. A retained
+  late-start failure does not establish the cause of its post-setup delay or
+  a hosted speed improvement. Startup refusal preserves any already observed
+  command-monitor deadline even when the caller is then lost.
+  The owner and keeper use only standard-library imports and invoke Python with
+  [`-S`](https://docs.python.org/3/using/cmdline.html#cmdoption-S), which disables
+  automatic [`site`](https://docs.python.org/3/library/site.html) initialization
+  and its customization hooks. Payload arguments and environment are unchanged.
+  The dedicated keeper enters its unchanged ready/control/acknowledgment protocol
+  after importing only `os`, `signal` and `sys`; owner-only imports are skipped.
+  Its two private descriptor arguments are validated before descriptor access.
+  Imported-module and owner entry paths retain their ordinary initialization.
+  A finite thirteen-second site hook remains unentered while both roles complete
+  and are reaped; separate retained counterfactuals show this is a reachable
+  startup delay class, not the established cause of the hosted late-start failure.
+  Caller cancellation retains status 130/143. Residual
+  cleanup and unknown reaps remain failures, rather than synchronized-cleanup
+  claims. Ordinary EOF releases only the keeper and does not prove silent
+  descendants are gone. Named receipts retain dispatches, authority release,
+  native/keeper reaps and keeper control-EOF acknowledgement. After writing that
+  acknowledgement and closing its private descriptors, the dedicated keeper
+  exits directly with zero; it owns no payload or buffered output requiring
+  interpreter finalization. The owner still requires both the exact
+  acknowledgement and a real zero reap within the existing release bound.
+  A finite injected finalization delay reproduces acknowledgement plus keeper
+  SIGKILL/cleanup failure, while the direct exit succeeds; before-acknowledgement
+  hangs and abnormal exits still fail. This control establishes the reachable
+  finalization tail, not the cause or acknowledgement timing of a native probe
+  failure. Probe failure does not establish an app crash.
+  `bash ios/launch_diagnostics_mock_test.sh` runs the existing attached-monitor
+  controls, `python3 ios/lifecycle_capture_test.py -v` and the caller-clock
+  controls in `python3 ios/lifecycle_capture_bridge_test.py -v`. They cover
+  actual native statuses versus launch errors, binary retention, held and
+  escaped writers, cancellation and keeper failure, startup clock expiry,
+  ignored/blocked signals, final protocol EOF, actual shim exit, generation
+  isolation and malformed receipt refusal. The signing fixture also requires
+  empty or malformed capture receipts to prevent install/launch, including
+  native-success cases. The Python lifecycle and caller-clock controls use
+  owned handles or finite fixture release markers; they do not claim
+  CoreSimulator descendants are contained by a group.
+  The ten-minute hosted fixture job runs four independent signing, install,
+  attached-monitor and shared-mobile groups concurrently. The attached group
+  retains its capture/caller/mock sequence; the shared group retains its asset
+  graphs/mobile cases/legacy monitor sequence. `ios/monitor_groups.py` gives each
+  group separate evidence, temporary and working directories plus an immediately
+  owned session-leader anchor. Payloads use absolute repository script paths.
+  Private pipes retain all four payload statuses without reaping any anchor;
+  final group KILL precedes individual anchor waits and the first nonzero status
+  in the fixed role order is propagated. INT/TERM retains
+  status 130/143 through one-second TERM grace, final KILL and one absolute
+  one-second reap bound while all anchors remain owned. Android controls begin
+  only after all four groups pass. `python3 ios/monitor_workflow_test.py -v`
+  exercises the actual extracted
+  workflow with finite leaf fixtures for four-way overlap, directory isolation,
+  individual/multiple failures, independent waits, cancellation and conditional
+  GNU availability. The frozen shared mobile fixture and all command/capture/job
+  deadlines remain unchanged.
   `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
   payload with real CoreSimulator boot, probes and shutdown on hosted macOS
   ARM64. The mobile lifecycle workflow retains actual probe availability and
@@ -215,6 +350,28 @@
   the mobile artifact. Every required package is validated after each attempt;
   a nonzero installer status or invalid package still fails setup. Run
   `python3 tools/ci_android_sdk_test.py -v` for the hermetic setup controls.
+- Qualification tool observations use `tools/ci_checks_tools.py` only when
+  `BUSTER_CI_CONDITIONS_EVIDENCE=1`. `python3 tools/ci_checks_tools_test.py -v`
+  exercises selected CMake/override paths, exact source/run/job binding,
+  deadlines, output limits, tool replacement and disabled no-op behavior using
+  Python-only fake tools. `python3 tools/ci_checks_qualification_test.py -v`
+  covers required role keys, wrong/unknown observations, digest-bound selected
+  tools, unchanged split-role maps and the existing Android validity scope.
+  Workflow lint runs both controls normally; the qualification branches alone
+  retain real selected Go/Ninja/adb receipts. No compiler build or measurement
+  dispatch is needed to run these controls. Missing historical observations
+  remain pending; see [checks qualification](../ci-combination-shards.md#further-checks-partition-qualification-2120).
+- The same opt-in retains `buster-ci/ios-simulator-selection.json` from the
+  selected discovery record, or the arguments and UUID of an actual creation.
+  `tools/ci_ios_simulator.py` adds no simulator query and preserves the launcher's
+  first available name match. Explicit UUIDs and missing observed fields remain
+  unknown. `python3 -B tools/ci_ios_simulator_test.py -v` checks this producer with
+  finite JSON; workflow lint also runs it. Qualification requires a digest-bound
+  `simulator_selection` reference with matching source/run/attempt/mobile-job
+  identity. Runtime and device type are comparable; the initial UUID remains
+  provenance. The CI batch selects once for Debug and Release; collection must
+  join that UUID to the initial launcher log, reject retention failures or
+  repeated selection, and retain any distinct replacement UUID from recovery.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
@@ -342,8 +499,9 @@ module-local function through all four allocator modes, requires PLT32 for the
 import and PC32 for the local call, and links/runs each default-model object
 with the configured host compiler as a PIE. It also verifies that a direct-call
 only function value leaves no separate address relocation. The argument-policy
-regression requires `-fPIE` and `-fpie` to be rejected on x86-64 ELF and remain
-accepted on Mach-O, COFF, UEFI, eBPF and Wasm. The existing fixtures preserve
+regression requires `-fPIE` and `-fpie` to select the position-independent model
+on every target, with the last positive spelling winning and `-fno-pie`
+cancelling only a PIE spelling. The existing fixtures preserve
 signed absolute `R_X86_64_32S` and GOTPCREL coverage; the indexed fixture makes
 both GCC and Clang produce those forms.
 The fixture is compiled `-O2`, because that is where both narrow an address to
@@ -396,8 +554,9 @@ it does not replace target-matrix execution or the seeded differential corpus.
 
 Allocator-matrix commands place optimization flags before the explicit allocator
 flag because the last allocator-affecting option wins. Assert the parsed allocator
-on the invocation passed to execution; retain `-fverify-codegen` and allow machine
-fallback for NONE, while requiring strict machine coverage on applicable MIR rows.
+on the invocation passed to execution; retain `-fverify-codegen` and
+`-fno-machine-fallback` on applicable native rows in every mode. NONE retains its
+parsed spelling but selects MIR-stack, so it has no direct-emitter exception.
 
 ## Oracle independence
 
@@ -526,8 +685,11 @@ compiler-global metadata and persistent lane contexts keep their existing owners
 `test_arena_self_test` runs as a fail-closed harness check without changing
 registered assertion/module counts. It covers nested and empty scopes, retained
 scopes, an internal rewind, decommit, dirty-byte zeroing, quiet mode, and buffered
-failure diagnostics surviving a rewind and overwrite. Observation uses separate
-arena header storage in test-enabled builds and adds no allocation-path work.
+failure diagnostics surviving a rewind and overwrite. Observation uses the
+scoped `Arena.high_water` header field, separate from `dirty_position`, and adds
+no allocation-path work; rewinds fold the cursor into it in every build, and
+the driver's per-input metrics save and restore it around a unit in the same
+way.
 
 
 Fatal-output regressions in `os_tests` run raw and formatted reporters in
@@ -674,7 +836,41 @@ against the original returned bytes after execution. The source and oracle are
 generated inline, leaving the frozen support inventory unchanged. Existing
 stack-reservation and memory-hint regressions remain required.
 
+## Direct canonical Wasm bit counts
+
+`compiler_driver_test_wasm_bit_counts` constructs CLZ, CTZ and population-count
+functions directly in canonical IR, so C integer promotions cannot hide a
+narrow backend defect. The block-row protocol commits each argument, unary
+operation and return; canonical preparation validates the module before each
+pointer-width emitter run. Signed and unsigned widths 7, 8, 16, 24, 32, 33, 48
+and 64 separate semantic width from the i32/i64 carrier.
+
+An inline Node oracle checks twelve literal expectations, exhausts both 7- and
+8-bit bit patterns, and checks zero, all ones, sign boundaries, alternating
+patterns, every single bit and its complement at larger widths. Dirty carrier
+bits separately check normalization. Each pointer-size run makes 5,352 actual
+export calls; zero CLZ/CTZ results use the canonical width convention, and
+32/64-bit controls retain full-carrier behavior. The oracle loops over the
+semantic bits instead of calling a host count intrinsic.
+
+Repeated emission must be byte-identical. The consumed module SHA-256 and
+before/after artifact comparisons prove that Node receives the original bytes.
+Normal zero exit, empty stderr and the exact terminal summary are required
+through the existing bounded Node runner. Missing Node is reported as an
+execution skip, not an engine pass. The script is inline; frozen Wasm oracles,
+startup shims and support inventory stay untouched.
+
 ## Node-backed Wasm oracle deadlines
+
+`codegen_test_ebpf_argument_images` checks equality, ordering, unsigned
+division/remainder, right shifts and widening from signed/unsigned 8/16/32-bit
+arguments, Boolean arguments and full-width controls in both frontend forms.
+Clean and dirty incoming register images must give the same value at the
+declared width. The eBPF prologue normalizes a private R0 copy before storing
+each argument; input registers remain available for later captures. Boolean
+capture first discards bits outside its one-bit canonical representation.
+The existing VM executes every case; the kernel verifier/JIT is compared when
+available and its participation is reported separately.
 
 `compiler_driver_test_wasm_integers` runs the frozen integer oracle and the
 additive `tools/wasm_unsigned_div_rem_execution.js` companion on the same freshly
