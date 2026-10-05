@@ -79,6 +79,7 @@ class ZigCachePolicyTests(unittest.TestCase):
         targets = (
             ("Linux", "X64", "x86_64-linux"),
             ("Linux", "ARM64", "aarch64-linux"),
+            ("macOS", "ARM64", "aarch64-macos"),
             ("Windows", "X64", "x86_64-windows"),
         )
         for runner_os, runner_arch, target in targets:
@@ -99,7 +100,7 @@ class ZigCachePolicyTests(unittest.TestCase):
     def test_split_owners_reject_unsupported_targets_on_every_event(self):
         for event in sorted(ci_zig_cache.EVENTS):
             for shard in sorted(ci_zig_cache.SPLIT_CHECK_SHARDS):
-                for target in ("aarch64-macos", "aarch64-windows"):
+                for target in ("aarch64-windows", "x86_64-macos"):
                     with self.subTest(event=event, shard=shard, target=target):
                         with self.assertRaisesRegex(ValueError, "supported split target"):
                             self.policy(event=event, target=target, shard=shard)

@@ -94,6 +94,18 @@
   and its generated table) follow this rule; `aarch64_syntax.c` fails with
   `#error` in a tests-disabled compile, so self-host stage 1 cannot silently
   regain it.
+- Place additions by name, not after the newest neighbour, so independent PRs
+  land at different anchors and merge in either order. In
+  `src/buster/lib/compiler/frontend/c/c_parse_internal.h`, each seam group
+  (comment, types, declarations) is one blank-line-separated block ordered by
+  the byte (`LC_ALL=C sort`) order of its first `c_test_` function name; insert
+  a new group at its sorted position or extend the owning group, and do not
+  enumerate groups in the file comment. `c_frontend_tests` in
+  `src/buster/tests/compiler/frontend/c/c_test.c` registers every
+  `BUSTER_TEST_FIXTURE` in one block sorted the same way, so fixtures must not
+  depend on run order; inline assertions follow that block. Define a new test
+  function next to the tests of the feature it covers, not after the most
+  recently added one. Names that sort adjacently can still conflict.
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
