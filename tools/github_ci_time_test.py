@@ -34,7 +34,8 @@ class ChecksLayoutCLITests(unittest.TestCase):
         branches = ("codex/ci-checks-combined-overlap", "codex/ci-checks-combined-all-builds",
                     "codex/2120-evidence-v2-combined-overlap", "codex/2120-evidence-v2-combined-all-builds")
         self.assertEqual(github_ci_time.COMBINED_QUALIFICATION_BRANCHES, branches)
-        self.assertEqual(len(github_ci_time.combination_jobs()), 27)
+        self.assertEqual(len(github_ci_time.combination_jobs()), 29)
+        self.assertEqual(len(github_ci_time.HISTORICAL_SPLIT_COMBINATION_JOBS), 27)
         self.assertEqual(len(github_ci_time.combination_jobs("combined")), 21)
         for branch in branches:
             for event in ("pull_request", "push", "merge_group", "workflow_dispatch"):
