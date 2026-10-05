@@ -13,15 +13,23 @@ dispatch, PR, repository branch or per-experiment GitHub approval. CI is an
 optional client of the same queue. The service authenticates its owner;
 repository contribution permissions do not authorize execution.
 
-The first [native execution slice](NATIVE_EXECUTION.md) accepts privately
-uploaded static Linux x86-64 executables, including assembled microkernels.
-CLI and bounded MCP upload tools return an immutable manifest identity for
-direct submission to `native-execute-v1`. There is one program, fixed argv
-and environment, and no dynamic runtime closure or optional compilation yet.
-Runtime samples and custom compiler measurements remain unavailable in this
-slice. The MCP adapter rejects caller commands and runtime argument fields;
-successful execution is not a custom benchmark result. Source implementation
-does not establish that a particular worker has the coordinated installation.
+This document is the intended contract. What exists today is narrower, and
+[USING.md](USING.md) describes exactly that.
+
+Implemented: privately uploaded static Linux x86-64 executables, including
+assembled microkernels and statically linked C programs built elsewhere. CLI
+and bounded MCP upload tools return an immutable manifest identity for direct
+submission to [`native-execute-v1`](NATIVE_EXECUTION.md) (run once) or
+[`native-runtime-v1`](NATIVE_RUNTIME.md) (two warmups and nine diagnostic
+process samples). There is one program, fixed argv and environment.
+
+Not implemented: compilation on the host from a toolchain profile, program
+arguments, a dynamic runtime closure, a checksum or transcript oracle, A/A or
+A/B comparison with a statistical decision, and any custom compiler
+measurement. The MCP adapter rejects caller commands and runtime argument
+fields. A successful execution or a set of runtime samples is not a custom
+benchmark result. Source implementation does not establish that a particular
+worker has the coordinated installation.
 
 ## Existing machinery
 
