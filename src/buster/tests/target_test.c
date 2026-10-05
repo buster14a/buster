@@ -872,6 +872,19 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         {S8("arm64-apple-ios17.0-simulator-extra"), S8("extra"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
         {S8("x86_64-unknown-linux-gnu-notacpu"), S8("notacpu"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
         {S8("x86_64-unknown-linux-gnu-xxxx"), S8("xxxx"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
+        // MinGW is not the MSVC ABI that Buster's Windows targets implement,
+        // so its spellings are refused instead of aliased to MSVC (#1492).
+        {S8("x86_64-w64-mingw32"), S8("mingw32"), TARGET_PARSE_ERROR_ENVIRONMENT},
+        {S8("x86_64-pc-mingw32"), S8("mingw32"), TARGET_PARSE_ERROR_ENVIRONMENT},
+        {S8("x86_64-w64-windows-gnu"), S8("gnu"), TARGET_PARSE_ERROR_ENVIRONMENT},
+        {S8("x86_64-pc-windows-gnu"), S8("gnu"), TARGET_PARSE_ERROR_ENVIRONMENT},
+        {S8("aarch64-pc-windows-gnullvm"), S8("gnullvm"), TARGET_PARSE_ERROR_ENVIRONMENT},
+        {S8("x86_64-windows-gnu"), S8("gnu"), TARGET_PARSE_ERROR_ENVIRONMENT},
+        {S8("x86_64-windows-gnullvm"), S8("gnullvm"), TARGET_PARSE_ERROR_ENVIRONMENT},
+        {S8("x86_64-gnu-windows-msvc-extra"), S8("extra"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
+        {S8("x86_64-gnullvm-windows-msvc-extra"), S8("extra"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
+        {S8("x86_64-pc-windows-gnu-extra"), S8("extra"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
+        {S8("x86_64-pc-windows-gnullvm-extra"), S8("extra"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(rejected_component_cases); case_index += 1)
     {
@@ -882,7 +895,12 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     // The vendor and the environment stay free-form within the four components
     // a target string has, and `native` keeps bypassing component parsing.
     BUSTER_TEST(arguments, target_parse_triple(S8("x86_64-alpine-linux-musl")).error == TARGET_PARSE_ERROR_NONE);
-    BUSTER_TEST(arguments, target_parse_triple(S8("x86_64-w64-windows-gnu")).error == TARGET_PARSE_ERROR_NONE);
+    BUSTER_TEST(arguments, target_parse_triple(S8("x86_64-unknown-linux-gnu")).error == TARGET_PARSE_ERROR_NONE);
+    BUSTER_TEST(arguments, target_parse_triple(S8("x86_64-pc-windows-msvc")).error == TARGET_PARSE_ERROR_NONE);
+    TargetParseResult gnu_vendor = target_parse_triple(S8("x86_64-gnu-windows-msvc"));
+    TargetParseResult gnullvm_vendor = target_parse_triple(S8("x86_64-gnullvm-windows-msvc"));
+    BUSTER_TEST(arguments, gnu_vendor.error == TARGET_PARSE_ERROR_NONE && gnu_vendor.target.os == OPERATING_SYSTEM_WINDOWS);
+    BUSTER_TEST(arguments, gnullvm_vendor.error == TARGET_PARSE_ERROR_NONE && gnullvm_vendor.target.os == OPERATING_SYSTEM_WINDOWS);
     BUSTER_TEST(arguments, target_parse_triple(S8("native")).error == TARGET_PARSE_ERROR_NONE);
     BUSTER_TEST(arguments, cpu_model_from_string(S8("znver5")) == CPU_MODEL_AMD_ZEN_5);
     BUSTER_TEST(arguments, cpu_model_from_string(S8("apple-m4")) == CPU_MODEL_A64_APPLE_M4);

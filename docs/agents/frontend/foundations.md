@@ -92,6 +92,20 @@ Condition lowering resolves a literal left operand of `||` or `&&` before
 allocating a block for its right operand. A short-circuited arm must not
 become a disconnected source block that joins a value defined only on another
 path; selected MIR enforces dominance in unreachable code too.
+A GNU statement-expression body retains the complete range of each automatic
+declaration. Its top-level commas separate declarators and reach the existing
+automatic-declaration-list frame; only expression statements use the trailing
+comma split. `declaration_statement` is shared with trailing-value classification
+in the body walker. The embedded driver regression for #1388 checks initialized,
+uninitialized, pointer/scalar, discarded and exactly-once call initializers,
+alongside ordinary/nested blocks, typedefs, typeof and comma/loop sequencing,
+under both frontend forms and all four allocators at O0/O2. Syntax/object rows
+retain those accepted declarations and a rejected const-store neighbor.
+The semantic type query classifies the final statement in its own parsed block
+scope, so a local value shadows an outer typedef. A final declaration still
+produces void; an expired nested shadow does not change the enclosing typedef,
+and a const-qualified shadow remains unmodifiable.
+
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
@@ -199,6 +213,23 @@ consumers. Terminators own topology, including parameter-free destinations and
 duplicate-target suppression. `ir_function_cfg_edge` replaces incoming-list
 searches. Mutation must invalidate `IrFunction.published_cfg`; it is not a
 semantic certificate. See [publication and lifetime details](../../canonical-cfg-publication.md).
+
+## Assignment destinations and values (#1260)
+
+Assignment expressions prepare calls in their destination before forming the
+place, then retain that place for storage and the expression result. Prepared
+call results feed the existing member/subscript suffix walk, so `get()->m = 3`
+and `get()[i] += 2` each evaluate the callee once. Destinations beginning with
+`*&`, like `*&local += 3`, use the existing expression continuation and recover
+the final load's place; the identifier-based place reader does not parse the
+address-of operand. Parenthesized and pointer-update destinations keep their
+existing routes.
+
+`c_test_call_assignment_values` checks semantic/canonical lowering on six
+native target layouts in GNU17/GNU23 and both frontend forms. Canonical call
+counts and supported desktop execution cover initializer, argument, condition,
+arithmetic, comma, wrapped/member/subscript and address-derived assignment
+values, including compound results and stored values under all allocators.
 
 ## Number facts
 

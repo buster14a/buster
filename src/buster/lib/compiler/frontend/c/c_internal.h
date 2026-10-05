@@ -171,6 +171,10 @@ BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // the entity that ends before the operand. `*cursor` starts at zero.
 BUSTER_C_EXTERN bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
                                                u32* count_out);
+// A final member expression uses its declaring aggregate's placement
+// alignment; every lookup and layout query operates on a protected model.
+BUSTER_C_EXTERN bool c_semantic_alignof_member(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                u32 start, u32 end, u32* alignment);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
 // The GNU layout attributes the frontend implements, as the parser spells
 // them. `__has_attribute` answers from these same predicates so the query
@@ -502,7 +506,7 @@ BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
 // AAPCS64    The same placement, but every bit-field's container -- named,
 //            unnamed or zero-width -- raises the record's alignment (AAPCS64
 //            10.1.8). AArch64 Linux, Android, UEFI and bare metal; not Darwin.
-// MICROSOFT  The Windows rule, for the MSVC and MinGW environments alike: a
+// MICROSOFT  The Windows (MSVC) rule; MinGW triples are rejected (#1492): a
 //            bit-field occupies a storage unit of its declared type's size,
 //            and the next one shares it only while its declared type has the
 //            same size and its bits still fit. A zero-width bit-field matters
@@ -1052,6 +1056,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_PARAMETERS,
     C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
     C_TYPE_PARSE_STAGE_FINISH,
+    C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
 
 struct CTypeMutation

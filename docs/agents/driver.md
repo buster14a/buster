@@ -252,6 +252,13 @@ and maximum native vector width. `-target`/`--target` strings are
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+Windows targets implement the MSVC ABI only, so the MinGW spellings
+(`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
+`unsupported target environment` instead of being aliased to MSVC (#1492);
+MinGW's GCC `ms_struct` layout is not modelled.
+The GNU environment refusal applies after a recognized Windows OS component;
+`x86_64-gnu-windows-msvc` and `x86_64-gnullvm-windows-msvc` retain their free-form
+vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`, while
 `-fno-register-allocator` and `-fregister-allocator=none` retain their accepted
