@@ -29,6 +29,7 @@
 // missing feature instead of encoding.
 
 #include <buster/lib/compiler/assembly/aarch64_base_assembly.h>
+#include <buster/lib/string.h>
 
 #define A64_BASE_MAX_OPERANDS 6u
 // Unscaled and pre/post-indexed single transfers use a signed nine-bit byte
