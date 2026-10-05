@@ -24769,6 +24769,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_address_assignment_expre
     return result;
 }
 
+// #2676: control statements nested D deep. The source is generated in memory;
+// each family is parsed and analyzed at two depths four apart, and the
+// per-path work counters must grow with depth, not with its square: a
+// quadratic path multiplies by sixteen across the pair, a linear one by four.
+enum
+{
+    C_TEST_NESTED_CONTROL_WHILE,
+    C_TEST_NESTED_CONTROL_IF,
+    C_TEST_NESTED_CONTROL_FOR,
+    C_TEST_NESTED_CONTROL_FAMILIES,
+};
+
+BUSTER_GLOBAL_LOCAL String8 c_test_nested_control_source(Arena* arena, u32 family, u32 depth)
+{
+    String8 prefix = S8("int f(int x) { ");
+    String8 header = family == C_TEST_NESTED_CONTROL_WHILE ? S8("while (x > 1) { ")
+                     : family == C_TEST_NESTED_CONTROL_IF  ? S8("if (x > 1) { ")
+                                                           : S8("for (int i = 0; i < x; i += 1) { ");
+    String8 core = S8("x -= 1; ");
+    String8 suffix = S8("return x; }\n");
+    u64 capacity = prefix.length + (header.length + core.length + 2) * depth + core.length + suffix.length;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, prefix);
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, header);
+    }
+    c_test_append_source(bytes, capacity, &length, core);
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("} "));
+        c_test_append_source(bytes, capacity, &length, core);
+    }
+    c_test_append_source(bytes, capacity, &length, suffix);
+    return (String8){.pointer = bytes, .length = length};
+}
+
+// The slot's work for one parse of the family at this depth; UINT64_MAX when
+// the source did not parse cleanly.
+BUSTER_GLOBAL_LOCAL u64 c_test_nested_control_work(u32 family, u32 depth, u32 slot)
+{
+    u64 work = UINT64_MAX;
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = c_test_nested_control_source(temporary.arena, family, depth);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    u64 before = c_test_parse_nesting_count(slot);
+    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+    if (preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && analysis.diagnostic_count == 0)
+    {
+        work = c_test_parse_nesting_count(slot) - before;
+    }
+    scratch_end(temporary);
+    return work;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 200, DEEP = 800 };
+    for (u32 family = 0; family < C_TEST_NESTED_CONTROL_FAMILIES; family += 1)
+    {
+        u64 shallow = c_test_nested_control_work(family, SHALLOW, C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS);
+        u64 deep = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS);
+        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && (family == C_TEST_NESTED_CONTROL_IF || shallow >= SHALLOW) &&
+                            deep <= shallow * 6 + DEEP && deep <= DEEP * 16,
+                        string_format(arguments->arena, S8("statement-end tokens family={u32} shallow={u64} deep={u64}"), family, shallow, deep));
+    }
+    return result;
+}
+
 // Lua's userdata accessor combines nested pointer-cast macros, a
 // builtin-offsetof ternary, and a switch whose other arm returns void *.  The
 // strict expression-type walk must preserve the pointer result instead of
@@ -38629,6 +38701,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
+    BUSTER_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);

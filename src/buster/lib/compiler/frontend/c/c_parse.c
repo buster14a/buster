@@ -395,6 +395,18 @@ struct CParseValidationCapacities
 // expression; `for` is apart because its header opens a loop scope of its own.
 #define C_PARSE_CONTROLLING_EXPRESSION_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH))
 
+// Work counters of the nested-control-statement paths (#2676), kept for the
+// tests that bound their growth with nesting depth. Each counts units of
+// token work, so a regression to a per-level rescan shows as a count that
+// grows with depth squared. Only test builds count: production never
+// evaluates the amount. The slots are C_TEST_PARSE_NESTING_* in c_parse_internal.h.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_nesting_counts[C_TEST_PARSE_NESTING_SLOTS];
+#define C_PARSE_NESTING_COUNT(slot, amount) (c_parse_nesting_counts[slot] += (u64)(amount))
+#else
+#define C_PARSE_NESTING_COUNT(slot, amount) ((void)sizeof(amount))
+#endif
+
 // The position index and token census classify the same contiguous sidecar in
 // the same tiles. Keeping the tile width here makes a later tile consumer
 // share the census' 2,048-token working set instead of inventing another pass
@@ -20649,6 +20661,35 @@ BUSTER_C_INTERNAL bool c_parse_statement_keyword_at(CPreprocessResult preprocess
            c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], keyword);
 }
 
+// The matching-closer table for statement walks, or zero when it cannot stand in for a
+// scan: unbuilt, or built over a stream whose delimiters do not nest. On balanced tokens
+// the closer of an opener is the one a same-kind depth count finds, so both answers agree.
+BUSTER_C_INTERNAL u32 const* c_parse_statement_delimiters(CParseResult const* result)
+{
+    CTokenPositionIndex const* index = result ? result->position_index : 0;
+    return index && index->built && !index->delimiter_mismatch_count ? index->matching_delimiters_plus_one : 0;
+}
+
+// The closer of the opener at `open` for a walk bounded by `end`, `end` itself when it is
+// not closed inside the window: the answer of c_parse_matching_delimiter.
+BUSTER_C_INTERNAL u32 c_parse_statement_delimiter_close(CPreprocessResult preprocess, u32 const* matching, u32 open, u32 end, CPunctuator opening,
+                                                         CPunctuator closing)
+{
+    u32 close;
+    if (matching)
+    {
+        close = matching[open] - 1;
+        close = close < end ? close : end;
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS, 1);
+    }
+    else
+    {
+        close = c_parse_matching_delimiter(preprocess, open, end, opening, closing);
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS, close - open + 1);
+    }
+    return close;
+}
+
 // One past the last token of the single statement beginning at `start`, or UINT32_MAX when that
 // statement is not closed inside [start, end).
 //
@@ -20664,7 +20705,12 @@ BUSTER_C_INTERNAL bool c_parse_statement_keyword_at(CPreprocessResult preprocess
 //
 // Declarations, `_Generic`, statement expressions and every other construct that can hold a `;`
 // inside a delimiter are covered by the depth count alone; nothing here needs to know their shape.
-BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 start, u32 end, u8* suffix, u32 suffix_capacity)
+//
+// `matching` is the retained delimiter table (c_parse_statement_delimiters), or zero to
+// match each delimiter by scanning. With the table every header, block and do-while
+// condition is skipped in one read, so a statement nested in D others costs the tokens
+// of its own prefix and not a rescan of every inner block (#2676).
+BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 const* matching, u32 start, u32 end, u8* suffix, u32 suffix_capacity)
 {
     u32 cursor = start;
     u32 suffix_count = 0;
@@ -20681,7 +20727,7 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 st
                 {
                     return UINT32_MAX;
                 }
-                u32 header_close = c_parse_matching_delimiter(preprocess, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                u32 header_close = c_parse_statement_delimiter_close(preprocess, matching, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 if (header_close == end)
                 {
                     return UINT32_MAX;
@@ -20720,7 +20766,7 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 st
         }
         if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
         {
-            u32 close = c_parse_matching_delimiter(preprocess, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+            u32 close = c_parse_statement_delimiter_close(preprocess, matching, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
             if (close == end)
             {
                 return UINT32_MAX;
@@ -20729,6 +20775,7 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 st
         }
         else
         {
+            u32 simple_start = cursor;
             u32 depth = 0;
             while (cursor < end)
             {
@@ -20753,6 +20800,7 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 st
                 }
                 cursor += 1;
             }
+            C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS, cursor - simple_start);
             if (cursor == end)
             {
                 return UINT32_MAX;
@@ -20769,7 +20817,7 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 st
                 {
                     return UINT32_MAX;
                 }
-                u32 close = c_parse_matching_delimiter(preprocess, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                u32 close = c_parse_statement_delimiter_close(preprocess, matching, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 if (close == end || close + 1 == end || !c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_SEMICOLON))
                 {
                     return UINT32_MAX;
@@ -20951,7 +20999,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         {
             u32 header_close = c_parse_matching_delimiter(preprocess, index + 1, body_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             u32 statement_end = header_close < body_end && c_parse_controlling_expression_defines_tag(token_shapes, preprocess, index + 2, header_close)
-                                    ? c_parse_statement_end(preprocess, index, body_end, statement_suffix, body_token_count + 1)
+                                    ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), index, body_end, statement_suffix, body_token_count + 1)
                                     : UINT32_MAX;
             if (statement_end != UINT32_MAX)
             {
@@ -21076,7 +21124,9 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             {
                 // The loop scope covers the whole controlled statement, compound or not, so the
                 // init declaration stays visible across every form of body.
-                u32 loop_end = c_parse_statement_end(preprocess, header_close + 1, body_end, statement_suffix, body_token_count + 1);
+                c_parse_position_index_ensure(result, preprocess);
+                u32 loop_end = c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, body_end, statement_suffix,
+                                                     body_token_count + 1);
                 u32 first_separator = UINT32_MAX;
                 depth = 0;
                 for (u32 scan = index + 2; scan < header_close; scan += 1)
@@ -26935,7 +26985,8 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                   c_token_is_punctuator(&preprocess.tokens[switch_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
     u32 header_close = header ? c_parse_matching_delimiter_indexed(result, preprocess, switch_index + 1) : function_end;
     u32 switch_end = header_close < function_end && header_close + 1 < function_end
-        ? c_parse_statement_end(preprocess, header_close + 1, function_end, suffix, function_end - header_close) : UINT32_MAX;
+        ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, function_end, suffix, function_end - header_close)
+        : UINT32_MAX;
     bool braced_body = header_close < function_end && header_close + 1 < function_end &&
                        c_token_is_punctuator(&preprocess.tokens[header_close + 1], C_PUNCTUATOR_LEFT_BRACE);
     if (!braced_body)
@@ -27006,7 +27057,8 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                     {
                         u32 nested_header = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
                         u32 nested_end = nested_header + 1 < switch_end
-                                             ? c_parse_statement_end(preprocess, nested_header + 1, switch_end, suffix, switch_end - nested_header)
+                                             ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), nested_header + 1, switch_end, suffix,
+                                                                     switch_end - nested_header)
                                              : UINT32_MAX;
                         if (nested_end != UINT32_MAX)
                         {
@@ -28080,6 +28132,11 @@ bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult pr
 {
     return c_parse_label_values_needed(result, preprocess, declaration, 0);
 }
+
+u64 c_test_parse_nesting_count(u32 slot)
+{
+    return slot < C_TEST_PARSE_NESTING_SLOTS ? c_parse_nesting_counts[slot] : 0;
+}
 #endif
 
 BUSTER_C_INTERNAL String8 c_parse_asm_constraint_shape(String8 text, bool output)
@@ -28541,6 +28598,7 @@ BUSTER_C_INTERNAL void c_parse_validate_control_statements(CTypeParseMachine* ma
     // Ranges close in stack order, so popping them at the next candidate
     // leaves the same loop/switch depth every candidate saw before.
     CParseCandidates candidates = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_CONTROL_KEYWORDS, C_PARSE_POPULATION_BRACE_IDENTIFIERS, start);
+    u32 const* matching = c_parse_statement_delimiters(result);
     for (u32 index = c_parse_candidates_next(&candidates, start, end); index < end; index = c_parse_candidates_next(&candidates, index + 1, end))
     {
         while (count && ranges[count - 1].end <= index)
@@ -28572,7 +28630,7 @@ BUSTER_C_INTERNAL void c_parse_validate_control_statements(CTypeParseMachine* ma
             {
                 body = c_parse_matching_delimiter_indexed(result, preprocess, body) + 1;
             }
-            u32 limit = body < end ? c_parse_statement_end(preprocess, body, end, suffix, end - start + 1) : UINT32_MAX;
+            u32 limit = body < end ? c_parse_statement_end(preprocess, matching, body, end, suffix, end - start + 1) : UINT32_MAX;
             if (limit <= end)
             {
                 ranges[count++] = (CParseControlRange){.end = limit, .loop = loop};
