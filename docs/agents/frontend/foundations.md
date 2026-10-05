@@ -357,6 +357,19 @@ without facts for identical bitcode and diagnostics.
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
   `c_test_variadic_comma_omission` checks omission, explicit emptiness, forwarding,
   named variadics and ordinary placemarkers in every supported dialect.
+- C23 `__VA_OPT__ ( content )` is accepted in every dialect. A variadic
+  definition writing it sets `has_va_opt`, which stages it through
+  `c_macro_replacement_tokens` and prescans the variable argument: the content
+  stands when that argument has tokens after expansion and is a placemarker
+  otherwise, so `##` on either side pastes against the content's edge tokens.
+  `#__VA_OPT__` pastes the content on its own (`c_macro_paste_tokens`) before
+  stringifying it. `c_macro_va_opt_violation` rejects the definition when
+  `__VA_OPT__` appears in a non-variadic macro, lacks its parenthesized
+  content, nests, or has `##` at a content edge; a `__VA_OPT__` reaching
+  expansion output was written outside a replacement list and is diagnosed.
+  `c_test_variadic_va_opt` covers empty, macro-expanding-to-empty and
+  non-empty arguments, `#`/`##` operands, nested `__VA_ARGS__` and the
+  diagnostics (GitHub #2509).
 - `_Pragma` destringizes either an ordinary or `L`-prefixed string operand.
   It strips the optional `L` and the quotes, and removes a backslash only
   before a quote or another backslash. Macro-generated operands use the same
