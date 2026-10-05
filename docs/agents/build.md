@@ -16,6 +16,26 @@ shared checkout still reads source that another session can edit. Follow the
 workload includes `build/generated`. No live-use lock protects `generate`:
 coordination and isolation are required before removing or regenerating a tree.
 
+`generate` only deletes a directory it can prove is disposable
+(`generate_build_directory_verdict` in `build.c`), so a mistyped
+`--build-directory` cannot erase a checkout. The target must be missing, an
+empty directory, a tree carrying the `.buster-build-tree` marker that every
+generation writes, a CMake tree whose `CMakeCache.txt` has
+`CMAKE_HOME_DIRECTORY` equal to this repository (compared by real path), or
+anything inside the repository's ignored `build/` directory. Whatever the
+contents, it refuses the repository root, any ancestor of it (including `/`),
+the home directory, `.git`, `.github`, `cmake`, `docs`, `src`, `tests` and
+`tools` and anything inside them, and a path that is not a directory. Links and
+`.`/`..` are resolved first. A refusal prints the reason, deletes nothing and
+exits nonzero, as does a removal that cannot finish, so `generate` never
+configures on top of a half-deleted tree. Every internal caller (the
+combination matrix, `test_mode_matrix`, self-host, the x86-64 completion census)
+goes through the same check. To reuse a directory that is none of these, empty
+or remove it yourself. `remove_path_recursive` removes through the library's
+iterative, link-safe `os_directory_delete` and reports failure.
+`generate_guard_self_test` covers the guard with sentinel trees and runs in the
+combination-matrix preflight.
+
 ## Self-hosting — reproduce first
 
 All contributors—humans and coding agents—should reproduce the current
@@ -225,7 +245,7 @@ header that defines functions must be included before the test region, as
 Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
-`test_timing_summary_self_test`, `musl_directory_self_test`,
+`test_timing_summary_self_test`, `musl_directory_self_test`, `generate_guard_self_test`,
 `compiler_discovery_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
