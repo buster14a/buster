@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Aggregate buster's Forgejo CI time over a window: runner hours and push latency.
+"""Aggregate historical Forgejo CI time: runner hours and push latency.
+
+The Forgejo workflows were removed in 02c0400a34d04be9e984f29a59291750b3998d3f.
+This retained reader analyses their historical API records, not active GitHub
+CI. If the former local workflow is absent, job_timeout_seconds uses the recorded
+120-minute ceiling; it does not require or recreate the deleted implementation.
 
 Two independent series, both read from the Actions API under
 `https://code.buster14a.com/api/v1/repos/buster/buster`:

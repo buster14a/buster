@@ -1,5 +1,12 @@
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
 
+// The syntax model and its generated table have only test consumers, so
+// tests-disabled builds such as self-host stage 1 omit this module (#1315).
+// A production caller must first add it to ide's unconditional module list.
+#if !BUSTER_INCLUDE_TESTS
+#error "aarch64_syntax.c is test-only; tests-disabled builds must not compile it"
+#endif
+
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Woverlength-strings"

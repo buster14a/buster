@@ -70,14 +70,13 @@ Every stage runs under FAST, NONE, MIR_STACK and QUALITY, and each build's
 transcript must equal the Clang reference's exactly. Compiler cost and
 generated-code quality are reported separately and must not be conflated:
 `DOOM_METRIC` carries per-unit compiler wall time with the `-fsource-metrics=`
-source metrics, `DOOM_FALLBACK` carries the number of functions that fell back
-to the canonical emitter (a fallback is correct code, so the number is a
-quality signal, not a failure), and `DOOM_RUN` carries the run's wall time and
+source metrics, `DOOM_FALLBACK` retains the legacy count, which stays zero
+under MIR-only generation, and `DOOM_RUN` carries the run's wall time and
 instructions retired. The instruction counts come from the same Linux hardware
 counter as `STEP_INSTRUCTIONS`, read either side of a child that runs alone,
 so they follow this process tree only and are the number to trend; where no
 counter is available the field is simply zero, which is never an error. One
-recorded run put the Clang reference at 4,43 G instructions for the 480-frame
+pre-cutover recorded run put the Clang reference at 4,43 G instructions for the 480-frame
 workload against 24,9 G for QUALITY, 28,3 G for FAST, 48,6 G for MIR_STACK and
 54,7 G for NONE — the allocator ordering the names promise, with NONE 2,2x
 QUALITY. The whole matrix takes about half a minute and leaves about 19 MB

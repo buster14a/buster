@@ -1,0 +1,23 @@
+TEST_FIXTURE_WATCHDOG_V1 status=armed deadline_seconds=1800
+TEST_FIXTURE_START_V1 kind=module module=string_tests fixture=body index=0
+BENCH_STRING_SEQUENCE n=256 m=1 shape=0 calls=1048576 elapsed_ns=3773892 checksum=0
+BENCH_STRING_SEQUENCE n=256 m=2 shape=0 calls=1048576 elapsed_ns=3831649 checksum=0
+BENCH_STRING_SEQUENCE n=256 m=3 shape=0 calls=1048576 elapsed_ns=3858063 checksum=0
+BENCH_STRING_SEQUENCE n=256 m=7 shape=0 calls=1048576 elapsed_ns=3860632 checksum=0
+BENCH_STRING_SEQUENCE n=256 m=15 shape=0 calls=1048576 elapsed_ns=3859881 checksum=0
+BENCH_STRING_SEQUENCE n=256 m=31 shape=0 calls=1048576 elapsed_ns=3866507 checksum=0
+BENCH_STRING_SEQUENCE n=256 m=32 shape=0 calls=1048576 elapsed_ns=3945790 checksum=0
+BENCH_STRING_SEQUENCE n=256 m=1 shape=1 calls=1048576 elapsed_ns=684725514 checksum=18446744073708503040
+BENCH_STRING_SEQUENCE n=256 m=2 shape=1 calls=1048576 elapsed_ns=710227100 checksum=18446744073708503040
+BENCH_STRING_SEQUENCE n=256 m=3 shape=1 calls=1048576 elapsed_ns=708075830 checksum=18446744073708503040
+BENCH_STRING_SEQUENCE n=256 m=7 shape=1 calls=1048576 elapsed_ns=705068870 checksum=18446744073708503040
+BENCH_STRING_SEQUENCE n=256 m=15 shape=1 calls=1048576 elapsed_ns=713770175 checksum=18446744073708503040
+BENCH_STRING_SEQUENCE n=256 m=31 shape=1 calls=1048576 elapsed_ns=635300399 checksum=18446744073708503040
+BENCH_STRING_SEQUENCE n=256 m=32 shape=1 calls=1048576 elapsed_ns=679334313 checksum=18446744073708503040
+TEST_ARENA_V1 kind=module module=string_tests fixture=body index=0 arena_slot=0 start=4648 end=773190 retained_bytes=768542 high_water=773190 peak_bytes=768542 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=string_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=16536 peak_bytes=16408 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=string_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=string_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+[161668/161668] Unit tests (1 of 57 modules selected)
+[1/1] Module tests
+[0/0] External tests

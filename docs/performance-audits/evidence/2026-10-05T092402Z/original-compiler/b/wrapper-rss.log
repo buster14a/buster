@@ -1,0 +1,5 @@
+$ taskset -c 2 perf stat -x, -o /home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-uarch/b/wrapper.csv -e task-clock,cycles:u,instructions:u,branch-misses:u,page-faults,minor-faults,major-faults -- true
+exit=0
+--- stdout
+
+--- stderr
