@@ -2,6 +2,102 @@
 #include <buster/lib/integer.h>
 
 #if BUSTER_INCLUDE_TESTS
+// Shared bit-count contracts: the oracles use division/remainders rather than
+// the production builtin or shift loops. integer_bit_count_tests owns reduced
+// exhaustive domains and full-width boundaries; alignment research stays below.
+BUSTER_GLOBAL_LOCAL u8 integer_leading_zeroes_reference(u64 value, u8 width)
+{
+    u8 result = width;
+    while (value != 0)
+    {
+        value /= 2;
+        result -= 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u8 integer_trailing_zeroes_reference(u64 value, u8 width)
+{
+    u8 result = width;
+    if (value != 0)
+    {
+        result = 0;
+        while (value % 2 == 0)
+        {
+            value /= 2;
+            result += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void integer_bit_count_compare(UnitTestArguments* arguments, UnitTestResult* totals, u32 value32, u64 value64)
+{
+    UnitTestResult result = {0};
+    u8 leading32 = integer_leading_zeroes_reference(value32, 32);
+    u8 trailing32 = integer_trailing_zeroes_reference(value32, 32);
+    u8 leading64 = integer_leading_zeroes_reference(value64, 64);
+    u8 trailing64 = integer_trailing_zeroes_reference(value64, 64);
+    BUSTER_TEST(arguments, leading_zeroes_u32(value32) == leading32);
+    BUSTER_TEST(arguments, trailing_zeroes_u32(value32) == trailing32);
+    BUSTER_TEST(arguments, leading_zeroes_u64(value64) == leading64);
+    BUSTER_TEST(arguments, trailing_zeroes_u64(value64) == trailing64);
+    totals->test_count += result.test_count;
+    totals->succeeded_test_count += result.succeeded_test_count;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult integer_bit_count_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Independent literal controls also test the oracles, including the zero
+    // result that differs from the compiler builtin's undefined-zero contract.
+    BUSTER_TEST(arguments, integer_leading_zeroes_reference(0, 32) == 32);
+    BUSTER_TEST(arguments, integer_trailing_zeroes_reference(0, 32) == 32);
+    BUSTER_TEST(arguments, integer_leading_zeroes_reference(0, 64) == 64);
+    BUSTER_TEST(arguments, integer_trailing_zeroes_reference(0, 64) == 64);
+    BUSTER_TEST(arguments, integer_leading_zeroes_reference(1, 32) == 31);
+    BUSTER_TEST(arguments, integer_trailing_zeroes_reference(1, 32) == 0);
+    BUSTER_TEST(arguments, integer_leading_zeroes_reference(UINT32_C(0x80000000), 32) == 0);
+    BUSTER_TEST(arguments, integer_trailing_zeroes_reference(UINT32_C(0x80000000), 32) == 31);
+    BUSTER_TEST(arguments, integer_leading_zeroes_reference(UINT64_C(0x8000000000000000), 64) == 0);
+    BUSTER_TEST(arguments, integer_trailing_zeroes_reference(UINT64_C(0x8000000000000000), 64) == 63);
+    BUSTER_TEST(arguments, integer_leading_zeroes_reference(UINT64_MAX, 64) == 0);
+    BUSTER_TEST(arguments, integer_trailing_zeroes_reference(UINT64_MAX, 64) == 0);
+
+    // Exhaust every u16 value both low and at the top of each operand width.
+    // Widen before multiplying: 65535 * 2^16 / 2^48 fits u32 / u64 exactly.
+    for (u32 value = 0; value <= UINT16_MAX; value += 1)
+    {
+        integer_bit_count_compare(arguments, &result, value, value);
+        u32 high32 = value * UINT32_C(0x10000);
+        u64 high64 = (u64)value * UINT64_C(0x1000000000000);
+        integer_bit_count_compare(arguments, &result, high32, high64);
+    }
+
+    // Every full-width bit and its neighbours: one-hot, lower-bit run,
+    // separated endpoint, one-clear and adjacent-bit inputs. The cast gives
+    // the u32 helper its own 32-bit value, rather than a 64-bit count result.
+    u64 bit = 1;
+    for (u32 position = 0; position < 64; position += 1)
+    {
+        u64 values[] = {bit, bit - 1, bit + 1, UINT64_MAX ^ bit, bit + bit / 2};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+        {
+            integer_bit_count_compare(arguments, &result, (u32)values[index], values[index]);
+        }
+        if (position < 63)
+        {
+            bit *= 2;
+        }
+    }
+    u64 patterns[] = {0, UINT64_MAX, UINT64_MAX - 1, UINT64_C(0xAAAAAAAAAAAAAAAA), UINT64_C(0x5555555555555555), UINT64_C(0x8000000000000001)};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(patterns); index += 1)
+    {
+        integer_bit_count_compare(arguments, &result, (u32)patterns[index], patterns[index]);
+    }
+    return result;
+}
+
 // Test-only research kernel for link_objects' checked align/add recurrence.
 // integer_alignment_summary_then composes constant-size transfer functions;
 // integer_alignment_blocked reconstructs offsets and the first failing prefix.
@@ -441,6 +537,7 @@ UnitTestResult integer_tests(UnitTestArguments* arguments)
     valid = align_forward_checked(1, 8, 0);
     BUSTER_TEST(arguments, !valid && aligned == UINT64_MAX);
 
+    BUSTER_TEST_FIXTURE(arguments, integer_bit_count_tests);
     BUSTER_TEST_FIXTURE(arguments, integer_alignment_recurrence_tests);
 
     BUSTER_TEST(arguments, align_forward(9, 8) == 16);

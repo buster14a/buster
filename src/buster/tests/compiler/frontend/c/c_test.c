@@ -376,6 +376,120 @@ BUSTER_GLOBAL_LOCAL void c_test_append_source(char8* destination, u64 capacity, 
     *length += source.length;
 }
 
+BUSTER_GLOBAL_LOCAL void c_test_append_u32(char8* destination, u64 capacity, u64* length, u32 value)
+{
+    char8 digits[10];
+    u32 digit_count = 0;
+    do
+    {
+        digits[digit_count++] = (char8)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    BUSTER_CHECK(destination && length && *length <= capacity && digit_count <= capacity - *length);
+    while (digit_count)
+    {
+        destination[(*length)++] = digits[--digit_count];
+    }
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // 2,104 is the depth at which the pre-fix quadratic retention aborted; keep
+    // the fixture cheap enough for Debug and sanitizer builds on hosted CI.
+    u32 depths[] = {2104, 4096};
+    String8 nested_prefix = S8("static int id(int x){ return x; }\nint main(void){ return ");
+    String8 nested_open = S8("id(");
+    String8 nested_close = S8(")");
+    String8 nested_suffix = S8(";\n}\n");
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 depth = depths[depth_index];
+        u64 source_capacity = nested_prefix.length + (u64)depth * (nested_open.length + nested_close.length) + 1 +
+                              nested_suffix.length;
+        char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, nested_prefix);
+        for (u32 index = 0; index < depth; index += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, nested_open);
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("0"));
+        for (u32 index = 0; index < depth; index += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, nested_close);
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, nested_suffix);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                     S8("nested-calls.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+        {
+            BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
+        }
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 case_count = 65535;
+        String8 switch_prefix = S8("int f(int x){ switch (x) { ");
+        String8 switch_suffix = S8(" } return -1; }\n");
+        u64 source_capacity = switch_prefix.length + (u64)case_count * 40 + switch_suffix.length;
+        char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, switch_prefix);
+        for (u32 index = 0; index < case_count; index += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("case "));
+            c_test_append_u32(source_bytes, source_capacity, &source_length, index);
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8(":\n"));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("return 1;"));
+        c_test_append_source(source_bytes, source_capacity, &source_length, switch_suffix);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        Arena* lower_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1), .flags = {.no_pool = true}});
+        CIRLowerResult lowered =
+            lower_arena ? c_test_lower_source(lower_arena, (String8){.pointer = source_bytes, .length = source_length},
+                                              S8("wide-switch.c"), target_native, &preprocess, &parse)
+                        : (CIRLowerResult){0};
+        BUSTER_TEST(arguments, lower_arena != 0);
+        BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+        {
+            BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
+            IrFunction* function = c_test_find_ir_function(&lowered.program->modules[0], S8("f"));
+            if (BUSTER_REQUIRE(arguments, function != 0))
+            {
+                u32 switch_instruction_count = 0;
+                u32 switch_immediate_count = 0;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    if (instruction->opcode == IR_OPCODE_SWITCH)
+                    {
+                        switch_instruction_count += 1;
+                        switch_immediate_count += instruction->immediate_count;
+                    }
+                }
+                BUSTER_TEST(arguments, switch_instruction_count == 2);
+                BUSTER_TEST(arguments, switch_immediate_count == case_count);
+            }
+        }
+        if (lower_arena)
+        {
+            BUSTER_TEST(arguments, arena_destroy(lower_arena, 1));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 c_test_translate_source_scalar(String8 source, char8* translated)
 {
     u64 input = 0;
@@ -36974,6 +37088,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("array ? 3 : 4"), 3}, {S8("!array"), 0}, {S8("!callee"), 0},
         {S8("(_Bool)zero"), 0}, {S8("(_Bool)nonzero"), 1}, {S8("(_Bool)array"), 1},
         {S8("zero + 1"), 1}, {S8("nonzero != 0"), 1},
+        {S8("exact_object"), 29}, {S8("*(const int *)&exact_object"), 29},
+        {S8("((const int *)&exact_object)[0]"), 29}, {S8("*(ConstInt *)&exact_object"), 29},
+        {S8("aligned_object"), 31}, {S8("*(const int *)&aligned_object"), 31},
         {S8("null_object == 0"), 1}, {S8("address_object == &object"), 1},
         {S8("array && 1"), 1}, {S8("array || 0"), 1},
         {S8("(1 ? -1 : wide_input > 0) > 0"), 0},
@@ -36999,11 +37116,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("*(const int *volatile *)&null_object"), 0}, {S8("*(const int *_Atomic *)&null_object"), 0},
         {S8("!effect()"), 0}, {S8("effect() ? 7 : 9"), 0},
         {S8("0 ? effect() : 7"), 1}, {S8("!zero"), 1}, {S8("!array"), 1},
+        // A whole-object initializer cannot certify a different access or
+        // byte offset. These conservative queries must not perform the read.
+        {S8("((const int *)&wide_object)[0]"), 0}, {S8("((const int *)&wide_object)[1]"), 0},
+        {S8("*(const short *)&wide_object"), 0}, {S8("*(const unsigned long long *)&wide_object"), 0},
+        {S8("*(const int *)&record_object.bits"), 0}, {S8("((const int *)&exact_object)[1]"), 0},
+        {S8("*(const int *)&float_object"), 0},
+        {S8("*(const long *)&wide_object"), 0},
     };
     enum { CONSTANT_COUNT = BUSTER_ARRAY_LENGTH(constants), PREDICATE_COUNT = BUSTER_ARRAY_LENGTH(predicates) };
     TemporalArena sources = scratch_begin(&arguments->arena, 1);
     String8 definitions[CONSTANT_COUNT + PREDICATE_COUNT + 1];
     definitions[0] = S8("static const int zero = 0, nonzero = -7;\n"
+        "static const int exact_object = 29; typedef const int ConstInt;\n"
+        "static const long long wide_object = 0x1122334455667788LL;\n"
+        "typedef int AlignedInt __attribute__((aligned(16))); static const AlignedInt aligned_object = 31;\n"
+        "static const float float_object = 1.25f;\n"
+        "struct ReadOnlyRecord { long long bits; int tail; };\n"
+        "static const struct ReadOnlyRecord record_object = {0x1122334455667788LL, 19};\n"
         "static const double fzero = -0.0, fraction = 0.25;\n"
         // Binary128 scalar storage initialization is still refused. Exercise
         // its literal truth here and pin that refusal separately below.
@@ -37201,6 +37331,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         S8("static int *const u = 0; static int bad = !*(int *volatile *)&u;"),
         S8("struct S { int x; }; static struct S u; static int bad = !u;"),
         S8("struct S { int x; }; static struct S u; static int bad = u ? 3 : 4;"),
+        S8("static const long long k = 0x1122334455667788LL; static int bad = ((const int *)&k)[0];"),
+        S8("static const long long k = 0x1122334455667788LL; static int bad = ((const int *)&k)[1];"),
+        S8("static const long long k = 0x1122334455667788LL; static int bad = *(const short *)&k;"),
+        S8("static const long long k = 0x1122334455667788LL; static unsigned long long bad = *(const unsigned long long *)&k;"),
+        S8("struct S { long long bits; int tail; }; static const struct S k = {0x1122334455667788LL, 19}; static int bad = *(const int *)&k.bits;"),
+        S8("static const int k = 29; static int bad = ((const int *)&k)[1];"),
+        S8("static const float k = 1.25f; static int bad = *(const int *)&k;"),
+        S8("static const long long k = 29; static long bad = *(const long *)&k;"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
@@ -37215,6 +37353,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST(arguments, !tokens.diagnostic_count);
             BUSTER_TEST_RAW(arguments, parsed.diagnostic_count + lowered.diagnostic_count != 0, invalid[index]);
+            BUSTER_TEST_RAW(arguments, !lowered.canonical_ir_certified, invalid[index]);
             scratch_end(temporary);
         }
     }
@@ -38525,6 +38664,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_tls);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
+    BUSTER_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
