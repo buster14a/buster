@@ -2860,6 +2860,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
     return result;
 }
 
+// A definition may omit a parameter's name (C23 N3007; GCC and Clang accept it
+// before C23 and diagnose only under -pedantic). The unnamed parameter binds
+// nothing but still occupies its ABI slot, so every named parameter around it
+// must read the caller's value, for registers, vector registers, by-value
+// aggregates and the stack alike (#2712).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unnamed_parameter_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "struct pair { long a; long b; };\n"
+        "struct big { long v[5]; };\n"
+        "int all_unnamed(int, int) { return 7; }\n"
+        "int mixed(int a, int, int c) { return a + c; }\n"
+        "int trailing(int a, int) { return a; }\n"
+        "int leading(int, int b) { return b; }\n"
+        "double floating(double, double x, double) { return x; }\n"
+        "int by_value(struct pair, int k, struct pair p) { return k + (int)p.b; }\n"
+        "int by_memory(struct big, int k, struct big q) { return k + (int)q.v[4]; }\n"
+        "long on_stack(long, long, long, long, long, long, long, long k, long, long m) { return k * 10 + m; }\n"
+        "int variadic(int a, int, ...) { return a; }\n"
+        "int pointer(int (*)(int, int), int a) { return a; }\n"
+        "int main(void) {\n"
+        "    struct pair p1 = {1, 2}, p2 = {3, 40};\n"
+        "    struct big b1 = {{1, 2, 3, 4, 5}}, b2 = {{6, 7, 8, 9, 50}};\n"
+        "    int failure = 0;\n"
+        "    failure += all_unnamed(1, 2) != 7;\n"
+        "    failure += mixed(10, 99, 5) != 15;\n"
+        "    failure += trailing(6, 77) != 6;\n"
+        "    failure += leading(88, 9) != 9;\n"
+        "    failure += floating(1.5, 2.5, 3.5) != 2.5;\n"
+        "    failure += by_value(p1, 4, p2) != 44;\n"
+        "    failure += by_memory(b1, 5, b2) != 55;\n"
+        "    failure += on_stack(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) != 90;\n"
+        "    failure += variadic(3, 4, 5, 6.0, 7) != 3;\n"
+        "    failure += pointer(all_unnamed, 12) != 12;\n"
+        "    return failure;\n"
+        "}\n");
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("unnamed-parameter-definitions"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("unnamed-parameter-definitions-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
+                                         S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("unnamed parameters {S8} {S8} {S8}: {S8}"),
+                                      dialects[dialect], modes[mode], frontends[form], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("unnamed parameters runtime {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                    dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -39139,6 +39224,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unnamed_parameter_definitions);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);

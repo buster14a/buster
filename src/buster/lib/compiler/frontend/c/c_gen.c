@@ -54819,6 +54819,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         for (u32 parameter_index = 0; parameter_index < signature.parameter_count; parameter_index += 1)
         {
             CParameter parameter = signature.parameters[parameter_index];
+            // An unnamed parameter of a definition (C23 N3007; a common
+            // extension before it) has no entity to bind: the parser leaves
+            // its name empty and its entity invalid. It still occupies its ABI
+            // slot through signature.parameter_types, but the body can never
+            // name it, so it needs no local and no ARGUMENT load.
+            if (!parameter.name.length)
+            {
+                continue;
+            }
             IrTypeId value_type = signature.parameter_types[parameter_index];
             IrTypeId object_type = parameter.type.value < parse.type_count ? c_type_ir_map[parameter.type.value] : IR_TYPE_ID_INVALID;
             CType* parameter_type = c_type_from_id(&builder.parse, parameter.type);
