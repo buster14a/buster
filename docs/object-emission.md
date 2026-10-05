@@ -70,6 +70,24 @@ adversarial objects. Retire the oracle when an intended ELF output change
 lands (for example [#1288](https://github.com/buster14a/buster/issues/1288)'s
 empty-section removal), replacing byte comparison with a read-back comparison.
 
+## ELF64 reader refusal diagnostics
+
+`object_read_elf64` reports an unsupported relocation through
+`ObjectFile.diagnostic` together with `OBJECT_ERROR_UNSUPPORTED_TARGET`.
+The message includes the architecture and unsigned ABI type number.
+AArch64 short test/conditional branches (TSTBR14 and CONDBR19) and the
+TLSDESC families also include their ABI names. Unknown AArch64 types keep
+the architecture and numeric type; existing x86-64 messages retain their
+wording. The relocation-kind mapping remains the support authority, including
+the supported AArch64 GOT page and low-offset forms. Offset and
+bounds validation retain their existing refusal behavior.
+
+`compiler_driver_archive_test_aarch64_refusal_diagnostics` specifies raw
+ELF bytes independently of the writer, exercises selected and unused members
+through both archive extraction paths, and checks direct/lazy driver records
+and output preservation. On native Linux AArch64, a configured host assembler
+independently produces the conditional-branch refusal input.
+
 ## The work ledger: `ObjectWriteStatistics`
 
 Every `ObjectArtifact` carries `ObjectWriteStatistics`, counted where the work
