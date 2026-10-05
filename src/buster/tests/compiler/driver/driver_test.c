@@ -27674,6 +27674,36 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_conditional_operand_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The prepared-control-expression lookups answer from token-indexed
+    // tables; a wrong answer repeats or drops a side effect, so run it.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_prepared_control_index_path"), false);
+    String8 c_prepared_control_index_path = buster_test_temporary_path(arguments->arena, S8("buster-c-prepared-control-index"), S8(""));
+    String8 c_prepared_control_index_command_line[] = {
+        S8("-o"),
+        c_prepared_control_index_path,
+        S8("tests/basic_c_prepared_control_index.c"),
+    };
+    CompilerDriverResult c_prepared_control_index = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepared_control_index_command_line)));
+    BUSTER_TEST(arguments, c_prepared_control_index.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_prepared_control_index.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_prepared_control_index_arguments[] = {
+            c_prepared_control_index_path,
+        };
+        ProcessSpawnResult c_prepared_control_index_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepared_control_index_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true, .search_path = true,
+                             });
+        BUSTER_TEST(arguments, c_prepared_control_index_spawn.handle != 0);
+        if (c_prepared_control_index_spawn.handle)
+        {
+            ProcessWaitResult c_prepared_control_index_wait = os_process_wait_sync(arguments->arena, c_prepared_control_index_spawn);
+            BUSTER_TEST(arguments, c_prepared_control_index_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // A conditional assignment yields the assigned member's type.  Keep the
     // cJSON_SetBoolValue shape inline with its comparison so type prediction
     // cannot retain the pointer type of the object operand.
