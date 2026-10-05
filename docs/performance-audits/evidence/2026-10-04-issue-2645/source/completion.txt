@@ -1,0 +1,1 @@
+supported_campaign=PASS; inspect explicit unsupported configuration diagnostics, including hot_reload full-DWARF verifier

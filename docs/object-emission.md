@@ -149,3 +149,68 @@ and thread-local relocations still require an external runtime and are refused.
 The registered `object_test_executable_sections` checks data and BSS through
 PC-relative and absolute references on x86-64/AArch64, repeated updates,
 over-page alignment and Linux, Windows and macOS mapping permission queries.
+
+## AArch64 textual assembly preservation
+
+Issue #1280 requires each printed instruction to retain every field that
+distinguishes its original 32-bit encoding. A word outside the printer's exact
+mnemonic subset may use the existing `.word 0x...` spelling. Expanding the
+mnemonic subset is optional; changing an instruction's bytes is not.
+
+The registered `object_test_aarch64_printer_fields` fixture fixes 92 literal
+instruction words and their expected mnemonic or raw-word lines across Linux,
+Android, Windows and macOS AArch64 targets. The neighboring encodings cover
+system operations, literal and unsigned loads, FP/vector memory, pairs, shifts,
+register 31, reserved widths and immediate-shift bits without consulting the
+production decoder. Seven literal-load cases retain their original self-targeting
+word after an independent fixed `B +4` prefix; that branch establishes the target
+label without a production decoder or relocation oracle.
+
+The registered `compiler_driver_aarch64_printer_roundtrip` independently
+assembles the original literal words and the printed assembly, extracts
+`.text` directly from their ELF bytes and compares both with the fixed original
+bytes (99 words including the seven label seeds). It also compiles a C corpus through both `-c` and `-S` for all four
+allocators and both frontend forms, then assembles the original `-S` output
+and compares its `.text` with the original `-c` output. The corpus exercises
+fences, compare-exchange failure, signed extensions, HFA calls, scalar and vector
+FP memory, and variadic FP retrieval. Linux and macOS require an available
+Clang or native AArch64 GNU assembler observer; other desktop hosts report
+observer unavailability explicitly. Mobile lanes retain the literal field
+fixture.
+
+These are regression oracles. Their presence alone does not establish that the
+current printer satisfies the contract; qualification is tied to an actual
+reviewed source head and hosted results. Observer admission stops after a failed
+group cleanup, retained reservation or lost ownership.
+
+The printer restricts system-register and bit-field aliases to their exact
+supported encodings, and declines ignored SIMD/opcode/shift/reserved-width
+fields. GPR data operands spell register 31 as ZR; memory and immediate-add
+base operands retain SP/WSP. GPR pairs with non-temporal modes or assembler-
+refused register overlaps also stay raw. The separate
+`object_test_aarch64_printer_boundaries` pins nine original words for WSP,
+nonzero immediate shifts, CSET-to-ZR and pair-overlap neighbors. Its original
+44-byte host assembly control includes those words after NOP/RET; the original
+92 cases and 99-word causal corpus stay unchanged.
+
+The bounded partial #1281 repair suppresses type, label and size emission only
+for the private local zero-value, zero-size FUNCTION anchor named `.text` in
+the default AArch64 ELF text section. It leaves every relocation reference
+intact: the independent assembler owns that section-base symbol. Public,
+ordinary, undefined, nondefault-section, differently attributed and other-
+target symbols retain their prior emission. The registered
+`object_test_aarch64_text_anchor` fixes these positive and negative boundaries.
+
+The host anchor control first assembles its original literal source, then
+assembles the printer's unmodified output. Its independent ELF symbol/RELA
+reader requires a local text SECTION symbol, the original ordinary local
+zero-size FUNCTION, a public 44-byte FUNCTION, and a public 16-byte data OBJECT.
+Two fixed AArch64 ABS64 relocations at offsets 0 and 8 retain addend 4 and
+their section-base/public-function identities. The same original text bytes
+must survive both paths. This control does not use the production object
+reader, writer or symbol planner as its metadata oracle.
+
+#1281 remains open: this slice does not qualify its x86/debug-anchor,
+constructor priority, weak/hidden binding, PLT/TLS, assembly-dialect or own-
+assembler acceptance rows. Actual qualification still requires source review
+and fresh hosted results at the published repair head.

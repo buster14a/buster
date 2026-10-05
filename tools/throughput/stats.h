@@ -57,6 +57,7 @@ static double tp_median_sorted(double const* values, unsigned count)
     return result;
 }
 
+#ifndef TP_MEDIAN_ONLY
 /* P[Binomial(n, 1/2) >= successes], including ties as non-successes.
  * Powers of two are exact and n <= 256 keeps all terms representable.
  */
@@ -153,4 +154,5 @@ static TpAssessment tp_assess(double const* baseline, double const* candidate, u
     }
     return result;
 }
+#endif /* TP_MEDIAN_ONLY */
 #endif
