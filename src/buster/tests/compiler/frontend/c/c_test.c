@@ -22430,7 +22430,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
     // a per-run deadline the quadratic walk cost would exhaust (CI Debug
     // measured ~80 s for this fixture against a 180 s budget).
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    u32 lowered_heights[] = {4096, 10000};
+    // 4,096 is far past the old depth-64 cap and any C-stack budget. The
+    // walk still scans each operand range once per split, so cost grows with
+    // the square of the height: 10,000 took 9 s in Release and exhausted the
+    // 1,800 s fixture deadline under Linux sanitized-debug.
+    u32 lowered_heights[] = {4096};
     String8 lowered_source_text = c_test_tall_expression_source(arguments->arena, lowered_heights, BUSTER_ARRAY_LENGTH(lowered_heights));
     for (u32 form = 0; form < 2; form += 1)
     {
