@@ -2796,6 +2796,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(void) { return ({ static int a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("int f(void) { return ({ volatile int a = 3, b = 4; a += 1, b += 2, a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("typedef int T; int f(void) { return ({ int T = 2; int x = 3; T += 4, x += 5, T + x; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("typedef int T; int f(void) { return ({ T a = 2; }); }\n"), false, false, S8("void value not ignored"), S8("-std=gnu17")},
+        {S8("typedef int T; int f(void) { return ({ { int T = 2; T; } T a = 3; }); }\n"), false, false, S8("void value not ignored"), S8("-std=gnu17")},
+        {S8("typedef int T; int f(void) { return ({ const int T = 2; T += 1; T; }); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=gnu17")},
         {S8("int f(void) { return ({ int a = 5, b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("int f(void) { return ({ int a, b; a = 5; b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("int f(void) { int x = 4; return ({ int *p = &x, v = 2; *p + v; }); }\n"), true, false, {0}, S8("-std=gnu17")},
@@ -3141,7 +3144,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
                 BUSTER_TEST(arguments, object_after.values[IR_CONSTRUCTION_TYPE_APPENDS] > ir_after.values[IR_CONSTRUCTION_TYPE_APPENDS]);
             }
 #endif
-            BUSTER_TEST(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[index].valid);
+            BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[index].valid,
+                            string_format(arena, S8("source={S8}\nsyntax={S8}"), cases[index].source, syntax.diagnostic));
             BUSTER_TEST(arguments, syntax.error == object.error);
             BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostic, object.diagnostic),
                             string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),

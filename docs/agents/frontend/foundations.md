@@ -101,6 +101,10 @@ uninitialized, pointer/scalar, discarded and exactly-once call initializers,
 alongside ordinary/nested blocks, typedefs, typeof and comma/loop sequencing,
 under both frontend forms and all four allocators at O0/O2. Syntax/object rows
 retain those accepted declarations and a rejected const-store neighbor.
+The semantic type query classifies the final statement in its own parsed block
+scope, so a local value shadows an outer typedef. A final declaration still
+produces void; an expired nested shadow does not change the enclosing typedef,
+and a const-qualified shadow remains unmodifiable.
 
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
