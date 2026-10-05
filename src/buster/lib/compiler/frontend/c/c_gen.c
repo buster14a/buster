@@ -54940,19 +54940,23 @@ bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclarat
                        .layout = {.resolved = true, .size = 4, .alignment = 4}};
         IrProgram program = {.types = {.types = &type, .count = 1, .capacity = 1}};
         IrModule module = {0};
-        IrBlock block = {.id = {.value = 0}, .sealed = true};
+        // An empty block carries no terminator for CFG discovery to read.
+        IrBlock block = {.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .id = {.value = 0}, .sealed = true};
         IrValue values[4] = {
             {.canonical_type = {.value = 0}, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_PLACE},
             {.canonical_type = {.value = 0}, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE},
         };
         IrFunction function = {.blocks = &block, .block_count = 1, .block_capacity = 1,
                                .values = values, .value_count = 2, .value_capacity = BUSTER_ARRAY_LENGTH(values), .entry = block.id};
-        CIrSsaLocal local = {.place = {.value = 0}, .type = {.value = 0}, .first_event = UINT32_MAX, .last_event = UINT32_MAX};
+        CIrSsaLocal locals[2] = {
+            {.place = {.value = 0}, .type = {.value = 0}, .first_event = UINT32_MAX, .last_event = UINT32_MAX},
+            {.place = {.value = 0}, .type = {.value = 0}, .first_event = UINT32_MAX, .last_event = UINT32_MAX},
+        };
         CIrSsaSlot slots[8] = {0};
         u32 slot_index = c_ir_ssa_hash(1, 0, BUSTER_ARRAY_LENGTH(slots) - 1);
         slots[slot_index] = (CIrSsaSlot){.block_plus_one = 1, .value = {.value = 1}};
         u32 slot_indices[4] = {slot_index};
-        CIrDirectSsa ssa = {.locals = &local, .local_count = 1, .local_capacity = 1,
+        CIrDirectSsa ssa = {.locals = locals, .local_count = BUSTER_ARRAY_LENGTH(locals), .local_capacity = BUSTER_ARRAY_LENGTH(locals),
                            .slots = slots, .slot_indices = slot_indices, .slot_count = 1, .slot_capacity = BUSTER_ARRAY_LENGTH(slots)};
         CIntegerIrBuilder builder = {.arena = scratch, .scratch_arena = scratch, .temporary_arena = scratch,
                                      .program = &program, .module = &module, .function = &function, .current_block = block.id,
@@ -54964,7 +54968,7 @@ bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclarat
                 refused = c_ir_ssa_event(&builder, 0, IR_OPCODE_LOAD, IR_VALUE_ID_INVALID, (IrSourceRange){0}) == UINT32_MAX;
                 break;
             case C_TEST_IR_SCRATCH_READS:
-                refused = c_ir_ssa_read(&builder, &local, (IrSourceRange){0}, false).value == IR_ID_UNDERLYING_INVALID;
+                refused = c_ir_ssa_read(&builder, locals, (IrSourceRange){0}, false).value == IR_ID_UNDERLYING_INVALID;
                 break;
             case C_TEST_IR_SCRATCH_BODY_TASKS:
             {
@@ -54976,7 +54980,7 @@ bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclarat
                 // A full table asks for growth when a new key arrives; the
                 // refusal reads as an unresolved current value, never a carve.
                 ssa.slot_count = 3;
-                refused = c_ir_ssa_current(&builder, 0, 5).value == IR_ID_UNDERLYING_INVALID && ssa.scratch_exhausted;
+                refused = c_ir_ssa_current(&builder, 0, 1).value == IR_ID_UNDERLYING_INVALID && ssa.scratch_exhausted;
                 break;
             case C_TEST_IR_SCRATCH_SSA_PARAMETERS:
             {
