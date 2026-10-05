@@ -1483,7 +1483,7 @@ BUSTER_GLOBAL_LOCAL u64 ui_scale_event_list_digest(UI_EventList* list, u64* coun
     *owned = 0;
     for (UI_EventNode* node = list->first; node; node = node->next)
     {
-        digest = ui_scale_digest_add(digest, node->v.kind);
+        digest = ui_scale_digest_add(digest, (u64)node->v.kind);
         digest = ui_scale_digest_add(digest, (u64)node->v.key);
         digest = ui_scale_digest_add(digest, node->v.owner_key);
         digest = ui_scale_digest_add(digest, node->v.owner_assigned);
