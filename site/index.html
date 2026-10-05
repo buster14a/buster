@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Buster: a personal monorepo of native applications, shared C components, development tools, and experiments.">
+    <meta name="color-scheme" content="dark light">
+    <title>Buster — applications, components, and tools</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+        <a class="wordmark" href="./" aria-label="Buster home">buster<span aria-hidden="true">.</span></a>
+        <nav aria-label="Main navigation">
+            <a href="#projects">Projects</a>
+            <a href="#start">Get started</a>
+            <a href="https://github.com/buster14a/buster">Source on GitHub</a>
+        </nav>
+    </header>
+    <main id="main">
+        <section class="hero" aria-labelledby="headline">
+            <p class="eyebrow">Native software · Shared C components</p>
+            <h1 id="headline">One monorepo.<br>More than a compiler.</h1>
+            <p class="lede">Buster brings together applications, reusable components,
+                development tools, and experiments. Its from-scratch C compiler and
+                toolchain is one part of the collection.</p>
+            <div class="actions">
+                <a class="button" href="https://github.com/buster14a/buster/blob/main/PROJECTS.md">Explore the project catalogue</a>
+                <a href="https://github.com/buster14a/buster/blob/main/docs/agents/build.md">Read the build guide →</a>
+            </div>
+        </section>
+        <section id="projects" aria-labelledby="projects-title">
+            <div class="section-heading">
+                <p class="eyebrow">Find your starting point</p>
+                <h2 id="projects-title">Projects and components</h2>
+                <p>The linked guides describe current capabilities and limitations.
+                    Source in the tree is not a promise of a packaged or supported product.</p>
+            </div>
+            <div class="cards">
+                <article>
+                    <p class="eyebrow">Compiler &amp; toolchain</p>
+                    <h3><a href="https://github.com/buster14a/buster/blob/main/docs/projects/compiler.md">From C to an artifact</a></h3>
+                    <p>C is the active frontend. The historically named <code>ide</code>
+                        target is a headless compiler, test runner, benchmark driver,
+                        and metadata tool — not a graphical IDE.</p>
+                </article>
+                <article>
+                    <p class="eyebrow">Native application</p>
+                    <h3><a href="https://github.com/buster14a/buster/blob/main/docs/projects/image-browser.md">Image browser &amp; inspector</a></h3>
+                    <p>An explicit opt-in Linux x86-64/XCB application using the CPU
+                        rendering path. It does not depend on the compiler.</p>
+                </article>
+                <article>
+                    <p class="eyebrow">Shared components</p>
+                    <h3><a href="https://github.com/buster14a/buster/blob/main/docs/projects/foundation.md">Foundation &amp; platform</a></h3>
+                    <p>Memory, strings, numeric helpers, and SIMD, alongside
+                        <a href="https://github.com/buster14a/buster/blob/main/docs/projects/platform.md">OS, file, and process services</a>.
+                        These are shared components, not a separately packaged SDK.</p>
+                </article>
+                <article>
+                    <p class="eyebrow">Images &amp; rendering</p>
+                    <h3><a href="https://github.com/buster14a/buster/blob/main/docs/projects/media.md">Media &amp; graphics</a></h3>
+                    <p>Bounded in-memory image recognition, probing, and decoding, with
+                        separate <a href="https://github.com/buster14a/buster/blob/main/docs/projects/graphics-ui.md">graphics and UI components</a>.
+                        The guides define each integration boundary.</p>
+                </article>
+            </div>
+            <p class="section-note">Looking for disk-image tools, benchmark infrastructure, or other experiments?
+                Start with the <a href="https://github.com/buster14a/buster/blob/main/PROJECTS.md">complete catalogue</a>.</p>
+        </section>
+        <section id="start" class="start" aria-labelledby="start-title">
+            <p class="eyebrow">Work from the source of truth</p>
+            <h2 id="start-title">Build, test, contribute.</h2>
+            <p>Documentation stays with the code on GitHub. This site is an entry point,
+                not a second copy of the manuals or a browser-based compiler.</p>
+            <div class="guide-links">
+                <a href="https://github.com/buster14a/buster/blob/main/docs/agents/build.md">Build instructions →</a>
+                <a href="https://github.com/buster14a/buster/blob/main/docs/agents/testing.md">Tests and CI →</a>
+                <a href="https://github.com/buster14a/buster/blob/main/AGENTS.md">Contributor guidance →</a>
+                <a href="https://github.com/buster14a/buster/issues">Issues and ongoing work →</a>
+            </div>
+        </section>
+    </main>
+    <footer>
+        <p>Buster · A personal software monorepo.</p>
+        <p>First-party licensing is not yet selected. See the
+            <a href="https://github.com/buster14a/buster/blob/main/LICENSES/README.md">license record</a>
+            and <a href="https://github.com/buster14a/buster/blob/main/THIRD_PARTY_NOTICES.md">third-party notices</a>.
+            Public source access does not imply a license grant.</p>
+        <p><a href="https://github.com/buster14a/buster/blob/main/docs/github-pages.md">About this site and its deployment</a></p>
+    </footer>
+</body>
+</html>

@@ -169,7 +169,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_operation(u32 operation)
 {
     bool public_operation = operation == BQ_OP_CAPABILITIES || operation == BQ_OP_SUBMIT ||
                             operation == BQ_OP_SUBMIT_EXCLUSIVE || operation == BQ_OP_STATUS ||
-                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT;
+                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT ||
+                            (operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH);
     BqError error = public_operation ? BQ_OK : BQ_BAD_REQUEST;
     return error;
 }
@@ -198,6 +199,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
             error = !bq_request_valid(&request) ? BQ_BAD_REQUEST : !bq_recipe_real(&request) ? BQ_UNSUPPORTED :
                     !string_equal(bq_field(&request, 0), S8(BQ_EXPORT_PRINCIPAL)) ? BQ_EXPORT_UNAUTHORIZED : BQ_OK;
         }
+    }
+    if (error == BQ_OK && operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
+    {
+        u8 const* arguments = input + BQ_CONTROL_HEADER;
+        bool valid = length >= 72 && bq_native_hex(arguments) && bq_u64(arguments + 64) >= 64 &&
+                     bq_u64(arguments + 64) <= BQ_NATIVE_PROGRAM_CAP &&
+                     (operation == BQ_OP_NATIVE_WRITE ? length > 80 : length == 72);
+        if (valid && operation == BQ_OP_NATIVE_WRITE)
+            valid = bq_u64(arguments + 72) <= bq_u64(arguments + 64) &&
+                    length - 80 <= bq_u64(arguments + 64) - bq_u64(arguments + 72);
+        if (!valid) error = BQ_BAD_REQUEST;
     }
     if (error == BQ_OK && operation == BQ_OP_EXPORT)
     {
@@ -335,7 +347,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
     if (request_size >= BQ_CONTROL_HEADER && request_size <= BQ_CONTROL_CAP &&
         bq_transport_socket_path(socket_path, (char[BQ_PATH_CAP + 1]){0}))
     {
-        client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        /* A blocking connect waits without limit while the synchronous daemon
+         * runs a job and its backlog is full. Nothing has been sent at that
+         * point, so report busy at once; the caller may retry safely. */
+        client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
         if (client >= 0)
         {
             char path[BQ_PATH_CAP + 1];
@@ -345,8 +360,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
             address.sun_family = AF_UNIX;
             memcpy(address.sun_path, path, length + 1);
             socklen_t address_size = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1);
-            if (connect(client, (struct sockaddr*)&address, address_size) == 0 &&
-                bq_transport_send(client, request, request_size) == BQ_OK)
+            int connected = connect(client, (struct sockaddr*)&address, address_size);
+            bool backlog_full = connected != 0 && errno == EAGAIN;
+            if (connected == 0 && bq_transport_send(client, request, request_size) == BQ_OK)
             {
                 u32 received = 0;
                 BqError receive_error = bq_transport_receive_timeout(client, response->bytes, &received,
@@ -370,7 +386,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
             }
             else
             {
-                error = BQ_IO;
+                error = backlog_full ? BQ_BUSY : BQ_IO;
             }
             close(client);
             client = -1;
@@ -503,7 +519,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_dispatch(BqQueue* queue, u8 const* requ
     else if (error == BQ_OK)
     {
         error = bq_dispatch(queue, request, size, response);
-        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS)
+        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS &&
+            !(operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH))
         {
             /* Public receipts do not reveal global queue occupancy/sequence. */
             memset(response->bytes + BQ_CONTROL_HEADER + 20, 0, 8);
