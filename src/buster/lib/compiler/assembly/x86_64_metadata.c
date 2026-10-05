@@ -3973,19 +3973,37 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_operand_width(BusterX86Metadata
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_data_operand_width(BusterX86MetadataPhysicalBinding* bindings, u32 binding_count)
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_data_operand_width(BusterX86MetadataForm form,
+    BusterX86MetadataPhysicalBinding* bindings, u32 binding_count)
 {
-    for (u32 index = 0; index < binding_count; index += 1)
+    bool port_io = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("IN")) ||
+                   buster_x86_metadata_string_input_equal(form.iclass.offset, S8("OUT"));
+    u16 result = 0;
+    bool selected = false;
+    for (u32 index = 0; !selected && index < binding_count; index += 1)
     {
-        BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
-        if (physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
-            physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        if (port_io)
         {
-            u16 width = buster_x86_metadata_emit_operand_width(physical);
-            if (width == 16 || width == 32 || width == 64) return width;
+            // DX is a 16-bit port selector, independently of transferred data.
+            // Only the validated accumulator can determine an I/O size prefix.
+            BusterX86MetadataOperand metadata = bindings[index].metadata;
+            selected = buster_x86_metadata_string_input_equal(metadata.atom.offset, S8("XED_REG_AL")) ||
+                       buster_x86_metadata_string_input_equal(metadata.atom.offset, S8("OeAX()"));
+            if (selected) result = buster_x86_metadata_emit_operand_width(bindings[index].physical);
+        }
+        else
+        {
+            BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
+            if (physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+                physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            {
+                u16 width = buster_x86_metadata_emit_operand_width(physical);
+                selected = width == 16 || width == 32 || width == 64;
+                if (selected) result = width;
+            }
         }
     }
-    return 0;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_variable_width(u16 data_width, u8 form_width, bool immediate)
@@ -4683,11 +4701,13 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source(BusterX86
     // suffix heuristics.
     if (metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED)
         return BUSTER_X86_METADATA_FIELD_SOURCE_FIXED;
-    // MOV moffs uses OrAX() for its hidden accumulator operand.  The atom is
-    // a fixed architectural choice even though the generated field source is
-    // REG; keep this exception closed to that one hidden register spelling.
+    // MOV moffs uses OrAX() and port I/O uses OeAX() for hidden accumulator
+    // operands. These fixed architectural choices have no ModRM REG field,
+    // even though the generated field source is REG.
     u8 result;
-    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible && buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")))
+    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible &&
+        (buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")) ||
+         buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OeAX()"))))
     {
         result = BUSTER_X86_METADATA_FIELD_SOURCE_FIXED;
     }
@@ -4994,14 +5014,16 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_prefix(BusterX86MetadataS
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX86MetadataOperand metadata,
                                                                           BusterX86MetadataPhysicalOperand physical)
 {
+    bool accumulator16_32 = buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OeAX()"));
     if (metadata.field_source != BUSTER_X86_METADATA_FIELD_SOURCE_FIXED &&
-        !buster_x86_metadata_emit_atom_contains(metadata.atom, S8("XED_REG_")))
+        !buster_x86_metadata_emit_atom_contains(metadata.atom, S8("XED_REG_")) && !accumulator16_32)
         return true;
     if (physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) return false;
-    if (buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")))
+    if (accumulator16_32 || buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")))
     {
         return physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.index == 0 &&
-               (physical.reg.width == 16 || physical.reg.width == 32 || physical.reg.width == 64) && !physical.reg.high_byte;
+               (physical.reg.width == 16 || physical.reg.width == 32 || (!accumulator16_32 && physical.reg.width == 64)) &&
+               !physical.reg.high_byte;
     }
     u8 expected_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN;
     u16 expected_index = UINT16_MAX;
@@ -7005,7 +7027,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     u8 mandatory_prefix = (u8)form.mandatory_prefix;
     if (pattern.mandatory_prefix) mandatory_prefix = (u8)pattern.mandatory_prefix;
     u8 pp = buster_x86_metadata_emit_mandatory_pp(mandatory_prefix);
-    u16 data_width = buster_x86_metadata_emit_data_operand_width(bindings, binding_count);
+    u16 data_width = buster_x86_metadata_emit_data_operand_width(form, bindings, binding_count);
     // FISTTP's m16 form belongs to the SSE3 ISA set, but its DF encoding
     // still uses the architectural 16-bit field without an operand-size
     // override.  Treat it like the other x87 fixed-width rows when deriving
@@ -14183,6 +14205,12 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_register_view_resolve(Bust
     {
         *physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR;
         *physical_width_flags = BUSTER_X86_METADATA_PHYSICAL_WIDTH_8;
+    }
+    else if (buster_x86_metadata_pool_string_equal_literal(operand.atom_offset, S8("OeAX()")))
+    {
+        // The imported port-I/O accumulator atom selects AX/EAX, never RAX.
+        *physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR;
+        *physical_width_flags = BUSTER_X86_METADATA_PHYSICAL_WIDTH_16 | BUSTER_X86_METADATA_PHYSICAL_WIDTH_32;
     }
     else if (buster_x86_metadata_pool_string_has_prefix(operand.atom_offset, S8("GPR16")))
     {

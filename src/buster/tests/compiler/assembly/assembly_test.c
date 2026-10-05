@@ -2890,6 +2890,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_data_widths(UnitTestArgume
     return result;
 }
 
+// Explicit port operands must match the hidden XED accumulator/port topology.
+// Size prefixes describe transferred data independently of DX's 16-bit width.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_port_suffixes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct AssemblyPortSuffixCase
+    {
+        String8 source[2];
+        u8 byte_count;
+        u8 bytes[3];
+    } const cases[] = {
+        {{S8("in al,dx\n"), S8("inb %dx,%al\n")}, 1, {0xec}},
+        {{S8("out dx,al\n"), S8("outb %al,%dx\n")}, 1, {0xee}},
+        {{S8("in al,0\n"), S8("inb $0,%al\n")}, 2, {0xe4, 0x00}},
+        {{S8("out 0,al\n"), S8("outb %al,$0\n")}, 2, {0xe6, 0x00}},
+        {{S8("in al,255\n"), S8("inb $255,%al\n")}, 2, {0xe4, 0xff}},
+        {{S8("out 255,al\n"), S8("outb %al,$255\n")}, 2, {0xe6, 0xff}},
+        {{S8("in ax,dx\n"), S8("inw %dx,%ax\n")}, 2, {0x66, 0xed}},
+        {{S8("out dx,ax\n"), S8("outw %ax,%dx\n")}, 2, {0x66, 0xef}},
+        {{S8("in eax,dx\n"), S8("inl %dx,%eax\n")}, 1, {0xed}},
+        {{S8("out dx,eax\n"), S8("outl %eax,%dx\n")}, 1, {0xef}},
+        {{S8("in ax,255\n"), S8("inw $255,%ax\n")}, 3, {0x66, 0xe5, 0xff}},
+        {{S8("out 255,ax\n"), S8("outw %ax,$255\n")}, 3, {0x66, 0xe7, 0xff}},
+        {{S8("in eax,255\n"), S8("inl $255,%eax\n")}, 2, {0xe5, 0xff}},
+        {{S8("out 255,eax\n"), S8("outl %eax,$255\n")}, 2, {0xe7, 0xff}},
+        {{S8("OUT DX,AL\n"), S8("OUTB %al,%dx\n")}, 1, {0xee}},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_BASELINE};
+    // Architectural fixed opcodes, including the 66 prefix for 16-bit data.
+    // This is an encoding check only; no privileged I/O instruction executes.
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        for (u32 syntax = 0; syntax < 2; syntax += 1)
+        {
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, cases[row].source[syntax],
+                (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+            bool exact = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                         assembly_test_bytes_equal(encoded.bytes, cases[row].bytes, cases[row].byte_count);
+            if (!exact)
+            {
+                arguments->show(arguments, S8("X86_PORT_ENCODING row={u32} syntax={u32} diagnostics={u32} bytes={u64} expected={u32} input={S8}"),
+                    row, syntax, encoded.diagnostic_count, (u64)encoded.bytes.length, (u32)cases[row].byte_count, cases[row].source[syntax]);
+                if (encoded.diagnostic_count)
+                    arguments->show(arguments, S8("X86_PORT_DIAGNOSTIC {S8}"), encoded.diagnostics[0].message);
+                for (u32 index = 0; index < encoded.bytes.length && index < 3; index += 1)
+                    arguments->show(arguments, S8("X86_PORT_BYTE index={u32} value={u32}"), index, (u32)encoded.bytes.pointer[index]);
+            }
+            BUSTER_TEST_RAW(arguments, exact, cases[row].source[syntax]);
+        }
+    }
+    String8 invalid_sources[] = {
+        S8("inb %dx,%ax\n"), S8("outb %eax,%dx\n"),
+        S8("inw %dx,%al\n"), S8("outl %ax,%dx\n"),
+        S8("inb %dx,%ah\n"), S8("outb %bl,%dx\n"),
+        S8("inw %dx,%bx\n"), S8("outl %ecx,%dx\n"),
+        S8("inb %cx,%al\n"), S8("outb %al,%dl\n"),
+        S8("inb %edx,%al\n"), S8("outb %al,%rdx\n"),
+        S8("inb (%rdx),%al\n"), S8("outb %al,(%rdx)\n"),
+        S8("inb $256,%al\n"), S8("outb %al,$256\n"),
+        S8("inq %dx,%rax\n"), S8("outq %rax,%dx\n"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_sources); row += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_sources[row],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST_RAW(arguments, rejected.diagnostic_count == 1 && !rejected.bytes.length && !rejected.relocation_count,
+            invalid_sources[row]);
+    }
+    return result;
+}
+
 // GNU as 2.47 byte/rejection oracles. Unsized bit-test operands may be
 // diagnosed, but an accepted BTS/BTR/BTC must never become another operation.
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_suffix_aliases(UnitTestArguments* arguments)
@@ -4286,6 +4357,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_private_labels);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_start_names);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_att_port_suffixes);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
     result.test_count += suffix_aliases.test_count;
