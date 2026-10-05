@@ -238,13 +238,19 @@ struct GpuPipelineResult
     String8 command;
     String8 log;
     // Always names the private workspace created for this invocation. Unless
-    // save_temporaries was requested it has been removed before return.
+    // save_temporaries was requested or cleanup_failed is true, it has been
+    // removed before return. A failed cleanup leaves this path for remediation.
     String8 temporary_directory;
     ProcessResult process_result;
     GpuPipelineError error;
     u32 failed_step;
     bool timed_out;
-    u8 reserved[3];
+    // Set only after named publication commits. The artifact remains available
+    // even if later workspace cleanup sets error/process_result to failure.
+    bool published;
+    // Independent of the primary error and publication fact.
+    bool cleanup_failed;
+    u8 reserved;
 };
 
 BUSTER_F_DECL GpuTargetParseResult gpu_target_parse(String8 triple);

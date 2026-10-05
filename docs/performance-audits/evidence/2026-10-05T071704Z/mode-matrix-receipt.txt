@@ -1,0 +1,28 @@
+MACHINE_INFO arch=x86_64 cpu="11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz" model=tigerlake cores=8 ram_mib=31815
+ninja: no work to do.
+MODE_MATRIX_HARNESS ide=/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2483/build/Release/ide targets=6 modes=4 fixtures=6 qemu=1 wine=1 oracle=1
+MODE_MATRIX leg=x86_64-linux/none avenue=native status=pass fixtures=6 elapsed_us=182868
+MODE_MATRIX leg=x86_64-linux/mir-stack avenue=native status=pass fixtures=6 elapsed_us=177817
+MODE_MATRIX leg=x86_64-linux/fast avenue=native status=pass fixtures=6 elapsed_us=316673
+MODE_MATRIX leg=x86_64-linux/quality avenue=native status=pass fixtures=6 elapsed_us=181815
+MODE_MATRIX leg=aarch64-linux/none avenue=qemu status=pass fixtures=6 elapsed_us=144285
+MODE_MATRIX leg=aarch64-linux/mir-stack avenue=qemu status=pass fixtures=6 elapsed_us=152002
+MODE_MATRIX leg=aarch64-linux/fast avenue=qemu status=pass fixtures=6 elapsed_us=264911
+MODE_MATRIX leg=aarch64-linux/quality avenue=qemu status=pass fixtures=6 elapsed_us=121236
+MODE_MATRIX leg=x86_64-windows/none avenue=wine status=pass fixtures=6 elapsed_us=350301
+MODE_MATRIX leg=x86_64-windows/mir-stack avenue=wine status=pass fixtures=6 elapsed_us=240490
+MODE_MATRIX leg=x86_64-windows/fast avenue=wine status=pass fixtures=6 elapsed_us=347606
+MODE_MATRIX leg=x86_64-windows/quality avenue=wine status=pass fixtures=6 elapsed_us=243829
+MODE_MATRIX leg=aarch64-windows/none avenue=oracle status=pass fixtures=6 elapsed_us=184090
+MODE_MATRIX leg=aarch64-windows/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=206502
+MODE_MATRIX leg=aarch64-windows/fast avenue=oracle status=pass fixtures=6 elapsed_us=195337
+MODE_MATRIX leg=aarch64-windows/quality avenue=oracle status=pass fixtures=6 elapsed_us=170565
+MODE_MATRIX leg=x86_64-macos/none avenue=oracle status=pass fixtures=6 elapsed_us=253349
+MODE_MATRIX leg=x86_64-macos/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=291007
+MODE_MATRIX leg=x86_64-macos/fast avenue=oracle status=pass fixtures=6 elapsed_us=243688
+MODE_MATRIX leg=x86_64-macos/quality avenue=oracle status=pass fixtures=6 elapsed_us=246658
+MODE_MATRIX leg=aarch64-macos/none avenue=oracle status=pass fixtures=6 elapsed_us=178241
+MODE_MATRIX leg=aarch64-macos/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=248292
+MODE_MATRIX leg=aarch64-macos/fast avenue=oracle status=pass fixtures=6 elapsed_us=249757
+MODE_MATRIX leg=aarch64-macos/quality avenue=oracle status=pass fixtures=6 elapsed_us=261113
+MODE_MATRIX_RESULT legs=24 executed=12 oracle_checked=12 expected_failures=0 failures=0 elapsed_us=5454396 status=pass

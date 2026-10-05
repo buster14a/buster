@@ -31,7 +31,7 @@ typedef enum CodegenError
 } CodegenError;
 
 // The active owner of a failed native generation attempt. Success reports
-// NONE; a canonical fallback that succeeds does not become a phase failure.
+// NONE; a machine failure records its phase and fails the module.
 typedef enum CodegenPhase
 {
     CODEGEN_PHASE_NONE,
@@ -269,6 +269,7 @@ typedef enum CodegenModuleRelocationKind
     // shared object at all.
     CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL,
     CODEGEN_MODULE_RELOCATION_X86_64_PLT32,
+    CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12,
     CODEGEN_MODULE_RELOCATION_COUNT,
 } CodegenModuleRelocationKind;
 
@@ -331,9 +332,9 @@ struct CodegenModuleGlobal
 };
 
 typedef struct CodegenModule CodegenModule;
-// Stable census keys. Append new reasons; do not renumber existing reports.
-// SELECTION_OTHER preserves unclassified selector failures without claiming
-// they are unsupported semantics. VERIFICATION is an implementation failure.
+// Legacy fallback census keys retained for result-layout compatibility until
+// #514 removes the retired direct-native implementation. Production native
+// generation no longer records fallbacks; machine failures are CodegenErrors.
 typedef enum CodegenFallbackReason
 {
     CODEGEN_FALLBACK_TARGET_EXCLUDED,
@@ -380,9 +381,8 @@ struct CodegenStatistics
     u64 simd_operation_count;
     u32 function_count;
     u32 maximum_stack_frame_bytes;
-    // Functions a non-NONE register-allocator mode handed to the canonical
-    // stack path because the machine pipeline could not retain them. Zero
-    // under NONE; exactly the sum of fallback_reason_counts otherwise.
+    // Retired native-fallback census. Production generation keeps these zero;
+    // the fields remain temporarily so existing result consumers retain ABI.
     u32 fallback_function_count;
     u32 reserved;
     // Census of why machine selection rejected each fallback function,
@@ -516,14 +516,12 @@ struct CodegenExecutable
     CodegenError error;
 };
 
-// Register-allocation strategy for the machine-IR backend path. `NONE` uses
-// the canonical direct emitter and is the explicit compatibility/diagnostic
-// escape hatch. `MIR_STACK` places every eligible value in a stack location
-// through the machine selector/encoder for differential testing. `FAST` is
-// the driver default and minimizes allocation latency; `QUALITY` maximizes
-// generated-code performance under a compile-time budget. Every non-NONE
-// mode falls back to the canonical path per unsupported function, and the
-// fallback is counted in CodegenStatistics.
+// Register-allocation strategy for the machine-IR backend path. `NONE` is a
+// retained compatibility spelling for `MIR_STACK`; neither selects the direct
+// native emitter. `MIR_STACK` places every value in a stack location through
+// the machine selector/encoder. `FAST` is the driver default and minimizes
+// allocation latency; `QUALITY` maximizes generated-code performance under a
+// compile-time budget. A machine failure fails the module without fallback.
 typedef enum CodegenRegisterAllocatorMode
 {
     CODEGEN_REGISTER_ALLOCATOR_NONE,
@@ -554,11 +552,10 @@ struct CodegenModuleOptions
 {
     bool debug_info;
     bool assume_validated;
-    // Test/audit mode: validate certified IR and selected/scheduled MIR too;
-    // verifier/placement failures must not disappear into canonical fallback.
+    // Test/audit mode: validate certified IR and selected/scheduled MIR too.
     bool verify_invariants;
-    // Keep diagnostic flags independently addressable during self-hosting.
-    // Packed _Bool fields can lose their load type during local promotion.
+    // Retained compatibility option for the retired fallback census. Native
+    // production generation never records fallback rows.
     bool record_fallbacks;
     // -fPIC/-fpic: this object may end up in a shared library. No
     // thread-local definition it names can be assumed to sit in the initial
@@ -590,17 +587,13 @@ BUSTER_F_DECL bool codegen_module_relocation_kind_is_thread_local(u8 kind);
 BUSTER_F_DECL bool codegen_module_relocation_kind_is_thread_local_low(u8 kind);
 BUSTER_F_DECL bool codegen_module_relocation_kind_is_thread_local_index(u8 kind);
 BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation);
-// The canonical named-parameter classification the a64 variadic model is
-// defined over; the AArch64 machine selector's VA_START mirrors the
-// canonical emitter's simulation through this exact walk.
-BUSTER_F_DECL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count);
-// Target-dependent wide-vector transport is shared by the canonical and MIR
-// x86-64 emitters so their register pieces cannot drift.
+// Target-dependent wide-vector transport for the x86-64 machine selector.
 BUSTER_F_DECL u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, u32* register_size);
 BUSTER_F_DECL u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, IrType* type, u32* piece_size);
-// The System V argument-area slot alignment the canonical layout gives one
-// stack argument; the x86-64 machine placement rounds its stack cursor by
-// this exact clamp so both emitters count the same padding eightbytes.
+// The AArch64 selector uses the shared aggregate part classifier for copies.
+BUSTER_F_DECL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count);
+// The System V machine placement rounds each stack argument's cursor to its
+// required slot alignment.
 BUSTER_F_DECL u32 codegen_canonical_x64_stack_argument_alignment(IrType* type);
 BUSTER_F_DECL String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode);
 BUSTER_F_DECL String8 codegen_fallback_reason_string(CodegenFallbackReason reason);

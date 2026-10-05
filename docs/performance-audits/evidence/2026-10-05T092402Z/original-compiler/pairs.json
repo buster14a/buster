@@ -1,0 +1,134 @@
+[
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33058816,
+  "identical": true,
+  "maxrss_bytes": 958287872,
+  "order": "AB",
+  "pair": 1,
+  "span_s": 3.539147,
+  "variant": "a",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33058816,
+  "identical": true,
+  "maxrss_bytes": 958377984,
+  "order": "AB",
+  "pair": 1,
+  "span_s": 3.419434,
+  "variant": "b",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33099776,
+  "identical": true,
+  "maxrss_bytes": 958402560,
+  "order": "BA",
+  "pair": 2,
+  "span_s": 3.618773,
+  "variant": "b",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33103872,
+  "identical": true,
+  "maxrss_bytes": 958238720,
+  "order": "BA",
+  "pair": 2,
+  "span_s": 3.47996,
+  "variant": "a",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33103872,
+  "identical": true,
+  "maxrss_bytes": 958300160,
+  "order": "AB",
+  "pair": 3,
+  "span_s": 3.427643,
+  "variant": "a",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33103872,
+  "identical": true,
+  "maxrss_bytes": 959172608,
+  "order": "AB",
+  "pair": 3,
+  "span_s": 3.565318,
+  "variant": "b",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33103872,
+  "identical": true,
+  "maxrss_bytes": 958439424,
+  "order": "BA",
+  "pair": 4,
+  "span_s": 4.983131,
+  "variant": "b",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33107968,
+  "identical": true,
+  "maxrss_bytes": 959193088,
+  "order": "BA",
+  "pair": 4,
+  "span_s": 8.641861,
+  "variant": "a",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33112064,
+  "identical": true,
+  "maxrss_bytes": 959528960,
+  "order": "AB",
+  "pair": 5,
+  "span_s": 8.222541,
+  "variant": "a",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33112064,
+  "identical": true,
+  "maxrss_bytes": 959397888,
+  "order": "AB",
+  "pair": 5,
+  "span_s": 12.155261,
+  "variant": "b",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33116160,
+  "identical": true,
+  "maxrss_bytes": 959340544,
+  "order": "BA",
+  "pair": 6,
+  "span_s": 12.329632,
+  "variant": "b",
+  "wrapper_rss_bytes": 34873344
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33120256,
+  "identical": true,
+  "maxrss_bytes": 959467520,
+  "order": "BA",
+  "pair": 6,
+  "span_s": 7.563154,
+  "variant": "a",
+  "wrapper_rss_bytes": 34873344
+ }
+]
