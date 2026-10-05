@@ -15,6 +15,7 @@
 // compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
+// compiler_driver_test_wasm_function_addresses checks escaping function markers and direct calls.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
 // compiler_driver_test_quoted_assembly_round_trip covers printed string/call symbols.
@@ -11669,6 +11670,507 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     return result;
 }
 
+enum
+{
+    COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_TOPOLOGY_COUNT = 4,
+    COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_ESCAPE_COUNT = 6,
+    COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_MODE_COUNT = 8,
+};
+
+typedef struct CompilerDriverWasmFunctionAddressFixture CompilerDriverWasmFunctionAddressFixture;
+struct CompilerDriverWasmFunctionAddressFixture
+{
+    IrProgram program;
+    IrFunctionId probe;
+    IrSymbolId referenced;
+    IrInstructionId refusal;
+    u32 expected_result;
+    bool committed;
+};
+
+BUSTER_GLOBAL_LOCAL IrInstruction compiler_driver_test_wasm_function_address_row(IrOpcode opcode, IrTypeId type, IrValueId result)
+{
+    return (IrInstruction){.canonical_type = type, .symbol = IR_SYMBOL_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
+                           .next = IR_INSTRUCTION_ID_INVALID, .result = result, .opcode = (u8)opcode,
+                           .conversion_operation = IR_CONVERSION_COUNT, .unary_operation = IR_UNARY_COUNT,
+                           .binary_operation = IR_BINARY_COUNT, .memory_order = IR_MEMORY_ORDER_COUNT,
+                           .failure_memory_order = IR_MEMORY_ORDER_COUNT, .atomic_operation = IR_ATOMIC_OPERATION_COUNT};
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId compiler_driver_test_wasm_function_address_value(Arena* arena, IrFunction* function, IrTypeId type, IrValueCategory category)
+{
+    return ir_function_add_value(arena, function,
+        (IrValue){.canonical_type = type, .definition = IR_INSTRUCTION_ID_INVALID, .category = (u8)category});
+}
+
+BUSTER_GLOBAL_LOCAL IrInstructionId compiler_driver_test_wasm_function_address_append(
+    Arena* arena, IrFunction* function, IrInstruction row, u32 operand_count, IrValueId first, IrValueId second, bool* committed)
+{
+    if (operand_count)
+    {
+        row.operands = arena_allocate(arena, IrValueId, operand_count);
+        row.operands[0] = first;
+        if (operand_count == 2)
+        {
+            row.operands[1] = second;
+        }
+        row.operand_count = operand_count;
+    }
+    u32 expected_id = function->instruction_count;
+    IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+    IrInstructionId id = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, row, (IrSourceRange){0}, &refusal);
+    *committed &= refusal == IR_COMMIT_ACCEPTED && id.value == expected_id;
+    return id;
+}
+
+BUSTER_GLOBAL_LOCAL IrInstruction compiler_driver_test_wasm_function_address_constant(Arena* arena, IrTypeId type, IrValueId result, u64 bits)
+{
+    IrInstruction row = compiler_driver_test_wasm_function_address_row(IR_OPCODE_CONSTANT_INTEGER, type, result);
+    row.immediates = arena_allocate(arena, u64, 1);
+    row.immediates[0] = bits;
+    row.immediate_count = 1;
+    return row;
+}
+
+// Topologies pin an import-free first definition, first import, definition
+// after an import, and a later definition. Escapes exercise both canonical
+// FUNCTION forms; direct CALL and an unused inert marker remain controls.
+BUSTER_GLOBAL_LOCAL CompilerDriverWasmFunctionAddressFixture compiler_driver_test_wasm_function_address_program(
+    Arena* arena, Target target, u32 topology, u32 mode)
+{
+    CompilerDriverWasmFunctionAddressFixture fixture = {.program = ir_program_initialize(arena, 1, 9, 4, 0), .committed = true};
+    IrProgram* program = &fixture.program;
+    program->data_layout = target_data_layout(target);
+    IrModule* module = program->modules;
+    module->name = S8("wasm-function-address");
+    u32 pointer_bytes = program->data_layout.pointer.size;
+    IrTypeLayout pointer_layout = {.size = pointer_bytes, .alignment = program->data_layout.pointer.alignment,
+                                  .abi_class = IR_ABI_CLASS_POINTER, .resolved = true};
+    IrTypeId void_type = ir_program_add_type(program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+    IrTypeId integer_type = ir_program_add_type(program,
+        (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true,
+                 .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    IrTypeId boolean_type = ir_program_add_type(program,
+        (IrType){.kind = IR_TYPE_BOOLEAN, .bit_width = 1,
+                 .layout = {.size = 1, .alignment = 1, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    IrTypeId carrier_type = ir_program_add_type(program,
+        (IrType){.kind = IR_TYPE_INTEGER, .bit_width = pointer_bytes * 8,
+                 .layout = {.size = pointer_bytes, .alignment = pointer_layout.alignment, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    IrTypeId signature = ir_program_add_type(program,
+        (IrType){.kind = IR_TYPE_FUNCTION, .return_type = integer_type,
+                 .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+    IrTypeId pointer_type = ir_program_add_type(program,
+        (IrType){.kind = IR_TYPE_POINTER, .element_type = signature, .layout = pointer_layout});
+    IrTypeId void_pointer_type = ir_program_add_type(program,
+        (IrType){.kind = IR_TYPE_POINTER, .element_type = void_type, .layout = pointer_layout});
+    bool returning_pointer = mode == 4;
+    bool direct = mode >= COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_ESCAPE_COUNT;
+    IrTypeId probe_result_type = returning_pointer ? pointer_type : direct ? integer_type : boolean_type;
+    IrTypeId probe_signature = ir_program_add_type(program,
+        (IrType){.kind = IR_TYPE_FUNCTION, .return_type = probe_result_type,
+                 .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+    IrSymbolId imported = IR_SYMBOL_ID_INVALID;
+    if (topology == 1 || topology == 2)
+    {
+        imported = ir_program_add_symbol(program,
+            (IrSymbol){.name = S8("host_first"), .link_name = S8("host_first"), .type = signature,
+                       .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL});
+    }
+    IrSymbolId definitions[2];
+    String8 names[] = {S8("first"), S8("later")};
+    for (u32 definition = 0; definition < BUSTER_ARRAY_LENGTH(definitions); definition += 1)
+    {
+        definitions[definition] = ir_program_add_symbol(program,
+            (IrSymbol){.name = names[definition], .link_name = names[definition], .type = signature,
+                       .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+        IrFunction* function = ir_module_add_function(arena, module,
+            (IrFunction){.name = names[definition], .symbol = definitions[definition], .canonical_type = signature,
+                         .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+        ir_function_add_block(arena, function,
+            (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+        IrValueId value = compiler_driver_test_wasm_function_address_value(arena, function, integer_type, IR_VALUE_VALUE);
+        compiler_driver_test_wasm_function_address_append(arena, function,
+            compiler_driver_test_wasm_function_address_constant(arena, integer_type, value, definition ? 11 : 7),
+            0, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, &fixture.committed);
+        compiler_driver_test_wasm_function_address_append(arena, function,
+            compiler_driver_test_wasm_function_address_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID),
+            1, value, IR_VALUE_ID_INVALID, &fixture.committed);
+    }
+    fixture.referenced = topology == 1 ? imported : definitions[topology == 3 ? 1 : 0];
+    fixture.expected_result = mode == 7 ? 7 : topology == 1 ? 13 : topology == 3 ? 11 : 7;
+    IrSymbolId probe_symbol = ir_program_add_symbol(program,
+        (IrSymbol){.name = S8("probe"), .link_name = S8("probe"), .type = probe_signature,
+                   .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+    IrFunction* probe = ir_module_add_function(arena, module,
+        (IrFunction){.name = S8("probe"), .symbol = probe_symbol, .canonical_type = probe_signature,
+                     .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+    fixture.probe = probe->id;
+    ir_function_add_block(arena, probe,
+        (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+    bool address_of = mode == 1 || mode == 5;
+    IrTypeId reference_type = address_of || direct ? signature : pointer_type;
+    IrValueId reference = compiler_driver_test_wasm_function_address_value(arena, probe, reference_type,
+        address_of ? IR_VALUE_PLACE : IR_VALUE_VALUE);
+    IrInstruction reference_row = compiler_driver_test_wasm_function_address_row(IR_OPCODE_FUNCTION, reference_type, reference);
+    reference_row.symbol = fixture.referenced;
+    fixture.refusal = compiler_driver_test_wasm_function_address_append(arena, probe, reference_row,
+        0, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, &fixture.committed);
+    IrValueId observed = reference;
+    if (address_of)
+    {
+        observed = compiler_driver_test_wasm_function_address_value(arena, probe, pointer_type, IR_VALUE_VALUE);
+        fixture.refusal = compiler_driver_test_wasm_function_address_append(arena, probe,
+            compiler_driver_test_wasm_function_address_row(IR_OPCODE_ADDRESS_OF, pointer_type, observed),
+            1, reference, IR_VALUE_ID_INVALID, &fixture.committed);
+        if (mode == 5)
+        {
+            IrValueId dereferenced = compiler_driver_test_wasm_function_address_value(arena, probe, signature, IR_VALUE_PLACE);
+            compiler_driver_test_wasm_function_address_append(arena, probe,
+                compiler_driver_test_wasm_function_address_row(IR_OPCODE_DEREFERENCE, signature, dereferenced),
+                1, observed, IR_VALUE_ID_INVALID, &fixture.committed);
+            IrValueId recovered = compiler_driver_test_wasm_function_address_value(arena, probe, pointer_type, IR_VALUE_VALUE);
+            compiler_driver_test_wasm_function_address_append(arena, probe,
+                compiler_driver_test_wasm_function_address_row(IR_OPCODE_ADDRESS_OF, pointer_type, recovered),
+                1, dereferenced, IR_VALUE_ID_INVALID, &fixture.committed);
+            observed = recovered;
+        }
+    }
+    if (mode == 2)
+    {
+        IrTypeId types[] = {void_pointer_type, carrier_type, pointer_type};
+        IrConversionOperation conversions[] = {
+            IR_CONVERSION_POINTER_REINTERPRET, IR_CONVERSION_POINTER_TO_INTEGER, IR_CONVERSION_INTEGER_TO_POINTER,
+        };
+        for (u32 conversion = 0; conversion < BUSTER_ARRAY_LENGTH(types); conversion += 1)
+        {
+            IrValueId converted = compiler_driver_test_wasm_function_address_value(arena, probe, types[conversion], IR_VALUE_VALUE);
+            IrInstruction row = compiler_driver_test_wasm_function_address_row(IR_OPCODE_CAST, types[conversion], converted);
+            row.conversion_operation = (u8)conversions[conversion];
+            compiler_driver_test_wasm_function_address_append(arena, probe, row,
+                1, observed, IR_VALUE_ID_INVALID, &fixture.committed);
+            observed = converted;
+        }
+    }
+    if (mode == 3)
+    {
+        IrValueId place = compiler_driver_test_wasm_function_address_value(arena, probe, pointer_type, IR_VALUE_PLACE);
+        probe->local_count = 1;
+        probe->local_places = arena_allocate(arena, IrValueId, 1);
+        probe->local_places[0] = place;
+        probe->local_uses_memory = arena_allocate(arena, bool, 1);
+        probe->local_uses_memory[0] = true;
+        probe->values[place.value].is_volatile = true;
+        IrInstruction local = compiler_driver_test_wasm_function_address_row(IR_OPCODE_LOCAL, pointer_type, place);
+        local.canonical_local = (IrLocalId){.value = 0};
+        compiler_driver_test_wasm_function_address_append(arena, probe, local,
+            0, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, &fixture.committed);
+        IrInstruction store = compiler_driver_test_wasm_function_address_row(IR_OPCODE_STORE, void_type, IR_VALUE_ID_INVALID);
+        store.volatile_access = true;
+        compiler_driver_test_wasm_function_address_append(arena, probe, store,
+            2, place, observed, &fixture.committed);
+        IrValueId loaded = compiler_driver_test_wasm_function_address_value(arena, probe, pointer_type, IR_VALUE_VALUE);
+        IrInstruction load = compiler_driver_test_wasm_function_address_row(IR_OPCODE_LOAD, pointer_type, loaded);
+        load.volatile_access = true;
+        compiler_driver_test_wasm_function_address_append(arena, probe, load,
+            1, place, IR_VALUE_ID_INVALID, &fixture.committed);
+        observed = loaded;
+    }
+    if (mode == 6)
+    {
+        IrValueId called = compiler_driver_test_wasm_function_address_value(arena, probe, integer_type, IR_VALUE_VALUE);
+        IrInstruction call = compiler_driver_test_wasm_function_address_row(IR_OPCODE_CALL, integer_type, called);
+        call.symbol = fixture.referenced;
+        compiler_driver_test_wasm_function_address_append(arena, probe, call,
+            1, reference, IR_VALUE_ID_INVALID, &fixture.committed);
+        observed = called;
+    }
+    else if (mode == 7)
+    {
+        observed = compiler_driver_test_wasm_function_address_value(arena, probe, integer_type, IR_VALUE_VALUE);
+        compiler_driver_test_wasm_function_address_append(arena, probe,
+            compiler_driver_test_wasm_function_address_constant(arena, integer_type, observed, 7),
+            0, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, &fixture.committed);
+    }
+    else if (!returning_pointer)
+    {
+        IrValueId zero = compiler_driver_test_wasm_function_address_value(arena, probe, carrier_type, IR_VALUE_VALUE);
+        compiler_driver_test_wasm_function_address_append(arena, probe,
+            compiler_driver_test_wasm_function_address_constant(arena, carrier_type, zero, 0),
+            0, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, &fixture.committed);
+        IrValueId null_pointer = compiler_driver_test_wasm_function_address_value(arena, probe, pointer_type, IR_VALUE_VALUE);
+        IrInstruction cast = compiler_driver_test_wasm_function_address_row(IR_OPCODE_CAST, pointer_type, null_pointer);
+        cast.conversion_operation = IR_CONVERSION_INTEGER_TO_POINTER;
+        compiler_driver_test_wasm_function_address_append(arena, probe, cast,
+            1, zero, IR_VALUE_ID_INVALID, &fixture.committed);
+        IrValueId predicate = compiler_driver_test_wasm_function_address_value(arena, probe, boolean_type, IR_VALUE_VALUE);
+        IrInstruction compare = compiler_driver_test_wasm_function_address_row(IR_OPCODE_BINARY, boolean_type, predicate);
+        compare.binary_operation = topology % 2 ? IR_BINARY_POINTER_NOT_EQUAL : IR_BINARY_POINTER_EQUAL;
+        compiler_driver_test_wasm_function_address_append(arena, probe, compare,
+            2, observed, null_pointer, &fixture.committed);
+        observed = predicate;
+    }
+    compiler_driver_test_wasm_function_address_append(arena, probe,
+        compiler_driver_test_wasm_function_address_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID),
+        1, observed, IR_VALUE_ID_INVALID, &fixture.committed);
+    return fixture;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_engine(
+    UnitTestArguments* arguments, Arena* arena, ByteSlice bytes, String8 script, u32 pointer_bytes, u32 topology, u32 mode, u32 expected)
+{
+    UnitTestResult result = {0};
+    String8 output = buster_test_temporary_path(arena, S8("buster-wasm-function-address"), S8(".wasm"));
+    String8 script_path = buster_test_temporary_path(arena, S8("buster-wasm-function-address"), S8(".cjs"));
+    bool written = file_write(output, bytes) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        ByteSlice before = file_read(arena, output, (FileReadOptions){0});
+        bool unchanged = before.pointer && before.length == bytes.length && memory_compare(before.pointer, bytes.pointer, bytes.length);
+        BUSTER_TEST(arguments, unchanged);
+        String8 node = executable_resolve_in_path(arena, S8("node"));
+        if (unchanged && node.length)
+        {
+            Sha256 hash;
+            char8 hash_bytes[SHA256_HEX_CAPACITY];
+            sha256_init(&hash);
+            sha256_add(&hash, bytes.pointer, bytes.length);
+            sha256_finish_hex(&hash, hash_bytes);
+            String8 hash_text = {.pointer = hash_bytes, .length = SHA256_HEX_CAPACITY - 1};
+            String8 node_arguments[] = {
+                node, script_path, output, hash_text, string_format(arena, S8("{u32}"), pointer_bytes),
+                string_format(arena, S8("{u32}"), topology), string_format(arena, S8("{u32}"), mode),
+                string_format(arena, S8("{u32}"), expected),
+            };
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arena, S8("function-address"), string_format(arena, S8("pointer-{u32}-topology-{u32}-mode-{u32}"), pointer_bytes, topology, mode),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), S8("1/1 Wasm function-address engine check passed"),
+                compiler_driver_test_wasm_node_deadline_microseconds());
+            arguments->show(arguments, S8("{S8}"), BYTE_SLICE_TO_STRING(8, run.wait.streams[STANDARD_STREAM_OUTPUT]));
+            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(run));
+            ByteSlice after = file_read(arena, output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, after.pointer && after.length == bytes.length && memory_compare(after.pointer, bytes.pointer, bytes.length));
+        }
+        else if (!node.length)
+        {
+            arguments->show(arguments, S8("Wasm function-address engine execution skipped: Node is not installed\n"));
+        }
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_file_delete(script_path));
+    }
+    return result;
+}
+
+// Baseline success is still executed: the engine witnesses index-zero/null
+// collisions before the narrowed capability refusal makes those rows fail.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_addresses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 script = S8(
+        "'use strict';\n"
+        "const fs = require('node:fs');\n"
+        "const crypto = require('node:crypto');\n"
+        "const assert = require('node:assert/strict');\n"
+        "const bytes = fs.readFileSync(process.argv[2]);\n"
+        "const digest = crypto.createHash('sha256').update(bytes).digest('hex');\n"
+        "assert.equal(digest, process.argv[3], 'original emitted module consumed');\n"
+        "assert(WebAssembly.validate(bytes), 'valid original function-address module');\n"
+        "const pointerBytes = Number(process.argv[4]);\n"
+        "const topology = Number(process.argv[5]);\n"
+        "const mode = Number(process.argv[6]);\n"
+        "const expected = Number(process.argv[7]);\n"
+        "const guest = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env: {host_first: () => 13}}).exports;\n"
+        "assert.equal(typeof guest.probe, 'function', 'probe export');\n"
+        "const actual = guest.probe();\n"
+        "const nonnull = BigInt(actual) !== 0n;\n"
+        "console.log('WASM_FUNCTION_ADDRESS sha256=' + digest + ' pointer_bytes=' + pointerBytes +\n"
+        "            ' topology=' + topology + ' mode=' + mode + ' actual=' + actual + ' nonnull=' + Number(nonnull));\n"
+        "if (mode === 4) assert(nonnull, 'a defined/imported function address is nonnull');\n"
+        "else assert.equal(Number(actual), expected, 'function address or direct-call result');\n"
+        "console.log('1/1 Wasm function-address engine check passed');\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_WASM32, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WASI},
+        {.cpu_arch = CPU_ARCH_WASM64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_FREESTANDING},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 topology = 0; topology < COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_TOPOLOGY_COUNT; topology += 1)
+        {
+            for (u32 mode = 0; mode < COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_MODE_COUNT; mode += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                CompilerDriverWasmFunctionAddressFixture fixture =
+                    compiler_driver_test_wasm_function_address_program(arena, targets[target_index], topology, mode);
+                IrValidationResult validation = {0};
+                bool ready = BUSTER_REQUIRE(arguments, fixture.committed);
+                if (ready)
+                {
+                    validation = ir_prepare_canonical_module(&fixture.program, fixture.program.modules, false);
+                    ready = BUSTER_REQUIRE(arguments, validation.error == IR_VALIDATION_NONE);
+                }
+                if (ready)
+                {
+                    WasmOptions options = WASM_OPTIONS_DEFAULT;
+                    options.pointer_size = target_index ? 8 : 4;
+                    WasmArtifact first = wasm_emit(arena, &fixture.program, fixture.program.modules, 1, options);
+                    WasmArtifact second = wasm_emit(arena, &fixture.program, fixture.program.modules, 1, options);
+                    bool unsupported = target_index == 0 && mode < COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_ESCAPE_COUNT;
+                    if (unsupported)
+                    {
+                        bool refused = !first.success && first.error.code == WASM64_ERROR_UNSUPPORTED_INSTRUCTION &&
+                                       string_starts_with_sequence(first.error.message, S8("runtime function addresses are unsupported by Wasm32"));
+                        BUSTER_TEST_RAW(arguments, refused,
+                            string_format(arena, S8("Wasm32 address topology={u32} mode={u32}: {S8}"), topology, mode, first.error.message));
+                        if (refused)
+                        {
+                            BUSTER_TEST(arguments, !first.bytes.pointer && !first.bytes.length && !first.wasm.pointer && !first.wasm.length &&
+                                                   !first.binary.pointer && !first.binary.length);
+                            BUSTER_TEST(arguments, first.error.function.value == fixture.probe.value && first.error.block.value == 0 &&
+                                                   first.error.instruction.value == fixture.refusal.value &&
+                                                   first.error.opcode == (mode == 1 || mode == 5 ? IR_OPCODE_ADDRESS_OF : IR_OPCODE_FUNCTION));
+                            BUSTER_TEST(arguments, !second.success && second.error.code == first.error.code &&
+                                                   second.error.instruction.value == first.error.instruction.value &&
+                                                   !second.bytes.pointer && !second.bytes.length);
+                        }
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, first.success && second.success, first.error.message);
+                    }
+                    if (first.success && second.success)
+                    {
+                        bool equal = first.bytes.length && first.bytes.length == second.bytes.length &&
+                                     memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length);
+                        if (BUSTER_REQUIRE(arguments, equal))
+                        {
+                            BUSTER_TEST(arguments, first.stats.memory64 == (target_index != 0) &&
+                                                   first.stats.import_count == (topology == 1 || topology == 2 ? 1u : 0u) &&
+                                                   first.stats.defined_function_count == 3);
+                            u32 expected = mode >= COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_ESCAPE_COUNT ? fixture.expected_result : topology % 2;
+                            UnitTestResult engine = compiler_driver_test_wasm_function_address_engine(
+                                arguments, arena, first.bytes, script, options.pointer_size, topology, mode, expected);
+                            result.test_count += engine.test_count;
+                            result.succeeded_test_count += engine.succeeded_test_count;
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+// Backend failure must preserve both the absent destination and bytes already
+// at an existing destination. Alias witnesses are C sources through the driver.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_outputs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("typedef int (*F)(void); int first(void){return 7;} int probe(void){F volatile p=first;return p==0;} void _start(void){}"),
+        S8("typedef int (*F)(void); int first(void){return 7;} F probe(void){return first;} void _start(void){}"),
+        S8("typedef int (*F)(void); int first(void){return 7;} int probe(void){F p=first;void *v=(void*)p;__UINTPTR_TYPE__ n=(__UINTPTR_TYPE__)v;p=(F)n;return p!=0;} void _start(void){}"),
+        S8("typedef int (*F)(void); int first(void){return 7;} int probe(void){F p=first;F q=p;return q!=0;} void _start(void){}"),
+        S8("typedef int (*F)(void); int first(void){return 7;} int later(void){return 11;} int probe(int choose){F volatile p=choose?first:later;return p!=0;} void _start(void){}"),
+        S8("typedef int (*F)(void); int probe(F p){return p();} void _start(void){}"),
+        S8("typedef int (*F)(void); int first(void){return 7;} F slot=first; int probe(void){return slot!=0;} void _start(void){}"),
+    };
+    String8 sentinel = S8("a rejected Wasm function address must preserve these existing output bytes");
+    String8 forms[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 existing = 0; existing < 2; existing += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 input = buster_test_temporary_path(arena, S8("buster-wasm-function-address-refusal"), S8(".c"));
+                String8 output = buster_test_temporary_path(arena, S8("buster-wasm-function-address-refusal"), S8(".wasm"));
+                bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index]));
+                if (existing)
+                {
+                    written &= file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel));
+                }
+                else
+                {
+                    OsFileDescriptor* prior = os_file_open(output, (OpenFlags){.read = true}, (OpenPermissions){0});
+                    if (prior)
+                    {
+                        BUSTER_TEST(arguments, os_file_close(prior));
+                        BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                }
+                if (BUSTER_REQUIRE(arguments, written))
+                {
+                    String8 command[] = {S8("-target"), S8("wasm32-wasip1"), S8("-nostdinc"), forms[form], S8("-o"), output, input};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                    {
+                        CompilerDriverResult refused = compiler_driver_execute_invocation(arena, invocation);
+                        BUSTER_TEST_RAW(arguments, refused.error == COMPILER_DRIVER_ERROR_WASM && refused.diagnostic.length != 0, refused.diagnostic);
+                        if (refused.error == COMPILER_DRIVER_ERROR_WASM)
+                        {
+                            BUSTER_TEST(arguments, !refused.wasm.success && !refused.wasm.bytes.pointer && !refused.wasm.bytes.length &&
+                                                   !refused.wasm64.success && !refused.wasm64.bytes.pointer && !refused.wasm64.bytes.length);
+                        }
+                        if (existing)
+                        {
+                            ByteSlice after = file_read(arena, output, (FileReadOptions){0});
+                            BUSTER_TEST(arguments, after.pointer && after.length == sentinel.length &&
+                                                   memory_compare(after.pointer, sentinel.pointer, sentinel.length));
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
+                        else
+                        {
+                            OsFileDescriptor* file = os_file_open(output, (OpenFlags){.read = true}, (OpenPermissions){0});
+                            BUSTER_TEST(arguments, file == 0);
+                            if (file)
+                            {
+                                BUSTER_TEST(arguments, os_file_close(file));
+                                BUSTER_TEST(arguments, os_file_delete(output));
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(input));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // Compile direct C calls through both driver targets/frontend forms. Their
+    // independent execution is also covered by the direct canonical matrix.
+    String8 direct = S8("int first(void){return 7;} int probe(void){return first();} void _start(void){}");
+    String8 targets[] = {S8("wasm32-wasip1"), S8("wasm64-unknown-freestanding")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-wasm-direct-call"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-wasm-direct-call"), S8(".wasm"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(direct))))
+            {
+                String8 command[] = {S8("-target"), targets[target_index], S8("-nostdinc"), forms[form], S8("-o"), output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_wasm && compiled.wasm.success, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, bytes.pointer && bytes.length == compiled.wasm.bytes.length &&
+                                           memory_compare(bytes.pointer, compiled.wasm.bytes.pointer, bytes.length));
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                BUSTER_TEST(arguments, os_file_delete(input));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Recompile each frontend form for byte stability, then use Node's own Wasm
 // validator and engine for positive calls and ABI-negative traps.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_function_tables(UnitTestArguments* arguments)
@@ -18589,6 +19091,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_addresses);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_stack_alignment);
