@@ -85,6 +85,8 @@ struct Wasm64FunctionRecord
     Wasm64Signature signature;
     u32 function_index;
     u32 defined_index;
+    u32 source_module_index;
+    u32 source_function_index;
     Wasm64SyntheticFunction synthetic;
     bool imported;
     bool exported;
@@ -1191,6 +1193,11 @@ static bool wasm64_collect_functions(Wasm64Context* context)
                 return false;
             }
             Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(context, symbol->id);
+            if (record)
+            {
+                record->source_module_index = module_index;
+                record->source_function_index = function_index;
+            }
             String8 external_name = wasm64_symbol_external_name(symbol);
             if (record && wasm64_string_equal(external_name, wasm64_s8("_start")) &&
                 context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1)
@@ -2313,6 +2320,7 @@ static Wasm64StringRecord* wasm64_string_record_find(Wasm64FunctionEmitter* emit
     {
         u32 middle = low + (high - low) / 2;
         Wasm64StringRecord* record = context->strings + middle;
+        context->stats.string_record_lookup_probes += 1;
         bool before = record->module_index != emitter->module_index       ? record->module_index < emitter->module_index
                       : record->function_index != emitter->function_index ? record->function_index < emitter->function_index
                                                                           : record->instruction.value < instruction.value;
@@ -2329,6 +2337,7 @@ static Wasm64StringRecord* wasm64_string_record_find(Wasm64FunctionEmitter* emit
     if (low < context->string_count)
     {
         Wasm64StringRecord* record = context->strings + low;
+        context->stats.string_record_lookup_probes += 1;
         if (record->function == emitter->function && record->instruction.value == instruction.value)
         {
             result = record;
@@ -2464,17 +2473,10 @@ static u32 wasm64_fe_count_block_parameters(IrFunction* function)
 static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* context, Wasm64FunctionRecord* record)
 {
     IrFunction* function = record->function;
-    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record, .module_index = UINT32_MAX, .function_index = UINT32_MAX};
-    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
-    {
-        IrModule* module = context->modules + module_index;
-        if (function >= module->functions && function < module->functions + module->function_count)
-        {
-            emitter->module_index = module_index;
-            emitter->function_index = (u32)(function - module->functions);
-            break;
-        }
-    }
+    // Source ordinals come from collection, independently of import-first
+    // function indices or the addresses of unrelated module allocations.
+    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record,
+                                     .module_index = record->source_module_index, .function_index = record->source_function_index};
     wasm64_buffer_init(&emitter->body, context->arena);
     emitter->value_locals = arena_allocate(context->arena, u32, function->value_count ? function->value_count : 1);
     emitter->value_types = arena_allocate(context->arena, u8, function->value_count ? function->value_count : 1);
