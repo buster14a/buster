@@ -37520,6 +37520,24 @@ BUSTER_C_SHARED bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_
     return valid;
 }
 
+// These unions admit an existing fixed register in every case. Select that
+// member rather than representing an immediate or memory alternative in IR.
+// Target validation still applies to the selected x86 register class.
+BUSTER_C_SHARED u64 c_semantic_asm_register_alternative(String8 text, bool output)
+{
+    u64 result = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+    if (output && text.length >= 3 && (text.pointer[0] == '=' || text.pointer[0] == '+'))
+    {
+        u64 prefix = text.pointer[1] == '&' ? 2 : 1;
+        if (string_equal(string_slice(text, prefix, text.length), S8("am"))) result = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+    }
+    else if (!output && string_equal(text, S8("dN")))
+    {
+        result = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+    }
+    return result;
+}
+
 // The x86-64 register names a local register variable may bind, paired with the
 // operand class that pins an asm operand to them. The set is the emitter's
 // caller-saved asm pool; rbx and r12-r15 are callee-saved and are left out
@@ -37701,7 +37719,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     bool early_clobber = false;
     bool matching = false;
     u32 match_index = UINT32_MAX;
-    if (output)
+    u64 alternative = c_semantic_asm_register_alternative((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, output);
+    if (alternative != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+    {
+        constraint = alternative;
+        read_write = output && bytes.pointer[0] == '+';
+        early_clobber = output && bytes.pointer[1] == '&';
+    }
+    else if (output)
     {
         bool modifier_shape = bytes.length == 2 || (bytes.length == 3 && bytes.pointer[1] == '&');
         if (!modifier_shape || (bytes.pointer[0] != '=' && bytes.pointer[0] != '+'))
@@ -37958,8 +37983,16 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     return true;
 }
 
+BUSTER_C_SHARED String8 c_semantic_asm_clobber_name(Target target, String8 clobber)
+{
+    // GNU x86 register number zero denotes AX, independently of operand ties.
+    String8 result = target.cpu_arch == CPU_ARCH_X86_64 && string_equal(clobber, S8("0")) ? S8("rax") : clobber;
+    return result;
+}
+
 BUSTER_C_SHARED bool c_semantic_asm_clobber_valid(Target target, String8 clobber)
 {
+    clobber = c_semantic_asm_clobber_name(target, clobber);
     bool result = false;
     if (string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")))
     {
@@ -38044,6 +38077,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
                 .pointer = (char8*)name.pointer,
                 .length = name.length,
             };
+            clobber = c_semantic_asm_clobber_name(builder->target, clobber);
             if (!c_semantic_asm_clobber_valid(builder->target, clobber))
             {
                 return false;
@@ -38074,6 +38108,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
 
 BUSTER_C_SHARED bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint)
 {
+    clobber = c_semantic_asm_clobber_name(target, clobber);
     bool matches = false;
     if (target.cpu_arch == CPU_ARCH_AARCH64 && IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint))
     {

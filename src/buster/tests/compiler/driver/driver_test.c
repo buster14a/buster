@@ -9415,6 +9415,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_binary128_runtime(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_inline_assembly_constraint_unions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+#if BUSTER_CPU_ARCH_X86_64
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 suffix;
+#if BUSTER_ANDROID || BUSTER_IOS
+            suffix = S8(".o");
+#elif BUSTER_WINDOWS
+            suffix = S8(".exe");
+#else
+            suffix = S8("");
+#endif
+            String8 output = buster_test_temporary_path(temporary.arena,
+                string_format(temporary.arena, S8("buster-asm-constraint-unions-{u32}-{u32}"), mode, form), suffix);
+            // NONE requests the canonical emitter directly and rejects the
+            // strict MIR flag. Its zero-fallback count is still checked below.
+            String8 fallback_policy = mode == 0 ? S8("-fmachine-fallback") : S8("-fno-machine-fallback");
+            String8 command[] = {modes[mode], frontends[form], fallback_policy, S8("-fverify-codegen"),
+#if BUSTER_ANDROID || BUSTER_IOS
+                                 S8("-c"),
+#endif
+                                 S8("-o"), output, S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_constraint_unions.c")};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, output));
+#endif
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 // Keep the complete conversion fixture strict on all desktop AArch64 targets.
 // Foreign object success is not execution evidence; native hosts run it too.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_i128(UnitTestArguments* arguments)
@@ -21129,6 +21175,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_atomic_pair_contention);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_location_counter);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_inline_assembly_constraint_unions);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_machine_fallback);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_many_native_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_dynamic_calls);
