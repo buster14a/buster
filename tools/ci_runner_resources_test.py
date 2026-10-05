@@ -105,14 +105,50 @@ class RunnerResourceTests(unittest.TestCase):
   --phase failed-step --log {shlex.quote(str(log))} &
 sampler=$!
 trap 'kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true' EXIT
-sleep 0.2
+ready=0
+deadline=$((SECONDS + 10))
+while (( SECONDS < deadline )); do
+  if [[ -f {shlex.quote(str(log))} ]]; then
+    while IFS= read -r line; do
+      if [[ "$line" == 'CI_RESOURCE_SAMPLE '* ]]; then ready=1; break; fi
+    done < {shlex.quote(str(log))}
+  fi
+  if [[ $ready -eq 1 ]]; then break; fi
+  if ! kill -0 "$sampler" 2>/dev/null; then
+    echo 'sampler exited before its first complete sample' >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ $ready -ne 1 ]]; then
+  echo 'sampler did not publish its first complete sample before the fixture deadline' >&2
+  exit 1
+fi
 exit 7
 """
-            result = subprocess.run(["bash", "-c", script], capture_output=True,
-                                    text=True, timeout=12, check=False)
+            child = subprocess.Popen(["bash", "-c", script], stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, start_new_session=True)
+            try:
+                out, err = child.communicate(timeout=12)
+            except BaseException:
+                # The test owns its shell, sampler and any in-flight probes;
+                # killing only the shell could leave descendants holding pipes.
+                if child.returncode is None:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                child.communicate(timeout=2)
+                raise
+            result = subprocess.CompletedProcess(child.args, child.returncode, out, err)
             self.assertEqual(result.returncode, 7, result.stderr)
             self.assertIn("CI_RESOURCE_SAMPLE ", result.stdout)
-            self.assertIn("CI_RESOURCE_END phase=failed-step", log.read_text(encoding="utf-8"))
+            self.assertEqual(log.read_text(encoding="utf-8"), result.stdout)
+            samples = [line for line in result.stdout.splitlines() if line.startswith("CI_RESOURCE_SAMPLE ")]
+            first = json.loads(samples[0].removeprefix("CI_RESOURCE_SAMPLE "))
+            self.assertEqual(first["phase"], "failed-step")
+            self.assertTrue(result.stdout.splitlines()[-1].startswith(
+                f"CI_RESOURCE_END phase=failed-step samples={len(samples)} elapsed_seconds="))
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 name: Buster CI
 
-# Build/test policy remains in build.c. Two shards per desktop lane, five
-# independent native mode lanes, three Unix differential lanes and two mobile
-# lanes retain full coverage. Manual split-layout measurements replace the
-# combined checks shard on Linux x86-64/AArch64 and Windows x86-64 with three owners.
+# Build/test policy remains in build.c. Linux x86-64/AArch64, macOS AArch64 and
+# Windows x86-64 use independent sanitized Debug, sanitized Release and
+# portability owners; Windows AArch64 retains grouped checks. Five native mode lanes,
+# three Unix differential lanes and two mobile lanes retain full coverage.
 # See docs/ci-suite-partition.md for suite ownership
 # and measurement; docs/ci-combination-shards.md describes the internal
 # combination partition; docs/ci-workflow-audit.md documents cache boundaries
@@ -41,7 +41,8 @@ env:
   # Sanitizer correctness policy belongs to generated test commands; keeping a
   # second workflow default would conceal precedence regressions.
   BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
-  BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && 'split' || 'combined' }}
+  BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && 'combined' || 'split' }}
+  BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
 
 jobs:
   lint:
@@ -51,9 +52,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Test merge-parent preservation guard
         shell: bash
         run: python3 -B tools/merge_parent_preservation_test.py -v
@@ -68,7 +77,15 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 tests/action_pins_test.py
+          python3 -B tools/ci_unit_tests_measure_test.py -v
+          python3 -B tools/ci_unit_tests_campaign_test.py -v
           python3 -B tools/ci_checks_qualification_test.py -v
+          python3 -B tools/ci_checks_population_test.py -v
+          python3 -B tools/ci_checks_dispatch_inventory_test.py -v
+          python3 -B tools/ci_checks_sample_test.py -v
+          python3 -B tools/ci_checks_tools_test.py -v
+          python3 -B tools/ci_job_environment_test.py -v
+          python3 -B tools/ci_ios_simulator_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
@@ -96,6 +113,11 @@ jobs:
           set -euo pipefail
           python3 tools/new_audit.py --self-test
           python3 tools/new_audit.py --check
+          python3 -B tools/check_markdown_links.py --self-test
+          python3 -B tools/check_markdown_links.py
+      - name: Check bounded string sequence search work
+        shell: bash
+        run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
       - name: Compile the build driver with GCC
         shell: bash
         run: |
@@ -113,10 +135,14 @@ jobs:
         env:
           GOTOOLCHAIN: local
           GOSUMDB: sum.golang.org
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           # The pinned actionlint predates GitHub's queue: max field. The
           # preceding policy test confines that field to the reviewed workflow.
+          if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
+            python3 tools/ci_checks_tools.py --tool go --executable go --output "$RUNNER_TEMP/selected-go.json"
+          fi
           go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -ignore 'unexpected key "queue" for "concurrency" section' -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
       - name: Lint result and reproduction
         if: ${{ always() }}
@@ -132,7 +158,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/actionlint.log
+          path: |
+            ${{ runner.temp }}/actionlint.log
+            ${{ runner.temp }}/selected-go.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -142,6 +171,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
@@ -150,8 +180,16 @@ jobs:
       receipt: ${{ steps.admit.outputs.receipt }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Verify exact queue execution before scheduling main jobs
         id: admit
         shell: bash
@@ -166,7 +204,9 @@ jobs:
           label: main-ci-reuse
           label_title: Main CI reuse
           name: main-ci-reuse-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/main-ci-reuse.json
+          path: |
+            ${{ runner.temp }}/main-ci-reuse.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: error
           retention-days: 7
 
@@ -177,6 +217,7 @@ jobs:
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
+      BUSTER_CI_CHECKS_RESOURCES: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
       # Profiling is diagnostic and opt-in. The manual dispatch input is
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
@@ -192,8 +233,8 @@ jobs:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         lane: [linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64]
-        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && '["release", "checks", "sanitized-debug", "sanitized-release", "portability"]' || '["release", "checks"]') }}
-        exclude: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && '[{"lane":"linux-x86_64","shard":"checks"},{"lane":"linux-aarch64","shard":"checks"},{"lane":"windows-x86_64","shard":"checks"},{"lane":"macos-aarch64","shard":"sanitized-debug"},{"lane":"macos-aarch64","shard":"sanitized-release"},{"lane":"macos-aarch64","shard":"portability"},{"lane":"windows-aarch64","shard":"sanitized-debug"},{"lane":"windows-aarch64","shard":"sanitized-release"},{"lane":"windows-aarch64","shard":"portability"}]' || '[]') }}
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && '["release", "checks"]' || '["release", "checks", "sanitized-debug", "sanitized-release", "portability"]') }}
+        exclude: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && '[]' || '[{"lane":"linux-x86_64","shard":"checks"},{"lane":"linux-aarch64","shard":"checks"},{"lane":"windows-x86_64","shard":"checks"},{"lane":"macos-aarch64","shard":"checks"},{"lane":"windows-aarch64","shard":"sanitized-debug"},{"lane":"windows-aarch64","shard":"sanitized-release"},{"lane":"windows-aarch64","shard":"portability"}]') }}
         include:
           - name: Linux x86-64
             lane: linux-x86_64
@@ -346,6 +387,8 @@ jobs:
             tools/ci_sanitize_logs_test.py=sanitize-logs-test.log
             tools/github_ci_time_test.py=ci-queue-timing-test.log
             tools/ci_workflow_tools_test.py=workflow-tools-runner-test.log
+            tools/ci_checks_resources_test.py=checks-resource-observer-test.log
+            tools/ci_checks_resources_workflow_test.py=checks-resource-workflow-test.log
           )
           if [[ '${{ matrix.os }}' == macos ]]; then
             suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
@@ -506,20 +549,57 @@ jobs:
           # build.c selects and reports the actual GCC row before configuration.
           zig version
 
+      # Observe the complete existing combination step, including its setup and
+      # the bounded runner scheduling gap. The sidecar never controls payloads.
+      - name: Start checks resource observation
+        id: checks_resources_start
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CHECKS_RESOURCES == '1' && ((matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success')) || (matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success')) }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          BUSTER_CI_RESOURCES_PYTHON=$("$BUSTER_CI_PYTHON" -c 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.executable).resolve().as_posix())')
+          printf 'BUSTER_CI_RESOURCES_PYTHON=%s\n' "$BUSTER_CI_RESOURCES_PYTHON" >> "$GITHUB_ENV"
+          "$BUSTER_CI_RESOURCES_PYTHON" tools/ci_checks_resources.py start \
+            --session "$RUNNER_TEMP/buster-ci/runner-resources" \
+            --source-revision "$(git rev-parse HEAD)" \
+            --source-tree "$(git rev-parse 'HEAD^{tree}')" \
+            --workflow-blob "$(git rev-parse 'HEAD:.github/workflows/ci.yml')" \
+            --role "${{ matrix.lane }}" --invocation "${{ matrix.shard }}"
+
       - name: Combination matrix (Linux, macOS)
         id: combinations_unix
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
-          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
         if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/combinations.log") 2>&1
+          # #1400: exercise the existing correctness suite with a long base.
+          # Preserve an externally supplied base, including memory-backed runs.
+          if [[ "${{ matrix.lane }}" == linux-x86_64 && "${{ matrix.shard }}" == release ]]; then
+            buster_long_temporary_parent=${BUSTER_TEST_TEMPORARY_BASE:-$RUNNER_TEMP}
+            buster_long_temporary_base=$(mktemp -d "$buster_long_temporary_parent/buster-temporary-base-regression-1400-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-0123456789-XXXXXXXXXX")
+            trap 'rm -rf -- "$buster_long_temporary_base"' EXIT
+            export BUSTER_TEST_TEMPORARY_BASE="$buster_long_temporary_base"
+            buster_long_temporary_base_bytes=$(printf '%s' "$BUSTER_TEST_TEMPORARY_BASE" | wc -c)
+            [[ "$buster_long_temporary_base_bytes" -ge 87 ]]
+            printf 'CI_LONG_TEMPORARY_BASE_V1 status=prepared bytes=%s minimum_bytes=87\n' "$buster_long_temporary_base_bytes"
+          fi
           # The superbuild manifest names this exact bootstrap-driver path.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
           ./build/build test_all_combinations_ci --verbose=1
+          if [[ -n "${buster_long_temporary_base:-}" ]]; then
+            # library_tests owns and deletes its children before returning.
+            # An unexpected leftover fails the lane before fallback cleanup.
+            rmdir -- "$buster_long_temporary_base"
+            trap - EXIT
+            printf 'CI_LONG_TEMPORARY_BASE_V1 status=cleaned\n'
+          fi
 
       - name: Combination matrix (Windows)
         id: combinations_windows
@@ -527,8 +607,8 @@ jobs:
         shell: powershell
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
-          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
-          BUSTER_MATRIX_TEST_ADMISSION: ${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' && 'all-builds' || 'overlap' }}
+          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
+          BUSTER_MATRIX_TEST_ADMISSION: ${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && (github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && 'all-builds' || 'overlap' }}
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
           CLANG_ARCH: ${{ matrix.clang_arch }}
@@ -552,6 +632,15 @@ jobs:
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Stop checks resource observation
+        id: checks_resources_stop
+        if: ${{ always() && env.BUSTER_CI_CHECKS_RESOURCES == '1' && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${BUSTER_CI_RESOURCES_PYTHON:-$BUSTER_CI_PYTHON}" tools/ci_checks_resources.py stop --session "$RUNNER_TEMP/buster-ci/runner-resources"
+
       # Postprocess only: build.c still owns every configure, probe and build.
       # Keep raw diagnostics outside build/ so failed attempts survive cleanup.
       - name: Collect CMake configure evidence
@@ -569,7 +658,7 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_windows') || (matrix.platform == 'unix' && 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_windows') }}
+          BUSTER_CI_REQUIRED: ${{ format('{0}{1}', matrix.shard == 'release' && (matrix.platform == 'unix' && 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_windows') || (matrix.platform == 'unix' && 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_windows'), env.BUSTER_CI_CHECKS_RESOURCES == '1' && ' checks_resources_start checks_resources_stop' || '') }}
           BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=${{ matrix.shard }} and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
           BUSTER_CI_ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
@@ -1032,6 +1121,7 @@ jobs:
         if: ${{ matrix.os == 'android' }}
         shell: bash
         env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_ANDROID_AVD: buster-ci
           BUSTER_ANDROID_DEVICE: pixel_6
           BUSTER_ANDROID_EMULATOR_GPU: swiftshader_indirect
@@ -1083,6 +1173,7 @@ jobs:
         if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_IOS_ARCH: arm64
           BUSTER_IOS_CONSOLE_LOG: ${{ runner.temp }}/buster-ci/ios-console.log
         run: |
@@ -1123,8 +1214,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-ci/job-environment.json"
       - name: Install pinned QEMU and reference firmware
         shell: bash
         run: |
@@ -1163,9 +1262,14 @@ jobs:
           build/uefi-driver test_uefi --self-test build/uefi-self-test
       - name: Build compiler and boot both architectures in all allocators
         shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           build/uefi-driver generate --build-directory build/uefi-compiler --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+          if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
+            python3 tools/ci_checks_tools.py --tool ninja --cmake-cache build/uefi-compiler/CMakeCache.txt --output "$RUNNER_TEMP/buster-ci/selected-ninja.json"
+          fi
           build/uefi-driver build --build-directory build/uefi-compiler --config Release -t ide -- -j2
           build/uefi-driver test_uefi build/uefi-compiler/Release/ide build/uefi
       - name: Retain firmware execution evidence
@@ -1178,6 +1282,8 @@ jobs:
             !build/uefi/**/VARS.fd
             build/uefi-self-test
             build/uefi-compiler/CMakeCache.txt
+            ${{ runner.temp }}/buster-ci/selected-ninja.json
+            ${{ runner.temp }}/buster-ci/job-environment.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -1189,9 +1295,17 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-analyzer/job-environment.json"
       - name: Bootstrap candidate and select reference build driver
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1282,9 +1396,14 @@ jobs:
       - name: Configure the authoritative split-source database
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+          if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
+            python3 tools/ci_checks_tools.py --tool ninja --cmake-cache build/analyzer-tree/CMakeCache.txt --output "$RUNNER_TEMP/buster-analyzer/selected-ninja.json"
+          fi
       - name: Compare reference analysis and aggregate all module shards
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1429,8 +1548,16 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Verify every desktop partition exists
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1455,6 +1582,7 @@ jobs:
           path: |
             ${{ runner.temp }}/desktop-partitions.json
             ${{ runner.temp }}/main-ci-reuse-finish.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: error
           retention-days: 7
       - name: Require every shard
