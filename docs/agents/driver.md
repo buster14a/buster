@@ -468,7 +468,7 @@ rather than wrapped, and a `movabs` value that fits a sign-extended imm32
 takes the shorter `mov` row. The `moffs` forms of `movabs`, `ret`/`retq` with
 an immediate, multi-byte `nop` with operands, and the short accumulator ALU
 forms (`and al, imm8` encodes as `80 /4 ib`, a byte longer than GNU's `24 ib`)
-are tracked separately.
+are tracked in [#2680](https://github.com/buster14a/buster/issues/2680).
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
 and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
