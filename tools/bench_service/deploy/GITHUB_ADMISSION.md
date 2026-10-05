@@ -1,8 +1,11 @@
 # Protected GitHub admission for the Ryzen 7 9700X
 
-The benchmark host is not a general Actions executor. The sole Actions path
-uses the installed fixed gateway in `.github/workflows/9700x-service-dispatch.yml`;
-no workflow may check out candidate code onto this host. The repository variable
+The benchmark host is not a general Actions executor. Exactly two workflows
+may reach it. `.github/workflows/9700x-service-dispatch.yml` uses the installed
+fixed gateway and checks out nothing. `.github/workflows/9700x-direct-bench.yml`
+(#2704) compiles and runs the owner's own pull-request workloads directly; see
+[Direct workload gate](#direct-workload-gate). No other workflow may check out
+code onto this host. The repository variable
 `BENCH_SERVICE_DISPATCH_ENABLED` stays `false` until live host qualification.
 Only dispatches by `davidgmbb` (user 39247043) reach the runner, and they run
 without a manual approval step; the workflow gate in section 2 enforces this.
@@ -16,7 +19,8 @@ runner in `buster14a`, not a repository runner, and move it into the new
 - Repository access: Selected repositories, only `buster14a/buster`. Allow
   public repositories, because this one is public.
 - Workflow access: Selected workflows, exactly
-  `buster14a/buster/.github/workflows/9700x-service-dispatch.yml@refs/heads/main`.
+  `buster14a/buster/.github/workflows/9700x-service-dispatch.yml@refs/heads/main`
+  and `buster14a/buster/.github/workflows/9700x-direct-bench.yml@refs/heads/main`.
 - Exactly one runner with labels `self-hosted`, `Linux`, `X64`,
   `buster-zen5`, `ryzen-9700x` in the group. Remove the old repository runner
   registration. Do not attach another runner to the group.
@@ -112,6 +116,46 @@ workflow, policy files, installed binary, recipe and host registration.
 Changes to any of these need review under the repository's trust policy before
 live activation; do not equate a passing static policy check with approval of
 arbitrary new commands on a self-hosted runner.
+
+### Direct workload gate
+
+`.github/workflows/9700x-direct-bench.yml` starts on `pull_request_target` for
+changes to `benchmarks/9700x/*.c`, with no manual dispatch and no approval.
+`pull_request_target` runs the workflow definition from `main`, so a pull
+request cannot edit the gate and the run matches the runner group's
+`@refs/heads/main` pin. A `push` or `pull_request` trigger would run the
+branch's own copy of the workflow and must not be used for this host. To run a
+workload from a branch, open a pull request from it; a draft is enough.
+
+Both jobs require the repository variable `BENCH_DIRECT_ENABLED == 'true'`,
+the pull request author to be `davidgmbb` by login and numeric ID 39247043,
+the head repository to be this repository, and `davidgmbb` as actor, actor ID
+and triggering actor. The hosted `authorize` job re-reads the run attempt as
+the dispatch workflow does, and `bench` is bound to an authorization from the
+same attempt. A pull request by any other author, from a fork, or pushed to by
+another account skips both jobs before the self-hosted runner. An agent that
+pushes with the owner's credentials is the owner for this gate.
+
+`bench` receives no token capability, no secret and no environment. It checks
+out `main`'s `tools/bench_direct` as the trusted harness and the pull request
+head's `benchmarks/9700x` as data, both without persisted credentials, then
+runs only `trusted/tools/bench_direct/run_workloads.py`. The pull request
+supplies C source that is compiled and executed as the runner account. That is
+the intended capability, and it is why the author gate is the whole control:
+this path has none of the service's containment, lease or sealed results. Do
+not widen the author list.
+
+Administrator steps, none of which a pull request can perform:
+
+1. Add the second selected workflow to the runner group as in section 1.
+2. Create `BENCH_DIRECT_ENABLED` with value `false`; set it to `true` only
+   after the host step below. Set it back to `false` on any drift.
+3. On the host, give the runner account `clang`, `python3`, `git` and a work
+   directory it can write. Its sudo rule stays limited to the fixed gateway.
+4. Confirm that workflows from fork pull requests still require approval.
+
+The read-only preflight in section 2 verifies the two-workflow runner group
+and compares both workflows on `main` byte for byte with the trusted checkout.
 
 ### Settings transition
 

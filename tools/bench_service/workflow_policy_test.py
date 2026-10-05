@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed if Actions can execute repository code on the benchmark host."""
+"""Fail closed if Actions can reach the benchmark host outside its two reviewed paths."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 SERVICE = ROOT / "tools" / "bench_service"
 DISPATCH = WORKFLOWS / "9700x-service-dispatch.yml"
+DIRECT = WORKFLOWS / "9700x-direct-bench.yml"
 POLICY = WORKFLOWS / "bench-service-policy.yml"
 EXCLUSIVE_TEST = SERVICE / "exclusive_admission_test.c"
 OLD_AUDIT = WORKFLOWS / "zen5-audit.yml"
@@ -100,6 +101,76 @@ SUBMIT_LINES = (
     "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
 )
 
+# The direct workload path (#2704): main's definition, run for the owner's own
+# same-repository pull requests only. The pull request author is part of the
+# gate because pull_request_target runs for every pull request.
+DIRECT_TERMS = (
+    "vars.BENCH_DIRECT_ENABLED == 'true'",
+    "github.event_name == 'pull_request_target'",
+    "github.event.pull_request.user.login == 'davidgmbb'",
+    "github.event.pull_request.user.id == 39247043",
+    "github.event.pull_request.head.repo.full_name == github.repository",
+    "github.actor == 'davidgmbb'",
+    "github.actor_id == '39247043'",
+    "github.triggering_actor == 'davidgmbb'",
+)
+DIRECT_AUTHORIZE_IF = "    if: ${{ " + " && ".join(DIRECT_TERMS) + " }}"
+DIRECT_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING)) + " }}"
+DIRECT_TRIGGER = (
+    "on:",
+    "  pull_request_target:",
+    "    types: [opened, synchronize, reopened]",
+    "    paths:",
+    "      - 'benchmarks/9700x/*.c'",
+)
+DIRECT_AUTHORIZE_LINES = tuple(
+    line for line in AUTHORIZE_LINES
+    if line != AUTHORIZE_IF and '"head branch"' not in line
+    and "BENCH_DISPATCH_UNAUTHORIZED" not in line and '"event"' not in line
+) + (
+    DIRECT_AUTHORIZE_IF,
+    "              (\"event\", run.get(\"event\") == \"pull_request_target\"),",
+    "              sys.exit(\"BENCH_DIRECT_UNAUTHORIZED \" + \", \".join(failures))",
+)
+DIRECT_RUN_LINES = (
+    "    needs: authorize",
+    DIRECT_RUN_IF,
+    "    runs-on:",
+    "      group: buster-9700x-service-dispatch",
+    "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
+    "      BQ_BASE_COMMIT: ${{ github.event.pull_request.base.sha }}",
+    "      BQ_HEAD_COMMIT: ${{ github.event.pull_request.head.sha }}",
+)
+DIRECT_CHECKOUTS = (
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          ref: ${{ github.sha }}",
+        "          path: trusted",
+        "          sparse-checkout: tools/bench_direct",
+        "          persist-credentials: false",
+    ),
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          ref: ${{ github.event.pull_request.head.sha }}",
+        "          path: candidate",
+        "          fetch-depth: 0",
+        "          filter: blob:none",
+        "          sparse-checkout: benchmarks/9700x",
+        "          persist-credentials: false",
+    ),
+)
+DIRECT_RUN_SCRIPT = [
+    "          set -euo pipefail",
+    "          [[ \"$BQ_BASE_COMMIT\" =~ ^[0-9a-f]{40}$ ]]",
+    "          [[ \"$BQ_HEAD_COMMIT\" =~ ^[0-9a-f]{40}$ ]]",
+    "          [[ \"$(git -C candidate rev-parse HEAD)\" == \"$BQ_HEAD_COMMIT\" ]]",
+    "          python3 -B trusted/tools/bench_direct/run_workloads.py \\",
+    "            --candidate candidate --base \"$BQ_BASE_COMMIT\" --head \"$BQ_HEAD_COMMIT\" \\",
+    "            --work \"$RUNNER_TEMP/direct-bench\" --summary \"$GITHUB_STEP_SUMMARY\"",
+]
+
 SOURCE_REQUIREMENTS = {
     "exclusive_admission.c": (
         "BqError bq_submit_exclusive",
@@ -123,11 +194,13 @@ SOURCE_REQUIREMENTS = {
 DOCUMENTATION_REQUIREMENTS = {
     ACTIONLINT: (
         ".github/workflows/9700x-service-dispatch.yml",
-        "only by the fixed service dispatch workflow",
+        ".github/workflows/9700x-direct-bench.yml",
+        "only by the two reviewed 9700X workflows",
     ),
     BENCHMARKING: (
         "The dedicated Ryzen 7 9700X is no longer a general GitHub Actions",
         ".github/workflows/9700x-service-dispatch.yml",
+        ".github/workflows/9700x-direct-bench.yml",
         "native-retirement-performance-v1` remains blocked",
     ),
     DEPLOYMENT: (
@@ -137,6 +210,8 @@ DOCUMENTATION_REQUIREMENTS = {
     ),
     ADMISSION_GUIDE: (
         "### Dispatch gate",
+        "### Direct workload gate",
+        ".github/workflows/9700x-direct-bench.yml@refs/heads/main",
         "### Settings transition",
         "must use **Re-run all jobs**",
     ),
@@ -368,8 +443,12 @@ def main() -> int:
         if "buster-zen5" in path.read_text(encoding="utf-8")
         or "ryzen-9700x" in path.read_text(encoding="utf-8")
     ]
-    if benchmark_users != [DISPATCH.name]:
-        errors.append(f"benchmark labels are not exclusive to the service workflow: {benchmark_users}")
+    if benchmark_users != [DIRECT.name, DISPATCH.name]:
+        errors.append(f"benchmark labels are not exclusive to the two reviewed workflows: {benchmark_users}")
+    for path in workflows:
+        if path != DIRECT and "pull_request_target" in path.read_text(encoding="utf-8") and \
+                "self-hosted" in path.read_text(encoding="utf-8"):
+            errors.append(f"only the direct workflow may pair pull_request_target with self-hosted: {path.name}")
 
     required = (
         "workflow_dispatch:",
@@ -434,7 +513,71 @@ def main() -> int:
         errors.append("submission must use exactly one literal installed-gateway command")
 
     check_recipe_selection(dispatch, submit, errors)
+    check_direct_workflow(errors)
     return report(errors)
+
+
+def check_direct_workflow(errors: list[str]) -> None:
+    """The direct path runs main's harness for the owner's own pull requests."""
+    if not DIRECT.is_file():
+        errors.append("missing 9700x-direct-bench.yml")
+        return
+    direct = DIRECT.read_text(encoding="utf-8")
+    lines = direct.splitlines()
+    jobs = job_blocks(direct)
+    if list(jobs) != ["authorize", "bench"]:
+        errors.append(f"direct workflow jobs must be authorize then bench: {list(jobs)}")
+    authorize, run = jobs.get("authorize", []), jobs.get("bench", [])
+
+    # The trigger block is exact: no other event, type or path may start it.
+    start = lines.index("on:") if "on:" in lines else len(lines)
+    trigger = [line for line in lines[start:start + len(DIRECT_TRIGGER) + 1] if line.strip()]
+    if tuple(trigger) != DIRECT_TRIGGER:
+        errors.append("direct workflow trigger must be exactly the reviewed pull_request_target block")
+    declarations = [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")]
+    if declarations != ["permissions: {}", "    permissions:"]:
+        errors.append("direct workflow must grant no GITHUB_TOKEN permissions beyond authorize")
+    if not contains_block(authorize, ("    permissions:", "      actions: read", "    timeout-minutes: 5")):
+        errors.append("direct authorize job must be granted exactly actions: read")
+
+    for line in DIRECT_AUTHORIZE_LINES:
+        if line not in authorize:
+            errors.append(f"direct authorize job is missing exact line: {line.strip()}")
+    scripts = run_scripts(authorize)
+    if len(scripts) != 1 or not scripts[0] or scripts[0][-1] != AUTHORIZE_OUTPUT or \
+            sum("GITHUB_OUTPUT" in line for line in scripts[0]) != 1:
+        errors.append("direct authorize job must emit its attempt once, after every verification passes")
+    for marker in ("buster-zen5", "ryzen-9700x", "self-hosted", "uses:", "pull_request.head"):
+        if any(marker in line for line in authorize if not line.startswith("    if:")):
+            errors.append(f"direct authorize job must not use: {marker}")
+
+    for line in DIRECT_RUN_LINES:
+        if line not in run:
+            errors.append(f"direct bench job is missing exact line: {line.strip()}")
+    for name, job in (("authorize", authorize), ("bench", run)):
+        if len([line for line in job if line.startswith("    if:")]) != 1:
+            errors.append(f"direct {name} job must have exactly one condition")
+    for marker in ("GH_TOKEN", "github.token", "curl ", "api.github.com", "permissions:", "sudo",
+                   "environment:", "buster-bench-service"):
+        if any(marker in line for line in run):
+            errors.append(f"direct bench job must not use: {marker}")
+    uses = [line for line in run if "uses:" in line]
+    if len(uses) != len(DIRECT_CHECKOUTS) or not all(contains_block(run, block) for block in DIRECT_CHECKOUTS):
+        errors.append("direct bench job must use exactly the two reviewed credential-free checkouts")
+    if run_scripts(run) != [DIRECT_RUN_SCRIPT]:
+        errors.append("direct bench job must run only main's harness with validated commit IDs")
+
+    for number, line in expression_lines_in_scripts(direct):
+        errors.append(f"direct workflow line {number} interpolates an expression inside a run script")
+    for marker in ("workflow_dispatch:", "pull_request:", "push:", "schedule:", "repository_dispatch:",
+                   "workflow_run:", "issue_comment:", "secrets.", "inputs.", "wget ", " ssh "):
+        if marker in direct:
+            errors.append(f"direct workflow contains forbidden path: {marker}")
+    if sum("https://" in line for line in lines) != 1:
+        errors.append("direct workflow may fetch only authorize's fixed run-attempt API URL")
+    harness = ROOT / "tools" / "bench_direct" / "run_workloads.py"
+    if not harness.is_file():
+        errors.append("missing direct workload harness")
 
 
 def check_recipe_selection(dispatch: str, submit: list[str], errors: list[str]) -> None:
@@ -611,7 +754,7 @@ def report(errors: list[str]) -> int:
         for error in errors:
             print(f"WORKFLOW_POLICY_FAIL {error}", file=sys.stderr)
         return 1
-    print("WORKFLOW_POLICY_PASS fixed gateway is the sole 9700X Actions path")
+    print("WORKFLOW_POLICY_PASS the fixed gateway and the owner direct path are the only 9700X Actions paths")
     return 0
 
 
