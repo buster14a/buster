@@ -24,7 +24,9 @@ is the last timestamp-named `.md` file in
 [`docs/performance-audits/`](docs/performance-audits/). `--list` keeps the
 headlines written below for the audits the index lists and reads a later
 audit's headline from its opening line. CI runs `tools/new_audit.py --check`,
-which fails a pull request that adds a line to the closed index.
+which fails a pull request that adds a line to the closed index, and
+`tools/check_markdown_links.py`, which fails one that deletes a path an audit
+links by relative path.
 
 An audit's id is the UTC timestamp at which it is recorded,
 `2026-08-22T140351Z`, which is ISO 8601 with the colons dropped because Windows

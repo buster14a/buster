@@ -1312,8 +1312,9 @@ static int tp_compare(char const* root)
                         {
                             TpRow const* row = probes + tp_row_index(job, kind, variant, repeat, 3);
                             TpRow const* reference = rows + tp_row_index(job, 0, variant, 0, pairs);
-                            ok = ok && !strcmp(row->output_hash, reference->output_hash) &&
-                                 row->source_bytes == reference->source_bytes && row->source_lines == reference->source_lines;
+                            ok = ok && row->output_bytes == reference->output_bytes && !strcmp(row->output_hash, reference->output_hash) &&
+                                 row->source_bytes == reference->source_bytes && row->source_lines == reference->source_lines &&
+                                 row->source_functions == reference->source_functions;
                             double value = tp_metric(row, metric);
                             if (isfinite(value)) values[count++] = value;
                         }

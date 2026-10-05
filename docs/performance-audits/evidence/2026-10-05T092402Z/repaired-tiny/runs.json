@@ -1,0 +1,1808 @@
+[
+  {
+    "label": "warmup-baseline",
+    "variant": "baseline",
+    "start_unix_ns": 1791191303443548768,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/warmup-baseline/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3438608,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3543585,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3463181,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3379135,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3771652,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3593324,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3615953,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 549881322,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 548181005,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 547096204,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 538426961,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 521908107,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 492792118,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 492383491,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "warmup-candidate",
+    "variant": "candidate",
+    "start_unix_ns": 1791191307360041795,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/warmup-candidate/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3853292,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3608217,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3846560,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3939440,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4086172,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3821033,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3144202,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 552927703,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 552697138,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 563604966,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 544998149,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 529085301,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 497679434,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 263805097,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-0-baseline",
+    "variant": "baseline",
+    "start_unix_ns": 1791191311076946174,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-0-baseline/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3404038,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3527791,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3878880,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3463208,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3427711,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3514443,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3653734,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 565859271,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 561262796,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 557534781,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 554685919,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 534186754,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 499336896,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 496552165,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-0-candidate",
+    "variant": "candidate",
+    "start_unix_ns": 1791191315102082651,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-0-candidate/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4261611,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3644046,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3597450,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3771925,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3759472,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3842956,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3193956,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 563935983,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 566089494,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 567719951,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 555676788,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 540578697,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 505577816,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 269660316,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-1-candidate",
+    "variant": "candidate",
+    "start_unix_ns": 1791191318868818534,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-1-candidate/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4875521,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3820947,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3633184,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3597532,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3836698,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3702556,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3228692,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 566772488,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 571379390,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 568782842,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 560877167,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 545510975,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 509492974,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 271499893,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-1-baseline",
+    "variant": "baseline",
+    "start_unix_ns": 1791191322686892253,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-1-baseline/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3363611,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3417625,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3633198,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3629771,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3629388,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3550547,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3590232,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 590144068,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 623897993,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 739387514,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 746569354,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 737660798,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 687269433,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 679001947,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-2-baseline",
+    "variant": "baseline",
+    "start_unix_ns": 1791191327763251560,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-2-baseline/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4214529,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4163752,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4205590,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4311206,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4733469,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4167611,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4461642,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 720521913,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 755722732,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 743086205,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 719802751,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 694652868,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 658994655,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 652638716,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-2-candidate",
+    "variant": "candidate",
+    "start_unix_ns": 1791191332990074551,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-2-candidate/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4232088,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4246303,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4740282,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4314448,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4212466,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4303635,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3788343,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 689080518,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 718143293,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 715997382,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 733451661,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 703182425,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 645528106,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 343187921,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-3-candidate",
+    "variant": "candidate",
+    "start_unix_ns": 1791191337769004730,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-3-candidate/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4421918,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3952980,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3900181,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3936252,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4032129,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3933097,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3468147,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 756202548,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 766358253,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 737390806,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 714636976,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 705601943,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 660582403,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 357990300,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-3-baseline",
+    "variant": "baseline",
+    "start_unix_ns": 1791191342694879383,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-3-baseline/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3972697,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3882146,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3857478,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3863930,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4141882,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3973469,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3854441,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 679852793,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 721001694,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 718333054,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 703486155,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 684671871,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 635963801,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 675158484,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-4-baseline",
+    "variant": "baseline",
+    "start_unix_ns": 1791191347772613632,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-4-baseline/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4049522,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4199440,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4127876,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4070168,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4122252,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4272016,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4111759,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 689634681,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 717640769,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 708476807,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 699536786,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 674121555,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 627841666,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 635986980,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-4-candidate",
+    "variant": "candidate",
+    "start_unix_ns": 1791191352794613457,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-4-candidate/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4350075,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4126477,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4154871,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4240207,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4319920,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4282830,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3681441,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 674561683,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 719179389,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 719989371,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 701592388,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 678639988,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 643565418,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 340194751,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-5-candidate",
+    "variant": "candidate",
+    "start_unix_ns": 1791191357467238009,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-5-candidate/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4938578,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4300614,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4189509,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4429512,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 4593129,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 5159137,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3789924,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 713051365,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 720344933,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 711284559,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 729192603,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 721070844,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 631994446,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 338368721,
+        "checksum": 18446744073708503040
+      }
+    ]
+  },
+  {
+    "label": "pair-5-baseline",
+    "variant": "baseline",
+    "start_unix_ns": 1791191362234166367,
+    "command": [
+      "taskset",
+      "-c",
+      "2",
+      "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-tiny/pair-5-baseline/ide",
+      "test",
+      "--module=string_tests",
+      "--ci=1"
+    ],
+    "returncode": 0,
+    "cells": [
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3773892,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3831649,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3858063,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3860632,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3859881,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3866507,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 0,
+        "calls": 1048576,
+        "elapsed_ns": 3945790,
+        "checksum": 0
+      },
+      {
+        "n": 256,
+        "m": 1,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 684725514,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 2,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 710227100,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 3,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 708075830,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 7,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 705068870,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 15,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 713770175,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 31,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 635300399,
+        "checksum": 18446744073708503040
+      },
+      {
+        "n": 256,
+        "m": 32,
+        "shape": 1,
+        "calls": 1048576,
+        "elapsed_ns": 679334313,
+        "checksum": 18446744073708503040
+      }
+    ]
+  }
+]

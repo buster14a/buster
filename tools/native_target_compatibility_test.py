@@ -59,6 +59,22 @@ esac
 exec "$BUSTER_TEST_REAL_CC" "$@"
 """
 
+LIFETIME_WRAPPER = r"""#!/bin/sh
+for arg; do
+    shift
+    case "$arg" in
+        -Wexperimental-lifetime-safety)
+            if [ "$BUSTER_TEST_LIFETIME_SAFETY" = unsupported ]; then
+                echo "error: unknown warning option '-Wexperimental-lifetime-safety' [-Werror,-Wunknown-warning-option]" >&2
+                exit 1
+            fi
+            continue ;;
+    esac
+    set -- "$@" "$arg"
+done
+exec "$BUSTER_TEST_REAL_CC" "$@"
+"""
+
 ASAN_WRAPPER = r"""#!/bin/sh
 query=$1
 printf '%s\n' "$query" >> "$BUSTER_TEST_ASAN_QUERY_LOG"
@@ -290,6 +306,99 @@ class ProbeTests(unittest.TestCase):
     def test_fixed_compiler_or_other_architecture_is_not_probed(self):
         self.assertEqual(self.configure("affected", version="22.1.0"), "")
         self.assertEqual(self.configure("affected", processor="aarch64"), "")
+
+
+@unittest.skipUnless(CMAKE and HOST_CC and os.name == "posix", "cmake, a host C compiler and POSIX sh are required")
+class OptionalWarningProbeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = CMAKELISTS.read_text()
+        function_start = source.index("function(buster_filter_supported_c_flags out_var)")
+        function_end = source.index("endfunction()", function_start) + len("endfunction()")
+        cls.filter_function = source[function_start:function_end]
+
+        candidates_start = source.index("set(CLANG_GNU_FAMILY_OPTIONAL_WARNING_CANDIDATES")
+        optional_if_start = source.index(
+            "if (C_COMPILER_CLANG_FAMILY AND BUSTER_CHECK_OPTIONAL_WARNINGS)",
+            candidates_start,
+        )
+        depth = 0
+        block_end = None
+        cursor = optional_if_start
+        for line in source[optional_if_start:].splitlines(keepends=True):
+            if line.lstrip().startswith("if ("):
+                depth += 1
+            elif line.lstrip().startswith("endif()"):
+                depth -= 1
+                if depth == 0:
+                    block_end = cursor + len(line)
+                    break
+            cursor += len(line)
+        if block_end is None:
+            raise AssertionError("optional warning CMake block has no closing endif()")
+        cls.optional_warning_block = source[candidates_start:block_end]
+
+    def configure(self, work, mode, version):
+        work = Path(work)
+        wrapper = work / "cc-wrapper"
+        wrapper.write_text(LIFETIME_WRAPPER)
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+        cmake_lists = "\n".join((
+            "cmake_minimum_required(VERSION 3.17)",
+            "project(optional_warning_probe C)",
+            "include(CheckCCompilerFlag)",
+            "set(C_COMPILER_CLANG_FAMILY ON)",
+            "set(BUSTER_CHECK_OPTIONAL_WARNINGS ON)",
+            'set(CLANG_GNU_FAMILY_WARNINGS "")',
+            'set(CMAKE_C_COMPILER_VERSION "${BUSTER_TEST_COMPILER_VERSION}")',
+            self.filter_function,
+            self.optional_warning_block,
+            'file(WRITE "${CMAKE_BINARY_DIR}/result.txt" "${BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS}")',
+            "",
+        ))
+        (work / "CMakeLists.txt").write_text(cmake_lists)
+        env = dict(
+            os.environ,
+            BUSTER_TEST_LIFETIME_SAFETY=mode,
+            BUSTER_TEST_REAL_CC=HOST_CC,
+            CC=str(wrapper),
+        )
+        env.pop("CFLAGS", None)
+        result = subprocess.run(
+            [
+                CMAKE,
+                "--warn-uninitialized",
+                "-Werror=dev",
+                "-S",
+                str(work),
+                "-B",
+                str(work / "build"),
+                f"-DBUSTER_TEST_COMPILER_VERSION={version}",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return (work / "build/result.txt").read_text().split(";"), result.stdout + result.stderr
+
+    def test_compiler_upgrade_reprobes_flag_that_became_unsupported(self):
+        with tempfile.TemporaryDirectory() as work:
+            supported, _ = self.configure(work, "supported", "22.1.8")
+            self.assertIn("-Wexperimental-lifetime-safety", supported)
+
+            unsupported, output = self.configure(work, "unsupported", "23.1.1")
+        self.assertNotIn("-Wexperimental-lifetime-safety", unsupported)
+        self.assertIn("Skipping unsupported optional C compiler flags", output)
+        self.assertIn("-Wexperimental-lifetime-safety", output)
+
+    def test_compiler_change_reprobes_flag_that_became_supported(self):
+        with tempfile.TemporaryDirectory() as work:
+            unsupported, _ = self.configure(work, "unsupported", "22.1.8")
+            self.assertNotIn("-Wexperimental-lifetime-safety", unsupported)
+
+            supported, _ = self.configure(work, "supported", "23.1.1")
+        self.assertIn("-Wexperimental-lifetime-safety", supported)
 
 
 if __name__ == "__main__":

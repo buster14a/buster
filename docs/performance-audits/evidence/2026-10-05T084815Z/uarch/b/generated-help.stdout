@@ -1,0 +1,8 @@
+usage:
+  ide cc <C compiler options and inputs>
+  ide test [--verbose=0|1] [--ci=0|1] [--module=<name>[,<name>...]] [--coff-relocation-fixture=<path>]
+  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)
+  ide bench
+  ide bench-select <self-contained-source.c>
+  ide x86_64_completion_census [--output=<path>]
+  ide --fuzz <libFuzzer options and corpus paths>
