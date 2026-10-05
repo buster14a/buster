@@ -1694,7 +1694,16 @@ u64 string_first_sequence(String8 s, String8 sub)
     {
         if (sub.length >= STRING_FIRST_SEQUENCE_TWO_WAY_MINIMUM_NEEDLE)
         {
-            result = string_first_sequence_two_way(s, sub);
+            // One full prefix probe costs at most the needle length and keeps
+            // immediate matches on the existing optimized equality path.
+            if (string_equal(string_slice(s, 0, sub.length), sub))
+            {
+                result = 0;
+            }
+            else
+            {
+                result = string_first_sequence_two_way(s, sub);
+            }
         }
         else
         {
