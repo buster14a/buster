@@ -460,7 +460,7 @@ BUSTER_GLOBAL_LOCAL char const bq_mcp_tools[] =
     "{\"name\":\"bench_capabilities\",\"description\":\"Read current service capabilities and adapter limits.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_submit\",\"description\":\"Durably queue immutable installed revisions under a fixed recipe. Identical key retries return the same job; do not generate a new key after a lost reply.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{"
     "\"idempotency_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64,\"pattern\":\"^[A-Za-z0-9._-]+$\"},"
-    "\"recipe\":{\"type\":\"string\",\"enum\":[\"validate-buster-v1\",\"zen5-calibration-v1\",\"native-execute-v1\"]},"
+    "\"recipe\":{\"type\":\"string\",\"enum\":[\"validate-buster-v1\",\"zen5-calibration-v1\",\"native-execute-v1\",\"native-runtime-v1\"]},"
     "\"baseline_sha\":" BQ_MCP_SOURCE_SCHEMA ",\"candidate_sha\":" BQ_MCP_SOURCE_SCHEMA "},\"required\":[\"idempotency_key\",\"recipe\",\"baseline_sha\",\"candidate_sha\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_status\",\"description\":\"Read a service job receipt; the synchronous backend can time out while execution owns the host.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"job_id\":" BQ_MCP_JOB_SCHEMA "},\"required\":[\"job_id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_result\",\"description\":\"Read this job's bound manifest/bundle/full-result digests, if present. This tool returns receipts, not downloaded artifact bytes.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"job_id\":" BQ_MCP_JOB_SCHEMA "},\"required\":[\"job_id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
@@ -468,7 +468,7 @@ BUSTER_GLOBAL_LOCAL char const bq_mcp_tools[] =
     "{\"name\":\"bench_logs\",\"description\":\"Read at most four lifecycle events with a stable per-job ordinal cursor; these are not build stdout logs.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"job_id\":" BQ_MCP_JOB_SCHEMA ",\"cursor\":" BQ_MCP_CURSOR_SCHEMA "},\"required\":[\"job_id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_program_begin\",\"description\":\"Start or resume a private immutable static Linux x86-64 program upload; read the durable byte cursor. No filename crosses the service boundary.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_PROGRAM_SCHEMA "},\"required\":[\"program_sha256\",\"program_size\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_program_write\",\"description\":\"Persist 1-432 program bytes encoded as lowercase hex at an exact byte offset. Retry identical bytes after a lost reply; gaps and changed prefixes conflict.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_PROGRAM_SCHEMA ",\"offset\":" BQ_MCP_CURSOR_SCHEMA ",\"bytes_hex\":{\"type\":\"string\",\"pattern\":\"^([0-9a-f]{2}){1,432}$\",\"maxLength\":864}},\"required\":[\"program_sha256\",\"program_size\",\"offset\",\"bytes_hex\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},"
-    "{\"name\":\"bench_program_finish\",\"description\":\"Verify and commit all declared program bytes. Submit the returned program_manifest_sha256 as both source SHA fields with recipe native-execute-v1; no compiler revisions or workflow dispatch are needed.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_PROGRAM_SCHEMA "},\"required\":[\"program_sha256\",\"program_size\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}}]}";
+    "{\"name\":\"bench_program_finish\",\"description\":\"Verify and commit all declared program bytes. Submit the returned program_manifest_sha256 as both source SHA fields with recipe native-execute-v1 (run once) or native-runtime-v1 (2 warmups and 9 diagnostic process samples); no compiler revisions or workflow dispatch are needed.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_PROGRAM_SCHEMA "},\"required\":[\"program_sha256\",\"program_size\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}}]}";
 
 BUSTER_GLOBAL_LOCAL bool bq_mcp_recipe_available(String8 capabilities, String8 recipe)
 {
@@ -506,11 +506,16 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_service_result(BqPacket const* request, BqPacket
         {
             String8 capabilities = {(char8*)data + 4, response->size - BQ_CONTROL_HEADER - 4};
             bool native = bq_mcp_recipe_available(capabilities, S8(BQ_NATIVE_RECIPE));
+            bool runtime = bq_mcp_recipe_available(capabilities, S8(BQ_RUNTIME_RECIPE));
             bq_mcp_append(result, S8("{\"service_capabilities\":"));
             bq_mcp_string(result, capabilities);
             bq_mcp_append(result, S8(",\"adapter\":{\"transport\":\"stdio\",\"backend\":\"unix-seqpacket\",\"principal\":\"github-actions\",\"off_host_cache\":false,\"synchronous_backend\":true,\"fixed_recipe_only\":true,\"custom_workloads\":false,\"native_program_upload\":"));
-            bq_mcp_append(result, native ? S8("true,\"arbitrary_native_execution\":true") : S8("false,\"arbitrary_native_execution\":false"));
-            bq_mcp_append(result, S8(",\"custom_runtime_benchmarks\":false,\"compiler_benchmarks\":false,\"artifact_download\":false}}"));
+            /* One upload store serves both native recipes; each flag follows
+             * the installed backend's own served-recipe token. */
+            bq_mcp_append(result, native || runtime ? S8("true") : S8("false"));
+            bq_mcp_append(result, native ? S8(",\"arbitrary_native_execution\":true") : S8(",\"arbitrary_native_execution\":false"));
+            bq_mcp_append(result, runtime ? S8(",\"custom_runtime_benchmarks\":true") : S8(",\"custom_runtime_benchmarks\":false"));
+            bq_mcp_append(result, S8(",\"compiler_benchmarks\":false,\"artifact_download\":false}}"));
         }
         else if (operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
         {
@@ -693,7 +698,7 @@ BUSTER_GLOBAL_LOCAL void bq_mcp_message(BqMcpSession* session, char const* socke
             bq_mcp_id(output, &json, id);
             bq_mcp_append(output, S8(",\"result\":{\"protocolVersion\":"));
             bq_mcp_string(output, string_equal(requested, S8("2025-06-18")) ? requested : S8(BQ_MCP_VERSION));
-            bq_mcp_append(output, S8(",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"buster-bench-service\",\"version\":\"1\"},\"instructions\":\"Use bench_capabilities to check installed recipes. Native programs use typed begin/write/finish uploads and a native-execute-v1 submission with the manifest digest in both SHA fields. Compilation and runtime timing are unavailable. This adapter requires the authenticated Unix socket; the synchronous backend may time out while a job runs. No artifact byte download tool is implemented. EOF and MCP request cancellation do not cancel jobs; use bench_cancel.\"}}\n"));
+            bq_mcp_append(output, S8(",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"buster-bench-service\",\"version\":\"1\"},\"instructions\":\"Use bench_capabilities to check installed recipes. Native programs use typed begin/write/finish uploads and a native-execute-v1 or native-runtime-v1 submission with the manifest digest in both SHA fields. native-runtime-v1 returns diagnostic process-latency samples, not a qualified verdict. Compilation is unavailable. This adapter requires the authenticated Unix socket; the synchronous backend may time out while a job runs. No artifact byte download tool is implemented. EOF and MCP request cancellation do not cancel jobs; use bench_cancel.\"}}\n"));
             session->phase = 1;
         }
     }

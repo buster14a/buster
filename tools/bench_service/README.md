@@ -727,8 +727,11 @@ This software adapter does not establish the full #437 deployment. The current
 service runs its worker synchronously and may defer every public operation
 until cleanup, causing a bounded request timeout. The adapter reports
 `off_host_cache=false`, `synchronous_backend=true`, `fixed_recipe_only=true`,
-`custom_workloads=false`, `arbitrary_native_execution=false` and
-`artifact_download=false`. Off-host cached queue/SSH transport, quiet-phase
+`custom_workloads=false`, `compiler_benchmarks=false` and
+`artifact_download=false`. `native_program_upload`,
+`arbitrary_native_execution` and `custom_runtime_benchmarks` are true only
+when the installed backend serves `native-execute-v1` and `native-runtime-v1`
+respectively. Off-host cached queue/SSH transport, quiet-phase
 client-load evidence, write-capable ChatGPT/Codex installation and live raw
 artifact retrieval are still required. Follow the [MCP client installation
 boundary](deploy/MCP_CLIENT.md); local initialization/enumeration alone is not

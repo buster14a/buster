@@ -434,7 +434,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_socket(void)
                 bq_mcp_message(&session, socket_path, S8("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_capabilities\",\"arguments\":{}}}"), &output);
                 BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"isError\":false") &&
                          bq_test_mcp_contains(&output, "\"off_host_cache\":false") && bq_test_mcp_contains(&output, "\"custom_workloads\":false") &&
-                         bq_test_mcp_contains(&output, "\"native_program_upload\":true"));
+                         bq_test_mcp_contains(&output, "\"native_program_upload\":true") &&
+                         bq_test_mcp_contains(&output, "\"custom_runtime_benchmarks\":true") &&
+                         bq_test_mcp_contains(&output, "\"compiler_benchmarks\":false"));
                 char const* submit = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_submit\",\"arguments\":{\"idempotency_key\":\"mcp-lost-reply\",\"recipe\":\"validate-buster-v1\",\"baseline_sha\":\"1111111111111111111111111111111111111111\",\"candidate_sha\":\"2222222222222222222222222222222222222222\"}}}";
                 bq_mcp_message(&session, socket_path, string_from_pointer(submit), &output);
                 BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"isError\":false") &&

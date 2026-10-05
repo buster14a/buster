@@ -465,12 +465,17 @@ static TpProcess tp_process_internal(char* const* args, char const* directory, c
         }
         if (!failure.error)
         {
+#ifdef __linux__
+            /* Descriptor launches exist only on Linux; elsewhere the block
+             * above already failed the launch with ENOSYS. */
             if (descriptor)
             {
                 char* const environment[] = {"PATH=/usr/bin:/bin", "LC_ALL=C", NULL};
                 fexecve(descriptor->executable, args, environment);
             }
-            else execv(args[0], args);
+            else
+#endif
+            execv(args[0], args);
             failure.stage = TP_LAUNCH_EXEC;
             failure.error = errno;
         }

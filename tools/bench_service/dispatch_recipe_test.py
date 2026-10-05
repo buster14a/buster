@@ -87,7 +87,7 @@ class DispatchRecipeTest(unittest.TestCase):
 
     def test_unknown_recipes_are_refused_without_outputs(self):
         for recipe in ("", "zen5-calibration-v2", "native-retirement-performance-v1", "fake-success-v1",
-                       "native-execute-v1",
+                       "native-execute-v1", "native-runtime-v1",
                        "Validate-buster-v1", "validate-buster-v1 ", "validate-buster-v1\n", " zen5-calibration-v1",
                        "$(touch pwned)", "validate-buster-v1;true", "*"):
             with self.subTest(recipe=recipe):

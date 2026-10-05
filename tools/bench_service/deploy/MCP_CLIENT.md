@@ -42,6 +42,12 @@ and execution only when the backend lists that admitted recipe. A successful
 one-shot execution has no compiler or runtime performance series. See the
 [execution contract](../NATIVE_EXECUTION.md) for supported binaries and limits.
 
+Submitting the same digest with recipe `native-runtime-v1` runs two warmups
+and nine fresh-process samples of that program instead. Its sealed rows are a
+diagnostic process-latency measurement, not a qualified comparison; see the
+[runtime contract](../NATIVE_RUNTIME.md). `custom_runtime_benchmarks` is true
+only when the backend serves that recipe.
+
 The installed daemon is synchronous: during an admitted job it stops serving
 ordinary control requests until cleanup. An MCP call can therefore return a
 transport error without cancelling or resubmitting the job. Retrying submission
