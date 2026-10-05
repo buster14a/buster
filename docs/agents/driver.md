@@ -252,6 +252,13 @@ and maximum native vector width. `-target`/`--target` strings are
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+Windows targets implement the MSVC ABI only, so the MinGW spellings
+(`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
+`unsupported target environment` instead of being aliased to MSVC (#1492);
+MinGW's GCC `ms_struct` layout is not modelled.
+The GNU environment refusal applies after a recognized Windows OS component;
+`x86_64-gnu-windows-msvc` and `x86_64-gnullvm-windows-msvc` retain their free-form
+vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`, while
 `-fno-register-allocator` and `-fregister-allocator=none` retain their accepted
@@ -433,7 +440,12 @@ relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
 `.att_syntax prefix`; and the `.cfi_*` family, accepted and dropped because it
-describes unwinding rather than bytes. Anything else -- a directive the table
+describes unwinding rather than bytes. Widths and alignment follow the target
+as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on
+AArch64 `.align N` is 2^N bytes like `.p2align`, `.word` is 32 bits, and
+`.xword`/`.dword` add 64-bit data. A constant that fits neither the signed nor
+the unsigned reading of its directive's width is refused, as llvm-mc does,
+rather than truncated. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
@@ -655,15 +667,21 @@ then the same target roots used by ELF export discovery: `lib/<triple>`,
 sysroot. Without a sysroot, the absolute host roots also include
 `/usr/<triple>/lib` after the two multiarch roots. The sysroot replaces these
 default host paths; explicit `-L` directories retain their literal meaning.
-Each directory prefers `libNAME.so` to `libNAME.a`, so an earlier explicit
+Each directory prefers a target-compatible `libNAME.so` to `libNAME.a`, so an earlier explicit
 archive wins over a later default shared library. `-l:FILE.a` searches the
 exact archive name without that shared-library probe and retains its existing
-bare-path fallback. Other target search policies are unchanged.
+bare-path fallback. A little-endian ELF64 shared candidate naming a different
+CPU is skipped before archive selection, allowing an archive in the same or
+a later directory to satisfy the request. Files without that recognized
+foreign shared header retain the existing export-discovery refusal. The probe
+does not validate the complete foreign object. Other target search policies
+are unchanged.
 
 `compiler_driver_archive_test_default_roots`, invoked by the registered lazy
 archive fixture, checks both ELF CPUs and all six literal sysroot roots,
 named/exact/direct image parity, distinct provider precedence, explicit `-L`,
-shared preference, exact archive bypass and output preservation on refusal.
+shared preference, incompatible shared headers beside and before usable
+archives, exact archive bypass and output preservation on refusal.
 Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.

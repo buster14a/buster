@@ -56,7 +56,8 @@ unavailable in this local transport.
 
 ## Store, materialization and execution
 
-The service owns `queue/native-blobs` at mode 0700. Program size is limited to
+The service owns `queue/native-blobs` at mode 0710: the root broker runs
+without capabilities in the service group and must traverse it. Program size is limited to
 4 MiB, with at most 128 lifetime store entries (completed bundles and partial
 uploads count). The worst-case admitted program bytes are bounded by 512 MiB;
 an in-flight finish can temporarily duplicate one file. There is no automatic
@@ -83,8 +84,8 @@ program-sha256=PROGRAM_SHA256
 program-size=DECIMAL_BYTES
 ```
 
-Its SHA256 names a mode-0500 directory containing `manifest` and `program`, both
-0400. Finish syncs the complete files and directory, then publishes that one
+Its SHA256 names a mode-0550 directory containing `manifest` (0440, so the
+broker can compare it with the workspace copy) and `program` (0400). Finish syncs the complete files and directory, then publishes that one
 directory with no-replace rename and syncs the store. An interrupted finish can
 retry only exact service-owned partial prefixes of the two declared files.
 Extra, foreign, linked, changed or invalid-mode evidence is preserved and

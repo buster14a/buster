@@ -770,7 +770,7 @@ static bool bq_broker_manifest(BqBrokerRequest const* request, BqBrokerPaths con
     bool ok = native ?
               bq_broker_format(installed, sizeof(installed), "%s/native-blobs/%s", BQ_BROKER_QUEUE, revision) &&
               bq_broker_directory(installed, service_uid, false) &&
-              bq_broker_regular(installed, "manifest", service_uid, (gid_t)-1, 0400, false, source_bytes,
+              bq_broker_regular(installed, "manifest", service_uid, (gid_t)-1, BQ_NATIVE_MANIFEST_MODE, false, source_bytes,
                                 sizeof(source_bytes), &source_size) &&
               bq_broker_directory(workspace, service_uid, false) &&
               bq_broker_regular(workspace, ".native-manifest", service_uid, (gid_t)-1, 0440, false, copy_bytes,

@@ -318,7 +318,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_native_read(BqOffhostControl* control, u6
     int directory = store >= 0 ? openat(store, identity, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
     struct stat info = {0};
     if (error == BQ_OK && (directory < 0 || fstat(directory, &info) != 0 || !S_ISDIR(info.st_mode) ||
-        info.st_uid != geteuid() || (info.st_mode & 07777) != 0500 ||
+        info.st_uid != geteuid() || (info.st_mode & 07777) != BQ_NATIVE_BUNDLE_MODE ||
         !bq_native_description(directory, identity, manifest, &length, program, &size))) error = BQ_SOURCE_MISMATCH;
     int file = error == BQ_OK ? openat(directory, "program", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
     if (error == BQ_OK && !bq_native_file(file, (off_t)size, 0400)) error = BQ_SOURCE_MISMATCH;

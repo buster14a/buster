@@ -8662,11 +8662,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_encode_into_caller_buffer(UnitTe
     return result;
 }
 
+// A value defined just above its constrained consumer should be born in the
+// register that consumer fixes: SHL64 reads its count from RCX, so the MOV_RI
+// feeding it wants RCX rather than the lowest free lane. The fixture is the
+// `x << 3` shape — a constant defined two rows above a shift — and the check
+// is that the count reaches RCX with no copy, reload or rematerialization
+// along the way, and that the placement is deterministic.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_consumer_register_hint(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    u32 count = machine_builder_virtual_register(
+        &builder, (MachineVirtualRegister){.definition_point = machine_point_make(0, MACHINE_POINT_AFTER),
+                                           .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+    u32 value = machine_builder_virtual_register(
+        &builder, (MachineVirtualRegister){.definition_point = machine_point_make(1, MACHINE_POINT_AFTER),
+                                           .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                           .flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE});
+    MachineRef count_ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count);
+    MachineRef value_ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+    machine_builder_block_begin(&builder);
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_MOV_RI,
+                                                               .operands = {count_ref, machine_ref_make(MACHINE_REF_IMMEDIATE, 0)}});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                                               .operands = {value_ref, machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RDI)}});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_SHL64,
+                                                               .operands = {value_ref, count_ref}});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                                               .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), value_ref}});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+    function.immediates = arena_allocate(arena, u64, 1);
+    function.immediates[0] = 3;
+    function.immediate_count = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement placement = machine_fast_placement_build(arena, &function);
+    BUSTER_TEST(arguments, placement.valid);
+    BUSTER_TEST(arguments, placement.operand_registers[2 * MACHINE_INSTRUCTION_OPERAND_COUNT + 1] == MACHINE_X64_RCX);
+    u32 count_edits = 0;
+    for (u32 index = 0; index < placement.edit_count; index += 1)
+    {
+        MachineEdit edit = placement.edits[index];
+        count_edits += edit.subject == count &&
+                       (edit.kind == MACHINE_EDIT_RELOAD || edit.kind == MACHINE_EDIT_COPY || edit.kind == MACHINE_EDIT_REMATERIALIZE);
+    }
+    BUSTER_TEST(arguments, count_edits == 0);
+    MachineStackPlacement repeated = machine_fast_placement_build(arena, &function);
+    BUSTER_TEST(arguments, repeated.valid && repeated.edit_count == placement.edit_count);
+    BUSTER_TEST(arguments, !memcmp(repeated.edits, placement.edits, placement.edit_count * sizeof(*placement.edits)));
+    BUSTER_TEST(arguments, !memcmp(repeated.operand_registers, placement.operand_registers,
+                                   (u64)function.instruction_count * MACHINE_INSTRUCTION_OPERAND_COUNT));
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
+    BUSTER_TEST_FIXTURE(arguments, machine_test_fast_consumer_register_hint);
     BUSTER_TEST_FIXTURE(arguments, machine_test_source_writer_guards);
     BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
     BUSTER_TEST_FIXTURE(arguments, machine_test_encode_into_caller_buffer);

@@ -15,6 +15,7 @@
 // compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
+// compiler_driver_test_wasm_string_records checks multi-module lookup scaling.
 // compiler_driver_test_wasm_function_addresses checks escaping function markers and direct calls.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
@@ -2793,6 +2794,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
+        // #1388: GNU body declarations retain every comma-separated declarator.
+        {S8("int f(void) { return ({ static int a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ volatile int a = 3, b = 4; a += 1, b += 2, a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("typedef int T; int f(void) { return ({ int T = 2; int x = 3; T += 4, x += 5, T + x; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("typedef int T; int f(void) { return ({ T a = 2; }); }\n"), false, false, S8("void value not ignored"), S8("-std=gnu17")},
+        {S8("typedef int T; int f(void) { return ({ { int T = 2; T; } T a = 3; }); }\n"), false, false, S8("void value not ignored"), S8("-std=gnu17")},
+        {S8("typedef int T; int f(void) { return ({ const int T = 2; T += 1; T; }); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int a = 5, b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int a, b; a = 5; b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { int x = 4; return ({ int *p = &x, v = 2; *p + v; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("void f(void) { ({ int a = 5, b = 6; (void)(a + b); }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int setg(int); int rg(void); int f(void) { return ({ int a = setg(5), b = rg(); a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int a = 5; int b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { int r; { int a = 5, b = 6; r = a + b; } return r; }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int r = 0; { int a = 5, b = 6; r = a + b; } r; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("typedef int Number; int f(void) { return ({ Number a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { int x = 0; return ({ __typeof__(x) a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int a = 1, b = 2; a += 4, b += 5, a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ const int a = 5, b = 6; b = 7; a + b; }); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=gnu17")},
         // Callback storage is an explicit GNU extension on admitted native targets.
         {S8("typedef int (*F)(int); void g(F f) { void *p = f; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
         {S8("typedef int (*F)(int); void g(void *p) { F f = p; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
@@ -3126,7 +3146,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
                 BUSTER_TEST(arguments, object_after.values[IR_CONSTRUCTION_TYPE_APPENDS] > ir_after.values[IR_CONSTRUCTION_TYPE_APPENDS]);
             }
 #endif
-            BUSTER_TEST(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[index].valid);
+            BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[index].valid,
+                            string_format(arena, S8("source={S8}\nsyntax={S8}"), cases[index].source, syntax.diagnostic));
             BUSTER_TEST(arguments, syntax.error == object.error);
             BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostic, object.diagnostic),
                             string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
@@ -11960,6 +11981,110 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_en
     return result;
 }
 
+// Context-wide string records retain identity across distinct modules and
+// functions; each function emits two rows in the reverse of instruction-ID
+// order, with equal contents in separate records as well as unique contents.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_string_records(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 populations[] = {1, 4, 16};
+    for (u32 width = 4; width <= 8; width += 4)
+    {
+        for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(populations); population += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            enum { MODULES = 3 };
+            u32 functions = MODULES * populations[population];
+            u32 strings = functions * 2;
+            IrProgram program = ir_program_initialize(arena, MODULES, 4, functions, 0);
+            Target target = {.cpu_arch = width == 4 ? CPU_ARCH_WASM32 : CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING};
+            program.data_layout = target_data_layout(target);
+            IrTypeLayout pointer_layout = {.size = width, .alignment = width, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true};
+            IrTypeId void_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+            IrTypeId byte_type = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 8, .layout = {.size = 1, .alignment = 1, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+            IrTypeId pointer_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_POINTER, .element_type = byte_type, .layout = pointer_layout});
+            IrTypeId signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = pointer_type, .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+            bool committed = true;
+            for (u32 module_index = 0; module_index < MODULES; module_index += 1)
+            {
+                IrModule* module = program.modules + module_index;
+                module->name = string_format(arena, S8("strings-{u32}"), module_index);
+                for (u32 function_index = 0; function_index < populations[population]; function_index += 1)
+                {
+                    String8 name = string_format(arena, S8("string_{u32}_{u32}"), module_index, function_index);
+                    IrSymbolId symbol = ir_program_add_symbol(&program,
+                        (IrSymbol){.name = name, .link_name = name, .type = signature, .kind = IR_SYMBOL_FUNCTION,
+                                   .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+                    IrFunction* function = ir_module_add_function(arena, module,
+                        (IrFunction){.name = name, .symbol = symbol, .canonical_type = signature, .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+                    ir_function_add_block(arena, function,
+                        (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+                    IrValueId value = ir_function_add_value(arena, function,
+                        (IrValue){.canonical_type = pointer_type, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+                    IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+                    IrInstruction literal = {.canonical_type = pointer_type, .symbol = IR_SYMBOL_ID_INVALID,
+                        .canonical_local = IR_LOCAL_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID, .result = value, .opcode = IR_OPCODE_CONSTANT_STRING};
+                    IrInstructionId row = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, literal, (IrSourceRange){0}, &refusal);
+                    committed &= refusal == IR_COMMIT_ACCEPTED;
+                    if (refusal == IR_COMMIT_ACCEPTED)
+                    {
+                        ir_instruction_extra_ensure(arena, function, row)->literal = function_index % 2 ? name : S8("shared");
+                    }
+                    IrValueId second_value = ir_function_add_value(arena, function,
+                        (IrValue){.canonical_type = pointer_type, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+                    literal.result = second_value;
+                    IrInstructionId second_row = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, literal, (IrSourceRange){0}, &refusal);
+                    committed &= refusal == IR_COMMIT_ACCEPTED;
+                    if (refusal == IR_COMMIT_ACCEPTED)
+                    {
+                        ir_instruction_extra_ensure(arena, function, second_row)->literal = S8("shared");
+                    }
+                    IrValueId* operand = arena_allocate(arena, IrValueId, 1);
+                    *operand = value;
+                    IrInstruction tail = {.canonical_type = void_type, .symbol = IR_SYMBOL_ID_INVALID,
+                        .canonical_local = IR_LOCAL_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID, .result = IR_VALUE_ID_INVALID,
+                        .opcode = IR_OPCODE_RETURN, .operands = operand, .operand_count = 1};
+                    IrInstructionId tail_row = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, tail, (IrSourceRange){0}, &refusal);
+                    committed &= refusal == IR_COMMIT_ACCEPTED;
+                    if (committed)
+                    {
+                        function->blocks[0].first_instruction = second_row;
+                        function->instructions[second_row.value].next = row;
+                        function->instructions[row.value].next = tail_row;
+                    }
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, committed))
+            {
+                WasmOptions options = WASM_OPTIONS_DEFAULT;
+                options.pointer_size = (u8)width;
+                WasmArtifact first = wasm_emit_program(arena, &program, options);
+                WasmArtifact second = wasm_emit_program(arena, &program, options);
+                BUSTER_TEST_RAW(arguments, first.success && second.success, first.error.message);
+                if (BUSTER_REQUIRE(arguments, first.success && second.success))
+                {
+                    u32 bound = 1;
+                    for (u32 remaining = strings; remaining; remaining >>= 1) bound += 1;
+                    BUSTER_TEST(arguments, first.stats.module_count == MODULES && first.stats.defined_function_count == functions);
+                    BUSTER_TEST(arguments, first.stats.data_segment_count == strings);
+                    BUSTER_TEST(arguments, first.stats.string_record_lookup_probes >= strings &&
+                                           first.stats.string_record_lookup_probes <= (u64)strings * bound);
+                    BUSTER_TEST(arguments, first.stats.string_record_lookup_probes == second.stats.string_record_lookup_probes);
+                    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                                           memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                    arguments->show(arguments, S8("WASM_STRING_LOOKUP width={u32} modules={u32} strings={u32} probes={u64} bound={u64}\n"),
+                                    width, (u32)MODULES, strings, first.stats.string_record_lookup_probes, (u64)strings * bound);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Baseline success is still executed: the engine witnesses index-zero/null
 // collisions before the narrowed capability refusal makes those rows fail.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_addresses(UnitTestArguments* arguments)
@@ -15155,7 +15280,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_dynamic_tls(UnitTe
         for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
         {
             String8 object_path = string_format_z(arena, S8("{S8}/foreign-{u32}-{u32}.o"), directory, compiler, variant);
-            String8 compile[] = {compilers[compiler], S8("-O2"), S8("-fPIC"), variants[variant], S8("-c"), S8("-o"), object_path, foreign_path};
+            String8 compile[] = {compilers[compiler], S8("-O2"), S8("-fPIC"), S8("-gz=none"), variants[variant], S8("-c"), S8("-o"), object_path, foreign_path};
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0}, (SliceString8){0},
                                                         (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             bool compiled = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
@@ -19091,6 +19216,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_records);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
@@ -20227,6 +20353,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_excess_component_command_line));
     BUSTER_TEST(arguments, target_excess_component.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, target_excess_component.diagnostic, S8("unsupported target component: notacpu"));
+    // A MinGW spelling used to select the MSVC ABI silently (#1492).
+    String8 target_mingw_command_line[] = {
+        S8("--target=x86_64-w64-mingw32"),
+        S8("-c"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation target_mingw = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_mingw_command_line));
+    BUSTER_TEST(arguments, target_mingw.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, target_mingw.diagnostic,
+                       S8("unsupported target environment: mingw32 (MinGW's ABI is not implemented; Windows targets use the MSVC ABI, spelled *-windows-msvc)"));
     // The spelling that works, and the wide vector registers it unlocks.
     String8 target_march_command_line[] = {
         S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-march=znver4"), S8("-c"), S8("source.c"),
@@ -28055,11 +28191,87 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ),
     };
 
+    // #1388: complete declaration lists at the top level of a GNU body.
+    String8 c_statement_expression_declarators_source = S8(
+        "static int calls;\n"
+        "static int stored;\n"
+        "static int write_value(int value)\n"
+        "{\n"
+        "    calls += 1;\n"
+        "    stored = value;\n"
+        "    return value;\n"
+        "}\n"
+        "static int read_value(void)\n"
+        "{\n"
+        "    calls += 1;\n"
+        "    return stored + 1;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    int initialized = ({ int left = 5, right = 6; left + right; });\n"
+        "    if (initialized != 11) result = 1;\n"
+        "    int uninitialized = ({ int left, right; left = 5; right = 6; left + right; });\n"
+        "    if (uninitialized != 11) result = 2;\n"
+        "    int base = 4;\n"
+        "    int mixed = ({ int *pointer = &base, value = 2; *pointer + value; });\n"
+        "    if (mixed != 6) result = 3;\n"
+        "    stored = 0;\n"
+        "    ({ int left = 5, right = 6; stored = left + right; (void)(left + right); });\n"
+        "    if (stored != 11) result = 4;\n"
+        "    calls = 0;\n"
+        "    stored = 0;\n"
+        "    int once = ({ int left = write_value(5), right = read_value(); left + right; });\n"
+        "    if (once != 11 || calls != 2 || stored != 5) result = 5;\n"
+        "    calls = 0;\n"
+        "    stored = 0;\n"
+        "    int three = ({ int first = write_value(2), second = read_value(), third = read_value(); first + second + third; });\n"
+        "    if (three != 8 || calls != 3 || stored != 2) result = 6;\n"
+        "    int separate = ({ int left = 5; int right = 6; left + right; });\n"
+        "    if (separate != 11) result = 7;\n"
+        "    int ordinary;\n"
+        "    { int left = 5, right = 6; ordinary = left + right; }\n"
+        "    if (ordinary != 11) result = 8;\n"
+        "    int nested = ({ int sum = 0; { int left = 5, right = 6; sum = left + right; } sum; });\n"
+        "    if (nested != 11) result = 9;\n"
+        "    typedef int Number;\n"
+        "    int alias = ({ Number left = 3, right = 4; left + right; });\n"
+        "    if (alias != 7) result = 10;\n"
+        "    int inferred = ({ __typeof__(base) left = 3, right = 4; left + right; });\n"
+        "    if (inferred != 7) result = 11;\n"
+        "    int qualified = ({ const int left = 3, right = 4; left + right; });\n"
+        "    if (qualified != 7) result = 12;\n"
+        "    int array = ({ int values[2] = {2, 3}, sum = values[0] + values[1]; sum; });\n"
+        "    if (array != 5) result = 13;\n"
+        "    calls = 0;\n"
+        "    int comma_value = ({ int left = 1, right = 2; calls += 1, calls += 2, left + right + calls; });\n"
+        "    if (comma_value != 6 || calls != 3) result = 14;\n"
+        "    int comma_update = ({ int left = 1, right = 2; left += 4, right += 5, left + right; });\n"
+        "    if (comma_update != 12) result = 15;\n"
+        "    calls = 0;\n"
+        "    int loop = ({ int sum = 0; for (int index = 0; index < 3; index += 1, calls += 1) sum += index; sum; });\n"
+        "    if (loop != 3 || calls != 3) result = 16;\n"
+        "    calls = 0;\n"
+        "    stored = 0;\n"
+        "    ({ int left = write_value(5), right = read_value(); stored = left + right; (void)(left + right); });\n"
+        "    if (stored != 11 || calls != 2) result = 17;\n"
+        "    int static_objects = ({ static int left = 3, right = 4; left + right; });\n"
+        "    if (static_objects != 7) result = 18;\n"
+        "    int volatile_objects = ({ volatile int left = 3, right = 4; left += 1, right += 2, left + right; });\n"
+        "    if (volatile_objects != 10) result = 19;\n"
+        "    typedef int Shadow;\n"
+        "    int shadowed = ({ int Shadow = 2; int other = 3; Shadow += 4, other += 5, Shadow + other; });\n"
+        "    if (shadowed != 14) result = 20;\n"
+        "    return result;\n"
+        "}\n"
+    );
     String8 c_modification_destination_sources[] = {
         string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prefix_pointer_store_parts), false),
         string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_parameter_update_parts), false),
+        c_statement_expression_declarators_source,
     };
-    String8 c_modification_destination_names[] = {S8("buster-c-prefix-pointer-store"), S8("buster-c-array-parameter-update")};
+    String8 c_modification_destination_names[] = {S8("buster-c-prefix-pointer-store"), S8("buster-c-array-parameter-update"),
+                                                S8("buster-c-statement-expression-declarators")};
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(c_modification_destination_sources); source_index += 1)
     {
         for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
@@ -28076,7 +28288,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_modification_destination_sources[source_index])));
                     bool native_allocator = !string_equal(c_lz4_regression_allocators[allocator_index], S8("-fregister-allocator=none"));
                     String8 fixture_command_line[] = {
-                        S8("-std=c17"), c_designator_optimizations[optimization_index], c_flat_initializer_frontends[frontend_index],
+                        source_index == 2 ? S8("-std=gnu17") : S8("-std=c17"), c_designator_optimizations[optimization_index], c_flat_initializer_frontends[frontend_index],
                         c_lz4_regression_allocators[allocator_index], S8("-fverify-codegen"),
                         native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-o"), fixture_path, source_path,
                     };

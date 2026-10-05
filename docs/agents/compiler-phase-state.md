@@ -49,6 +49,11 @@ A machine failure fails the complete module. The wrapper clears unpublished
 code, data, relocations and debug/unwind tables while preserving diagnostics,
 attempted-work counters and the active failure phase. Moving a boundary must
 keep the machine path's flat iteration and data layout.
+`codegen_publish_machine_relocations` checks combined call and inline-assembly
+capacity before writing and restores the live relocation count when any inline
+row is refused. Both native commit sites record line rows only after that
+transaction succeeds, so discarded machine bytes cannot publish references or
+line positions.
 
 The public native result identifies a failing function, instruction and opcode
 for many backend errors and names the active native owner in

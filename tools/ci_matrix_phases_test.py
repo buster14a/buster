@@ -293,14 +293,17 @@ class PhaseValidationTests(unittest.TestCase):
         self.assertNotIn("source_path", self.coverage["identity"])
         self.assertTrue(self.check()["complete"])
 
-    def test_apple_sanitizer_shards_keep_shared_tree(self):
+    def test_apple_sanitizer_owners_reject_foreign_rows_like_other_split_owners(self):
+        # #2659: macOS sanitizer owners are no longer rejected by platform. A
+        # tree carrying another owner's row (such as a shared Debug;Release
+        # tree) still fails the ordinary row-ownership check.
         plan = phases.read(self.root / "plan.json")
         for shard in ("sanitized-debug", "sanitized-release"):
             with self.subTest(shard=shard):
                 candidate, coverage = copy.deepcopy(plan), copy.deepcopy(self.coverage)
                 candidate["identity"].update(platform="macos", shard=shard)
                 coverage["identity"].update(platform="macos", shard=shard)
-                with self.assertRaisesRegex(ValueError, "Apple sanitizer trees require grouped checks"):
+                with self.assertRaisesRegex(ValueError, "unknown/excluded rows"):
                     phases.validate_plan(candidate, coverage, {})
 
     def test_nested_setup_conserves_enclosing_child_phase_time(self):

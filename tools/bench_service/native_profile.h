@@ -19,5 +19,12 @@
 #define BQ_NATIVE_STORE_CAP 128u
 #define BQ_NATIVE_MANIFEST_CAP 256u
 #define BQ_NATIVE_LOG_CAP (1024u * 1024u)
+/* The root broker runs without capabilities in the service group and must
+ * read each bundle's manifest to compare it with the workspace copy, so the
+ * store is group-traversable and the manifest group-readable. Program bytes
+ * stay owner-only; the candidate account is not in the service group. */
+#define BQ_NATIVE_STORE_MODE 0710
+#define BQ_NATIVE_BUNDLE_MODE 0550
+#define BQ_NATIVE_MANIFEST_MODE 0440
 #define BQ_NATIVE_PROFILE "schema=1\nrecipe=native-execute-v1\nsource-manifest=BQ-NATIVE-V1\noperation=execute-once\nplatform=linux-x86-64-static-elf\narguments=none\ncompilation=unavailable\nbenchmark-metrics=unavailable\n"
 #endif

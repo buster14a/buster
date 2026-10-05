@@ -1,0 +1,343 @@
+[
+  {
+    "target": "x86_64-gnu-windows-msvc",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-gnu-windows-msvc",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-gnu-windows-msvc-base.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-gnu-windows-msvc",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-gnu-windows-msvc-candidate.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    }
+  },
+  {
+    "target": "x86_64-gnullvm-windows-msvc",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-gnullvm-windows-msvc",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-gnullvm-windows-msvc-base.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-gnullvm-windows-msvc",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-gnullvm-windows-msvc-candidate.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    }
+  },
+  {
+    "target": "x86_64-pc-windows-msvc",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-msvc",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-msvc-base.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-msvc",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-msvc-candidate.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    }
+  },
+  {
+    "target": "x86_64-pc-windows-gnu",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-gnu",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-gnu-base.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-gnu",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-gnu-candidate.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target environment: gnu (MinGW's ABI is not implemented; Windows targets use the MSVC ABI, spelled *-windows-msvc)",
+      "sha256": null
+    }
+  },
+  {
+    "target": "x86_64-windows-gnu",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-windows-gnu",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-windows-gnu-base.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-windows-gnu",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-windows-gnu-candidate.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target environment: gnu (MinGW's ABI is not implemented; Windows targets use the MSVC ABI, spelled *-windows-msvc)",
+      "sha256": null
+    }
+  },
+  {
+    "target": "x86_64-pc-windows-gnullvm",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-gnullvm",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-gnullvm-base.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-gnullvm",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-gnullvm-candidate.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target environment: gnullvm (MinGW's ABI is not implemented; Windows targets use the MSVC ABI, spelled *-windows-msvc)",
+      "sha256": null
+    }
+  },
+  {
+    "target": "x86_64-windows-gnullvm",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-windows-gnullvm",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-windows-gnullvm-base.obj"
+      ],
+      "exit": 0,
+      "diagnostic": "",
+      "sha256": "3977ffff0ccd5ec11d51510d4553211d2a088ec50f17b7282bdd79b33ed77aba"
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-windows-gnullvm",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-windows-gnullvm-candidate.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target environment: gnullvm (MinGW's ABI is not implemented; Windows targets use the MSVC ABI, spelled *-windows-msvc)",
+      "sha256": null
+    }
+  },
+  {
+    "target": "x86_64-gnu-windows-msvc-extra",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-gnu-windows-msvc-extra",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-gnu-windows-msvc-extra-base.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target component: extra",
+      "sha256": null
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-gnu-windows-msvc-extra",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-gnu-windows-msvc-extra-candidate.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target component: extra",
+      "sha256": null
+    }
+  },
+  {
+    "target": "x86_64-gnullvm-windows-msvc-extra",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-gnullvm-windows-msvc-extra",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-gnullvm-windows-msvc-extra-base.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target component: extra",
+      "sha256": null
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-gnullvm-windows-msvc-extra",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-gnullvm-windows-msvc-extra-candidate.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target component: extra",
+      "sha256": null
+    }
+  },
+  {
+    "target": "x86_64-pc-windows-gnu-extra",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-gnu-extra",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-gnu-extra-base.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target component: extra",
+      "sha256": null
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-gnu-extra",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-gnu-extra-candidate.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target component: extra",
+      "sha256": null
+    }
+  },
+  {
+    "target": "x86_64-pc-windows-gnullvm-extra",
+    "base": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/perfbin/ide-base",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-gnullvm-extra",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-gnullvm-extra-base.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target component: extra",
+      "sha256": null
+    },
+    "candidate": {
+      "command": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide",
+        "cc",
+        "-c",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/string_offsets.c",
+        "--target=x86_64-pc-windows-gnullvm-extra",
+        "-o",
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-controls-final/x86_64-pc-windows-gnullvm-extra-candidate.obj"
+      ],
+      "exit": 1,
+      "diagnostic": "cc: error: unsupported target component: extra",
+      "sha256": null
+    }
+  }
+]
