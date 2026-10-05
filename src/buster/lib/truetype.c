@@ -307,7 +307,6 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
     u64 font_start = ttf_font_offset_for_index(file, font_index);
     if (!ttf_range_is_valid(file, font_start, 12))
     {
-        string_print(S8("ttf range not valid"));
         result.result = TTF_FONT_INITIALIZATION_FAILED;
         return result;
     }
@@ -316,7 +315,6 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
     bool supported_sfnt = sfnt_version == 0x00010000u || ttf_tag_equal(file, font_start, 't', 'r', 'u', 'e');
     if (!supported_sfnt)
     {
-        string_print(S8("not supported_sfnt"));
         result.result = TTF_FONT_INITIALIZATION_UNSUPPORTED;
         return result;
     }
@@ -340,8 +338,6 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
 
     if (!have_cmap || !have_loca || !have_head || !have_glyf || !have_hhea || !have_hmtx || !have_maxp)
     {
-        string_print(S8("cmap: {u32}. loca: {u32}. head: {u32}. glyf: {u32}. hhea: {u32}. hmtx: {u32}. maxp: {u32}\n"), have_cmap, have_loca, have_head,
-                     have_glyf, have_hhea, have_hmtx, have_maxp);
         result.result = TTF_FONT_INITIALIZATION_FAILED;
         return result;
     }
@@ -350,7 +346,6 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
     u32 cmap_format = 0;
     if (!ttf_find_unicode_cmap(file, cmap, &cmap_subtable, &cmap_format))
     {
-        string_print(S8("ttf_find_unicode_cmap failed"));
         result.result = TTF_FONT_INITIALIZATION_UNSUPPORTED;
         return result;
     }

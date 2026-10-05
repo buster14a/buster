@@ -468,9 +468,7 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
         os_fail();
     }
 
-    string_print(S8("Font path: {S8}\n"), create.font_path);
     ByteSlice font_file = file_read(arena, create.font_path, (FileReadOptions){0});
-    string_print(S8("Font. Pointer: {u64:x}. Length: {u64}\n"), font_file.pointer, font_file.length);
     if (font_file.pointer)
     {
         TTF_FontInitialization font_initialization = truetype_font_initialize(font_file, 0);
@@ -564,12 +562,13 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
         }
         else
         {
-            os_fail();
+            os_fail_message_format(S8("font file {S8} is not a usable TrueType font (initialization result {u32})"), create.font_path,
+                                   (u32)font_initialization.result);
         }
     }
     else
     {
-        os_fail();
+        os_fail_message_format(S8("font file {S8} could not be read"), create.font_path);
     }
 
     return result;
