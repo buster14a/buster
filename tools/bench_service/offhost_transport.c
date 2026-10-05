@@ -270,7 +270,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_native_cached(BqQueue* queue, String8 ide
     if (directory >= 0)
     {
         bool valid = fstat(directory, &info) == 0 && info.st_uid == geteuid() &&
-                     (info.st_mode & 07777) == 0500 &&
+                     (info.st_mode & 07777) == BQ_NATIVE_BUNDLE_MODE &&
                      bq_native_description(directory, name, manifest, &length, program, &size);
         int input = valid ? openat(directory, "program", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) : -1;
         valid = valid && bq_native_file(input, (off_t)size, 0400) && bq_native_elf(input, size, 0) &&

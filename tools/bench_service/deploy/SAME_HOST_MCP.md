@@ -74,7 +74,11 @@ into `/opt/buster-bench/installed/recipes` with the existing owner and mode:
 - `tools/bench_service/profiles/native-execute-v1.recipe`
 - `tools/bench_service/profiles/native-runtime-v1.recipe`
 
-alongside the profiles already there. Without them the capabilities reply
+alongside the profiles already there.
+
+A store written by a revision that sealed bundles owner-only (mode 0500) is
+not readable by the broker. Remove those bundles from `queue/native-blobs`
+while the service is stopped and upload the programs again. Without them the capabilities reply
 still lists both recipes and a submission is accepted, but the job fails at
 materialization as a recipe mismatch.
 

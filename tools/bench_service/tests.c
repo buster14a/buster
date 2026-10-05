@@ -5781,6 +5781,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #endif
     bq_test_native_upload_recovery();
     bq_test_native_staging_refusal();
+    bq_test_native_store_modes();
     bq_test_native_rejections();
     bq_test_native_materialization_execution();
     bq_test_native_collector_failures();
@@ -5860,6 +5861,7 @@ int main(int argc, char** argv)
     {
         bq_test_native_upload_recovery();
         bq_test_native_staging_refusal();
+        bq_test_native_store_modes();
         bq_test_native_rejections();
         bq_test_native_materialization_execution();
         bq_test_native_collector_failures();
