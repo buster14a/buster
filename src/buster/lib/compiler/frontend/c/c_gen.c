@@ -2781,6 +2781,32 @@ struct CIrPreparedControlExpression
     u8 reserved[2];
 };
 
+// What the control-expression prepass asks of a `(` or `[` group's interior.
+// Each bit is the answer of the predicate named beside it over (open, close).
+typedef enum CIrGroupFact
+{
+    C_IR_GROUP_FACT_ROOT_CONTROL = 1,    // c_ir_has_root_control_operator
+    C_IR_GROUP_FACT_ROOT_ASSIGNMENT = 2, // c_ir_has_root_assignment
+    C_IR_GROUP_FACT_TOP_COMMA = 4,       // c_ir_has_top_level_comma
+    C_IR_GROUP_FACT_ANY_ASSIGNMENT = 8,  // c_ir_has_assignment_anywhere
+    C_IR_GROUP_FACT_ANY_CONTROL = 16,    // c_ir_has_control_operator_anywhere
+} CIrGroupFact;
+
+// One open group of the classifying pass: the group's token, the facts seen so
+// far, the `?` count and conditional-tail bit the two root predicates carry,
+// and how many `{` are open directly inside it (a token there is not a root
+// token of the group).
+typedef struct CIrGroupFactsEntry CIrGroupFactsEntry;
+struct CIrGroupFactsEntry
+{
+    u32 open_index;
+    u32 questions;
+    u32 braces;
+    u32 facts;
+    bool conditional_tail;
+    u8 reserved[3];
+};
+
 typedef struct CIrLowerFrame CIrLowerFrame;
 
 typedef struct CIrLowerMachine CIrLowerMachine;
@@ -2980,6 +3006,15 @@ struct CIntegerIrBuilder
     u32 prepared_control_lowering_count;
     u32 prepared_control_token_start;
     u32 prepared_control_token_count;
+    // Group facts per body token, filled by one classifying pass
+    // (c_ir_group_facts_build) the first time a group with a long interior
+    // asks (c_ir_group_fact). Only a body whose delimiters nest properly may
+    // use it, because only then do the predicates' depth counters equal the
+    // pass's group stack; group_facts_exact says so.
+    u8* group_facts;
+    CIrGroupFactsEntry* group_facts_stack;
+    bool group_facts_exact;
+    bool group_facts_built;
     CIrSignature* signatures;
     IrTypeId* c_type_ir_map;
     IrTypeId* scalar_types;
@@ -18802,6 +18837,126 @@ BUSTER_C_INTERNAL void c_ir_prepared_control_expression_rollback(CIntegerIrBuild
     builder->prepared_control_lowering_count = kept;
 }
 
+// A group whose interior is at most this long is answered by scanning it: the
+// scans are then bounded by the limit per group, so nesting cannot square
+// them. A longer interior reads the classifying pass instead.
+#define C_IR_GROUP_FACT_SCAN_LIMIT 32u
+
+// Classify every `(` and `[` group of the body in one pass. A token is a root
+// token of a group exactly when that group is the innermost open one and no
+// `{` is open inside it, which is what the predicates' three depth counters
+// reach on an interior whose delimiters nest properly. The "anywhere" facts
+// flow outward when a group closes. The entry below the stack's bottom group
+// stands for the body itself and is never read.
+BUSTER_C_INTERNAL void c_ir_group_facts_build(CIntegerIrBuilder* builder)
+{
+    CIrGroupFactsEntry* stack = builder->group_facts_stack;
+    u32 stack_count = 1;
+    stack[0] = (CIrGroupFactsEntry){.open_index = UINT32_MAX};
+    for (u32 offset = 0; offset < builder->body_token_count; offset += 1)
+    {
+        u32 token_index = builder->body_token_start + offset;
+        CToken token = builder->preprocess.tokens[token_index];
+        CIrGroupFactsEntry* top = stack + (stack_count - 1);
+        CPunctuator punctuator = token.kind == C_TOKEN_PUNCTUATOR ? (CPunctuator)token.punctuator : C_PUNCTUATOR_NONE;
+        bool root = !top->braces;
+        if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET)
+        {
+            stack[stack_count] = (CIrGroupFactsEntry){.open_index = token_index};
+            stack_count += 1;
+        }
+        else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET)
+        {
+            if (stack_count > 1)
+            {
+                builder->group_facts[top->open_index - builder->body_token_start] = (u8)top->facts;
+                stack_count -= 1;
+                stack[stack_count - 1].facts |= top->facts & (C_IR_GROUP_FACT_ANY_ASSIGNMENT | C_IR_GROUP_FACT_ANY_CONTROL);
+            }
+        }
+        else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
+        {
+            top->braces += 1;
+        }
+        else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE)
+        {
+            top->braces -= top->braces ? 1 : 0;
+        }
+        else if (punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            top->facts |= C_IR_GROUP_FACT_ANY_CONTROL;
+            top->questions += root;
+            top->conditional_tail |= root;
+        }
+        else if (punctuator == C_PUNCTUATOR_COLON)
+        {
+            top->facts |= root && top->questions ? C_IR_GROUP_FACT_ROOT_CONTROL : 0;
+        }
+        else if (punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND)
+        {
+            top->facts |= C_IR_GROUP_FACT_ANY_CONTROL;
+            if (root && stack_count > 1 && !c_ir_label_address_prefix(builder, top->open_index + 1, token_index))
+            {
+                top->facts |= C_IR_GROUP_FACT_ROOT_CONTROL;
+            }
+        }
+        else if (punctuator == C_PUNCTUATOR_PIPE_PIPE)
+        {
+            top->facts |= C_IR_GROUP_FACT_ANY_CONTROL | (root ? C_IR_GROUP_FACT_ROOT_CONTROL : 0);
+        }
+        else if (punctuator == C_PUNCTUATOR_COMMA)
+        {
+            top->facts |= root ? C_IR_GROUP_FACT_TOP_COMMA : 0;
+        }
+        else if (punctuator != C_PUNCTUATOR_NONE && c_ir_assignment_operator(token))
+        {
+            top->facts |= C_IR_GROUP_FACT_ANY_ASSIGNMENT | (root && !top->conditional_tail ? C_IR_GROUP_FACT_ROOT_ASSIGNMENT : 0);
+        }
+    }
+    builder->group_facts_built = true;
+}
+
+// The answer of one predicate over the interior (open, close) of a group.
+// Short interiors, and any group outside a body whose delimiters nest properly,
+// run the predicate itself; the rest read the classifying pass. Both answer the
+// same, so the choice is only a cost choice.
+BUSTER_C_INTERNAL bool c_ir_group_fact(CIntegerIrBuilder* builder, u32 open, u32 close, CIrGroupFact fact)
+{
+    bool answer;
+    bool tabled = builder->group_facts_exact && close - open > C_IR_GROUP_FACT_SCAN_LIMIT && open >= builder->body_token_start &&
+                  open - builder->body_token_start < builder->body_token_count;
+    if (tabled)
+    {
+        if (!builder->group_facts_built)
+        {
+            c_ir_group_facts_build(builder);
+        }
+        answer = (builder->group_facts[open - builder->body_token_start] & fact) != 0;
+#if !BUSTER_OPTIMIZE
+        // The scan the pass replaces, kept as the reference: a debug build
+        // checks every tabled answer against it.
+        bool reference = fact == C_IR_GROUP_FACT_ROOT_CONTROL ? c_ir_has_root_control_operator(builder, open + 1, close)
+                         : fact == C_IR_GROUP_FACT_ROOT_ASSIGNMENT ? c_ir_has_root_assignment(builder, open + 1, close)
+                         : fact == C_IR_GROUP_FACT_TOP_COMMA ? c_ir_has_top_level_comma(builder, open + 1, close)
+                         : fact == C_IR_GROUP_FACT_ANY_ASSIGNMENT ? c_ir_has_assignment_anywhere(builder, open + 1, close)
+                                                                  : c_ir_has_control_operator_anywhere(builder, open + 1, close);
+        BUSTER_CHECK(reference == answer);
+#endif
+    }
+    else
+    {
+        switch (fact)
+        {
+        case C_IR_GROUP_FACT_ROOT_CONTROL: answer = c_ir_has_root_control_operator(builder, open + 1, close); break;
+        case C_IR_GROUP_FACT_ROOT_ASSIGNMENT: answer = c_ir_has_root_assignment(builder, open + 1, close); break;
+        case C_IR_GROUP_FACT_TOP_COMMA: answer = c_ir_has_top_level_comma(builder, open + 1, close); break;
+        case C_IR_GROUP_FACT_ANY_ASSIGNMENT: answer = c_ir_has_assignment_anywhere(builder, open + 1, close); break;
+        default: answer = c_ir_has_control_operator_anywhere(builder, open + 1, close); break;
+        }
+    }
+    return answer;
+}
+
 // An operand of sizeof or _Alignof is not prepared by either prepass. Its
 // owner decides whether a VLA expression operand must be lowered.
 #define C_IR_UNEVALUATED_OPERAND_WORDS                                                              \
@@ -18927,8 +19082,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         {
             continue;
         }
-        if (brackets && (close == index + 1 || (!c_ir_has_root_control_operator(builder, index + 1, close) &&
-                                                !c_ir_has_root_assignment(builder, index + 1, close))))
+        if (brackets && (close == index + 1 || (!c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ROOT_CONTROL) &&
+                                                !c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ROOT_ASSIGNMENT))))
         {
             continue;
         }
@@ -18938,10 +19093,11 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         // through the full expression lowering path just like a conditional
         // or logical group.  This is needed for conditions such as
         // `if ((p = get()) != 0)` and for assignment arms of `?:`.
-        if (!brackets && !c_ir_has_root_control_operator(builder, index + 1, close) &&
-            !c_ir_has_root_assignment(builder, index + 1, close) &&
-            !(c_ir_has_top_level_comma(builder, index + 1, close) &&
-              (c_ir_has_assignment_anywhere(builder, index + 1, close) || c_ir_has_control_operator_anywhere(builder, index + 1, close))))
+        if (!brackets && !c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ROOT_CONTROL) &&
+            !c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ROOT_ASSIGNMENT) &&
+            !(c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_TOP_COMMA) &&
+              (c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ANY_ASSIGNMENT) ||
+               c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ANY_CONTROL))))
         {
             continue;
         }
@@ -54126,7 +54282,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), control_token_array_capacity, BUSTER_ALIGN_OF(u32)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32),
                                           prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
-                                          BUSTER_ALIGN_OF(u32));
+                                          BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), body_array_capacity, BUSTER_ALIGN_OF(u8)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrGroupFactsEntry), prepared_control_expression_capacity + 1,
+                                          BUSTER_ALIGN_OF(CIrGroupFactsEntry));
         if (scratch_fits && lowering_capacity <= UINT32_MAX && local_capacity <= UINT32_MAX && local_slot_capacity <= UINT32_MAX &&
             prepared_call_capacity <= UINT32_MAX && prepared_control_expression_capacity <= UINT32_MAX && lower_frame_capacity <= UINT32_MAX &&
             !function_reservation_limit)
@@ -54284,6 +54443,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         builder.prepared_control_emitted_marks = arena_allocate(lowering_temporary.arena, u32, control_token_array_capacity);
         builder.prepared_control_lowering_stack = arena_allocate(lowering_temporary.arena, u32,
                                                                  prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
+        builder.group_facts = arena_allocate(lowering_temporary.arena, u8, body_array_capacity);
+        builder.group_facts_stack = arena_allocate(lowering_temporary.arena, CIrGroupFactsEntry, prepared_control_expression_capacity + 1);
         memset(builder.prepared_control_open_slots, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
@@ -54315,6 +54476,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             builder.failure_message = S8("function body has mismatched delimiters");
         }
+        builder.group_facts_exact = delimiters_valid;
         CIrSignature signature = signatures[declaration_index];
         bool parameters_lowered = true;
         for (u32 parameter_index = 0; parameter_index < signature.parameter_count; parameter_index += 1)
