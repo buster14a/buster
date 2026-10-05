@@ -70,6 +70,8 @@ struct Wasm64Stats
     // one pass over every function when any undefined internal function symbol
     // asks, however many do, and none when no symbol asks.
     u64 call_fact_instruction_visits;
+    // String-record key comparisons, including the final exact identity check.
+    u64 string_record_lookup_probes;
 };
 
 typedef struct Wasm64Artifact Wasm64Artifact;

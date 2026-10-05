@@ -506,7 +506,7 @@ BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
 // AAPCS64    The same placement, but every bit-field's container -- named,
 //            unnamed or zero-width -- raises the record's alignment (AAPCS64
 //            10.1.8). AArch64 Linux, Android, UEFI and bare metal; not Darwin.
-// MICROSOFT  The Windows rule, for the MSVC and MinGW environments alike: a
+// MICROSOFT  The Windows (MSVC) rule; MinGW triples are rejected (#1492): a
 //            bit-field occupies a storage unit of its declared type's size,
 //            and the next one shares it only while its declared type has the
 //            same size and its bits still fit. A zero-width bit-field matters

@@ -599,12 +599,21 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enumerator_type_source = S8_INITIALIZER
     "enum Wide { WZERO=0,WIDE=4294967296LL,WDECL=TY(WIDE),WSMALL=TY(WZERO) };\n"
     "enum Mixed { MNEG=-1,MPOS=4294967296LL,MNDECL=TY(MNEG),MPDECL=TY(MPOS),MCMP=MNEG<MPOS };\n"
     "enum Later { LREF=WIDE, LREF_TYPE=TY(WIDE), LREF_COMPARE=HZERO-1<0 };\n"
+    "#ifdef _WIN32\n"
+    "_Static_assert(TY(SMALL)==1&&NEXT==2, \"small\");\n"
+    "_Static_assert(TY(HZERO)==1&&TY(HIGH)==1&&HDECL==1&&HSMALL==1, \"MSVC high types\");\n"
+    "_Static_assert(TY(WZERO)==1&&TY(WIDE)==1&&WDECL==1&&WSMALL==1, \"MSVC wide types\");\n"
+    "_Static_assert(TY(MNEG)==1&&TY(MPOS)==1&&MNDECL==1&&MPDECL==1, \"MSVC mixed types\");\n"
+    "_Static_assert(HREF==(-2147483647-1)&&MCMP&&HCOMPARE&&LREF_COMPARE, \"MSVC declaration values\");\n"
+    "_Static_assert(LREF==0&&LREF_TYPE==1, \"MSVC earlier completed enum\");\n"
+    "#else\n"
     "_Static_assert(TY(SMALL)==1&&NEXT==2,\"small\");\n"
     "_Static_assert(TY(HZERO)==(ENUM_C23?2:1)&&TY(HIGH)==2&&HDECL==2&&HSMALL==1,\"high types\");\n"
     "_Static_assert(TY(WZERO)==(ENUM_C23?UNSIGNED_WIDE:1)&&TY(WIDE)==UNSIGNED_WIDE&&WDECL==5&&WSMALL==1,\"wide types\");\n"
     "_Static_assert(TY(MNEG)==(ENUM_C23?SIGNED_WIDE:1)&&TY(MPOS)==SIGNED_WIDE&&MNDECL==1&&MPDECL==5,\"mixed types\");\n"
     "_Static_assert(HREF==0x80000000&&MCMP&&HCOMPARE&&LREF_COMPARE==!ENUM_C23,\"declaration values\");\n"
     "_Static_assert(LREF==4294967296LL&&LREF_TYPE==UNSIGNED_WIDE,\"earlier completed enum\");\n"
+    "#endif\n"
     "__typeof(HIGH) high_global=HIGH;\n"
     "__typeof(WIDE) wide_global=WIDE;\n"
     "__typeof(MPOS) mixed_global=MNEG;\n"
@@ -614,12 +623,17 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enumerator_type_source = S8_INITIALIZER
     " int shadow=0;\n"
     " { enum Shadow { WIDE=2 }; shadow+=WIDE; }\n"
     " { int WIDE=3; shadow+=WIDE; }\n"
+    "#ifdef _WIN32\n"
+    " return !(TY(LZERO)==1&&LDT==1&&LST==1&&local==0&&pointer==0&&shadow==5&&high_global==(-2147483647-1)&&HIGH<0&&wide_global==0&&WIDE>HIGH&&mixed_global==-1&&MNEG<MPOS&&(unsigned long long)MNEG==0xffffffffffffffffULL&&sizeof(__typeof(HIGH))==4&&sizeof(__typeof(WIDE))==4&&sizeof(enum Wide)==4&&sizeof(enum Small)==4&&sizeof(HIGH)==4&&sizeof(WIDE)==4);\n"
+    "#else\n"
     " return !(TY(LZERO)==(ENUM_C23?UNSIGNED_WIDE:1)&&LDT==5&&LST==1&&local==4294967296LL&&\n"
     " pointer==0&&shadow==5&&high_global==0x80000000&&HIGH>0&&wide_global==4294967296LL&&WIDE>HIGH&&\n"
     " mixed_global==-1&&MNEG<MPOS&&(unsigned long long)MNEG==0xffffffffffffffffULL&&\n"
     " sizeof(__typeof(HIGH))==4&&sizeof(__typeof(WIDE))==8&&sizeof(enum Wide)==8&&\n"
     " sizeof(enum Small)==4&&sizeof(HIGH)==4&&sizeof(WIDE)==8);\n"
-    "}\n");
+    "#endif\n"
+    "}\n"
+);
 
 // #901 uses Clang for the declaration-preserving 32-bit transitions and GCC
 // for extended 128-bit transitions. Neither reference profile selects Buster semantics.
@@ -633,6 +647,16 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enum_successor_source = S8_INITIALIZER(
     "enum BelowInt { N0=-2147483649LL,N1,N2,NEXPLICIT=N1+1,NDT1=TY(N1),NDT2=TY(N2),NET=TY(NEXPLICIT) };\n"
     "enum Reset { R0=2147483647,R1,RRESET=3,R2,R3=R1+2,R4 };\n"
     "enum Zero { Z0=-1,Z1,Z2 };\n"
+    "#ifdef _WIN32\n"
+    "_Static_assert(I1==(-2147483647-1)&&I2==-2147483647&&I3==-2147483646, \"MSVC int successors\");\n"
+    "_Static_assert(ID1==5&&ID3==1&&TY(I1)==1&&sizeof(enum AtInt)==4, \"MSVC implicit declaration types\");\n"
+    "_Static_assert(U1==0&&U2==1&&U3==2&&UD1==1&&UD3==1&&sizeof(enum AtUint)==4, \"MSVC unsigned narrowing\");\n"
+    "_Static_assert(C1==(-2147483647-1)&&C2==-2147483647&&CD1==5, \"MSVC explicit conversion before successor\");\n"
+    "_Static_assert(N1==(-2147483647-1)&&N2==-2147483647&&NEXPLICIT==-2147483647, \"MSVC negative input narrowing\");\n"
+    "_Static_assert(NDT1==5&&NDT2==5&&NET==1&&TY(N1)==1, \"MSVC pending versus completed types\");\n"
+    "_Static_assert(R1==(-2147483647-1)&&R2==4&&R3==-2147483646&&R4==-2147483645, \"MSVC reset and reuse\");\n"
+    "_Static_assert(Z1==0&&Z2==1, \"normalize negative zero\");\n"
+    "#else\n"
     "_Static_assert(I1==2147483648LL&&I2==2147483649LL&&I3==2147483650LL,\"int successors\");\n"
     "_Static_assert(ID1==SIGNED_WIDE&&ID3==SIGNED_WIDE&&TY(I1)==2&&sizeof(enum AtInt)==4,\"int types\");\n"
     "_Static_assert(U1==4294967296ULL&&U2==4294967297ULL&&U3==4294967298ULL,\"uint successors\");\n"
@@ -642,14 +666,19 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enum_successor_source = S8_INITIALIZER(
     "_Static_assert(NDT1==5&&NDT2==5&&NET==1&&TY(N1)==(ENUM_C23?SIGNED_WIDE:1),\"implicit retains type; explicit resets\");\n"
     "_Static_assert(R1==2147483648LL&&R2==4&&R3==2147483650LL&&R4==2147483651LL,\"explicit reset and reuse\");\n"
     "_Static_assert(Z1==0&&Z2==1,\"normalize negative zero\");\n"
+    "#endif\n"
     "__typeof(I1) int_global=I1;\n"
     "__typeof(U2) uint_global=U2;\n"
     "__typeof(N2) negative_global=N2;\n"
     "long long read_negative(void){return N1;}\n"
     "unsigned long long read_wide(void){return U3;}\n"
     "int main(void){\n"
+    "#ifdef _WIN32\n"
+    " return !(int_global==(-2147483647-1)&&uint_global==1&&negative_global==-2147483647LL&&read_negative()==(-2147483647-1)&&read_wide()==2&&I1<0&&U1>U0&&N2>N1&&R4==-2147483645&&Z1==0);\n"
+    "#else\n"
     " return !(int_global==2147483648ULL&&uint_global==4294967297ULL&&negative_global==-2147483647LL&&\n"
     " read_negative()==-2147483648LL&&read_wide()==4294967298ULL&&I1>0&&U1>U0&&N2>N1&&R4==2147483651ULL&&Z1==0);\n"
+    "#endif\n"
     "}\n"
 );
 
@@ -660,21 +689,32 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enum_wide_successor_source = S8_INITIAL
     "enum UnsignedLimit { Q0=18446744073709551615ULL,Q1,Q2,Q3=Q2+1,QT1=TY(Q1),QT3=TY(Q3) };\n"
     "enum Borrow { B0=-((__int128)1<<64),B1,B2,B3=B2+1,BT=TY(B1) };\n"
     "enum MaxThenReset { MX=~(unsigned __int128)0,MRESET=7,MNEXT };\n"
+    "#ifdef _WIN32\n"
+    "_Static_assert(S1==0&&S2==1&&S3==2&&ST1==1&&ST3==1&&sizeof(enum SignedLimit)==4, \"MSVC signed64 narrowing\");\n"
+    "_Static_assert(Q1==0&&Q2==1&&Q3==2&&QT1==1&&QT3==1&&sizeof(enum UnsignedLimit)==4, \"MSVC unsigned64 narrowing\");\n"
+    "_Static_assert(B1==1&&B2==2&&B3==3&&BT==1, \"MSVC negative high limb narrowing\");\n"
+    "_Static_assert(MNEXT==8&&TY(MNEXT)==1, \"MSVC explicit reset\");\n"
+    "#else\n"
     "_Static_assert(S1==((__int128)1<<63)&&S2==S1+1&&S3==S1+2,\"signed64 successors\");\n"
     "_Static_assert(ST1==7&&ST3==7&&TY(S1)==UNSIGNED_WIDE&&sizeof(enum SignedLimit)==8,\"signed64 types\");\n"
     "_Static_assert(Q1==((unsigned __int128)1<<64)&&Q2==Q1+1&&Q3==Q1+2,\"unsigned64 successors\");\n"
     "_Static_assert(QT1==8&&QT3==8&&TY(Q1)==8&&sizeof(enum UnsignedLimit)==16,\"unsigned64 types\");\n"
     "_Static_assert(B1==-((__int128)18446744073709551615ULL)&&B2==B1+1&&B3==B1+2&&BT==7,\"negative limb borrow\");\n"
     "_Static_assert(MNEXT==8&&TY(MNEXT)==(ENUM_C23?8:1),\"explicit reset after terminal maximum\");\n"
+    "#endif\n"
     "unsigned long long signed_limit_global=S2;\n"
     "unsigned __int128 unsigned_limit_global=Q2;\n"
     "__int128 negative_limit_global=B1;\n"
     "unsigned __int128 read_unsigned_limit(void){return Q3;}\n"
     "__int128 read_negative_limit(void){return B2;}\n"
     "int main(void){\n"
+    "#ifdef _WIN32\n"
+    " return !(signed_limit_global==1&&unsigned_limit_global==1&&negative_limit_global==1&&read_unsigned_limit()==2&&read_negative_limit()==2&&S1>S0&&Q1>Q0&&B1>B0&&MNEXT==8);\n"
+    "#else\n"
     " return !(signed_limit_global==9223372036854775809ULL&&unsigned_limit_global==((unsigned __int128)1<<64)+1&&\n"
     " negative_limit_global==-((__int128)18446744073709551615ULL)&&read_unsigned_limit()==((unsigned __int128)1<<64)+2&&\n"
     " read_negative_limit()==-((__int128)18446744073709551614ULL)&&S1>S0&&Q1>Q0&&B1>B0&&MNEXT==8);\n"
+    "#endif\n"
     "}\n"
 );
 
@@ -698,15 +738,24 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enum_lowering_source = S8_INITIALIZER(
     "DECL(Unsigned64,TOP)\n"
     "long long widened_high=HIGH, widened_wide=WIDE, widened_negative=NEG;\n"
     "int high_positive=HIGH>0, wide_larger=WIDE>HIGH;\n"
+    "#ifdef _WIN32\n"
+    "_Static_assert(sizeof(enum Small)==4&&sizeof(enum High)==4&&sizeof(enum SignedSmall)==4, \"MSVC small sizes\");\n"
+    "_Static_assert(sizeof(enum Wide)==4&&sizeof(enum Mixed)==4&&sizeof(enum Successor)==4&&sizeof(enum Unsigned64)==4, \"MSVC ordinary sizes\");\n"
+    "_Static_assert(HIGH==(-2147483647-1)&&WIDE==0&&NEXT2==1&&TOP==-1, \"MSVC values\");\n"
+    "#else\n"
     "_Static_assert(sizeof(enum Small)==4&&sizeof(enum High)==4&&sizeof(enum SignedSmall)==4,\"small sizes\");\n"
     "_Static_assert(sizeof(enum Wide)==8&&sizeof(enum Mixed)==8&&sizeof(enum Successor)==8&&sizeof(enum Unsigned64)==8,\"wide sizes\");\n"
     "_Static_assert(HIGH==0x80000000U&&WIDE==4294967296LL&&NEXT2==4294967297ULL,\"values\");\n"
+    "#endif\n"
     "int main(void){\n"
     " volatile enum High h=HIGH;\n"
     " volatile enum Wide w=WIDE;\n"
     " volatile enum Mixed n=NEG;\n"
     " volatile enum Successor s=NEXT2;\n"
     " volatile enum Unsigned64 u=TOP;\n"
+    "#ifdef _WIN32\n"
+    " return !(opaque==0&&global_Small==2&&value_Small()==2&&echo_Small(2)==2&&global_High==(-2147483647-1)&&value_High()==(-2147483647-1)&&echo_High(h)<0&&global_Wide==0&&value_Wide()==0&&echo_Wide(w)>h&&global_Mixed==-1&&value_Mixed()==-1&&echo_Mixed(n)<POS&&global_SignedSmall==-2&&value_SignedSmall()==-2&&echo_SignedSmall(LOW)==-2&&global_Successor==1&&value_Successor()==1&&echo_Successor(s)==1&&global_Unsigned64==-1&&value_Unsigned64()==-1&&echo_Unsigned64(u)==-1&&widened_high==(-2147483647-1)&&widened_wide==0&&widened_negative==-1&&!high_positive&&wide_larger&&(long long)h==(-2147483647-1)&&(long long)w==0&&(long long)n==-1);\n"
+    "#else\n"
     " return !(opaque==0&&global_Small==2&&value_Small()==2&&echo_Small(2)==2&&\n"
     " global_High==0x80000000U&&value_High()==0x80000000U&&echo_High(h)>0&&\n"
     " global_Wide==4294967296LL&&value_Wide()==4294967296LL&&echo_Wide(w)>h&&\n"
@@ -716,6 +765,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enum_lowering_source = S8_INITIALIZER(
     " global_Unsigned64==0xffffffffffffffffULL&&value_Unsigned64()==0xffffffffffffffffULL&&echo_Unsigned64(u)==0xffffffffffffffffULL&&\n"
     " widened_high==2147483648LL&&widened_wide==4294967296LL&&widened_negative==-1&&high_positive&&wide_larger&&\n"
     " (long long)h==2147483648LL&&(long long)w==4294967296LL&&(long long)n==-1);\n"
+    "#endif\n"
     "}\n"
 );
 
@@ -1015,9 +1065,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* argum
                         for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(names); case_index += 1)
                         {
                             String8 name = names[case_index];
-                            CTypeKind expected = widths[case_index] == 32 ? (signs[case_index] ? C_TYPE_INT : C_TYPE_UNSIGNED_INT)
-                                : target.os == OPERATING_SYSTEM_WINDOWS ? (signs[case_index] ? C_TYPE_LONG_LONG : C_TYPE_UNSIGNED_LONG_LONG)
-                                : (signs[case_index] ? C_TYPE_LONG : C_TYPE_UNSIGNED_LONG);
+                            bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
+                            u32 width = windows ? 32 : widths[case_index];
+                            bool sign = windows || signs[case_index];
+                            CTypeKind expected = windows ? C_TYPE_INT : width == 32 ? (sign ? C_TYPE_INT : C_TYPE_UNSIGNED_INT)
+                                : (sign ? C_TYPE_LONG : C_TYPE_UNSIGNED_LONG);
                             u32 matched = 0;
                             for (u32 index = 0; index < parse.type_count; index += 1)
                             {
@@ -1043,8 +1095,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* argum
                                 BUSTER_TEST(arguments, value_signature->return_type.value == echo_signature->parameter_types[0].value);
                                 if (BUSTER_REQUIRE(arguments, type != 0))
                                 {
-                                    BUSTER_TEST(arguments, type->kind == IR_TYPE_INTEGER && type->bit_width == widths[case_index]);
-                                    BUSTER_TEST(arguments, type->is_signed == signs[case_index] && type->layout.size == widths[case_index] / 8);
+                                    BUSTER_TEST(arguments, type->kind == IR_TYPE_INTEGER && type->bit_width == width);
+                                    BUSTER_TEST(arguments, type->is_signed == sign && type->layout.size == width / 8);
                                 }
                                 u32 globals = 0;
                                 for (u32 index = 0; index < module->global_count; index += 1)
@@ -1118,11 +1170,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types(UnitTestArguments* ar
                         bool small = !high && !wide;
                         // The block's shadow of WIDE is deliberately a small enum.
                         bool shadow = wide && member->value == 2;
-                        CTypeKind declaration = high ? C_TYPE_UNSIGNED_INT : wide && !shadow ? C_TYPE_LONG_LONG : C_TYPE_INT;
+                        bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
+                        CTypeKind declaration = windows ? C_TYPE_INT : high ? C_TYPE_UNSIGNED_INT : wide && !shadow ? C_TYPE_LONG_LONG : C_TYPE_INT;
                         if (BUSTER_REQUIRE(arguments, member->declaration_type.value < parsed.type_count && member->type.value < parsed.type_count))
                         {
                             BUSTER_TEST(arguments, parsed.types[member->declaration_type.value].kind == declaration);
-                            BUSTER_TEST(arguments, parsed.types[member->type.value].kind == (shadow || (small && !c23) ? C_TYPE_INT : C_TYPE_ENUM));
+                            BUSTER_TEST(arguments, parsed.types[member->type.value].kind == (windows || shadow || (small && !c23) ? C_TYPE_INT : C_TYPE_ENUM));
                             BUSTER_TEST(arguments, member->integer_constant.valid);
                             BUSTER_TEST(arguments, member->integer_constant.type.value < parsed.type_count);
                             if (member->integer_constant.type.value < parsed.type_count)
@@ -1155,6 +1208,139 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types(UnitTestArguments* ar
                     if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
                     {
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+// Literal expectations independently verified with Clang's MSVC target in
+// GNU17/GNU23. Unsigned initializers narrow to signed int as well as wide ones.
+BUSTER_GLOBAL_LOCAL String8 const c_test_msvc_enum_source = S8_INITIALIZER(
+    "enum Wide { WIDE_BIG=0x100000000LL,WIDE_SMALL=1,WIDE_NEXT };\n"
+    "enum Neg { NEG_LOW=-1,NEG_HIGH=0xFFFFFFFFu,NEG_NEXT,NEG_AFTER=NEG_HIGH+1 };\n"
+    "enum SignedBoundary { SIGNED_MAX=0x7fffffff,SIGNED_NEXT,SIGNED_AFTER,SIGNED_RESET=1 };\n"
+    "enum WideNegative { WIDE_NEG=-0x100000001LL,WIDE_NEG_NEXT };\n"
+    "enum Declaration { DECL_BIG=0x100000000LL,DECL_SIZE=sizeof(DECL_BIG),DECL_COPY=DECL_BIG };\n"
+    "enum Fixed : unsigned long long { FIXED=0x100000000ULL };\n"
+    "struct Envelope { char first; enum Wide wide; char tail; enum Neg negative; };\n"
+    "unsigned long long probe[]={sizeof(enum Wide),sizeof(WIDE_BIG),(unsigned long long)WIDE_BIG,\n"
+    " sizeof(enum Neg),sizeof(NEG_HIGH),(unsigned long long)NEG_HIGH,(unsigned long long)NEG_NEXT,\n"
+    " (unsigned long long)NEG_AFTER,sizeof(SIGNED_NEXT),(unsigned long long)SIGNED_NEXT,\n"
+    " sizeof(SIGNED_AFTER),(unsigned long long)SIGNED_AFTER,(unsigned long long)WIDE_NEG,\n"
+    " (unsigned long long)WIDE_NEG_NEXT,sizeof(struct Envelope),__builtin_offsetof(struct Envelope,wide),\n"
+    " __builtin_offsetof(struct Envelope,tail),__builtin_offsetof(struct Envelope,negative)};\n"
+    "#ifdef _WIN32\n"
+    "_Static_assert(sizeof(enum Wide)==4&&sizeof(WIDE_BIG)==4&&WIDE_BIG==0,\"MSVC ordinary enums\");\n"
+    "_Static_assert(NEG_HIGH==-1&&NEG_NEXT==0&&NEG_AFTER==0,\"MSVC unsigned enumerator\");\n"
+    "_Static_assert(SIGNED_NEXT==(-2147483647-1)&&SIGNED_AFTER==(-2147483647),\"MSVC successors\");\n"
+    "_Static_assert(DECL_SIZE==4&&DECL_COPY==0,\"MSVC declaration point conversion\");\n"
+    "_Static_assert(_Generic(WIDE_BIG,int:1,default:0)&&_Generic(NEG_HIGH,int:1,default:0),\"MSVC member types\");\n"
+    "#else\n"
+    "_Static_assert(sizeof(enum Wide)==8&&WIDE_BIG==0x100000000LL,\"ordinary wide enum\");\n"
+    "_Static_assert(DECL_SIZE==8&&DECL_COPY==0x100000000LL,\"wide declaration point\");\n"
+    "#endif\n"
+    "_Static_assert(sizeof(enum Fixed)==8&&FIXED==0x100000000ULL,\"explicit base preserved\");\n"
+    "enum Wide global_wide=WIDE_BIG;\n"
+    "enum Wide return_wide(void){return WIDE_BIG;}\n"
+    "enum Wide echo_wide(enum Wide value){return value;}\n"
+    "long long widen_negative(void){return NEG_HIGH;}\n"
+);
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_msvc_enum_abi(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    u64 windows_values[] = {4,4,0,4,4,UINT64_MAX,0,0,4,UINT64_C(0xffffffff80000000),
+                            4,UINT64_C(0xffffffff80000001),UINT64_MAX,0,16,4,8,12};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_WINDOWS : target_index < 4 ? OPERATING_SYSTEM_LINUX : OPERATING_SYSTEM_MACOS;
+        bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_msvc_enum_source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect]});
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+                if (windows)
+                {
+                    for (u32 index = 0; index < parse.enum_member_count; index += 1)
+                    {
+                        CEnumMember const* member = parse.enum_members + index;
+                        if (BUSTER_REQUIRE(arguments, member->enum_type.value < parse.type_count && member->type.value < parse.type_count))
+                        {
+                            CType const* owner = parse.types + member->enum_type.value;
+                            if (!owner->has_fixed_underlying_type)
+                            {
+                                BUSTER_TEST(arguments, owner->element_type.value < parse.type_count);
+                                if (owner->element_type.value < parse.type_count)
+                                    BUSTER_TEST(arguments, parse.types[owner->element_type.value].kind == C_TYPE_INT);
+                                BUSTER_TEST(arguments, parse.types[member->type.value].kind == C_TYPE_INT);
+                            }
+                        }
+                    }
+                }
+                if (parse.diagnostic_count == 0)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("msvc-enum.c"), tokens, parse, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                        BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[index].message);
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        IrProgram* program = lowered.program;
+                        IrModule* module = program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        IrFunction* returned = c_test_find_ir_function(module, S8("return_wide"));
+                        IrFunction* echoed = c_test_find_ir_function(module, S8("echo_wide"));
+                        IrType* returned_type = returned ? ir_type_from_id(&program->types, returned->canonical_type) : 0;
+                        IrType* echoed_type = echoed ? ir_type_from_id(&program->types, echoed->canonical_type) : 0;
+                        if (BUSTER_REQUIRE(arguments, returned_type && echoed_type && echoed_type->parameter_count == 1))
+                        {
+                            IrType* scalar = ir_type_from_id(&program->types, returned_type->return_type);
+                            BUSTER_TEST(arguments, returned_type->return_type.value == echoed_type->parameter_types[0].value);
+                            BUSTER_TEST(arguments, returned_type->return_type.value == echoed_type->return_type.value);
+                            if (BUSTER_REQUIRE(arguments, scalar != 0))
+                            {
+                                BUSTER_TEST(arguments, scalar->kind == IR_TYPE_INTEGER);
+                                BUSTER_TEST(arguments, scalar->bit_width == (windows ? 32u : 64u));
+                                BUSTER_TEST(arguments, scalar->is_signed == windows);
+                            }
+                        }
+                        if (windows)
+                        {
+                            u32 checked = 0;
+                            for (u32 index = 0; index < module->global_count; index += 1)
+                            {
+                                IrGlobal* global = module->globals + index;
+                                IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+                                if (symbol && string_equal(symbol->name, S8("probe")))
+                                {
+                                    checked += 1;
+                                    if (BUSTER_REQUIRE(arguments, global->bytes.length == sizeof(windows_values)))
+                                    {
+                                        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(windows_values); row += 1)
+                                        {
+                                            u64 value = 0;
+                                            for (u32 byte = 0; byte < 8; byte += 1)
+                                                value |= (u64)global->bytes.pointer[row * 8 + byte] << (byte * 8);
+                                            BUSTER_TEST(arguments, value == windows_values[row]);
+                                        }
+                                    }
+                                }
+                            }
+                            BUSTER_TEST(arguments, checked == 1);
+                        }
                     }
                 }
                 scratch_end(temporary);
@@ -1434,6 +1620,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successors(UnitTestArguments* arg
             {S8("B3"), UINT64_MAX - 2, 0, C_TYPE_INT128, C_INTEGER_RANK_INT128, 128, true, true},
             {S8("MNEXT"), 8, 0, C_TYPE_INT, C_INTEGER_RANK_INT, 32, true, false},
         };
+        if (windows)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+            {
+                bool retained_wide = index < 2 || (index >= 6 && index <= 9);
+                if (!retained_wide)
+                {
+                    expected[index].kind = C_TYPE_INT;
+                    expected[index].rank = C_INTEGER_RANK_INT;
+                    expected[index].width = 32;
+                    expected[index].sign = true;
+                    expected[index].high = 0;
+                    expected[index].negative = index == 2 || index == 11;
+                }
+                if (index == 2) expected[index].low = UINT64_C(2147483646);
+                if (index >= 3 && index <= 5) expected[index].low = index - 3;
+                if (index == 8 || index == 9)
+                {
+                    expected[index].low = UINT64_C(2147483648) + index - 8;
+                    expected[index].negative = false;
+                }
+                if (index == 11) expected[index].low = UINT64_C(2147483645);
+                if (index >= 14 && index <= 16) expected[index].low = index - 14;
+                if (index >= 17 && index <= 19) expected[index].low = index - 17;
+                if (index >= 20 && index <= 22) expected[index].low = index - 19;
+            }
+        }
         for (u32 c23 = 0; c23 < 2; c23 += 1)
         {
             for (u32 form = 0; form < 2; form += 1)
@@ -1769,13 +1982,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_enum_range_diagnostics(UnitTestA
 BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
 {
     String8 parts[] = {S8(
+    "#ifdef _WIN32\n"
+    "#define ENUM_U32 : unsigned int\n"
+    "#define ENUM_U64 : unsigned long long\n"
+    "#define ENUM_S64 : long long\n"
+    "#else\n"
+    "#define ENUM_U32\n"
+    "#define ENUM_U64\n"
+    "#define ENUM_S64\n"
+    "#endif\n"
     "enum EU32 { U32_ZERO=0, U32_HIGH=0x80000000U, U32_MAX=0xffffffffU };\n"
     "enum ES32 { S32_NEG=-1, S32_POS=17 };\n"
-    "enum ESmall { SMALL_ZERO=0, SMALL_FIVE=5 };\n"
-    "enum EU40 { U40_ZERO=0, U40_HIGH=0x100000001ULL };\n"
-    "enum ES40 { S40_NEG=-0x100000000LL, S40_POS=0x100000001LL };\n"
-    "enum EU64 { U64_ZERO=0, U64_HIGH=0x8000000000000000ULL, U64_MAX=0xffffffffffffffffULL };\n"
-    "enum ES64 { S64_MIN=(-9223372036854775807LL-1), S64_MAX=9223372036854775807LL };\n"
+    "enum ESmall ENUM_U32 { SMALL_ZERO=0, SMALL_FIVE=5 };\n"
+    "enum EU40 ENUM_U64 { U40_ZERO=0, U40_HIGH=0x100000001ULL };\n"
+    "enum ES40 ENUM_S64 { S40_NEG=-0x100000000LL, S40_POS=0x100000001LL };\n"
+    "enum EU64 ENUM_U64 { U64_ZERO=0, U64_HIGH=0x8000000000000000ULL, U64_MAX=0xffffffffffffffffULL };\n"
+    "enum ES64 ENUM_S64 { S64_MIN=(-9223372036854775807LL-1), S64_MAX=9223372036854775807LL };\n"
     "enum EFixedU : unsigned long long { FIXED_U=1 };\n"
     "enum EFixedS : long long { FIXED_S=5 };\n"
     "typedef enum EU40 U40Alias;\n"
@@ -1846,7 +2068,11 @@ BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
     "    result |= read_FixedUBox()!=FIXED_U || object_FixedUBox.ordinary!=FIXED_U;\n"
     "    result |= read_FixedSBox()!=FIXED_S || object_FixedSBox.ordinary!=FIXED_S;\n"
     "    result |= read_QualifiedBox()!=U40_HIGH || object_QualifiedBox.ordinary!=U40_HIGH;\n"
+    "#ifdef _WIN32\n"
+    "    result |= read_U32Box()>=0 || read_U40Box()<=0 || read_U64Box()<=0;\n"
+    "#else\n"
     "    result |= read_U32Box()<=0 || read_U40Box()<=0 || read_U64Box()<=0;\n"
+    "#endif\n"
     "    result |= read_S32Box()>=0 || read_S40Box()>=0 || read_S64Box()>=0;\n"
     "    result |= +object_SmallBox.field!=5 || (object_SmallBox.field-6)!=-1;\n"
     "    object_U32Box.field=U32_MAX;\n"
@@ -2042,7 +2268,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
         CTypeKind unsigned_wide = target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
         CTypeKind signed_wide = target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_LONG_LONG : C_TYPE_LONG;
         CEnumBitFieldCase cases[] = {
-        {S8("U32Box"), C_TYPE_UNSIGNED_INT, 32, 32, false, false, true},
+        {S8("U32Box"), target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_INT : C_TYPE_UNSIGNED_INT,
+         32, 32, target.os == OPERATING_SYSTEM_WINDOWS, false, true},
         {S8("S32Box"), C_TYPE_INT, 32, 6, true, false, true},
         {S8("SmallBox"), C_TYPE_UNSIGNED_INT, 32, 3, false, false, true},
         {S8("U40Box"), unsigned_wide, 64, 40, false, false, true},
@@ -35785,7 +36012,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members(UnitTestArguments* ar
 }
 
 BUSTER_GLOBAL_LOCAL String8 const c_test_constexpr_integer_types_source = S8_INITIALIZER(
-    "enum NegativeValue { ENUM_NEGATIVE = -3 }; enum UnsignedValue { ENUM_UNSIGNED = 0x80000000U };\n"
+    "enum NegativeValue { ENUM_NEGATIVE = -3 }; enum UnsignedValue : unsigned int { ENUM_UNSIGNED = 0x80000000U };\n"
     "constexpr unsigned char wrapped_byte = (unsigned char)300;\n"
     "constexpr int signed_cast = (int)-1U;\n"
     "constexpr signed char signed_byte = (signed char)255U;\n"
@@ -35921,11 +36148,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
         String8 diagnostic;
         bool negative;
         bool check_int128_bytes;
+        bool windows_only;
+        bool non_windows_only;
     } cases[] = {
         {S8("constexpr int value = sizeof(int) - 5;"), 0, false, false, false},
         {S8("constexpr int value = -1U;"), 0, false, false, false},
         {S8("constexpr int value = (unsigned int)0 - 1;"), 0, false, false, false},
-        {S8("enum U { HIGH = 0x80000000U }; constexpr int value = HIGH;"), 0, false, false, false},
+        {S8("enum U : unsigned int { HIGH = 0x80000000U }; constexpr int value = HIGH;"), 0, false, false, false},
+        // Ordinary MSVC enum completion publishes signed int; other targets
+        // retain the unsigned high value and refuse its constexpr int use.
+        {.source = S8("enum U { HIGH = 0x80000000U }; constexpr int value = HIGH; "
+                      "static_assert(value == (-2147483647 - 1)); "
+                      "static_assert(_Generic(value, int: 1, default: 0)); "
+                      "static_assert(_Generic(HIGH, int: 1, default: 0));"),
+            .expected = UINT64_C(2147483648), .valid = true, .negative = true, .windows_only = true},
+        // The complementary unsigned destination retains its representability
+        // refusal on Windows, where HIGH has the negative int image.
+        {.source = S8("enum U { HIGH = 0x80000000U }; constexpr unsigned int value = HIGH;"),
+            .expected = UINT64_C(2147483648), .valid = true, .non_windows_only = true},
         {S8("constexpr unsigned char value = 300;"), 0, false, false, false},
         {S8("constexpr unsigned char value = -1;"), 0, false, false, false},
         {S8("constexpr signed char value = 128;"), 0, false, false, false},
@@ -35960,6 +36200,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
                 continue;
             }
             bool valid = cases[row].valid && (!cases[row].long64_only || layout.long_integer.size == 8);
+            valid = valid && (!cases[row].windows_only || target.os == OPERATING_SYSTEM_WINDOWS) &&
+                    (!cases[row].non_windows_only || target.os != OPERATING_SYSTEM_WINDOWS);
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             CPreprocessResult tokens = c_preprocess(temporary.arena, cases[row].source,
                 (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_GNU23});
@@ -37965,6 +38207,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_search_scratch);
+    BUSTER_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
