@@ -23138,7 +23138,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
 {
     UnitTestResult result = {0};
     String8 source = S8(
-        "struct M { int m; }; static struct M gm; static int words[2]; static volatile int calls;\n"
+        "struct M { int m; int *p; }; static struct M gm; static int words[2]; static volatile int calls;\n"
         "static struct M *get(void) { calls += 1; return &gm; }\n"
         "static int *get_words(void) { calls += 1; return words; }\n"
         "static int identity(int value) { return value; }\n"
@@ -23153,6 +23153,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
         "int assignment_comma(void) { return (get()->m = 6, 7); }\n"
         "int compound_comma(void) { return (get()->m += 1, 5); }\n"
         "int assignment_wrapped(void) { return ((*get()).m = 9); }\n"
+        "int compound_wrapped(void) { return ((*get()).m += 9); }\n"
+        "int assignment_wrapped_outer(void) { return *(*get()).p = 12; }\n"
         "int statement_control(void) { get()->m = 5; return gm.m; }\n"
         "int assignment_subscript(void) { return get_words()[1] = 11; }\n"
         "int compound_subscript(void) { return get_words()[1] += 2; }\n"
@@ -23168,7 +23170,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
         "    CHECK(assignment_condition, 8, 0); CHECK(compound_condition, 8, 5);\n"
         "    CHECK(assignment_arithmetic, 5, 4); CHECK(compound_arithmetic, 8, 7);\n"
         "    CHECK(assignment_comma, 7, 6); CHECK(compound_comma, 5, 4);\n"
-        "    CHECK(assignment_wrapped, 9, 9); CHECK(statement_control, 5, 5); CHECK(address_call, 5, 5);\n"
+        "    CHECK(assignment_wrapped, 9, 9); CHECK(compound_wrapped, 12, 12); CHECK(statement_control, 5, 5); CHECK(address_call, 5, 5);\n"
+        "    gm.p = &words[0]; words[0] = 3; calls = 0; failed |= assignment_wrapped_outer() != 12 || words[0] != 12 || calls != 1;\n"
         "    calls = 0; words[1] = 3; failed |= assignment_subscript() != 11 || words[1] != 11 || calls != 1;\n"
         "    calls = 0; words[1] = 3; failed |= compound_subscript() != 5 || words[1] != 5 || calls != 1;\n"
         "    failed |= address_compound() != 44 || address_simple() != 77 || address_argument() != 44; return failed;\n"
@@ -23185,7 +23188,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
         {S8("assignment_condition"), S8("get")}, {S8("compound_condition"), S8("get")},
         {S8("assignment_arithmetic"), S8("get")}, {S8("compound_arithmetic"), S8("get")},
         {S8("assignment_comma"), S8("get")}, {S8("compound_comma"), S8("get")},
-        {S8("assignment_wrapped"), S8("get")}, {S8("statement_control"), S8("get")},
+        {S8("assignment_wrapped"), S8("get")}, {S8("compound_wrapped"), S8("get")},
+        {S8("assignment_wrapped_outer"), S8("get")}, {S8("statement_control"), S8("get")},
         {S8("assignment_subscript"), S8("get_words")}, {S8("compound_subscript"), S8("get_words")},
         {S8("address_call"), S8("get")},
     };

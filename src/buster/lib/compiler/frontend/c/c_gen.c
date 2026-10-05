@@ -15339,9 +15339,10 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 nested_start += 1;
                 nested_end -= 1;
             }
+            u32 grouped_dereference_count = 0;
             while (nested_start < nested_end && c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_STAR))
             {
-                dereference_count += 1;
+                grouped_dereference_count += 1;
                 nested_start += 1;
             }
             if (depth || nested_end != nested_start + 1)
@@ -15376,6 +15377,10 @@ c_ir_place_expression_base:
                 }
                 return;
             }
+            // The complete-expression fallback above already evaluates
+            // stars inside the group. Only the direct identifier path still
+            // needs them; stripped outer stars remain pending on both paths.
+            dereference_count += grouped_dereference_count;
             base_index = nested_start;
             index = close;
         }
