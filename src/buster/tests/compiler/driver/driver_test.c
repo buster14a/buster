@@ -19,6 +19,8 @@
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_index_signedness checks canonical signed/narrow indices.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
+// compiler_driver_test_scalar_argument_boundaries exchanges fixed-prototype scalar
+// register/stack boundaries with independent objects, controls, and native-only runs.
 // compiler_driver_test_wasm_string_records checks multi-module lookup scaling.
 // compiler_driver_test_wasm_function_addresses checks escaping function markers and direct calls.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
@@ -10287,6 +10289,274 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(Un
             }
         }
     }
+    return result;
+}
+
+// Keep exact-boundary observations separate from foreign object generation.
+// The two first-party translation units share declarations, never classifiers.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scalar_argument_boundaries(UnitTestArguments* arguments)
+{
+    enum
+    {
+        ABI_BOUNDARY_BAD_EXPECTATION_EXIT = 73,
+        ABI_BOUNDARY_CALLER_FUNCTION_COUNT = 1,
+        ABI_BOUNDARY_CALLEE_FUNCTION_COUNT = 20,
+    };
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 sources[] = {S8("src/buster/tests/compiler/driver/fixtures/scalar_boundary_caller.c"),
+                         S8("src/buster/tests/compiler/driver/fixtures/scalar_boundary_callee.c")};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),
+                         S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    CodegenRegisterAllocatorMode allocators[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+                                               CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && (BUSTER_CPU_ARCH_AARCH64 || BUSTER_CPU_ARCH_X86_64) && \
+    (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    String8 host_objects[BUSTER_ARRAY_LENGTH(optimizations)][3] = {0};
+    bool host_ready[BUSTER_ARRAY_LENGTH(optimizations)][3] = {0};
+    bool host_controls[BUSTER_ARRAY_LENGTH(optimizations)][2] = {0};
+    ProcessSpawnOptions spawn_options = {.use_process_environment = true, .search_path = true, .new_process_group = true,
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+    u32 negative_status = BUSTER_WINDOWS ? ABI_BOUNDARY_BAD_EXPECTATION_EXIT : ABI_BOUNDARY_BAD_EXPECTATION_EXIT << 8;
+    for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+    {
+        // Cache the exact independent objects for both mixed directions.
+        // The third object changes only the caller's final expected result.
+        for (u32 source = 0; source < 3; source += 1)
+        {
+            host_objects[optimization][source] = buster_test_temporary_path(arguments->arena, S8("buster-scalar-boundary-reference"),
+                string_format(arguments->arena, S8("-{u32}-{u32}.o"), optimization, source));
+            String8 command[16];
+            u32 count = 0;
+            command[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+            command[count++] = S8("-std=c17");
+            command[count++] = optimizations[optimization];
+            command[count++] = S8("-fno-inline");
+            command[count++] = S8("-fno-lto");
+            if (source == 2) { command[count++] = S8("-DABI_BOUNDARY_BAD_EXPECTATION=1"); }
+            command[count++] = S8("-c");
+            command[count++] = sources[source == 2 ? 0 : source];
+            command[count++] = S8("-o");
+            command[count++] = host_objects[optimization][source];
+            BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count},
+                (SliceString8){0}, (SliceString8){0}, spawn_options);
+            ProcessWaitResult waited = spawned.handle ? os_process_wait_deadline(arguments->arena, spawned, 30000000) : (ProcessWaitResult){0};
+            host_ready[optimization][source] = spawned.handle && !waited.timed_out && !waited.capture_failed &&
+                                               waited.result == PROCESS_RESULT_SUCCESS;
+            String8 context = string_format(arguments->arena,
+                S8("scalar boundary reference compile {S8} source={u32} status={u32} timeout={u32} stderr={S8}"),
+                optimizations[optimization], source, waited.platform_status, (u32)waited.timed_out,
+                (String8){.pointer = (char8*)waited.streams[STANDARD_STREAM_ERROR].pointer,
+                          .length = waited.streams[STANDARD_STREAM_ERROR].length});
+            BUSTER_TEST_RAW(arguments, host_ready[optimization][source], context);
+        }
+        for (u32 negative = 0; negative < 2; negative += 1)
+        {
+            u32 caller = negative ? 2 : 0;
+            if (host_ready[optimization][caller] && host_ready[optimization][1])
+            {
+                String8 executable = buster_test_temporary_path(arguments->arena, S8("buster-scalar-boundary-control"),
+                    string_format(arguments->arena, S8("-{u32}-{u32}.exe"), optimization, negative));
+                String8 command[10];
+                u32 count = 0;
+                command[count++] = S8(BUSTER_HOST_C_COMPILER);
+                if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                command[count++] = S8("-fno-lto");
+#if BUSTER_LINUX
+                command[count++] = S8("-no-pie");
+#endif
+                command[count++] = host_objects[optimization][caller];
+                command[count++] = host_objects[optimization][1];
+                command[count++] = S8("-o");
+                command[count++] = executable;
+                BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
+                ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = command, .length = count},
+                    (SliceString8){0}, (SliceString8){0}, spawn_options);
+                ProcessWaitResult link_wait = linked.handle ? os_process_wait_deadline(arguments->arena, linked, 30000000) : (ProcessWaitResult){0};
+                bool link_ok = linked.handle && !link_wait.timed_out && !link_wait.capture_failed && link_wait.result == PROCESS_RESULT_SUCCESS;
+                String8 link_diagnostic = {.pointer = (char8*)link_wait.streams[STANDARD_STREAM_ERROR].pointer,
+                                           .length = link_wait.streams[STANDARD_STREAM_ERROR].length};
+                BUSTER_TEST_RAW(arguments, link_ok, link_diagnostic);
+                if (link_ok)
+                {
+                    String8 run_command[] = {executable};
+                    ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command),
+                        (SliceString8){0}, (SliceString8){0}, spawn_options);
+                    ProcessWaitResult waited = spawned.handle ? os_process_wait_deadline(arguments->arena, spawned, 30000000) : (ProcessWaitResult){0};
+                    bool observed = spawned.handle && !waited.timed_out && !waited.capture_failed &&
+                        waited.streams[STANDARD_STREAM_OUTPUT].length == 0 && waited.streams[STANDARD_STREAM_ERROR].length == 0 &&
+                        (negative ? waited.result == PROCESS_RESULT_FAILED && waited.platform_status == negative_status :
+                                    waited.result == PROCESS_RESULT_SUCCESS && waited.platform_status == 0);
+                    host_controls[optimization][negative] = observed;
+                    String8 context = string_format(arguments->arena, S8("scalar boundary reference control {S8} negative={u32} status={u32} timeout={u32}"),
+                        optimizations[optimization], negative, waited.platform_status, (u32)waited.timed_out);
+                    BUSTER_TEST_RAW(arguments, observed, context);
+                    if (observed)
+                    {
+                        arguments->show(arguments, S8("ABI_SCALAR_BOUNDARY_CONTROL_V1 reference={S8} optimization={S8} negative={u32} expected_exit={u32} observed=pass\n"),
+                            S8(BUSTER_HOST_C_COMPILER), optimizations[optimization], negative, negative ? (u32)ABI_BOUNDARY_BAD_EXPECTATION_EXIT : 0u);
+                    }
+                }
+            }
+        }
+    }
+#else
+    arguments->show(arguments, S8("ABI_SCALAR_BOUNDARY_NATIVE_V1 status=pending reason=configured-reference-unavailable\n"));
+#endif
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                bool native_target = false;
+#if defined(BUSTER_HOST_C_COMPILER) && (BUSTER_CPU_ARCH_AARCH64 || BUSTER_CPU_ARCH_X86_64) && \
+    (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
+                bool native_arch = (target < 3 && BUSTER_CPU_ARCH_AARCH64) || (target >= 3 && BUSTER_CPU_ARCH_X86_64);
+                native_target = native_arch && ((target % 3 == 0 && BUSTER_LINUX) ||
+                    (target % 3 == 1 && BUSTER_MACOS) || (target % 3 == 2 && BUSTER_WINDOWS));
+#endif
+                String8 objects[3] = {0};
+                bool ready[3] = {0};
+                u32 source_count = native_target ? 3u : 2u;
+                for (u32 source = 0; source < source_count; source += 1)
+                {
+                    objects[source] = buster_test_temporary_path(temporary.arena, S8("buster-scalar-boundary"),
+                        string_format(temporary.arena, S8("-{u32}-{u32}-{u32}-{u32}.o"), target, mode, frontend, source));
+                    String8 command[16];
+                    u32 count = 0;
+                    command[count++] = S8("-c");
+                    command[count++] = S8("-g0");
+                    command[count++] = S8("-target");
+                    command[count++] = targets[target];
+                    command[count++] = S8("-march=baseline");
+                    command[count++] = modes[mode];
+                    command[count++] = frontends[frontend];
+                    command[count++] = S8("-fverify-codegen");
+                    if (source == 2) { command[count++] = S8("-DABI_BOUNDARY_BAD_EXPECTATION=1"); }
+                    command[count++] = sources[source == 2 ? 0 : source];
+                    command[count++] = S8("-o");
+                    command[count++] = objects[source];
+                    BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8){.pointer = command, .length = count});
+                    BUSTER_TEST(arguments, invocation.register_allocator_explicit && invocation.register_allocator == allocators[mode]);
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 context = string_format(temporary.arena, S8("scalar boundary object {S8} {S8} {S8} source={u32}: {S8}"),
+                        targets[target], modes[mode], frontends[frontend], source, compiled.diagnostic);
+                    bool built = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
+                    BUSTER_TEST_RAW(arguments, built, context);
+                    if (BUSTER_REQUIRE(arguments, built && compiled.object.error == OBJECT_ERROR_NONE && compiled.object.sections &&
+                        compiled.object.section_count > OBJECT_SECTION_TEXT && compiled.object.symbols))
+                    {
+                        ByteSlice text = compiled.object.sections[OBJECT_SECTION_TEXT].data;
+                        u32 expected_functions = (u32)(source == 1 ? ABI_BOUNDARY_CALLEE_FUNCTION_COUNT : ABI_BOUNDARY_CALLER_FUNCTION_COUNT);
+                        bool verified = text.length != 0 && compiled.codegen_statistics.function_count == expected_functions &&
+                            compiled.codegen_statistics.fallback_function_count == 0 &&
+                            (mode == 0 || compiled.codegen_statistics.verified_mir_function_count == expected_functions);
+                        BUSTER_TEST_RAW(arguments, verified, context);
+                        String8 names[] = {source == 1 ? S8("abi_boundary_gp3") : S8("main"), S8("abi_boundary_pointer8")};
+                        bool symbols_valid = true;
+                        u32 name_count = source == 1 ? 2u : 1u;
+                        for (u32 name = 0; name < name_count; name += 1)
+                        {
+                            ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&compiled.object, names[name]);
+                            bool valid = symbol && symbol->kind == OBJECT_SYMBOL_FUNCTION && symbol->section == OBJECT_SECTION_TEXT &&
+                                symbol->size != 0 && symbol->value <= text.length && symbol->size <= text.length - symbol->value;
+                            BUSTER_TEST_RAW(arguments, valid, names[name]);
+                            symbols_valid &= valid;
+                        }
+                        ready[source] = verified && symbols_valid;
+                        if (ready[source])
+                        {
+                            arguments->show(arguments, S8("ABI_SCALAR_BOUNDARY_OBJECT_V1 target={S8} allocator={S8} frontend={S8} source={u32} functions={u32} text_bytes={u64} native_execution=unclaimed\n"),
+                                targets[target], modes[mode], frontends[frontend], source, expected_functions, text.length);
+                        }
+                    }
+                }
+#if defined(BUSTER_HOST_C_COMPILER) && (BUSTER_CPU_ARCH_AARCH64 || BUSTER_CPU_ARCH_X86_64) && \
+    (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
+                for (u32 optimization = 0; native_target && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    for (u32 direction = 0; direction < 2; direction += 1)
+                    {
+                        for (u32 negative = 0; negative < 2; negative += 1)
+                        {
+                            u32 caller = negative ? 2 : 0;
+                            bool inputs_ready = host_controls[optimization][0] && host_controls[optimization][1] &&
+                                (direction ? host_ready[optimization][caller] && ready[1] : ready[caller] && host_ready[optimization][1]);
+                            if (inputs_ready)
+                            {
+                                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-scalar-boundary-mixed"),
+                                    string_format(temporary.arena, S8("-{u32}-{u32}-{u32}-{u32}-{u32}-{u32}.exe"),
+                                        target, mode, frontend, optimization, direction, negative));
+                                String8 command[10];
+                                u32 count = 0;
+                                command[count++] = S8(BUSTER_HOST_C_COMPILER);
+                                if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                                command[count++] = S8("-fno-lto");
+#if BUSTER_LINUX
+                                command[count++] = S8("-no-pie");
+#endif
+                                command[count++] = direction ? host_objects[optimization][caller] : objects[caller];
+                                command[count++] = direction ? objects[1] : host_objects[optimization][1];
+                                command[count++] = S8("-o");
+                                command[count++] = executable;
+                                BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
+                                ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = command, .length = count},
+                                    (SliceString8){0}, (SliceString8){0}, spawn_options);
+                                ProcessWaitResult link_wait = linked.handle ? os_process_wait_deadline(temporary.arena, linked, 30000000) : (ProcessWaitResult){0};
+                                bool link_ok = linked.handle && !link_wait.timed_out && !link_wait.capture_failed &&
+                                               link_wait.result == PROCESS_RESULT_SUCCESS;
+                                String8 label = direction ? S8("reference-caller-buster-callee") : S8("buster-caller-reference-callee");
+                                String8 context = string_format(temporary.arena,
+                                    S8("scalar boundary link {S8} {S8} {S8} {S8} {S8} negative={u32} status={u32} stderr={S8}"),
+                                    targets[target], modes[mode], frontends[frontend], optimizations[optimization], label, negative,
+                                    link_wait.platform_status, (String8){.pointer = (char8*)link_wait.streams[STANDARD_STREAM_ERROR].pointer,
+                                                                       .length = link_wait.streams[STANDARD_STREAM_ERROR].length});
+                                BUSTER_TEST_RAW(arguments, link_ok, context);
+                                if (link_ok)
+                                {
+                                    String8 run_command[] = {executable};
+                                    ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command),
+                                        (SliceString8){0}, (SliceString8){0}, spawn_options);
+                                    ProcessWaitResult waited = spawned.handle ? os_process_wait_deadline(temporary.arena, spawned, 30000000) : (ProcessWaitResult){0};
+                                    bool observed = spawned.handle && !waited.timed_out && !waited.capture_failed &&
+                                        waited.streams[STANDARD_STREAM_OUTPUT].length == 0 && waited.streams[STANDARD_STREAM_ERROR].length == 0 &&
+                                        (negative ? waited.result == PROCESS_RESULT_FAILED && waited.platform_status == negative_status :
+                                                    waited.result == PROCESS_RESULT_SUCCESS && waited.platform_status == 0);
+                                    context = string_format(temporary.arena,
+                                        S8("scalar boundary native {S8} {S8} {S8} {S8} {S8} negative={u32} status={u32} timeout={u32}"),
+                                        targets[target], modes[mode], frontends[frontend], optimizations[optimization], label, negative,
+                                        waited.platform_status, (u32)waited.timed_out);
+                                    BUSTER_TEST_RAW(arguments, observed, context);
+                                    if (observed)
+                                    {
+                                        arguments->show(arguments, S8("ABI_SCALAR_BOUNDARY_NATIVE_V1 target={S8} allocator={S8} frontend={S8} reference={S8} optimization={S8} direction={S8} negative={u32} expected_exit={u32} observed=pass\n"),
+                                            targets[target], modes[mode], frontends[frontend], S8(BUSTER_HOST_C_COMPILER), optimizations[optimization], label,
+                                            negative, negative ? (u32)ABI_BOUNDARY_BAD_EXPECTATION_EXIT : 0u);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+#endif
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    arguments->show(arguments, S8("ABI_SCALAR_BOUNDARY_NATIVE_V1 status=pending reason=component-fixtures-not-packaged\n"));
+#endif
     return result;
 }
 
@@ -21190,6 +21460,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_inline_assembly_constraint_unions);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_machine_fallback);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_many_native_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scalar_argument_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_dynamic_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_variadic);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
