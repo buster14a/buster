@@ -896,3 +896,21 @@ Tracked-drift, source-identity, and checkout-race controls still exercise the
 production validator against those private checkouts.
 
 `node tools/wasm_integer_execution_startup_test.js` checks the real frozen oracle against an independently emitted Wasm fixture, buffered-output and live-resource controls, arithmetic/load/output failures, and an implicit-exit mutation that must time out. The focused hosted workflow runs these controls on Linux and Windows; the full driver policy still rejects deliberate hangs, nonzero exits, stderr and missing summaries.
+
+## Binary-coverage inventory controls
+
+The native build driver's `binary_coverage_inventory --self-test` runs in the
+existing Release/combinations preflight. Its hand-authored ELF fixture has
+independent expected identity/range values; malformed/truncated/overflowed and
+unsupported ELF inputs fail rather than producing a partial denominator.
+Regenerated-report comparisons reject omitted artifact/range, wrong-build hash,
+fabricated instruction/edge counts, missing MC/DC pair/completeness claims, and
+incomplete-collection claims. These are report-gate controls, not trace collector
+validation or test sensitivity evidence for the inventoried binary.
+
+Linux x86-64 also inventories the actual running native driver from
+`/proc/self/exe` into its ordinary combination log. Every executable byte stays
+unclassified, and instruction execution, machine edges, MC/DC and functional
+assertions each stay unmeasured. No percentages or approved tracing capability
+are inferred from a successful preflight. See
+[the exact-artifact pilot command and gaps](build.md#exact-artifact-binary-coverage-pilot).
