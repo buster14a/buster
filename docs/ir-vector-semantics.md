@@ -117,8 +117,8 @@ The lowering boundaries are explicit:
   back at these boundaries. Predicate widths may change only through an
   explicit lane-preserving conversion; high bits cannot become stale lanes.
 
-The direct x86 emitter uses `KMOVQ` at its frame/integer boundaries and fixed
-scratch `k1` for predicates. MIR may preserve these values in the separate
+The archived direct x86 emitter used `KMOVQ` at its frame/integer boundaries and fixed
+scratch `k1` for predicates. MIR preserves these values in the separate
 mask register class; allocatable k1–k7 lifetime management is the work of
 [#37](https://github.com/buster14a/buster/issues/37). C masks and their ABI remain
 integers under either allocation strategy. `k0` is not an active writemask.
@@ -127,8 +127,8 @@ integers under either allocation strategy. `k0` is not an active writemask.
 
 | Backend | Generic vector values | Exact x86-512 operations | Internal predicates |
 |---|---|---|---|
-| x86-64 native | Native forms where supported, otherwise correct lane/frame expansion | Shared feature gate, exact forms, structured refusal on missing support | Hardware k bank; direct emitter uses k1/frame bridges; mask allocation is separate from C integer allocation |
-| AArch64 native | NEON where supported, otherwise scalar MIR or direct scalar lanes | Refused, including when stray x86 feature bits are present | No SVE predicate lowering is currently implemented; future predicates can use explicit per-lane Boolean vectors or normalized packed integer bits, never masquerade as NEON C comparison results |
+| x86-64 native | Native forms where supported, otherwise correct lane/frame expansion | Shared feature gate, exact forms, structured refusal on missing support | Hardware k bank; mask allocation is separate from C integer allocation |
+| AArch64 native | NEON where supported, otherwise scalar MIR lanes | Refused, including when stray x86 feature bits are present | No SVE predicate lowering is currently implemented; future predicates can use explicit per-lane Boolean vectors or normalized packed integer bits, never masquerade as NEON C comparison results |
 | Wasm64 | Current backend rejects unsupported vector values/operations explicitly | Refused | No predicate bank; future lowering must use explicit lane Booleans or normalized low-N-bit integer representation |
 | eBPF | Current backend rejects unsupported vector values/operations explicitly | Refused | No predicate bank; any future supported lowering uses normalized packed integer bits or explicit scalar lane Booleans |
 | LLVM bitcode | Emit supported LLVM vector operations; LLVM performs subsequent target legalization | Refused until exact intrinsic emission exists, even with an x86 triple | Future predicate lowering uses `<N x i1>`; integer bridges require explicit bit packing/unpacking and zero high bits |

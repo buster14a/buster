@@ -2158,11 +2158,12 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         for (u32 extend = A64_SCALAR_INT_EXTEND_UXTB; extend <= A64_SCALAR_INT_EXTEND_SXTX; extend += 1)
         {
             boundary_extend.value = (u8)extend;
-            boundary_ext_operands[2].width = (extend == A64_SCALAR_INT_EXTEND_UXTX || extend == A64_SCALAR_INT_EXTEND_SXTX) ? 64 : 32;
-            bool x_extension = extend == A64_SCALAR_INT_EXTEND_UXTX || extend == A64_SCALAR_INT_EXTEND_SXTX;
+            bool x_extension = width == 64 &&
+                               (extend == A64_SCALAR_INT_EXTEND_UXTX || extend == A64_SCALAR_INT_EXTEND_SXTX);
+            boundary_ext_operands[2].width = x_extension ? 64 : 32;
             bool extension_ok = a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_ext_operands, 3,
                                                                             &boundary_extend, 1, &boundary_word);
-            BUSTER_TEST(arguments, extension_ok == (width == 64 || !x_extension));
+            BUSTER_TEST(arguments, extension_ok);
         }
         boundary_extend.value = A64_SCALAR_INT_EXTEND_UXTW;
         boundary_extend.amount = 5;
@@ -2173,6 +2174,212 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                                boundary_word == UINT32_C(0x5a5aa5a5));
         boundary_extend.amount = 0;
     }
+    // Literal words for add w0, w1, w2, uxtx/sxtx from the independent #2625
+    // assembly audit. Decode them without first asking an encoder to succeed.
+    {
+        u32 const literal_words[2] = {UINT32_C(0x0b226020), UINT32_C(0x0b22e020)};
+        u8 const literal_options[2] = {A64_SCALAR_INT_EXTEND_UXTX, A64_SCALAR_INT_EXTEND_SXTX};
+        for (u32 literal = 0; literal < BUSTER_ARRAY_LENGTH(literal_words); literal += 1)
+        {
+            A64ScalarIntOperand literal_decoded[4] = {0};
+            A64ScalarIntModifier decoded_modifier = {0};
+            u32 decoded_form = UINT32_MAX;
+            u32 operand_count = UINT32_MAX;
+            u32 modifier_count = UINT32_MAX;
+            bool decoded_ok = a64_arm_m1_scalar_integer_decode(gpr_target, literal_words[literal], &decoded_form,
+                literal_decoded, BUSTER_ARRAY_LENGTH(literal_decoded), &operand_count, &decoded_modifier, 1, &modifier_count);
+            if (BUSTER_REQUIRE(arguments, decoded_ok))
+            {
+                BUSTER_TEST(arguments, operand_count == 3 && modifier_count == 1);
+                for (u32 index = 0; index < 3; index += 1)
+                {
+                    BUSTER_TEST(arguments, literal_decoded[index].kind == A64_SCALAR_INT_OPERAND_REGISTER &&
+                        literal_decoded[index].width == 32 && literal_decoded[index].index == index && !literal_decoded[index].stack_pointer);
+                }
+                BUSTER_TEST(arguments, decoded_modifier.kind == A64_SCALAR_INT_MODIFIER_EXTEND &&
+                    decoded_modifier.value == literal_options[literal] && decoded_modifier.amount == 0 &&
+                    decoded_modifier.present);
+                u32 word = UINT32_C(0x5a5aa5a5);
+                BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode(gpr_target, decoded_form, literal_decoded, 3,
+                    &decoded_modifier, 1, &word) && word == literal_words[literal]);
+            }
+            for (u32 amount = 5; amount < 8; amount += 1)
+            {
+                A64ScalarIntOperand unchanged_operands[4] = {0};
+                A64ScalarIntModifier unchanged_modifier = {0};
+                memset(literal_decoded, 0xa5, sizeof(literal_decoded));
+                memset(&decoded_modifier, 0xa5, sizeof(decoded_modifier));
+                memcpy(unchanged_operands, literal_decoded, sizeof(literal_decoded));
+                memcpy(&unchanged_modifier, &decoded_modifier, sizeof(decoded_modifier));
+                decoded_form = UINT32_MAX;
+                operand_count = UINT32_MAX;
+                modifier_count = UINT32_MAX;
+                u32 reserved_word = literal_words[literal] | (amount << 10);
+                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_decode(gpr_target, reserved_word, &decoded_form,
+                    literal_decoded, BUSTER_ARRAY_LENGTH(literal_decoded), &operand_count, &decoded_modifier, 1, &modifier_count));
+                BUSTER_TEST(arguments, decoded_form == UINT32_MAX && operand_count == UINT32_MAX &&
+                    modifier_count == UINT32_MAX && memcmp(literal_decoded, unchanged_operands, sizeof(literal_decoded)) == 0 &&
+                    memcmp(&decoded_modifier, &unchanged_modifier, sizeof(decoded_modifier)) == 0);
+            }
+        }
+    }
+
+    // ADD/SUB (extended register): fixed field arithmetic independently supplies
+    // decoder input, including reserved shifts and SP/ZR register roles.
+    {
+        String8 const audit_mnemonics[4] = {S8("add"), S8("adds"), S8("sub"), S8("subs")};
+        u8 const audit_registers[3][3] = {{0, 1, 2}, {30, 31, 31}, {31, 30, 0}};
+        for (u32 sf = 0; sf < 2; sf += 1)
+        {
+            for (u32 op = 0; op < 4; op += 1)
+            {
+                u8 width = sf ? 64 : 32;
+                A64ScalarIntOperand baseline[3] = {
+                    {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 0},
+                    {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 1},
+                    {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 2},
+                };
+                A64ScalarIntModifier modifier = {
+                    .kind = A64_SCALAR_INT_MODIFIER_EXTEND,
+                    .value = A64_SCALAR_INT_EXTEND_UXTB,
+                    .present = true,
+                };
+                u32 form_index = UINT32_MAX;
+                bool found = a64_arm_m1_scalar_integer_find_form(audit_mnemonics[op], baseline, 3,
+                                                                &modifier, 1, &form_index);
+                if (!BUSTER_REQUIRE(arguments, found))
+                {
+                    continue;
+                }
+                for (u32 option = 0; option < 8; option += 1)
+                {
+                    // The source register's width is a function of BOTH sf and option.
+                    // In particular, every option uses Wm when sf is zero.
+                    u8 source_width = sf && (option == 3 || option == 7) ? 64 : 32;
+                    modifier.value = (u8)option;
+                    for (u32 amount = 0; amount < 8; amount += 1)
+                    {
+                        modifier.amount = amount;
+                        for (u32 r = 0; r < 3; r += 1)
+                        {
+                            u32 rd = audit_registers[r][0];
+                            u32 rn = audit_registers[r][1];
+                            u32 rm = audit_registers[r][2];
+                            A64ScalarIntOperand operands[3] = {
+                                {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width,
+                                 .index = (u8)rd, .stack_pointer = rd == 31 && !(op & 1)},
+                                {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width,
+                                 .index = (u8)rn, .stack_pointer = rn == 31},
+                                {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = source_width,
+                                 .index = (u8)rm},
+                            };
+                            u32 expected = UINT32_C(0x0b200000) | (sf << 31) | ((op >> 1) << 30) |
+                                ((op & 1) << 29) | (rm << 16) | (option << 13) |
+                                (amount << 10) | (rn << 5) | rd;
+                            bool legal = amount <= 4;
+                            u32 word = UINT32_C(0x5a5aa5a5);
+                            bool audit_encoded = a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                                                                            operands, 3, &modifier, 1, &word);
+                            BUSTER_TEST(arguments, audit_encoded == legal);
+                            BUSTER_TEST(arguments, word == (legal ? expected : UINT32_C(0x5a5aa5a5)));
+                            word = UINT32_C(0x5a5aa5a5);
+                            audit_encoded = a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, audit_mnemonics[op],
+                                                                               operands, 3, &modifier, 1, &word);
+                            BUSTER_TEST(arguments, audit_encoded == legal);
+                            BUSTER_TEST(arguments, word == (legal ? expected : UINT32_C(0x5a5aa5a5)));
+                            word = UINT32_C(0x5a5aa5a5);
+                            audit_encoded = buster_aarch64_scalar_integer_encode_for_target(gpr_target, form_index,
+                                                                                      operands, 3, &modifier, 1, &word);
+                            BUSTER_TEST(arguments, audit_encoded == legal);
+                            BUSTER_TEST(arguments, word == (legal ? expected : UINT32_C(0x5a5aa5a5)));
+
+                            // Feed an independently supplied word, NOT the encoder's output.
+                            A64ScalarIntOperand audit_decoded[4] = {0};
+                            A64ScalarIntModifier decoded_modifier[1] = {0};
+                            A64ScalarIntOperand unchanged_operands[4] = {0};
+                            A64ScalarIntModifier unchanged_modifier[1] = {0};
+                            memset(audit_decoded, 0xa5, sizeof(audit_decoded));
+                            memset(decoded_modifier, 0xa5, sizeof(decoded_modifier));
+                            memcpy(unchanged_operands, audit_decoded, sizeof(audit_decoded));
+                            memcpy(unchanged_modifier, decoded_modifier, sizeof(decoded_modifier));
+                            u32 operand_count = UINT32_MAX;
+                            u32 modifier_count = UINT32_MAX;
+                            bool decoded_ok = a64_arm_m1_scalar_integer_decode_form(gpr_target, form_index, expected,
+                                audit_decoded, 4, &operand_count, decoded_modifier, 1, &modifier_count);
+                            BUSTER_TEST(arguments, decoded_ok == legal);
+                            if (decoded_ok)
+                            {
+                                BUSTER_TEST(arguments, operand_count == 3);
+                                for (u32 i = 0; i < 3; i += 1)
+                                {
+                                    BUSTER_TEST(arguments, audit_decoded[i].kind == operands[i].kind &&
+                                        audit_decoded[i].width == operands[i].width && audit_decoded[i].index == operands[i].index &&
+                                        audit_decoded[i].stack_pointer == operands[i].stack_pointer);
+                                }
+                                bool omitted_default = amount == 0 && option == (sf ? 3u : 2u) &&
+                                                       (operands[0].stack_pointer || operands[1].stack_pointer);
+                                BUSTER_TEST(arguments, modifier_count == (omitted_default ? 0u : 1u));
+                                if (modifier_count == 1)
+                                {
+                                    BUSTER_TEST(arguments, decoded_modifier[0].kind == A64_SCALAR_INT_MODIFIER_EXTEND &&
+                                        decoded_modifier[0].value == option && decoded_modifier[0].amount == amount &&
+                                        decoded_modifier[0].present);
+                                }
+                            }
+                            else
+                            {
+                                BUSTER_TEST(arguments, operand_count == UINT32_MAX && modifier_count == UINT32_MAX);
+                                BUSTER_TEST(arguments, memcmp(audit_decoded, unchanged_operands, sizeof(audit_decoded)) == 0 &&
+                                    memcmp(decoded_modifier, unchanged_modifier, sizeof(decoded_modifier)) == 0);
+                            }
+                            if (legal)
+                            {
+                                // Each width is independently legitimate somewhere, but not with this sf/option pair.
+                                operands[2].width = source_width == 64 ? 32 : 64;
+                                word = UINT32_C(0x5a5aa5a5);
+                                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                                    operands, 3, &modifier, 1, &word) && word == UINT32_C(0x5a5aa5a5));
+                            }
+                        }
+                    }
+                }
+                modifier.value = A64_SCALAR_INT_EXTEND_UXTB;
+                modifier.amount = UINT64_MAX;
+                u32 audit_unchanged = UINT32_C(0x5a5aa5a5);
+                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                    baseline, 3, &modifier, 1, &audit_unchanged) && audit_unchanged == UINT32_C(0x5a5aa5a5));
+                modifier.amount = 0;
+                for (u32 index = 0; index < 3; index += 1)
+                {
+                    u8 saved = baseline[index].index;
+                    u8 const invalid_indices[2] = {32, 255};
+                    for (u32 invalid_index = 0; invalid_index < 2; invalid_index += 1)
+                    {
+                        baseline[index].index = invalid_indices[invalid_index];
+                        audit_unchanged = UINT32_C(0x5a5aa5a5);
+                        BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                            baseline, 3, &modifier, 1, &audit_unchanged) && audit_unchanged == UINT32_C(0x5a5aa5a5));
+                    }
+                    baseline[index].index = saved;
+
+                    // Register number 31 has a field- and flag-dependent role.
+                    bool expected_sp = index == 1 || (index == 0 && !(op & 1));
+                    baseline[index].index = 31;
+                    baseline[index].stack_pointer = !expected_sp;
+                    audit_unchanged = UINT32_C(0x5a5aa5a5);
+                    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                        baseline, 3, &modifier, 1, &audit_unchanged) && audit_unchanged == UINT32_C(0x5a5aa5a5));
+                    baseline[index].index = saved;
+                    baseline[index].stack_pointer = true;
+                    audit_unchanged = UINT32_C(0x5a5aa5a5);
+                    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                        baseline, 3, &modifier, 1, &audit_unchanged) && audit_unchanged == UINT32_C(0x5a5aa5a5));
+                    baseline[index].stack_pointer = false;
+                }
+            }
+        }
+    }
+
     A64ScalarIntOperand boundary_imm_operands[3] = {
         {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0},
         {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1},
@@ -2605,6 +2812,138 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                                    memcmp(&word_first_modifier, &decoded_modifier, sizeof(decoded_modifier)) == 0;
     }
     BUSTER_TEST(arguments, scalar_typed_round_trips);
+
+
+    // DecodeBitMasks ignores high immr bits for sub-width repeated elements.
+    // These single-bit element images and instruction fields are explicit
+    // architectural goldens, independent of the production decoder/encoder.
+    typedef struct A64LogicalRotationGolden A64LogicalRotationGolden;
+    struct A64LogicalRotationGolden
+    {
+        u64 zero_rotation;
+        u64 one_rotation;
+        u32 element_width;
+        u32 imms;
+        u32 n;
+    };
+    static A64LogicalRotationGolden const logical_rotation_goldens[] = {
+        {UINT64_C(0x5555555555555555), UINT64_C(0xaaaaaaaaaaaaaaaa), 2, 60, 0},
+        {UINT64_C(0x1111111111111111), UINT64_C(0x8888888888888888), 4, 56, 0},
+        {UINT64_C(0x0101010101010101), UINT64_C(0x8080808080808080), 8, 48, 0},
+        {UINT64_C(0x0001000100010001), UINT64_C(0x8000800080008000), 16, 32, 0},
+        {UINT64_C(0x0000000100000001), UINT64_C(0x8000000080000000), 32, 0, 0},
+        {UINT64_C(0x0000000000000001), UINT64_C(0x8000000000000000), 64, 0, 1},
+    };
+    static String8 const logical_rotation_mnemonics[] = {
+        S8_INITIALIZER("and"), S8_INITIALIZER("orr"), S8_INITIALIZER("eor"), S8_INITIALIZER("ands"),
+    };
+    static u32 const logical_rotation_opcode_bases[] = {
+        UINT32_C(0x12000000), UINT32_C(0x32000000), UINT32_C(0x52000000), UINT32_C(0x72000000),
+    };
+    u32 logical_rotation_case_count = 0;
+    for (u32 logical_width_index = 0; logical_width_index < 2; logical_width_index += 1)
+    {
+        u8 logical_width = logical_width_index ? 64 : 32;
+        for (u32 logical_opcode_index = 0; logical_opcode_index < BUSTER_ARRAY_LENGTH(logical_rotation_mnemonics); logical_opcode_index += 1)
+        {
+            u32 logical_family_form = UINT32_MAX;
+            for (u32 logical_golden_index = 0; logical_golden_index < BUSTER_ARRAY_LENGTH(logical_rotation_goldens); logical_golden_index += 1)
+            {
+                A64LogicalRotationGolden logical_golden = logical_rotation_goldens[logical_golden_index];
+                if (logical_golden.element_width > logical_width) continue;
+                for (u32 logical_rotation = 0; logical_rotation < 2; logical_rotation += 1)
+                {
+                    u64 logical_expected_immediate = logical_rotation ? logical_golden.one_rotation : logical_golden.zero_rotation;
+                    if (logical_width == 32) logical_expected_immediate &= UINT64_C(0xffffffff);
+                    A64ScalarIntOperand logical_expected_operands[4] = {
+                        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = logical_width, .index = 0},
+                        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = logical_width, .index = 1},
+                        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = logical_expected_immediate},
+                    };
+                    u32 logical_expected_form = UINT32_MAX;
+                    bool logical_form_found = buster_aarch64_arm_m1_scalar_integer_find_form(
+                        logical_rotation_mnemonics[logical_opcode_index], logical_expected_operands, 3, 0, 0, &logical_expected_form);
+                    if (BUSTER_REQUIRE(arguments, logical_form_found))
+                    {
+                        logical_family_form = logical_expected_form;
+                        u32 logical_canonical_word = logical_rotation_opcode_bases[logical_opcode_index] |
+                                                     (logical_width_index << 31) | (logical_golden.n << 22) |
+                                                     (logical_golden.imms << 10) | (logical_rotation << 16) | UINT32_C(0x20);
+                        for (u32 logical_raw_rotation = logical_rotation; logical_raw_rotation < 64; logical_raw_rotation += logical_golden.element_width)
+                        {
+                            u32 logical_input_word = logical_canonical_word | ((logical_raw_rotation - logical_rotation) << 16);
+                            A64ScalarIntOperand logical_direct_operands[4] = {0};
+                            A64ScalarIntOperand logical_word_operands[4] = {0};
+                            u32 logical_direct_count = UINT32_MAX;
+                            u32 logical_word_count = UINT32_MAX;
+                            u32 logical_direct_modifiers = UINT32_MAX;
+                            u32 logical_word_modifiers = UINT32_MAX;
+                            u32 logical_word_form = UINT32_MAX;
+                            bool logical_direct_ok = buster_aarch64_arm_m1_scalar_integer_decode_form(
+                                canonical_target, logical_expected_form, logical_input_word, logical_direct_operands, 4,
+                                &logical_direct_count, 0, 0, &logical_direct_modifiers);
+                            bool logical_word_ok = buster_aarch64_arm_m1_scalar_integer_decode(
+                                canonical_target, logical_input_word, &logical_word_form, logical_word_operands, 4,
+                                &logical_word_count, 0, 0, &logical_word_modifiers);
+                            BUSTER_TEST(arguments, logical_direct_ok && logical_direct_count == 3 && logical_direct_modifiers == 0 &&
+                                                   memcmp(logical_direct_operands, logical_expected_operands, sizeof(logical_expected_operands)) == 0);
+                            BUSTER_TEST(arguments, logical_word_ok && logical_word_form == logical_expected_form &&
+                                                   logical_word_count == 3 && logical_word_modifiers == 0 &&
+                                                   memcmp(logical_word_operands, logical_expected_operands, sizeof(logical_expected_operands)) == 0);
+                            if (logical_direct_ok)
+                            {
+                                u32 logical_reencoded_word = 0;
+                                BUSTER_TEST(arguments, buster_aarch64_arm_m1_scalar_integer_encode(
+                                                           canonical_target, logical_expected_form, logical_direct_operands, logical_direct_count,
+                                                           0, 0, &logical_reencoded_word) &&
+                                                       logical_reencoded_word == logical_canonical_word);
+                            }
+                            logical_rotation_case_count += 1;
+                        }
+                    }
+                }
+            }
+            // All-ones elements are reserved, as is N=1 in a W form. Both
+            // decoder routes must preserve every output on refusal.
+            u32 logical_reserved_words[2] = {
+                logical_rotation_opcode_bases[logical_opcode_index] | (logical_width_index << 31) | (63u << 10) | UINT32_C(0x20),
+                logical_rotation_opcode_bases[logical_opcode_index] | (1u << 22) | UINT32_C(0x20),
+            };
+            u32 logical_reserved_count = logical_width == 32 ? 2 : 1;
+            for (u32 logical_reserved_index = 0; logical_reserved_index < logical_reserved_count; logical_reserved_index += 1)
+            {
+                A64ScalarIntOperand logical_saved_operands[4] = {
+                    {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = logical_width, .index = 7},
+                    {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = logical_width, .index = 8},
+                    {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = UINT64_C(0x1234)},
+                };
+                A64ScalarIntOperand logical_refused_operands[4] = {0};
+                memcpy(logical_refused_operands, logical_saved_operands, sizeof(logical_saved_operands));
+                u32 logical_refused_count = UINT32_C(0x12345678);
+                u32 logical_refused_modifiers = UINT32_C(0x87654321);
+                u32 logical_refused_form = UINT32_C(0x13572468);
+                if (BUSTER_REQUIRE(arguments, logical_family_form != UINT32_MAX))
+                {
+                    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_scalar_integer_decode_form(
+                                               canonical_target, logical_family_form, logical_reserved_words[logical_reserved_index],
+                                               logical_refused_operands, 4, &logical_refused_count, 0, 0, &logical_refused_modifiers) &&
+                                           logical_refused_count == UINT32_C(0x12345678) &&
+                                           logical_refused_modifiers == UINT32_C(0x87654321) &&
+                                           memcmp(logical_refused_operands, logical_saved_operands, sizeof(logical_saved_operands)) == 0);
+                    memcpy(logical_refused_operands, logical_saved_operands, sizeof(logical_saved_operands));
+                    logical_refused_count = UINT32_C(0x12345678);
+                    logical_refused_modifiers = UINT32_C(0x87654321);
+                }
+                BUSTER_TEST(arguments, !buster_aarch64_arm_m1_scalar_integer_decode(
+                                           canonical_target, logical_reserved_words[logical_reserved_index], &logical_refused_form,
+                                           logical_refused_operands, 4, &logical_refused_count, 0, 0, &logical_refused_modifiers) &&
+                                       logical_refused_form == UINT32_C(0x13572468) &&
+                                       logical_refused_count == UINT32_C(0x12345678) && logical_refused_modifiers == UINT32_C(0x87654321) &&
+                                       memcmp(logical_refused_operands, logical_saved_operands, sizeof(logical_saved_operands)) == 0);
+            }
+        }
+    }
+    BUSTER_TEST(arguments, logical_rotation_case_count == 1000);
 
     A64GprOperand immutable_gpr_operands[4];
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(immutable_gpr_operands); index += 1)
