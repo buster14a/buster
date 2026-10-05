@@ -3081,6 +3081,13 @@ struct CIntegerIrBuilder
     // Nonzero while a sizeof operand resolves a statement-expression tail,
     // where every array operand is evaluated and so decays.
     u32 sizeof_statement_expression_tail_depth;
+    // Set while a type-mapping pass runs and the array types of locals may
+    // still map later in the same pass: an unmapped local array is then not
+    // yet known to be variably modified, so a bare sizeof operand naming one
+    // stays unresolved for the next pass instead of decaying to a pointer
+    // (`S n[2]; unsigned idx[sizeof(n) / 16]`). A pass that maps nothing runs
+    // once more with this clear, which lets what never maps decay.
+    bool sizeof_defers_unmapped_local_arrays;
     u32 declaration_index;
     CIntegerIrLocal* locals;
     // The entity of `locals[i]`, kept beside the table rather than read out of
@@ -28230,7 +28237,12 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
             // decays the same way under a postfix operator or anywhere in a
             // statement-expression tail; as a bare operand it is the unsized
             // array the callers diagnose.
-            if (type.value == IR_ID_UNDERLYING_INVALID &&
+            // A bare local waits while the mapping pass can still give its
+            // array type an IR type, since decaying it would size the array
+            // as a pointer.
+            bool bare_local_may_still_map = builder->sizeof_defers_unmapped_local_arrays && builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL &&
+                                            chain_start >= end && !builder->sizeof_statement_expression_tail_depth;
+            if (type.value == IR_ID_UNDERLYING_INVALID && !bare_local_may_still_map &&
                 (builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL || chain_start < end ||
                  builder->sizeof_statement_expression_tail_depth))
             {
@@ -52655,9 +52667,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 type_mapping_worklist[type_mapping_worklist_count++] = type_index;
             }
         }
-        for (u32 pass = 0; pass < parse.type_count; pass += 1)
+        // Each deferring pass that maps nothing is followed by one that does
+        // not defer, so the passes are bounded by twice the type count.
+        bool defer_unmapped_local_arrays = true;
+        for (u32 pass = 0; pass < parse.type_count * 2u + 1u; pass += 1)
         {
             bool progress = false;
+            constant_builder.sizeof_defers_unmapped_local_arrays = defer_unmapped_local_arrays;
             u32 kept_count = 0;
             for (u32 position = 0; position < type_mapping_worklist_count; position += 1)
             {
@@ -53323,11 +53339,20 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             }
             progress = true;
         }
-            if (!progress)
+            if (!progress && defer_unmapped_local_arrays && type_mapping_worklist_count)
+            {
+                defer_unmapped_local_arrays = false;
+            }
+            else if (!progress)
             {
                 break;
             }
+            else
+            {
+                defer_unmapped_local_arrays = true;
+            }
         }
+        constant_builder.sizeof_defers_unmapped_local_arrays = false;
         if (type_mapping_round == 0)
         {
             c_ir_infer_incomplete_array_bounds(&constant_builder, &result, arena, lowering_diagnostic_capacity);

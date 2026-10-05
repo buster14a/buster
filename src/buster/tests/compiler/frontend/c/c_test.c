@@ -37704,6 +37704,98 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArgum
     return result;
 }
 
+// A later local's array bound that applies sizeof to an earlier local array of
+// aggregates is sized by the whole array, never by the pointer it decays to
+// (#2713). The array type of `n` maps after the bound's first attempt, so the
+// bound waits for it instead of folding sizeof(pointer).
+BUSTER_GLOBAL_LOCAL String8 const c_test_local_array_sizeof_bound_source = S8_INITIALIZER(
+    "typedef struct { int a[4]; } S;\n"
+    "typedef struct { char c; short s; int i; double d; } R;\n"
+    "static int nested(void)\n"
+    "{\n"
+    "    S m[3];\n"
+    "    {\n"
+    "        unsigned deep[sizeof(m) / sizeof(m[0])] = {1, 2, 3};\n"
+    "        return (int)sizeof deep - 12 + (int)deep[2] - 3;\n"
+    "    }\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    S n[2];\n"
+    "    R r[3];\n"
+    "    int a[3];\n"
+    "    unsigned idx[sizeof(n) / 16] = {5, 6};\n"
+    "    unsigned count[sizeof(n) / sizeof(n[0])] = {7, 8};\n"
+    "    unsigned bare[sizeof n / sizeof n[0]] = {9, 10};\n"
+    "    unsigned rows[sizeof(r) / sizeof(r[0])] = {1, 2, 3};\n"
+    "    char bytes[sizeof(n)];\n"
+    "    char plain[sizeof a];\n"
+    "    char decayed[sizeof(n + 1)];\n"
+    "    char element[sizeof(n[1])];\n"
+    "    char deref[sizeof(*n)];\n"
+    "    if (sizeof(n) != 32) return 1;\n"
+    "    if (sizeof idx != 8 || idx[0] != 5 || idx[1] != 6) return 2;\n"
+    "    if (sizeof count != 8 || count[0] != 7 || count[1] != 8) return 3;\n"
+    "    if (sizeof bare != 8 || bare[0] != 9 || bare[1] != 10) return 4;\n"
+    "    if (sizeof rows != 12 || rows[2] != 3) return 5;\n"
+    "    if (sizeof bytes != 32) return 6;\n"
+    "    if (sizeof plain != 12) return 7;\n"
+    "    if (sizeof decayed != sizeof(char *)) return 8;\n"
+    "    if (sizeof element != 16 || sizeof deref != 16) return 9;\n"
+    "    if (nested()) return 10;\n"
+    "    return 0;\n"
+    "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=c17"), S8("-std=c23")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("local-array-sizeof-bound"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_local_array_sizeof_bound_source))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("local-array-sizeof-bound-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
+                        form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("local array sizeof bound {S8} {S8} form={u32}: {S8}"),
+                                      dialects[dialect], modes[mode], form, compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("local array sizeof bound runtime {S8} {S8} form={u32}: status={u32} timed_out={u32}"),
+                                    dialects[dialect], modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A place is not a scalar value, and an unknown read is not known false.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArguments* arguments)
 {
@@ -39298,6 +39390,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_reserve_failure);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
+    BUSTER_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
