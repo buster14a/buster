@@ -111,6 +111,7 @@
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.h>
 #include <buster/tests/compiler/diagnostic_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
+#include <buster/tests/compiler/ir/ir_oracle_test.h>
 #include <buster/tests/compiler/ir/vector_contract_test.h>
 #include <buster/tests/compiler/llvm/bitcode_test.h>
 #include <buster/tests/compiler/codegen/machine_select_test.h>
@@ -174,6 +175,7 @@
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.c>
 #include <buster/tests/compiler/diagnostic_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
+#include <buster/tests/compiler/ir/ir_oracle_test.c>
 #include <buster/tests/compiler/ir/vector_contract_test.c>
 #include <buster/tests/compiler/llvm/bitcode_test.c>
 #include <buster/tests/compiler/codegen/machine_select_test.c>
@@ -888,6 +890,8 @@ typedef enum TestId
     TEST_ID_X86_64_COMPLETION_CENSUS,
 #endif
     TEST_ID_IR,
+    TEST_ID_IR_ORACLE,
+    TEST_ID_IR_ORACLE_NATIVE,
     TEST_ID_VECTOR_CONTRACT,
     TEST_ID_LLVM_BITCODE,
     TEST_ID_MACHINE_SELECTION,
@@ -954,6 +958,10 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
                                           TEST_DESCRIPTOR_PARALLEL_NONE, true},
 #endif
     [TEST_ID_IR] = {S8_INITIALIZER("ir_tests"), &ir_tests},
+    [TEST_ID_IR_ORACLE] = {S8_INITIALIZER("ir_oracle_tests"), &ir_oracle_tests, true},
+    // This re-exec payload uses only in-memory mappings. Its timeout child is
+    // killed before final cleanup, so leave unused temporary roots unallocated.
+    [TEST_ID_IR_ORACLE_NATIVE] = {S8_INITIALIZER("ir_oracle_native_tests"), &ir_oracle_native_tests, false},
     [TEST_ID_VECTOR_CONTRACT] = {S8_INITIALIZER("vector_contract_tests"), &vector_contract_tests},
     [TEST_ID_LLVM_BITCODE] = {S8_INITIALIZER("llvm_bitcode_tests"), &llvm_bitcode_tests},
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},

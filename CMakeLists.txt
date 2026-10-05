@@ -1148,6 +1148,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
     src/buster/tests/compiler/diagnostic_test.c
     src/buster/tests/compiler/ir/ir_test.c
+    src/buster/tests/compiler/ir/ir_oracle_test.c
     src/buster/tests/compiler/ir/vector_contract_test.c
     src/buster/tests/compiler/llvm/bitcode_test.c
     src/buster/tests/compiler/codegen/machine_select_test.c
@@ -1213,6 +1214,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.h
     src/buster/tests/compiler/diagnostic_test.h
     src/buster/tests/compiler/ir/ir_test.h
+    src/buster/tests/compiler/ir/ir_oracle_test.h
     src/buster/tests/compiler/ir/vector_contract_test.h
     src/buster/tests/compiler/llvm/bitcode_test.h
     src/buster/tests/compiler/codegen/machine_select_test.h
