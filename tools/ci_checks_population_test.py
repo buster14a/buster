@@ -195,7 +195,7 @@ class PopulationEpochTests(unittest.TestCase):
     def run_fixture(self, ordinal, variant):
         created = ordinal * 2000
         elapsed = 850 if variant == "split-overlap" else 1000
-        names = list(github.combination_jobs("split" if variant == "split-overlap" else "combined"))
+        names = list(qualification.cohort_jobs(variant))
         # Real upstream timestamp/inventory checks run on these synthetic API records.
         # Native receipt/census replay is covered by the unchanged sample tests.
         step_names = ("Combination matrix (Windows)", "Combination matrix (Linux, macOS)", "Install verified Zig",
@@ -225,7 +225,7 @@ class PopulationEpochTests(unittest.TestCase):
 
     def input_fixture(self, ordinal, item, run):
         prefix = f"witnesses/{ordinal}"
-        desktop_names = github.SPLIT_COMBINATION_PLATFORMS if item["variant"] == "split-overlap" else github.COMBINATION_PLATFORMS
+        desktop_names = qualification.cohort_desktop_jobs(item["variant"])
         configure, desktops, jobs = [], [], {}
         for index, job in enumerate(desktop_names):
             phase_directory = f"{prefix}/{index}/matrix-phases"

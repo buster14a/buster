@@ -61,12 +61,12 @@ differential corpus. Each Windows native job requires its mode result and the
 independent MSVC reference differential result. All five native jobs publish the
 same fail-closed summary and packed evidence shape.
 
-`tools/github_ci_time.py` defines the current exact aggregate as 27 jobs:
-16 desktop combination shards, 5 native jobs, 2 mobile jobs, UEFI, analyzer,
+`tools/github_ci_time.py` defines the current exact aggregate as 29 jobs:
+18 desktop combination shards, 5 native jobs, 2 mobile jobs, UEFI, analyzer,
 workflow lint, and `CI complete`. The live gate requires the Windows mode step,
 MSVC reference differential step, and native summary exactly once in each
-Windows native job. The timing reader also recognizes the historical 21-, 23-
-and 25-job layouts so older measurements remain readable, but those legacy
+Windows native job. The timing reader also recognizes the historical 21-, 23-,
+25- and 27-job layouts so older measurements remain readable, but those legacy
 layouts cannot satisfy the current live gate.
 
 ## Reproduction
@@ -112,8 +112,8 @@ python3 tools/github_ci_time.py collect \
 python3 tools/github_ci_time.py summarize windows-ci-runs.json
 ```
 
-Do not pool the current 27-job workflow with historical cohorts. Workflow
+Do not pool the current 29-job workflow with historical cohorts. Workflow
 blob and runner-label identities deliberately separate them. Green acceptance
 requires both Windows native jobs, every compiler/configuration shard, the exact
-27-job inventory, and the aggregate `CI complete` result on the same immutable
+29-job inventory, and the aggregate `CI complete` result on the same immutable
 source revision.
