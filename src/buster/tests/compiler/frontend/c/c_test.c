@@ -1228,6 +1228,158 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_and_wide_enumerator_types(UnitTe
     return result;
 }
 
+// Fixed Bool enums share one truth-conversion rule in every constant context.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "enum B : bool { BF, BT }; typedef enum B BoolEnum; enum I : int { IF, IT };\n"
+        "enum { X = (enum B)2, Y = (enum B)0.5, ZERO_INTEGER = (enum B)0, ZERO_FLOAT = (enum B)0.0,\n"
+        "       NEGATIVE_INTEGER = (enum B)-2, NEGATIVE_FLOAT = (enum B)-0.5,\n"
+        "       HIGH_LIMB = (enum B)((unsigned __int128)1 << 100), NEGATIVE_ZERO = (enum B)-0.0,\n"
+        "       ALIAS_INTEGER = (BoolEnum)2, QUALIFIED_FLOAT = (const enum B)0.5 };\n"
+        "static char arr[(enum B)2 + 1], fraction_arr[(enum B)0.5 + 1];\n"
+        "static int static_two = (enum B)2, static_half = (enum B)0.5, static_zero = (enum B)0.0;\n"
+        "static enum B static_enum = (enum B)2;\n"
+        "static const enum B static_qualified = (const enum B)-0.5;\n"
+        "static int static_alias = (BoolEnum)2, static_alias_half = (const BoolEnum)0.5;\n"
+        "static int static_integer = (enum I)2;\n"
+        "static_assert(X == 1 && Y == 1 && ZERO_INTEGER == 0 && ZERO_FLOAT == 0, \"positive and zero truth\");\n"
+        "static_assert(NEGATIVE_INTEGER == 1 && NEGATIVE_FLOAT == 1 && HIGH_LIMB == 1 && NEGATIVE_ZERO == 0, \"whole value truth\");\n"
+        "static_assert(ALIAS_INTEGER == 1 && QUALIFIED_FLOAT == 1, \"enum context parity\");\n"
+        "int main(void) {\n"
+        "    volatile int two = 2, zero = 0, negative = -2; volatile double half = 0.5, negative_half = -0.5;\n"
+        "    enum B r = (enum B)two, q = (enum B)half, z = (enum B)zero;\n"
+        "    BoolEnum n = (BoolEnum)negative; const enum B f = (const enum B)negative_half;\n"
+        "    return X != 1 || Y != 1 || sizeof arr != 2 || sizeof fraction_arr != 2 ||\n"
+        "           (int)r != 1 || (int)q != 1 || (int)z != 0 || (int)n != 1 || (int)f != 1 ||\n"
+        "           static_two != 1 || static_half != 1 || static_zero != 0 || static_enum != 1 || static_qualified != 1 ||\n"
+        "           static_alias != 1 || static_alias_half != 1 || static_integer != 2;\n"
+        "}\n");
+    typedef struct CTestBoolEnumConstant CTestBoolEnumConstant;
+    struct CTestBoolEnumConstant
+    {
+        String8 name;
+        u64 value;
+    };
+    CTestBoolEnumConstant expected[] = {
+        {S8("BF"), 0}, {S8("BT"), 1}, {S8("IF"), 0}, {S8("IT"), 1}, {S8("X"), 1}, {S8("Y"), 1},
+        {S8("ZERO_INTEGER"), 0}, {S8("ZERO_FLOAT"), 0}, {S8("NEGATIVE_INTEGER"), 1},
+        {S8("NEGATIVE_FLOAT"), 1}, {S8("HIGH_LIMB"), 1}, {S8("NEGATIVE_ZERO"), 0},
+        {S8("ALIAS_INTEGER"), 1}, {S8("QUALIFIED_FLOAT"), 1},
+    };
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_C23,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !parsed.diagnostic_count))
+                {
+                    BUSTER_TEST(arguments, parsed.enum_member_count == BUSTER_ARRAY_LENGTH(expected));
+                    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+                    {
+                        CEnumMember const* member = 0;
+                        for (u32 candidate = 0; !member && candidate < parsed.enum_member_count; candidate += 1)
+                        {
+                            if (string_equal(parsed.enum_members[candidate].name, expected[index].name))
+                            {
+                                member = parsed.enum_members + candidate;
+                            }
+                        }
+                        if (BUSTER_REQUIRE(arguments, member != 0))
+                        {
+                            CIntegerConstant constant = member->integer_constant;
+                            BUSTER_TEST_RAW(arguments, constant.valid && constant.magnitude == expected[index].value &&
+                                                      !constant.magnitude_high && !constant.is_negative, expected[index].name);
+                        }
+                    }
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("enum-bool-conversion.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                    {
+                        BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[index].message);
+                    }
+                    if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                                                  lowered.program->module_count == 1))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    String8 invalid[] = {
+        S8("enum B : bool { BF, BT }; static int s = (enum B)missing; int main(void) { return s; }"),
+        S8("enum B : bool { BF, BT }; int value = 2; static int s = (enum B)value; int main(void) { return s; }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[index], (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C23,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("enum-bool-invalid-static.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, invalid[index]);
+        scratch_end(temporary);
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("enum-bool-conversion"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 dialects[] = {S8("-std=c23"), S8("-std=gnu23")};
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-bool-conversion-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
+                                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 context = string_format(temporary.arena, S8("dialect={S8} mode={S8} form={u32}: {S8}"),
+                                                    dialects[dialect], modes[mode], form, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, context);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+
 // Inspect declaration-time facts separately from completed symbol/enum types.
 // This catches a correct low limb accompanied by a wrong sign, width or rank.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successors(UnitTestArguments* arguments)
@@ -36194,6 +36346,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);

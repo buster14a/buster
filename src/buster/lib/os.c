@@ -3025,6 +3025,38 @@ BUSTER_GLOBAL_LOCAL OsError os_process_spawn_not_found_error(void)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL OsError os_process_capture_sink_error(OsFileDescriptor* file)
+{
+    OsError result = os_process_spawn_invalid_error();
+    bool query_stats = file != 0;
+#if defined(_WIN32)
+    if (query_stats)
+    {
+        SetLastError(NO_ERROR);
+        DWORD kind = GetFileType(generic_fd_to_windows(file));
+        query_stats = kind == FILE_TYPE_DISK;
+        if (kind == FILE_TYPE_UNKNOWN)
+        {
+            OsError native_error = os_get_last_error();
+            if (native_error.v) result = native_error;
+        }
+    }
+#endif
+    if (query_stats)
+    {
+        FileStats stats = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+        if (!stats.valid)
+        {
+            if (stats.error.v) result = stats.error;
+        }
+        else if (stats.kind == OS_FILE_KIND_REGULAR)
+        {
+            result = (OsError){0};
+        }
+    }
+    return result;
+}
+
 #if defined(_WIN32)
 BUSTER_GLOBAL_LOCAL OsError os_process_spawn_injected_error(void)
 {
@@ -3288,8 +3320,18 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     }
     else
     {
+        for (StandardStream stream = STANDARD_STREAM_OUTPUT;
+             result.failure == PROCESS_SPAWN_FAILURE_NONE && stream < STANDARD_STREAM_COUNT; stream += 1)
+        {
+            if (options.capture_overflow_policy == PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE &&
+                (options.capture & ((u64)1 << stream)))
+            {
+                OsError sink_error = os_process_capture_sink_error(options.capture_overflow_files[stream]);
+                if (sink_error.v) os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_CAPTURE_SINK, sink_error);
+            }
+        }
         String8 requested = arguments.pointer[0];
-        if (options.search_path && !os_process_spawn_path_is_explicit(requested))
+        if (result.failure == PROCESS_SPAWN_FAILURE_NONE && options.search_path && !os_process_spawn_path_is_explicit(requested))
         {
             requested = executable_resolve_in_path(temp.arena, requested);
             if (!requested.length)
