@@ -52,6 +52,18 @@ BUSTER_F_DECL CTestExpressionQuery c_test_expression_type_query(Arena* scratch, 
                                                                 bool machine_only);
 BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 
+// Direct member alignment queries must leave the published model, including
+// spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
+typedef struct CTestMemberAlignmentQuery CTestMemberAlignmentQuery;
+struct CTestMemberAlignmentQuery
+{
+    u32 alignment;
+    bool valid;
+    bool model_unchanged;
+};
+BUSTER_F_DECL CTestMemberAlignmentQuery c_test_member_alignment_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                              CScopeId scope, u32 start, u32 end);
+
 // Promoted-member searches on this thread, and how many needed a per-type table.
 BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 
