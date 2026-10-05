@@ -51,7 +51,13 @@ so chains stay short at any scale (`UI_State.box_key_probes` per
 structure behind the dense active list, so that list's order does not change
 when the index grows. The target also checks box identity, duplicate and zero
 keys, pruning and free-list reuse, and the active-list order across growth.
-Desktop `test_all` and `test_units` include it when tests and libc are enabled.
+Keyboard focus navigation stamps the chosen scope's subtree once per request
+(one iterative pre-order pass) so scope membership is a single compare per
+candidate rather than a parent-chain walk; `UI_State.focus_scope_steps` counts
+the parent hops and subtree visits. The target compares selected keys with an
+independent copy of the ancestor-walk algorithm on chain, nested-scope, comb and
+broad trees with ineligible nodes, and bounds steps per box on 500 to 4000 deep
+spines. Desktop `test_all` and `test_units` include it when tests and libc are enabled.
 
 Create a feature issue for a concrete application workflow or component behavior,
 not a speculative checklist claiming that a future editor/viewer already exists.

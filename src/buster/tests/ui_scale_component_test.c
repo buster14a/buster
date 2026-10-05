@@ -5,8 +5,11 @@
 // unchanged. Only the unused native rendering boundary is supplied; no compiler
 // or desktop window/backend dependency belongs to this component runner.
 //
-// Map: ui_scale_check and the splitmix helpers, the keyed-box lookup scaling
-// and behavior cases, then main.
+// Map: ui_scale_check and the key helpers, the keyed-box lookup scaling
+// (ui_scale_lookup_scaling) and box-table behavior (ui_scale_table_behavior)
+// cases, the focus-navigation oracle (ui_scale_focus_oracle), its tree builders
+// and equivalence (ui_scale_focus_behavior) and deep-spine scaling
+// (ui_scale_focus_scaling) cases, then main.
 
 #include <buster/lib/system_headers.h>
 #include <buster/lib/os.h>
@@ -412,6 +415,546 @@ BUSTER_GLOBAL_LOCAL void ui_scale_table_behavior(Arena* arena)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Focus navigation.
+//
+// The oracle below is the pre-fix algorithm: it decides scope membership by
+// walking every candidate's parent chain, and scans the dense active list with
+// the same tie-breaking. It reads only public UI_State/UI_Box fields, so the
+// production implementation can change its data structures freely while its
+// selected keys must stay identical.
+
+typedef enum UI_ScaleDirection
+{
+    UI_ScaleDirection_Forward,
+    UI_ScaleDirection_Backward,
+    UI_ScaleDirection_Left,
+    UI_ScaleDirection_Right,
+    UI_ScaleDirection_Up,
+    UI_ScaleDirection_Down,
+    UI_ScaleDirection_Count,
+} UI_ScaleDirection;
+
+BUSTER_GLOBAL_LOCAL bool ui_scale_oracle_focusable(UI_Box* box)
+{
+    bool result = false;
+    if (box && !ui_key_match(box->key, ui_key_zero()) && !(box->flags & (UI_BoxFlag_FocusNavSkip | UI_BoxFlag_Disabled | UI_BoxFlag_FocusActiveDisabled)))
+    {
+        result = !!(box->flags & (UI_BoxFlag_FocusActive | UI_BoxFlag_KeyboardClickable | UI_BoxFlag_ClickToFocus | UI_BoxFlag_DefaultFocusNavX |
+                                  UI_BoxFlag_DefaultFocusNavY | UI_BoxFlag_DefaultFocusEdit));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UI_Box* ui_scale_oracle_scope(UI_Box* box, UI_Box* root)
+{
+    UI_Box* result = box ? box->parent : root;
+    bool found = false;
+    for (UI_Box* parent = box ? box->parent : root; parent && !found; parent = parent->parent)
+    {
+        if (parent != root && (parent->flags & (UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY)))
+        {
+            result = parent;
+            found = true;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_scale_oracle_in_scope(UI_Box* box, UI_Box* scope)
+{
+    bool result = false;
+    if (box && scope && box != scope)
+    {
+        for (UI_Box* parent = box->parent; parent && !result; parent = parent->parent)
+        {
+            result = parent == scope;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL f32 ui_scale_center(F32Interval2 rect, bool x_axis)
+{
+    return x_axis ? (rect.x0 + rect.x1) * 0.5f : (rect.y0 + rect.y1) * 0.5f;
+}
+
+BUSTER_GLOBAL_LOCAL f32 ui_scale_abs(f32 value)
+{
+    return value < 0.0f ? -value : value;
+}
+
+BUSTER_GLOBAL_LOCAL UI_Box* ui_scale_focus_oracle(UI_State* state, UI_Key current_key, UI_ScaleDirection direction)
+{
+    UI_BoxFlags axis_flag = UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY;
+    if (direction == UI_ScaleDirection_Left || direction == UI_ScaleDirection_Right)
+    {
+        axis_flag = UI_BoxFlag_DefaultFocusNavX;
+    }
+    else if (direction == UI_ScaleDirection_Up || direction == UI_ScaleDirection_Down)
+    {
+        axis_flag = UI_BoxFlag_DefaultFocusNavY;
+    }
+    bool directional_request = direction >= UI_ScaleDirection_Left;
+    bool horizontal = direction == UI_ScaleDirection_Left || direction == UI_ScaleDirection_Right;
+    bool negative = direction == UI_ScaleDirection_Left || direction == UI_ScaleDirection_Up;
+    u64 build_index = state->build_index;
+    UI_Box* root = state->root;
+    UI_Box* current = ui_box_from_key(current_key);
+    bool current_found = current && current->last_touched_build_index == build_index;
+    if (!current_found)
+    {
+        current = 0;
+    }
+    UI_Box* scope = ui_scale_oracle_scope(current, root);
+    UI_Box* first = 0;
+    UI_Box* last = 0;
+    UI_Box* directional = 0;
+    f32 directional_score = 0.0f;
+    for (u64 index = 0; index < state->active_box_count; index += 1)
+    {
+        UI_Box* box = state->active_boxes[index];
+        if (box->last_touched_build_index != build_index || !ui_scale_oracle_in_scope(box, scope) || !(box->flags & axis_flag) || !ui_scale_oracle_focusable(box))
+        {
+            continue;
+        }
+        if (!first || box->build_order < first->build_order)
+        {
+            first = box;
+        }
+        if (!last || box->build_order > last->build_order)
+        {
+            last = box;
+        }
+        if (current_found && directional_request && !ui_key_match(box->key, current_key))
+        {
+            f32 primary_delta = ui_scale_center(box->rect, horizontal) - ui_scale_center(current->rect, horizontal);
+            f32 cross_delta = ui_scale_abs(ui_scale_center(box->rect, !horizontal) - ui_scale_center(current->rect, !horizontal));
+            bool in_direction = negative ? primary_delta < 0.0f : primary_delta > 0.0f;
+            if (in_direction)
+            {
+                f32 score = ui_scale_abs(primary_delta) * 1024.0f + cross_delta;
+                if (!directional || score < directional_score || (score == directional_score && box->build_order < directional->build_order))
+                {
+                    directional = box;
+                    directional_score = score;
+                }
+            }
+        }
+    }
+    UI_Box* result = 0;
+    if (directional_request)
+    {
+        result = directional;
+        if (!result)
+        {
+            // Directional navigation wraps to the far side of the scope; ties keep
+            // the first box in active-list order.
+            for (u64 index = 0; index < state->active_box_count; index += 1)
+            {
+                UI_Box* box = state->active_boxes[index];
+                if (box->last_touched_build_index != build_index || !ui_scale_oracle_in_scope(box, scope) || !(box->flags & axis_flag) ||
+                    !ui_scale_oracle_focusable(box) || ui_key_match(box->key, current_key))
+                {
+                    continue;
+                }
+                bool better = !result;
+                if (result)
+                {
+                    f32 value = ui_scale_center(box->rect, horizontal);
+                    f32 old_value = ui_scale_center(result->rect, horizontal);
+                    better = negative ? value > old_value : value < old_value;
+                }
+                if (better)
+                {
+                    result = box;
+                }
+            }
+        }
+    }
+    else if (!current_found)
+    {
+        result = direction == UI_ScaleDirection_Backward ? last : first;
+    }
+    else
+    {
+        UI_Box* best = 0;
+        for (u64 index = 0; index < state->active_box_count; index += 1)
+        {
+            UI_Box* box = state->active_boxes[index];
+            if (box->last_touched_build_index == build_index && ui_scale_oracle_in_scope(box, scope) && (box->flags & axis_flag) && ui_scale_oracle_focusable(box))
+            {
+                if (direction == UI_ScaleDirection_Backward)
+                {
+                    if (box->build_order < current->build_order && (!best || box->build_order > best->build_order))
+                    {
+                        best = box;
+                    }
+                }
+                else if (box->build_order > current->build_order && (!best || box->build_order < best->build_order))
+                {
+                    best = box;
+                }
+            }
+        }
+        result = best ? best : (direction == UI_ScaleDirection_Backward ? last : first);
+    }
+    return result;
+}
+
+typedef struct UI_ScaleNode UI_ScaleNode;
+struct UI_ScaleNode
+{
+    // Index of the parent node, or -1 for a child of the window root. Parents
+    // precede their children.
+    s32 parent;
+    UI_BoxFlags flags;
+    UI_Key key;
+    f32 x;
+    f32 y;
+};
+
+#define UI_SCALE_FOCUSABLE (UI_BoxFlag_KeyboardClickable | UI_BoxFlag_FocusActive | UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY)
+#define UI_SCALE_SCOPE (UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY | UI_BoxFlag_FocusNavSkip)
+
+typedef struct UI_ScaleTree UI_ScaleTree;
+struct UI_ScaleTree
+{
+    UI_ScaleNode* nodes;
+    UI_Box** boxes;
+    u64 count;
+    u64 capacity;
+};
+
+BUSTER_GLOBAL_LOCAL UI_ScaleTree ui_scale_tree_allocate(Arena* arena, u64 capacity)
+{
+    UI_ScaleTree result = {
+        .nodes = arena_allocate(arena, UI_ScaleNode, capacity), .boxes = arena_allocate(arena, UI_Box*, capacity), .count = 0, .capacity = capacity};
+    return result;
+}
+
+// Returns the new node's index.
+BUSTER_GLOBAL_LOCAL s32 ui_scale_tree_add(UI_ScaleTree* tree, s32 parent, UI_BoxFlags flags, f32 x, f32 y)
+{
+    BUSTER_CHECK(tree->count < tree->capacity);
+    s32 result = (s32)tree->count;
+    UI_ScaleNode* node = &tree->nodes[tree->count];
+    node->parent = parent;
+    node->flags = flags;
+    node->key = ui_scale_key(UI_ScaleKeyShape_Mixed, 0x5000000ull + tree->count);
+    node->x = x;
+    node->y = y;
+    tree->count += 1;
+    return result;
+}
+
+// Eligibility mix for leaf `index`: disabled, skipped, X-only and
+// active-disabled leaves interleave with ordinary focusable ones.
+BUSTER_GLOBAL_LOCAL UI_BoxFlags ui_scale_leaf_flags(u64 index)
+{
+    UI_BoxFlags flags = UI_SCALE_FOCUSABLE;
+    if (index % 4 == 3)
+    {
+        flags |= UI_BoxFlag_Disabled;
+    }
+    if (index % 5 == 4)
+    {
+        flags |= UI_BoxFlag_FocusNavSkip;
+    }
+    if (index % 7 == 6)
+    {
+        flags = UI_BoxFlag_KeyboardClickable | UI_BoxFlag_FocusActive | UI_BoxFlag_DefaultFocusNavX;
+    }
+    if (index % 11 == 10)
+    {
+        flags |= UI_BoxFlag_FocusActiveDisabled;
+    }
+    return flags;
+}
+
+// A scope whose spine is `levels` unflagged containers deep, each carrying one
+// leaf. `scope_period` > 0 turns every that-many-th spine container into a
+// nested scope. With `plain` set every leaf is an ordinary focusable box,
+// which is what the scaling case needs; otherwise eligibility varies.
+BUSTER_GLOBAL_LOCAL UI_ScaleTree ui_scale_tree_chain(Arena* arena, u64 levels, u64 scope_period, bool plain)
+{
+    UI_ScaleTree tree = ui_scale_tree_allocate(arena, 2 * levels + 8);
+    s32 spine = ui_scale_tree_add(&tree, -1, UI_SCALE_SCOPE, 0.0f, 0.0f);
+    for (u64 level = 0; level < levels; level += 1)
+    {
+        bool nested_scope = scope_period != 0 && level % scope_period == scope_period - 1;
+        spine = ui_scale_tree_add(&tree, spine, nested_scope ? UI_SCALE_SCOPE : 0, 0.0f, 0.0f);
+        BUSTER_UNUSED(ui_scale_tree_add(&tree, spine, plain ? UI_SCALE_FOCUSABLE : ui_scale_leaf_flags(level), (f32)((level * 37) % 90), (f32)((level * 11) % 60)));
+    }
+    return tree;
+}
+
+// A root-level scope holding `branches` unflagged branches of `leaves` leaves.
+BUSTER_GLOBAL_LOCAL UI_ScaleTree ui_scale_tree_comb(Arena* arena, u64 branches, u64 leaves)
+{
+    UI_ScaleTree tree = ui_scale_tree_allocate(arena, 2 + branches * (leaves + 1));
+    s32 scope = ui_scale_tree_add(&tree, -1, UI_SCALE_SCOPE, 0.0f, 0.0f);
+    u64 leaf_index = 0;
+    for (u64 branch = 0; branch < branches; branch += 1)
+    {
+        s32 branch_node = ui_scale_tree_add(&tree, scope, 0, 0.0f, 0.0f);
+        for (u64 leaf = 0; leaf < leaves; leaf += 1)
+        {
+            BUSTER_UNUSED(ui_scale_tree_add(&tree, branch_node, ui_scale_leaf_flags(leaf_index), (f32)(branch * 12), (f32)(leaf * 12)));
+            leaf_index += 1;
+        }
+    }
+    return tree;
+}
+
+// Two sibling scopes of grid leaves with deliberately repeated centers, so
+// directional ties and wraps depend on active-list order, plus unscoped leaves
+// directly under the root.
+BUSTER_GLOBAL_LOCAL UI_ScaleTree ui_scale_tree_broad(Arena* arena, u64 leaves)
+{
+    UI_ScaleTree tree = ui_scale_tree_allocate(arena, 3 * leaves + 8);
+    s32 first_scope = ui_scale_tree_add(&tree, -1, UI_SCALE_SCOPE, 0.0f, 0.0f);
+    for (u64 index = 0; index < leaves; index += 1)
+    {
+        BUSTER_UNUSED(ui_scale_tree_add(&tree, first_scope, ui_scale_leaf_flags(index), (f32)((index % 9) * 30), (f32)((index / 9) * 30)));
+    }
+    s32 second_scope = ui_scale_tree_add(&tree, -1, UI_SCALE_SCOPE, 0.0f, 0.0f);
+    for (u64 index = 0; index < leaves / 2; index += 1)
+    {
+        BUSTER_UNUSED(ui_scale_tree_add(&tree, second_scope, ui_scale_leaf_flags(index + 3), (f32)((index % 5) * 30), (f32)((index / 5) * 30)));
+    }
+    for (u64 index = 0; index < leaves / 4; index += 1)
+    {
+        BUSTER_UNUSED(ui_scale_tree_add(&tree, -1, ui_scale_leaf_flags(index + 1), (f32)((index % 4) * 30), (f32)((index / 4) * 30)));
+    }
+    return tree;
+}
+
+// Builds the tree under the window root. The 64-entry parent stack is kept at
+// one entry (the current parent is swapped in per node), so tree depth is not
+// limited by the stack.
+BUSTER_GLOBAL_LOCAL void ui_scale_tree_build(UI_State* state, UI_ScaleTree* tree)
+{
+    UI_Box* root = state->root;
+    for (u64 index = 0; index < tree->count; index += 1)
+    {
+        UI_ScaleNode* node = &tree->nodes[index];
+        BUSTER_UNUSED(ui_pop_parent());
+        ui_push_parent(node->parent >= 0 ? tree->boxes[node->parent] : root);
+        ui_set_next_fixed_x(node->x);
+        ui_set_next_fixed_y(node->y);
+        ui_set_next_fixed_width(20.0f);
+        ui_set_next_fixed_height(20.0f);
+        tree->boxes[index] = ui_build_box_from_key(node->flags | UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY, node->key);
+    }
+    BUSTER_UNUSED(ui_pop_parent());
+    ui_push_parent(root);
+}
+
+BUSTER_GLOBAL_LOCAL WmKey ui_scale_direction_key(UI_ScaleDirection direction)
+{
+    WmKey result = WM_KEY_TAB;
+    if (direction == UI_ScaleDirection_Left)
+    {
+        result = WM_KEY_LEFT;
+    }
+    else if (direction == UI_ScaleDirection_Right)
+    {
+        result = WM_KEY_RIGHT;
+    }
+    else if (direction == UI_ScaleDirection_Up)
+    {
+        result = WM_KEY_UP;
+    }
+    else if (direction == UI_ScaleDirection_Down)
+    {
+        result = WM_KEY_DOWN;
+    }
+    return result;
+}
+
+typedef struct UI_ScaleNavigation UI_ScaleNavigation;
+struct UI_ScaleNavigation
+{
+    UI_Key selected;
+    u64 calls;
+    u64 steps;
+};
+
+// Presses the key for `direction` with focus on `current_key` in a frame that
+// rebuilds `tree`. Returns the focus key the pre-build router selected and the
+// scope work that routing performed.
+BUSTER_GLOBAL_LOCAL UI_ScaleNavigation ui_scale_navigate(UI_State* state, Arena* arena, UI_ScaleTree* tree, UI_Key current_key, UI_ScaleDirection direction)
+{
+    UI_ScaleNavigation result = {0};
+    UI_Event event = {
+        .kind = UI_EventKind_Press,
+        .key = ui_scale_direction_key(direction),
+        .modifiers = direction == UI_ScaleDirection_Backward ? (u8)(1u << WM_MODIFIER_SHIFT) : (u8)0,
+    };
+    UI_EventList events = {0};
+    ui_event_list_push(arena, &events, &event);
+    state->focus_active_key = current_key;
+    u64 calls_before = state->focus_navigation_calls;
+    u64 steps_before = state->focus_scope_steps;
+    ui_state_select(state);
+    ui_build_begin(0, 0, 16.0, events);
+    result.selected = state->focus_active_key;
+    result.calls = state->focus_navigation_calls - calls_before;
+    result.steps = state->focus_scope_steps - steps_before;
+    ui_scale_tree_build(state, tree);
+    ui_build_end();
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_focus_equivalence(Arena* arena, String8 name, UI_ScaleTree* tree)
+{
+    UI_State* state = ui_state_allocate(0, 0);
+    if (ui_scale_check(state != 0, S8("focus state allocation"), 0))
+    {
+        ui_scale_frame_begin(state);
+        ui_scale_tree_build(state, tree);
+        ui_build_end();
+        u64 compared = 0;
+        u64 moved = 0;
+        u64 mismatches = 0;
+        // Every node as the current key (including unkeyed-eligible and ineligible
+        // ones), plus an unknown key and the empty key, in all six directions.
+        for (u64 index = 0; index < tree->count + 2; index += 1)
+        {
+            UI_Key current = ui_key_zero();
+            if (index < tree->count)
+            {
+                current = tree->nodes[index].key;
+            }
+            else if (index == tree->count)
+            {
+                current = ui_scale_key(UI_ScaleKeyShape_Mixed, 77);
+            }
+            for (u64 direction = 0; direction < UI_ScaleDirection_Count; direction += 1)
+            {
+                UI_Box* expected_box = ui_scale_focus_oracle(state, current, (UI_ScaleDirection)direction);
+                UI_Key expected = expected_box ? expected_box->key : current;
+                UI_ScaleNavigation navigation = ui_scale_navigate(state, arena, tree, current, (UI_ScaleDirection)direction);
+                compared += 1;
+                moved += !ui_key_match(expected, current);
+                mismatches += !ui_key_match(navigation.selected, expected);
+            }
+        }
+        printf("ui_scale: focus equivalence %-10s nodes=%llu comparisons=%llu moved=%llu mismatches=%llu\n", (char*)name.pointer,
+               (unsigned long long)tree->count, (unsigned long long)compared, (unsigned long long)moved, (unsigned long long)mismatches);
+        ui_scale_check(mismatches == 0, name, mismatches);
+        // Guard against a vacuous comparison: most requests must select something new.
+        ui_scale_check(moved * 3 > compared, S8("equivalence cases exercise real navigation"), moved);
+        ui_state_deinitialize(state);
+    }
+}
+
+// Hand-computed controls, independent of the oracle: an outer scope holding a
+// button and an inner scope with two buttons (and a disabled one that is never
+// selected). Navigation inside the inner scope wraps within it, while the outer
+// button reaches the whole outer scope in build order.
+BUSTER_GLOBAL_LOCAL void ui_scale_focus_hand_controls(Arena* arena)
+{
+    UI_ScaleTree tree = ui_scale_tree_allocate(arena, 8);
+    s32 outer = ui_scale_tree_add(&tree, -1, UI_SCALE_SCOPE, 0.0f, 0.0f);
+    s32 outer_button = ui_scale_tree_add(&tree, outer, UI_SCALE_FOCUSABLE, 0.0f, 0.0f);
+    s32 inner = ui_scale_tree_add(&tree, outer, UI_SCALE_SCOPE, 0.0f, 30.0f);
+    s32 inner_first = ui_scale_tree_add(&tree, inner, UI_SCALE_FOCUSABLE, 0.0f, 30.0f);
+    s32 inner_second = ui_scale_tree_add(&tree, inner, UI_SCALE_FOCUSABLE, 0.0f, 60.0f);
+    BUSTER_UNUSED(ui_scale_tree_add(&tree, inner, UI_SCALE_FOCUSABLE | UI_BoxFlag_Disabled, 0.0f, 90.0f));
+    UI_State* state = ui_state_allocate(0, 0);
+    if (ui_scale_check(state != 0, S8("hand control state allocation"), 0))
+    {
+        ui_scale_frame_begin(state);
+        ui_scale_tree_build(state, &tree);
+        ui_build_end();
+        UI_Key outer_key = tree.nodes[outer_button].key;
+        UI_Key first_key = tree.nodes[inner_first].key;
+        UI_Key second_key = tree.nodes[inner_second].key;
+        UI_Key none = ui_key_zero();
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, first_key, UI_ScaleDirection_Forward).selected, second_key),
+                       S8("tab inside the inner scope"), 0);
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, second_key, UI_ScaleDirection_Forward).selected, first_key),
+                       S8("tab wraps inside the inner scope"), 0);
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, first_key, UI_ScaleDirection_Backward).selected, second_key),
+                       S8("shift-tab wraps inside the inner scope"), 0);
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, first_key, UI_ScaleDirection_Down).selected, second_key),
+                       S8("down inside the inner scope"), 0);
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, second_key, UI_ScaleDirection_Down).selected, first_key),
+                       S8("down wraps inside the inner scope"), 0);
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, outer_key, UI_ScaleDirection_Forward).selected, first_key),
+                       S8("outer button tabs into build order"), 0);
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, outer_key, UI_ScaleDirection_Backward).selected, second_key),
+                       S8("outer button shift-tabs to the last eligible box"), 0);
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, none, UI_ScaleDirection_Forward).selected, outer_key),
+                       S8("no focus tabs to the first eligible box"), 0);
+        ui_scale_check(ui_key_match(ui_scale_navigate(state, arena, &tree, none, UI_ScaleDirection_Backward).selected, second_key),
+                       S8("no focus shift-tabs to the last eligible box"), 0);
+        ui_state_deinitialize(state);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_focus_behavior(Arena* arena)
+{
+    ui_scale_focus_hand_controls(arena);
+    UI_ScaleTree chain = ui_scale_tree_chain(arena, 48, 0, false);
+    ui_scale_focus_equivalence(arena, S8("chain"), &chain);
+    UI_ScaleTree nested = ui_scale_tree_chain(arena, 60, 7, false);
+    ui_scale_focus_equivalence(arena, S8("nested"), &nested);
+    UI_ScaleTree comb = ui_scale_tree_comb(arena, 14, 6);
+    ui_scale_focus_equivalence(arena, S8("comb"), &comb);
+    UI_ScaleTree broad = ui_scale_tree_broad(arena, 80);
+    ui_scale_focus_equivalence(arena, S8("broad"), &broad);
+}
+
+// Navigation over a deep spine: the old per-candidate ancestor walk made one
+// request cost about one step per ancestor of every box, quadratic in depth.
+BUSTER_GLOBAL_LOCAL void ui_scale_focus_scaling(Arena* arena)
+{
+    static const u64 depths[] = {500, 1000, 2000, 4000};
+    f64 first_rate = 0.0;
+    for (u64 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        u64 levels = depths[depth_index];
+        UI_ScaleTree tree = ui_scale_tree_chain(arena, levels, 0, true);
+        UI_State* state = ui_state_allocate(0, 0);
+        if (ui_scale_check(state != 0, S8("scaling state allocation"), levels))
+        {
+            ui_scale_frame_begin(state);
+            ui_scale_tree_build(state, &tree);
+            ui_build_end();
+            // The leaf in the middle of the spine, so both before/after searches have work.
+            UI_Key current = tree.nodes[1 + 2 * (levels / 2) + 1].key;
+            u64 worst_steps = 0;
+            bool selected_match = true;
+            for (u64 direction = 0; direction < UI_ScaleDirection_Count; direction += 1)
+            {
+                UI_Box* expected_box = ui_scale_focus_oracle(state, current, (UI_ScaleDirection)direction);
+                UI_Key expected = expected_box ? expected_box->key : current;
+                UI_ScaleNavigation navigation = ui_scale_navigate(state, arena, &tree, current, (UI_ScaleDirection)direction);
+                selected_match = selected_match && ui_key_match(navigation.selected, expected) && navigation.calls == 1;
+                worst_steps = BUSTER_MAX(worst_steps, navigation.steps);
+            }
+            f64 rate = (f64)worst_steps / (f64)state->box_count;
+            printf("ui_scale: focus depth=%-5llu boxes=%-6llu worst-request steps=%llu (%.2f/box)\n", (unsigned long long)levels,
+                   (unsigned long long)state->box_count, (unsigned long long)worst_steps, rate);
+            ui_scale_check(selected_match, S8("deep spine navigation matches the oracle"), levels);
+            // Linear work: a bounded number of steps per box, independent of depth.
+            ui_scale_check(rate < 8.0, S8("navigation steps per box stay bounded"), (u64)(rate * 100.0));
+            if (depth_index == 0)
+            {
+                first_rate = rate;
+            }
+            else
+            {
+                ui_scale_check(rate < first_rate * 1.5 + 1.0, S8("steps per box do not grow with depth"), levels);
+            }
+            ui_state_deinitialize(state);
+        }
+    }
+}
+
 int main(void)
 {
     os_state.page_size = os_get_page_size();
@@ -423,6 +966,8 @@ int main(void)
     program_state->arena = arena;
     ui_scale_lookup_scaling();
     ui_scale_table_behavior(arena);
+    ui_scale_focus_behavior(arena);
+    ui_scale_focus_scaling(arena);
     ui_scale_check(ui_scale_renderer_calls == 0, S8("headless rendering boundary"), ui_scale_renderer_calls);
     printf("ui_scale_component_tests: %u/%u assertions passed\n", (unsigned)(ui_scale_assertions - ui_scale_failures), (unsigned)ui_scale_assertions);
     thread_context_release(context);

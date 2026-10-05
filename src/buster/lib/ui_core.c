@@ -2682,6 +2682,7 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_scope_from_box(UI_Box* box, UI_Box* root)
     UI_Box* result = box ? box->parent : root;
     for (UI_Box* parent = box ? box->parent : root; parent; parent = parent->parent)
     {
+        ui_state->focus_scope_steps += 1;
         if (parent != root && (parent->flags & (UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY)))
         {
             result = parent;
@@ -2691,26 +2692,36 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_scope_from_box(UI_Box* box, UI_Box* root)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ui_box_in_focus_scope(UI_Box* box, UI_Box* scope)
+// Stamps every strict descendant of `scope` with a fresh value and returns it,
+// so scope membership is one compare per candidate instead of a parent-chain
+// walk (which made a request quadratic in tree depth). The walk is one
+// iterative pre-order pass over the scope's subtree, linear in its size. A
+// box is a strict descendant exactly when the per-build child links reach it
+// from `scope`, which is the same set the parent chain reaches. `scope` itself
+// is never stamped, and an absent scope stamps nothing.
+BUSTER_GLOBAL_LOCAL u64 ui_focus_scope_mark(UI_Box* scope)
 {
-    if (box && scope && box != scope)
+    ui_state->focus_scope_stamp += 1;
+    u64 stamp = ui_state->focus_scope_stamp;
+    if (scope)
     {
-        for (UI_Box* parent = box->parent; parent; parent = parent->parent)
+        UI_BoxRec rec = ui_box_rec_df_pre(scope, scope);
+        while (rec.next)
         {
-            if (parent == scope)
-            {
-                return true;
-            }
+            UI_Box* box = rec.next;
+            box->focus_scope_stamp = stamp;
+            rec = ui_box_rec_df_pre(box, scope);
+            ui_state->focus_scope_steps += 1 + (u64)rec.pop_count;
         }
     }
-
-    return false;
+    return stamp;
 }
 
 BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI_BoxFlags axis_flag, UI_FocusDirection direction, u64 build_index, UI_Box* root)
 {
     UI_Box* first = 0;
     UI_Box* last = 0;
+    ui_state->focus_navigation_calls += 1;
     UI_Box* current = ui_box_from_key(current_key);
     bool current_found = current && current->last_touched_build_index == build_index;
     if (!current_found)
@@ -2718,12 +2729,13 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
         current = 0;
     }
     UI_Box* scope = ui_focus_scope_from_box(current, root);
+    u64 scope_stamp = ui_focus_scope_mark(scope);
     UI_Box* directional = 0;
     f32 directional_score = 0.0f;
     for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
         UI_Box* box = ui_state->active_boxes[active_box_index];
-        if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true))
+        if (box->last_touched_build_index != build_index || !(box->flags & axis_flag) || box->focus_scope_stamp != scope_stamp || !ui_box_focusable(box, true))
         {
             continue;
         }
@@ -2781,7 +2793,7 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
         for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
         {
             UI_Box* box = ui_state->active_boxes[active_box_index];
-            if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true) || ui_key_match(box->key, current_key))
+            if (box->last_touched_build_index != build_index || !(box->flags & axis_flag) || box->focus_scope_stamp != scope_stamp || !ui_box_focusable(box, true) || ui_key_match(box->key, current_key))
             {
                 continue;
             }
@@ -2820,7 +2832,7 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
         for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
         {
             UI_Box* box = ui_state->active_boxes[active_box_index];
-            if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order < current->build_order &&
+            if (box->last_touched_build_index == build_index && (box->flags & axis_flag) && box->focus_scope_stamp == scope_stamp && ui_box_focusable(box, true) && box->build_order < current->build_order &&
                 (!before || box->build_order > before->build_order))
             {
                 before = box;
@@ -2832,7 +2844,7 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
     for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
         UI_Box* box = ui_state->active_boxes[active_box_index];
-        if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order > current->build_order &&
+        if (box->last_touched_build_index == build_index && (box->flags & axis_flag) && box->focus_scope_stamp == scope_stamp && ui_box_focusable(box, true) && box->build_order > current->build_order &&
             (!after || box->build_order < after->build_order))
         {
             after = box;

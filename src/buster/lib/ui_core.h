@@ -351,6 +351,10 @@ struct UI_Box
     // active-list order, this link only serves ui_box_from_key.
     UI_Box* index_next;
 
+    // Scratch for focus navigation: equal to UI_State.focus_scope_stamp when
+    // this box was last marked as a strict descendant of the navigation scope.
+    u64 focus_scope_stamp;
+
     // per-build tree links
     UI_Box* first;
     UI_Box* last;
@@ -637,11 +641,14 @@ struct UI_State
     u64 active_box_capacity;
     u64 box_count;
     // Work counters for scalability regressions. They only ever increase and
-    // cost one add per inspected chain node or rehashed box.
+    // cost one add per inspected chain node, rehashed box, or focus-scope step.
     u64 box_key_lookups;
     u64 box_key_probes;
     u64 box_index_grows;
     u64 box_index_moves;
+    u64 focus_navigation_calls;
+    u64 focus_scope_steps;
+    u64 focus_scope_stamp;
     UI_DrawCommand* draw_commands;
     u64 draw_command_count;
     u64 draw_command_capacity;
