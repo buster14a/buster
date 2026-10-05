@@ -27113,6 +27113,145 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
     BUSTER_UNUSED(arena);
 }
 
+// C17 6.7.2.1p13: the members of an anonymous struct or union are members of
+// the containing one, so every named member reachable through unnamed
+// struct/union members shares one namespace. Each record is walked once, in
+// declaration order, with an explicit frame stack that descends into unnamed
+// aggregates. An interned member name is a dense index into a stamp table keyed
+// by the record's epoch, so a repeat is one load; only a member that carries no
+// symbol (synthesized token, parse without a table) compares spellings, against
+// the earlier members of that record. `branch` is 0 for a direct member and
+// one number per anonymous member of the root otherwise: a repeat inside one
+// branch is reported by that anonymous aggregate's own check, not twice.
+typedef struct CMemberNameFrame CMemberNameFrame;
+struct CMemberNameFrame
+{
+    u32 next;
+    u32 end;
+    u32 branch;
+};
+
+typedef struct CMemberNameStamp CMemberNameStamp;
+struct CMemberNameStamp
+{
+    u32 epoch;
+    u32 position;
+};
+
+BUSTER_C_INTERNAL void c_parse_validate_member_names(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess)
+{
+    u64 mark = machine->scratch_arena->position;
+    CMemberNameStamp* stamps = 0;
+    u32 stamp_count = result->symbols ? result->symbols->count + 1 : 0;
+    u32* entries = 0;
+    u32* entry_branches = 0;
+    u32* spelled = 0;
+    CMemberNameFrame* frames = 0;
+    u32 epoch = 0;
+    // A qualified copy shares the members of its unqualified type, which is
+    // the one checked.
+    for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
+    {
+        CType const* record = &result->types[type_index];
+        if ((record->kind != C_TYPE_STRUCT && record->kind != C_TYPE_UNION) || !record->is_complete || record->has_unqualified_type ||
+            record->is_const || record->is_volatile || record->is_atomic || record->member_count < 2 || record->member_start >= result->member_count)
+        {
+            continue;
+        }
+        if (!entries)
+        {
+            stamps = arena_allocate_zeroed(machine->scratch_arena, CMemberNameStamp, stamp_count + 1);
+            entries = arena_allocate(machine->scratch_arena, u32, result->member_count + 1);
+            entry_branches = arena_allocate(machine->scratch_arena, u32, result->member_count + 1);
+            spelled = arena_allocate(machine->scratch_arena, u32, result->member_count + 1);
+            frames = arena_allocate(machine->scratch_arena, CMemberNameFrame, result->type_count + 1);
+        }
+        epoch += 1;
+        u32 entry_count = 0;
+        u32 spelled_count = 0;
+        u32 branch_count = 0;
+        u32 depth = 1;
+        frames[0] = (CMemberNameFrame){.next = record->member_start, .end = BUSTER_MIN(record->member_start + record->member_count, result->member_count)};
+        while (depth)
+        {
+            CMemberNameFrame* frame = &frames[depth - 1];
+            if (frame->next >= frame->end)
+            {
+                depth -= 1;
+                continue;
+            }
+            u32 member_index = frame->next;
+            frame->next += 1;
+            CMember const* member = &result->members[member_index];
+            if (member->name.length)
+            {
+                if (entry_count < result->member_count)
+                {
+                    u32 position = entry_count;
+                    u32 earlier = C_ID_UNDERLYING_INVALID;
+                    bool interned = member->symbol && member->symbol < stamp_count;
+                    if (interned)
+                    {
+                        CMemberNameStamp* stamp = &stamps[member->symbol];
+                        if (stamp->epoch == epoch)
+                        {
+                            earlier = stamp->position;
+                        }
+                        else
+                        {
+                            stamp->epoch = epoch;
+                            stamp->position = position;
+                        }
+                        for (u32 index = 0; earlier == C_ID_UNDERLYING_INVALID && index < spelled_count; index += 1)
+                        {
+                            if (c_parse_member_named(&result->members[entries[spelled[index]]], 0, member->name))
+                            {
+                                earlier = spelled[index];
+                            }
+                        }
+                    }
+                    else
+                    {
+                        for (u32 index = 0; earlier == C_ID_UNDERLYING_INVALID && index < entry_count; index += 1)
+                        {
+                            if (c_parse_member_named(&result->members[entries[index]], member->symbol, member->name))
+                            {
+                                earlier = index;
+                            }
+                        }
+                        spelled[spelled_count] = position;
+                        spelled_count += 1;
+                    }
+                    entries[position] = member_index;
+                    entry_branches[position] = frame->branch;
+                    entry_count += 1;
+                    if (earlier != C_ID_UNDERLYING_INVALID && (frame->branch == 0 || entry_branches[earlier] != frame->branch))
+                    {
+                        c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION,
+                                           string_format(arena, S8("duplicate member '{S8}'"), member->name));
+                    }
+                }
+            }
+            else if (!member->is_bit_field && member->type.value < result->type_count && depth <= result->type_count)
+            {
+                CType const* nested = &result->types[member->type.value];
+                if ((nested->kind == C_TYPE_STRUCT || nested->kind == C_TYPE_UNION) && nested->member_start < result->member_count)
+                {
+                    if (depth == 1)
+                    {
+                        branch_count += 1;
+                    }
+                    frames[depth] = (CMemberNameFrame){.next = nested->member_start,
+                                                       .end = BUSTER_MIN(nested->member_start + nested->member_count, result->member_count),
+                                                       .branch = depth == 1 ? branch_count : frame->branch};
+                    depth += 1;
+                }
+            }
+        }
+    }
+    arena_set_position(machine->scratch_arena, mark);
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess)
 {
     for (u32 index = 0; index < result->member_count; index += 1)
@@ -27168,32 +27307,7 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
             arena_set_position(machine->scratch_arena, mark);
         }
     }
-    // Every named member of one struct or union has its own name. A
-    // qualified copy shares the members of its unqualified type, which is the
-    // one checked.
-    for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
-    {
-        CType const* record = &result->types[type_index];
-        if ((record->kind != C_TYPE_STRUCT && record->kind != C_TYPE_UNION) || !record->is_complete || record->has_unqualified_type ||
-            record->is_const || record->is_volatile || record->is_atomic)
-        {
-            continue;
-        }
-        u32 member_end = BUSTER_MIN(record->member_start + record->member_count, result->member_count);
-        for (u32 later = record->member_start + 1; later < member_end; later += 1)
-        {
-            CMember const* member = &result->members[later];
-            for (u32 earlier = record->member_start; member->name.length && earlier < later; earlier += 1)
-            {
-                if (c_parse_member_named(&result->members[earlier], member->symbol, member->name))
-                {
-                    c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION,
-                                       string_format(arena, S8("duplicate member '{S8}'"), member->name));
-                    break;
-                }
-            }
-        }
-    }
+    c_parse_validate_member_names(machine, arena, result, preprocess);
 }
 
 // C17 6.5.3.2p1: the operand of unary '&' is not declared `register`. An

@@ -6178,6 +6178,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("enum E { E0 }; struct S { unsigned : 3; _Bool b : 1; enum E e : 2; const unsigned u : 3; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct S { int a; long a; };"), S8("duplicate member 'a'"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("struct O { struct I { int a; } i; int a; }; union V { struct { int x; } inner; int x; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // Issue #2675: members of an anonymous struct or union belong to the
+        // containing record (C17 6.7.2.1p13), at any depth, beside the valid
+        // spellings that must stay accepted.
+        {S8("struct S { int a; struct { int a; }; };"), S8("duplicate member 'a'"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct T { union { int x; float y; }; struct { char x; }; };"), S8("duplicate member 'x'"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct U { struct { struct { int q; }; }; long q; };"), S8("duplicate member 'q'"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct V { struct { int a; int a; }; };"), S8("duplicate member 'a'"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct W { struct { struct { int p; }; int p; }; };"), S8("duplicate member 'p'"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct { int a; struct { int b; }; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct X { struct { int a; }; union { int b; float c; }; int d; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct Y { int z; }; struct Z { struct { int z; }; int w; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S { struct T { int a; } t; int a; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
