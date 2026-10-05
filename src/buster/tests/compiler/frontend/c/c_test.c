@@ -608,6 +608,270 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_parenthesized_operand(Unit
     return result;
 }
 
+
+// The fixed target layouts all use four-byte int and eight-byte pointers.
+// These are independent values, not results learned from another sizeof path.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestEnumSizeofExpression CTestEnumSizeofExpression;
+    struct CTestEnumSizeofExpression
+    {
+        String8 source;
+        u64 value;
+    };
+    CTestEnumSizeofExpression accepted[] = {
+        {S8("enum { QUERY = sizeof(\"prefix\") - 1 };"), 6},
+        {S8("enum { QUERY = sizeof('a') };"), 4},
+        {S8("enum { QUERY = sizeof(1) };"), 4},
+        {S8("struct S { int m; }; enum { QUERY = sizeof(((struct S *)0)->m) };"), 4},
+        {S8("struct S { int m; } gs; enum { QUERY = sizeof(gs.m + 0) };"), 4},
+        {S8("struct S { int m; } gs; enum { A = sizeof(\"prefix\") - 1, B = sizeof('a'), C = sizeof(1), "
+            "D = sizeof(((struct S *)0)->m), E = sizeof(gs.m + 0), QUERY = A + B + C + D + E };"), 22},
+        {S8("enum { QUERY = sizeof(\"pre\" \"fix\") - 1 };"), 6},
+        {S8("enum { QUERY = sizeof((1)) };"), 4},
+        {S8("enum { QUERY = sizeof 1 };"), 4},
+        {S8("enum { PRIOR = 3, QUERY = sizeof(PRIOR + 0) };"), 4},
+        {S8("int tick(void); enum { QUERY = sizeof(tick()) };"), 4},
+        {S8("struct S { int m; } gs; enum { QUERY = sizeof(gs.m++) };"), 4},
+        {S8("struct S { int m; } gs; enum { QUERY = sizeof(&gs.m) };"), 8},
+        {S8("enum { QUERY = sizeof(1.0f) };"), 4},
+        {S8("enum { QUERY = sizeof(1.0) };"), 8},
+        {S8("struct S { _Alignas(16) char m; }; enum { QUERY = sizeof(*(struct S *)0) };"), 16},
+        {S8("int (*p)(void); enum { QUERY = sizeof(0 ? p : p) };"), 8},
+        {S8("static int table[3]; enum { QUERY = sizeof(table) / sizeof((table)[0]) };"), 3},
+    };
+    typedef struct CTestEnumSizeofRefusal CTestEnumSizeofRefusal;
+    struct CTestEnumSizeofRefusal
+    {
+        String8 source;
+        u32 line;
+        u32 column;
+    };
+    CTestEnumSizeofRefusal rejected[] = {
+        {S8("struct Incomplete;\nenum { BAD = sizeof(*(struct Incomplete *)0) };\n"), 2, 8},
+        {S8("int value;\nenum { BAD = sizeof(missing + 0) };\n"), 2, 8},
+        {S8("enum { OLDER = 1 };\nenum { BAD = sizeof(LATER + 0), LATER = 3 };\n"), 2, 8},
+        {S8("int bad(int n) {\n enum { BAD = sizeof(int[n]) };\n return 0; }\n"), 2, 9},
+        {S8("int declared(void);\nenum { BAD = sizeof(int(void)) };\n"), 2, 8},
+        {S8("int (*p)(void);\nenum { BAD = sizeof(*(0 ? p : p)) };\n"), 2, 8},
+        {S8("int declared(void);\nenum { BAD = sizeof(sizeof(int(void))) };\n"), 2, 8},
+        {S8("int (*p)(void);\nenum { BAD = sizeof(sizeof(*(0 ? p : p))) };\n"), 2, 8},
+    };
+    Target targets[6] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        targets[target_index].cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[target_index].os = target_index < 2 ? OPERATING_SYSTEM_LINUX
+                               : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(accepted); fixture += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Target target = targets[target_index];
+                    String8 source = string_format(temporary.arena, S8("{S8}\nint probe(void) {{ return QUERY; }}\n"), accepted[fixture].source);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect]});
+                    CParseResult parsed = c_parse(temporary.arena, tokens);
+                    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                    BUSTER_TEST_RAW(arguments, parsed.diagnostic_count == 0, source);
+                    if (!parsed.diagnostic_count)
+                    {
+                        bool found = false;
+                        for (u32 member_index = 0; member_index < parsed.enum_member_count; member_index += 1)
+                        {
+                            CEnumMember const* member = parsed.enum_members + member_index;
+                            if (string_equal(member->name, S8("QUERY")))
+                            {
+                                found = true;
+                                BUSTER_TEST_RAW(arguments, !member->is_negative && member->value == accepted[fixture].value, source);
+                            }
+                        }
+                        BUSTER_TEST(arguments, found);
+                    }
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-sizeof-expression.c"), tokens, parsed, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, source);
+                    if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                    scratch_end(temporary);
+                }
+                for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(rejected); fixture += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Target target = targets[target_index];
+                    CTestEnumSizeofRefusal test = rejected[fixture];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, test.source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect]});
+                    CParseResult parsed = c_parse(temporary.arena, tokens);
+                    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                    BUSTER_TEST_RAW(arguments, parsed.diagnostic_count == 1, test.source);
+                    if (parsed.diagnostic_count == 1)
+                    {
+                        BUSTER_TEST(arguments, parsed.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_CONSTEXPR);
+                        BUSTER_STRING_TEST(arguments, parsed.diagnostics[0].message, S8("enumerator 'BAD' is not an integer constant expression"));
+                        BUSTER_TEST(arguments, parsed.diagnostics[0].location.line == test.line);
+                        BUSTER_TEST(arguments, parsed.diagnostics[0].location.column == test.column);
+                    }
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-sizeof-refusal.c"), tokens, parsed, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, lowered.program == 0);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "struct S { int m; } gs;\n"
+        "static unsigned hits;\n"
+        "static int tick(void) { hits += 1; return 17; }\n"
+        "struct Aligned { _Alignas(16) char m; };\n"
+        "enum { LEN = sizeof(\"prefix\") - 1, CHAR_SIZE = sizeof('a'), NUMBER_SIZE = sizeof(1),\n"
+        " MEMBER_SIZE = sizeof(((struct S *)0)->m), ARITHMETIC_SIZE = sizeof(gs.m + 0),\n"
+        " PRIOR = 3, PENDING_SIZE = sizeof(PRIOR + 0), CALL_SIZE = sizeof(tick()),\n"
+        " UPDATE_SIZE = sizeof(gs.m++), ADDRESS_SIZE = sizeof(&gs.m),\n"
+        " SINGLE_SIZE = sizeof(1.0f), DOUBLE_SIZE = sizeof(1.0),\n"
+        " GROUP_SIZE = sizeof((1)), CONCAT_LEN = sizeof(\"pre\" \"fix\") - 1,\n"
+        " ALIGNED_SIZE = sizeof(*(struct Aligned *)0) };\n"
+        "_Static_assert(LEN == 6 && CHAR_SIZE == 4 && NUMBER_SIZE == 4 && MEMBER_SIZE == 4 && ARITHMETIC_SIZE == 4, \"original operands\");\n"
+        "static volatile unsigned observed[] = { LEN, CHAR_SIZE, NUMBER_SIZE, MEMBER_SIZE, ARITHMETIC_SIZE,\n"
+        " PENDING_SIZE, CALL_SIZE, UPDATE_SIZE, ADDRESS_SIZE, SINGLE_SIZE, DOUBLE_SIZE, GROUP_SIZE, CONCAT_LEN, ALIGNED_SIZE };\n"
+        "int main(void) {\n"
+        " unsigned ordinary = sizeof(tick()) + sizeof(gs.m++);\n"
+        " return observed[0] != 6 || observed[1] != 4 || observed[2] != 4 || observed[3] != 4 || observed[4] != 4 ||\n"
+        " observed[5] != 4 || observed[6] != 4 || observed[7] != 4 || observed[8] != 8 || observed[9] != 4 ||\n"
+        " observed[10] != 8 || observed[11] != 4 || observed[12] != 6 || observed[13] != 16 ||\n"
+        " ordinary != 8 || hits != 0 || gs.m != 0;\n"
+        "}\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("enum-sizeof-expression"), S8(".c"));
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    u64 process_timeout = 30000000;
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        FileReadResult readback = file_read_checked(arguments->arena, source, (FileReadOptions){0});
+        BUSTER_TEST(arguments, readback.status == OS_FILE_READ_OK && readback.error.v == 0);
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, readback.bytes), source_text);
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-sizeof-expression-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
+                                         S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation =
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("enum sizeof {S8} {S8} {S8}: {S8}"),
+                            dialects[dialect], modes[mode], frontends[form], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, process_timeout);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                !execution.process_group_ownership_lost,
+                                string_format(temporary.arena, S8("enum sizeof runtime {S8} {S8} {S8}: status={u32} timeout={u32}"),
+                                    dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if BUSTER_LINUX
+        String8 references[] = {S8("gcc"), S8("clang")};
+        String8 optimizations[] = {S8("-O0"), S8("-O2")};
+        u64 diagnostic_limit = BUSTER_KB(64);
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-sizeof-reference-run"), S8(".exe"));
+                    if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                    {
+                        String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"),
+                                             S8("-nostdinc"), S8("-o"), output, source};
+                        ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                  .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                                  .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = diagnostic_limit,
+                                                                                  [STANDARD_STREAM_ERROR] = diagnostic_limit},
+                                                                     .total = diagnostic_limit * 2},
+                                                  .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+                        if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                        {
+                            ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, process_timeout);
+                            String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                            bool built = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS &&
+                                !compilation.capture_failed && !compilation.output_truncated && !compilation.capture_limit_exceeded &&
+                                !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
+                                !compilation.process_group_ownership_lost;
+                            BUSTER_TEST_RAW(arguments, built,
+                                string_format(temporary.arena, S8("enum sizeof oracle {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
+                                    compiler, dialects[dialect], optimizations[optimization], compilation.platform_status,
+                                    (u32)compilation.timed_out, string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                            if (built)
+                            {
+                                String8 run[] = {output};
+                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                    (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                                {
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, process_timeout);
+                                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                        !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                        !execution.process_group_ownership_lost,
+                                        string_format(temporary.arena, S8("enum sizeof oracle run {S8} {S8} {S8}: status={u32} timeout={u32}"),
+                                            compiler, dialects[dialect], optimizations[optimization],
+                                            execution.platform_status, (u32)execution.timed_out));
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                    scratch_end(temporary);
+                }
+            }
+        }
+#endif
+    }
+    BUSTER_TEST(arguments, os_file_delete(source));
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -13390,6 +13654,1676 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_target_abi_macros(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void c_test_gnu_common_predefined_macro_token(UnitTestArguments* arguments, UnitTestResult* outer_result,
+                                                                  CPreprocessResult preprocess, String8 name, u64 index, CTokenKind kind,
+                                                                  String8 spelling)
+{
+    UnitTestResult result = {0};
+    if (preprocess.tokens && preprocess.spelling_base && index < preprocess.token_count)
+    {
+        CToken token = preprocess.tokens[index];
+        String8 actual = c_token_spelling(preprocess.spelling_base, token);
+        BUSTER_TEST_RAW(arguments, token.kind == kind,
+                        string_format(arguments->arena, S8("{S8} token {u64}: expected kind {u32}, got {u32}"), name, index, (u32)kind,
+                                      (u32)token.kind));
+        BUSTER_TEST_RAW(arguments, string_equal(actual, spelling),
+                        string_format(arguments->arena, S8("{S8} token {u64}: expected `{S8}`, got `{S8}`"), name, index, spelling, actual));
+    }
+    else
+    {
+        BUSTER_TEST_RAW(arguments, false, string_format(arguments->arena, S8("{S8} token {u64} is missing"), name, index));
+    }
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_gnu_common_predefined_macro_probe(UnitTestArguments* arguments, UnitTestResult* outer_result, Target target,
+                                                                 CPreprocessDialect dialect, u8 position_independent_level,
+                                                                 bool position_independent_executable, String8 name, String8 expected_value,
+                                                                 bool defined)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = string_format(temporary.arena,
+                                   S8("#ifdef {S8}\n[ {S8} ]\n#else\nundefined\n#endif\n"), name, name);
+    CPreprocessOptions options = {
+        .target = target,
+        .data_layout = target_data_layout(target),
+        .dialect = dialect,
+        .source_path = S8("gnu-common-predefined-macros.c"),
+        .position_independent_level = position_independent_level,
+        .position_independent_executable = position_independent_executable,
+    };
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, options);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && preprocess.error_count == 0);
+    if (!preprocess.diagnostic_count && !preprocess.error_count)
+    {
+        if (!defined)
+        {
+            BUSTER_TEST_RAW(arguments, preprocess.token_count == 2,
+                            string_format(temporary.arena, S8("{S8}: expected 2 tokens, got {u64}"), name, preprocess.token_count));
+            if (preprocess.token_count == 2)
+            {
+                c_test_gnu_common_predefined_macro_token(arguments, &result, preprocess, name, 0, C_TOKEN_IDENTIFIER, S8("undefined"));
+                c_test_gnu_common_predefined_macro_token(arguments, &result, preprocess, name, 1, C_TOKEN_END_OF_FILE, S8(""));
+            }
+        }
+        else
+        {
+            u64 expected_token_count = 0;
+            for (u64 position = 0; position < expected_value.length;)
+            {
+                while (position < expected_value.length && (expected_value.pointer[position] == ' ' || expected_value.pointer[position] == '\t'))
+                {
+                    position += 1;
+                }
+                if (position < expected_value.length)
+                {
+                    expected_token_count += 1;
+                    while (position < expected_value.length && expected_value.pointer[position] != ' ' && expected_value.pointer[position] != '\t')
+                    {
+                        position += 1;
+                    }
+                }
+            }
+            BUSTER_TEST_RAW(arguments, preprocess.token_count == expected_token_count + 3,
+                            string_format(temporary.arena, S8("{S8}: expected {u64} tokens, got {u64}"), name, expected_token_count + 3,
+                                          preprocess.token_count));
+            if (preprocess.token_count == expected_token_count + 3)
+            {
+                c_test_gnu_common_predefined_macro_token(arguments, &result, preprocess, name, 0, C_TOKEN_PUNCTUATOR, S8("["));
+                u64 position = 0;
+                u64 token_index = 1;
+                while (position < expected_value.length)
+                {
+                    while (position < expected_value.length && (expected_value.pointer[position] == ' ' || expected_value.pointer[position] == '\t'))
+                    {
+                        position += 1;
+                    }
+                    if (position < expected_value.length)
+                    {
+                        u64 token_start = position;
+                        while (position < expected_value.length && expected_value.pointer[position] != ' ' && expected_value.pointer[position] != '\t')
+                        {
+                            position += 1;
+                        }
+                        String8 expected_token = {.pointer = expected_value.pointer + token_start, .length = position - token_start};
+                        c_test_gnu_common_predefined_macro_token(arguments, &result, preprocess, name, token_index,
+                                                                 preprocess.tokens[token_index].kind, expected_token);
+                        token_index += 1;
+                    }
+                }
+                c_test_gnu_common_predefined_macro_token(arguments, &result, preprocess, name, token_index, C_TOKEN_PUNCTUATOR, S8("]"));
+                c_test_gnu_common_predefined_macro_token(arguments, &result, preprocess, name, token_index + 1, C_TOKEN_END_OF_FILE, S8(""));
+            }
+        }
+    }
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+    scratch_end(temporary);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_common_predefined_macros(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("aarch64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"),
+        S8("aarch64-apple-macos"),
+        S8("aarch64-apple-ios"),
+        S8("x86_64-linux-android"),
+        S8("aarch64-linux-android"),
+        S8("x86_64-unknown-uefi"),
+        S8("aarch64-unknown-uefi"),
+        S8("wasm32-unknown-wasi"),
+        S8("wasm64-unknown-freestanding"),
+    };
+    String8 reference_strings[] = {
+        // x86_64-unknown-linux-gnu
+        S8(
+            "__amd64__ 1\n"
+            "__amd64 1\n"
+            "__x86_64 1\n"
+            "__k8 1\n"
+            "__k8__ 1\n"
+            "linux 1\n"
+            "unix 1\n"
+            "__SSE__ 1\n"
+            "__MMX__ 1\n"
+            "__FXSR__ 1\n"
+            "__SSE_MATH__ 1\n"
+            "__SSE2_MATH__ 1\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807L\n"
+            "__UINTMAX_MAX__ 18446744073709551615UL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807L\n"
+            "__UINT64_MAX__ 18446744073709551615UL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807L\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615UL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807L\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615UL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "__code_model_small__ 1\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // aarch64-unknown-linux-gnu
+        S8(
+            "!__amd64__\n"
+            "!__amd64\n"
+            "!__x86_64\n"
+            "!__k8\n"
+            "!__k8__\n"
+            "linux 1\n"
+            "unix 1\n"
+            "!__SSE__\n"
+            "!__MMX__\n"
+            "!__FXSR__\n"
+            "!__SSE_MATH__\n"
+            "!__SSE2_MATH__\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807L\n"
+            "__UINTMAX_MAX__ 18446744073709551615UL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807L\n"
+            "__UINT64_MAX__ 18446744073709551615UL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807L\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615UL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807L\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615UL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "!__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "!__code_model_small__\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // x86_64-pc-windows-msvc
+        S8(
+            "__amd64__ 1\n"
+            "__amd64 1\n"
+            "__x86_64 1\n"
+            "__k8 1\n"
+            "__k8__ 1\n"
+            "!linux\n"
+            "!unix\n"
+            "__SSE__ 1\n"
+            "__MMX__ 1\n"
+            "__FXSR__ 1\n"
+            "__SSE_MATH__ 1\n"
+            "__SSE2_MATH__ 1\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615ULL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807LL\n"
+            "__INTPTR_MAX__ 9223372036854775807LL\n"
+            "__UINTPTR_MAX__ 18446744073709551615ULL\n"
+            "__INTMAX_MAX__ 9223372036854775807LL\n"
+            "__UINTMAX_MAX__ 18446744073709551615ULL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807LL\n"
+            "__UINT64_MAX__ 18446744073709551615ULL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615ULL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615ULL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "__code_model_small__ 1\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // aarch64-pc-windows-msvc
+        S8(
+            "!__amd64__\n"
+            "!__amd64\n"
+            "!__x86_64\n"
+            "!__k8\n"
+            "!__k8__\n"
+            "!linux\n"
+            "!unix\n"
+            "!__SSE__\n"
+            "!__MMX__\n"
+            "!__FXSR__\n"
+            "!__SSE_MATH__\n"
+            "!__SSE2_MATH__\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615ULL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807LL\n"
+            "__INTPTR_MAX__ 9223372036854775807LL\n"
+            "__UINTPTR_MAX__ 18446744073709551615ULL\n"
+            "__INTMAX_MAX__ 9223372036854775807LL\n"
+            "__UINTMAX_MAX__ 18446744073709551615ULL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807LL\n"
+            "__UINT64_MAX__ 18446744073709551615ULL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615ULL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615ULL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "!__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "!__code_model_small__\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // x86_64-apple-macos
+        S8(
+            "__amd64__ 1\n"
+            "__amd64 1\n"
+            "__x86_64 1\n"
+            "__k8 1\n"
+            "__k8__ 1\n"
+            "!linux\n"
+            "!unix\n"
+            "__SSE__ 1\n"
+            "__MMX__ 1\n"
+            "__FXSR__ 1\n"
+            "__SSE_MATH__ 1\n"
+            "__SSE2_MATH__ 1\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807L\n"
+            "__UINTMAX_MAX__ 18446744073709551615UL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807LL\n"
+            "__UINT64_MAX__ 18446744073709551615ULL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615ULL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615ULL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__ _\n"
+            "__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "__code_model_small__ 1\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // aarch64-apple-macos
+        S8(
+            "!__amd64__\n"
+            "!__amd64\n"
+            "!__x86_64\n"
+            "!__k8\n"
+            "!__k8__\n"
+            "!linux\n"
+            "!unix\n"
+            "!__SSE__\n"
+            "!__MMX__\n"
+            "!__FXSR__\n"
+            "!__SSE_MATH__\n"
+            "!__SSE2_MATH__\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 8\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807L\n"
+            "__UINTMAX_MAX__ 18446744073709551615UL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807LL\n"
+            "__UINT64_MAX__ 18446744073709551615ULL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615ULL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615ULL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__ _\n"
+            "__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "!__code_model_small__\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // aarch64-apple-ios
+        S8(
+            "!__amd64__\n"
+            "!__amd64\n"
+            "!__x86_64\n"
+            "!__k8\n"
+            "!__k8__\n"
+            "!linux\n"
+            "!unix\n"
+            "!__SSE__\n"
+            "!__MMX__\n"
+            "!__FXSR__\n"
+            "!__SSE_MATH__\n"
+            "!__SSE2_MATH__\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 8\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807L\n"
+            "__UINTMAX_MAX__ 18446744073709551615UL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807LL\n"
+            "__UINT64_MAX__ 18446744073709551615ULL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615ULL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615ULL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__ _\n"
+            "__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "!__code_model_small__\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // x86_64-linux-android
+        S8(
+            "__amd64__ 1\n"
+            "__amd64 1\n"
+            "__x86_64 1\n"
+            "__k8 1\n"
+            "__k8__ 1\n"
+            "linux 1\n"
+            "unix 1\n"
+            "__SSE__ 1\n"
+            "__MMX__ 1\n"
+            "__FXSR__ 1\n"
+            "__SSE_MATH__ 1\n"
+            "__SSE2_MATH__ 1\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807L\n"
+            "__UINTMAX_MAX__ 18446744073709551615UL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807L\n"
+            "__UINT64_MAX__ 18446744073709551615UL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807L\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615UL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807L\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615UL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "__code_model_small__ 1\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // aarch64-linux-android
+        S8(
+            "!__amd64__\n"
+            "!__amd64\n"
+            "!__x86_64\n"
+            "!__k8\n"
+            "!__k8__\n"
+            "linux 1\n"
+            "unix 1\n"
+            "!__SSE__\n"
+            "!__MMX__\n"
+            "!__FXSR__\n"
+            "!__SSE_MATH__\n"
+            "!__SSE2_MATH__\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807L\n"
+            "__UINTMAX_MAX__ 18446744073709551615UL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807L\n"
+            "__UINT64_MAX__ 18446744073709551615UL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807L\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615UL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807L\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615UL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "!__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "!__code_model_small__\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // x86_64-unknown-uefi
+        S8(
+            "__amd64__ 1\n"
+            "__amd64 1\n"
+            "__x86_64 1\n"
+            "__k8 1\n"
+            "__k8__ 1\n"
+            "!linux\n"
+            "!unix\n"
+            "__SSE__ 1\n"
+            "__MMX__ 1\n"
+            "__FXSR__ 1\n"
+            "__SSE_MATH__ 1\n"
+            "__SSE2_MATH__ 1\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615ULL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807LL\n"
+            "__INTPTR_MAX__ 9223372036854775807LL\n"
+            "__UINTPTR_MAX__ 18446744073709551615ULL\n"
+            "__INTMAX_MAX__ 9223372036854775807LL\n"
+            "__UINTMAX_MAX__ 18446744073709551615ULL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807LL\n"
+            "__UINT64_MAX__ 18446744073709551615ULL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615ULL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615ULL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "__code_model_small__ 1\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // aarch64-unknown-uefi
+        S8(
+            "!__amd64__\n"
+            "!__amd64\n"
+            "!__x86_64\n"
+            "!__k8\n"
+            "!__k8__\n"
+            "!linux\n"
+            "!unix\n"
+            "!__SSE__\n"
+            "!__MMX__\n"
+            "!__FXSR__\n"
+            "!__SSE_MATH__\n"
+            "!__SSE2_MATH__\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807L\n"
+            "__UINTMAX_MAX__ 18446744073709551615UL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807L\n"
+            "__UINT64_MAX__ 18446744073709551615UL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807L\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615UL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807L\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615UL\n"
+            "__SIG_ATOMIC_TYPE__ int\n"
+            "__SIG_ATOMIC_MAX__ 2147483647\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "!__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "!__code_model_small__\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // wasm32-unknown-wasi
+        S8(
+            "!__amd64__\n"
+            "!__amd64\n"
+            "!__x86_64\n"
+            "!__k8\n"
+            "!__k8__\n"
+            "!linux\n"
+            "!unix\n"
+            "!__SSE__\n"
+            "!__MMX__\n"
+            "!__FXSR__\n"
+            "!__SSE_MATH__\n"
+            "!__SSE2_MATH__\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 4\n"
+            "__SIZEOF_PTRDIFF_T__ 4\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 4294967295UL\n"
+            "__PTRDIFF_MAX__ 2147483647L\n"
+            "__INTPTR_MAX__ 2147483647L\n"
+            "__UINTPTR_MAX__ 4294967295UL\n"
+            "__INTMAX_MAX__ 9223372036854775807LL\n"
+            "__UINTMAX_MAX__ 18446744073709551615ULL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807LL\n"
+            "__UINT64_MAX__ 18446744073709551615ULL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615ULL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615ULL\n"
+            "__SIG_ATOMIC_TYPE__ long\n"
+            "__SIG_ATOMIC_MAX__ 2147483647L\n"
+            "__SIG_ATOMIC_WIDTH__ 32\n"
+            "__PTRDIFF_WIDTH__ 32\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "!__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "!__code_model_small__\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+        // wasm64-unknown-freestanding
+        S8(
+            "!__amd64__\n"
+            "!__amd64\n"
+            "!__x86_64\n"
+            "!__k8\n"
+            "!__k8__\n"
+            "!linux\n"
+            "!unix\n"
+            "!__SSE__\n"
+            "!__MMX__\n"
+            "!__FXSR__\n"
+            "!__SSE_MATH__\n"
+            "!__SSE2_MATH__\n"
+            "!__PIC__\n"
+            "!__pic__\n"
+            "!__PIE__\n"
+            "!__pie__\n"
+            "__GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_INT_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
+            "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4\n"
+            "!__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8\n"
+            "__STDC_UTF_16__ 1\n"
+            "__STDC_UTF_32__ 1\n"
+            "__GNUC_STDC_INLINE__ 1\n"
+            "__CHAR_BIT__ 8\n"
+            "__SIZEOF_SIZE_T__ 8\n"
+            "__SIZEOF_PTRDIFF_T__ 8\n"
+            "!__SIZEOF_FLOAT128__\n"
+            "__BIGGEST_ALIGNMENT__ 16\n"
+            "__SIZE_MAX__ 18446744073709551615UL\n"
+            "__PTRDIFF_MAX__ 9223372036854775807L\n"
+            "__INTPTR_MAX__ 9223372036854775807L\n"
+            "__UINTPTR_MAX__ 18446744073709551615UL\n"
+            "__INTMAX_MAX__ 9223372036854775807LL\n"
+            "__UINTMAX_MAX__ 18446744073709551615ULL\n"
+            "__INT8_MAX__ 127\n"
+            "__UINT8_MAX__ 255\n"
+            "__INT16_MAX__ 32767\n"
+            "__UINT16_MAX__ 65535\n"
+            "__INT32_MAX__ 2147483647\n"
+            "__UINT32_MAX__ 4294967295U\n"
+            "__INT64_MAX__ 9223372036854775807LL\n"
+            "__UINT64_MAX__ 18446744073709551615ULL\n"
+            "__INT_LEAST8_TYPE__ signed char\n"
+            "__INT_LEAST8_MAX__ 127\n"
+            "__INT_LEAST8_WIDTH__ 8\n"
+            "__UINT_LEAST8_TYPE__ unsigned char\n"
+            "__UINT_LEAST8_MAX__ 255\n"
+            "__INT_LEAST16_TYPE__ short\n"
+            "__INT_LEAST16_MAX__ 32767\n"
+            "__INT_LEAST16_WIDTH__ 16\n"
+            "__UINT_LEAST16_TYPE__ unsigned short\n"
+            "__UINT_LEAST16_MAX__ 65535\n"
+            "__INT_LEAST32_TYPE__ int\n"
+            "__INT_LEAST32_MAX__ 2147483647\n"
+            "__INT_LEAST32_WIDTH__ 32\n"
+            "__UINT_LEAST32_TYPE__ unsigned int\n"
+            "__UINT_LEAST32_MAX__ 4294967295U\n"
+            "__INT_LEAST64_TYPE__ long long\n"
+            "__INT_LEAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_LEAST64_WIDTH__ 64\n"
+            "__UINT_LEAST64_TYPE__ unsigned long long\n"
+            "__UINT_LEAST64_MAX__ 18446744073709551615ULL\n"
+            "__INT_FAST8_TYPE__ signed char\n"
+            "__INT_FAST8_MAX__ 127\n"
+            "__INT_FAST8_WIDTH__ 8\n"
+            "__UINT_FAST8_TYPE__ unsigned char\n"
+            "__UINT_FAST8_MAX__ 255\n"
+            "__INT_FAST16_TYPE__ short\n"
+            "__INT_FAST16_MAX__ 32767\n"
+            "__INT_FAST16_WIDTH__ 16\n"
+            "__UINT_FAST16_TYPE__ unsigned short\n"
+            "__UINT_FAST16_MAX__ 65535\n"
+            "__INT_FAST32_TYPE__ int\n"
+            "__INT_FAST32_MAX__ 2147483647\n"
+            "__INT_FAST32_WIDTH__ 32\n"
+            "__UINT_FAST32_TYPE__ unsigned int\n"
+            "__UINT_FAST32_MAX__ 4294967295U\n"
+            "__INT_FAST64_TYPE__ long long\n"
+            "__INT_FAST64_MAX__ 9223372036854775807LL\n"
+            "__INT_FAST64_WIDTH__ 64\n"
+            "__UINT_FAST64_TYPE__ unsigned long long\n"
+            "__UINT_FAST64_MAX__ 18446744073709551615ULL\n"
+            "__SIG_ATOMIC_TYPE__ long\n"
+            "__SIG_ATOMIC_MAX__ 9223372036854775807L\n"
+            "__SIG_ATOMIC_WIDTH__ 64\n"
+            "__PTRDIFF_WIDTH__ 64\n"
+            "__INTMAX_WIDTH__ 64\n"
+            "__SHRT_WIDTH__ 16\n"
+            "__USER_LABEL_PREFIX__\n"
+            "!__REGISTER_PREFIX__\n"
+            "__FINITE_MATH_ONLY__ 0\n"
+            "!__code_model_small__\n"
+            "!__SEG_FS\n"
+            "!__SEG_GS\n"
+            "__ORDER_PDP_ENDIAN__ 3412\n"
+            "!__PRAGMA_REDEFINE_EXTNAME\n"
+        ),
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C23};
+    String8 consistency_assertions = S8(
+        "_Static_assert((__SIZE_TYPE__)-1 == __SIZE_MAX__, \"size maximum\");\n"
+        "_Static_assert(sizeof(__SIZE_TYPE__) == __SIZEOF_SIZE_T__, \"size type size\");\n"
+        "_Static_assert(sizeof(__PTRDIFF_TYPE__) == __SIZEOF_PTRDIFF_T__, \"ptrdiff type size\");\n"
+        "_Static_assert(__CHAR_BIT__ * sizeof(__SIG_ATOMIC_TYPE__) == __SIG_ATOMIC_WIDTH__, \"signal atomic width\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__SIZE_MAX__), __SIZE_TYPE__), \"size maximum type\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__INT64_MAX__), __INT64_TYPE__), \"int64 maximum type\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__UINTMAX_MAX__), __UINTMAX_TYPE__), \"uintmax maximum type\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__PTRDIFF_MAX__), __PTRDIFF_TYPE__), \"ptrdiff maximum type\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__INT_FAST64_TYPE__, __INT64_TYPE__), \"fast int64 type\");\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult target_parse = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, target_parse.error == TARGET_PARSE_ERROR_NONE);
+        if (target_parse.error == TARGET_PARSE_ERROR_NONE)
+        {
+            Target target = target_parse.target;
+            for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+            {
+                CPreprocessDialect dialect = dialects[dialect_index];
+                String8 reference = reference_strings[target_index];
+                u64 line_start = 0;
+                while (line_start < reference.length)
+                {
+                    u64 line_end = line_start;
+                    while (line_end < reference.length && reference.pointer[line_end] != '\n')
+                    {
+                        line_end += 1;
+                    }
+                    String8 line = {.pointer = reference.pointer + line_start, .length = line_end - line_start};
+                    if (line.length)
+                    {
+                        bool defined = line.pointer[0] != '!';
+                        String8 name = {0};
+                        String8 expected_value = {0};
+                        if (!defined)
+                        {
+                            name = (String8){.pointer = line.pointer + 1, .length = line.length - 1};
+                        }
+                        else
+                        {
+                            u64 name_end = 0;
+                            while (name_end < line.length && line.pointer[name_end] != ' ' && line.pointer[name_end] != '\t')
+                            {
+                                name_end += 1;
+                            }
+                            name = (String8){.pointer = line.pointer, .length = name_end};
+                            u64 value_start = name_end;
+                            while (value_start < line.length && (line.pointer[value_start] == ' ' || line.pointer[value_start] == '\t'))
+                            {
+                                value_start += 1;
+                            }
+                            expected_value = (String8){.pointer = line.pointer + value_start, .length = line.length - value_start};
+                        }
+                        bool dialect_omits_os_names = dialect == C_PREPROCESS_DIALECT_C23 &&
+                                                      (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID) &&
+                                                      (string_equal(name, S8("linux")) || string_equal(name, S8("unix")));
+                        if (dialect_omits_os_names)
+                        {
+                            defined = false;
+                        }
+                        c_test_gnu_common_predefined_macro_probe(arguments, &result, target, dialect, 0, false, name, expected_value, defined);
+                    }
+                    line_start = line_end + 1;
+                }
+                if (dialect == C_PREPROCESS_DIALECT_C23)
+                {
+                    c_test_gnu_common_predefined_macro_probe(arguments, &result, target, dialect, 0, false, S8("linux"), S8(""), false);
+                    c_test_gnu_common_predefined_macro_probe(arguments, &result, target, dialect, 0, false, S8("unix"), S8(""), false);
+                }
+            }
+            CPreprocessOptions options = {
+                .target = target,
+                .data_layout = target_data_layout(target),
+                .dialect = C_PREPROCESS_DIALECT_GNU17,
+                .source_path = S8("gnu-common-predefined-macros-consistency.c"),
+            };
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, consistency_assertions, options);
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, options.source_path, preprocess, syntax, target, (CIRLowerOptions){0});
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+            scratch_end(temporary);
+        }
+    }
+    TargetParseResult x86_linux = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    if (BUSTER_REQUIRE(arguments, x86_linux.error == TARGET_PARSE_ERROR_NONE))
+    {
+        c_test_gnu_common_predefined_macro_probe(arguments, &result, x86_linux.target, C_PREPROCESS_DIALECT_GNU89, 0, false,
+                                                 S8("__GNUC_GNU_INLINE__"), S8("1"), true);
+        c_test_gnu_common_predefined_macro_probe(arguments, &result, x86_linux.target, C_PREPROCESS_DIALECT_GNU89, 0, false,
+                                                 S8("__GNUC_STDC_INLINE__"), S8(""), false);
+        u8 levels[] = {1, 2, 1, 2};
+        bool executables[] = {false, false, true, true};
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(levels); case_index += 1)
+        {
+            for (u32 macro_index = 0; macro_index < 4; macro_index += 1)
+            {
+                bool pie_macro = macro_index >= 2;
+                bool defined = !pie_macro || executables[case_index];
+                String8 name = macro_index == 0 ? S8("__PIC__") : macro_index == 1 ? S8("__pic__") : macro_index == 2 ? S8("__PIE__") : S8("__pie__");
+                String8 expected_value = levels[case_index] == 1 ? S8("1") : S8("2");
+                c_test_gnu_common_predefined_macro_probe(arguments, &result, x86_linux.target, C_PREPROCESS_DIALECT_GNU17, levels[case_index],
+                                                         executables[case_index], name, expected_value, defined);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_max_align_t_layout(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14636,8 +16570,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     for (u32 os_case = 0; os_case < BUSTER_ARRAY_LENGTH(target_os_cases); os_case += 1)
     {
         CTargetOsQueryCase target_os_case = target_os_cases[os_case];
-        CPreprocessResult target_os_queries =
-            c_preprocess(arguments->arena, target_os_case.source, (CPreprocessOptions){.target = target_os_case.target});
+        CPreprocessResult target_os_queries = c_preprocess(arguments->arena, target_os_case.source,
+                                                            (CPreprocessOptions){.target = target_os_case.target, .dialect = C_PREPROCESS_DIALECT_GNU17});
         BUSTER_TEST(arguments, target_os_queries.diagnostic_count == 0);
         // `int <probe>;` plus the end-of-file token: the probe is only in the
         // stream when the guarded region above was actually preprocessed.
@@ -19743,6 +21677,143 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_then_prototyped(UnitTestA
         scratch_end(temporary);
     }
 
+    return result;
+}
+
+// Names in separate/nested prototype scopes may agree; a completed list
+// must reject its first repeated name before parameter binding can overwrite
+// it. Expected source sites refer to the first and later declarations.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+        u32 line;
+        u32 column;
+        bool valid;
+        bool c23_only;
+        bool check_outer_names;
+        // C23 lowering of a definition whose parameters are all unnamed fails before this
+        // namespace check is involved ("could not initialize cleanup state"); keep it semantic-only.
+        bool semantic_only;
+    } cases[] = {
+        {S8("int g(int a, int a) { return a; }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 18, false, false, false},
+        {S8("int g(int a, int a) { return a; } int main(void) { return g(3, 5); }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 18, false, false, false},
+        {S8("int k(int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 18, false, false, false},
+        {S8("int g(int (a), int (a));\n"), S8("redefinition of parameter 'a' (previous declaration at 1:12)"), 1, 21, false, false, false},
+        {S8("typedef int F(int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:19)"), 1, 26, false, false, false},
+        {S8("int (*p)(int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:14)"), 1, 21, false, false, false},
+        {S8("int f(int (*cb)(int a, int a));\n"), S8("redefinition of parameter 'a' (previous declaration at 1:21)"), 1, 28, false, false, false},
+        {S8("int (*factory(int a, int a))(int z);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:19)"), 1, 26, false, false, false},
+        {S8("int (*factory(int z))(int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:27)"), 1, 34, false, false, false},
+        {S8("void f(void) { extern int k(int a, int a); }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:33)"), 1, 40, false, false, false},
+        {S8("void f(void) { int (*p)(int a, int a); }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:29)"), 1, 36, false, false, false},
+        {S8("void f(void) { extern int k(int (*cb)(int a, int a)); }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:43)"), 1, 50, false, false, false},
+        {S8("int f(int a[2], int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 21, false, false, false},
+        {S8("int f(int a[static 2], int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 28, false, false, false},
+        {S8("int f(int a, char a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 19, false, false, false},
+        {S8("int f(int, int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:16)"), 1, 23, false, false, false},
+        {S8("int f(int a,\n      int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 2, 11, false, false, false},
+        {S8("int g(int a, int b) { return a + b; }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int g(int a); int h(int a);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int g(int a); int g(int b);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("typedef int F(int a); typedef int G(int a);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int f(int, int);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int f(int a, int);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int f(int a, int (*cb)(int a));\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int f(int (*cb)(int a), int a);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int (*factory(int a))(int a);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("void f(void) { extern int k(int a, int b); }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("void f(void) { extern int k(int a); { extern int h(int a); } }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("void f(void) { int (*p)(int a, int b); }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("void f(void) { extern int local_api(int (*cb)(int x), int x); }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, true},
+        {S8("void f(void) { extern int local_api(int cb, int (*x)(int cb)); }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, true},
+        {S8("int f(int, int) { return 0; }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, true, false, true},
+        {S8("int f(int a, int) { return a; }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, true, false},
+    };
+    for (u32 dialect = 0; dialect < 2; dialect += 1)
+    {
+        for (u32 symbols = 0; symbols < 2; symbols += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                {
+                    if (cases[case_index].c23_only && !dialect) continue;
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+                        .target = target_native, .data_layout = target_data_layout(target_native),
+                        .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                    });
+                    if (!symbols)
+                    {
+                        tokens.symbols = 0;
+                        for (u64 token = 0; token < tokens.token_count; token += 1) tokens.tokens[token].symbol = 0;
+                    }
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == (cases[case_index].valid ? 0u : 1u), cases[case_index].source);
+                    if (!cases[case_index].valid && BUSTER_REQUIRE(arguments, semantic.diagnostic_count == 1))
+                    {
+                        CDiagnostic row = semantic.diagnostics[0];
+                        BUSTER_TEST(arguments, row.kind == C_DIAGNOSTIC_REDEFINITION && row.severity == C_DIAGNOSTIC_ERROR);
+                        BUSTER_TEST_RAW(arguments, string_equal(row.message, cases[case_index].message),
+                            string_format(temporary.arena, S8("parameter source={S8} expected={S8} actual={S8}"),
+                                          cases[case_index].source, cases[case_index].message, row.message));
+                        BUSTER_TEST_RAW(arguments, row.location.line == cases[case_index].line &&
+                                                   row.location.column == cases[case_index].column, cases[case_index].source);
+                    }
+                    if (cases[case_index].valid && cases[case_index].check_outer_names)
+                    {
+                        u32 found = 0;
+                        for (u32 entity_index = 0; entity_index < semantic.entity_count; entity_index += 1)
+                        {
+                            CEntity entity = semantic.entities[entity_index];
+                            // The block declaration publishes a C_ENTITY_FUNCTION registration and the
+                            // lexical C_ENTITY_LOCAL binding; the binding is the one source declaration.
+                            if (entity.kind != C_ENTITY_LOCAL || !string_equal(entity.name, S8("local_api"))) continue;
+                            found += 1;
+                            CType* type = c_type_from_id(&semantic, entity.type);
+                            if (BUSTER_REQUIRE(arguments, type && type->kind == C_TYPE_FUNCTION && type->parameter_count == 2))
+                            {
+                                BUSTER_STRING_TEST(arguments, semantic.parameters[type->parameter_start].name, S8("cb"));
+                                BUSTER_STRING_TEST(arguments, semantic.parameters[type->parameter_start + 1].name, S8("x"));
+                            }
+                        }
+                        BUSTER_TEST(arguments, found == 1);
+                    }
+                    if (cases[case_index].semantic_only)
+                    {
+                        scratch_end(temporary);
+                        continue;
+                    }
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("duplicate-parameter-names.c"), tokens, syntax,
+                        target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == lowered.diagnostic_count,
+                        string_format(temporary.arena, S8("parameter names dialect={u32} symbols={u32} form={u32} semantic={u32} lowered={u32}: {S8}"),
+                                      dialect, symbols, form, semantic.diagnostic_count, lowered.diagnostic_count, cases[case_index].source));
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic left = semantic.diagnostics[diagnostic];
+                        CDiagnostic right = lowered.diagnostics[diagnostic];
+                        BUSTER_TEST(arguments, left.kind == right.kind && left.severity == right.severity &&
+                                               left.location.line == right.location.line && left.location.column == right.location.column);
+                        BUSTER_STRING_TEST(arguments, left.message, right.message);
+                    }
+                    if (cases[case_index].valid)
+                    {
+                        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count && lowered.canonical_ir_certified))
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                    else BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
     return result;
 }
 
@@ -27460,6 +29531,117 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_find_collisions(UnitTestArgumen
         BUSTER_TEST(arguments, c_test_symbol_count(table) == count + 1);
     }
     scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 path = S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_constraint_unions.c");
+    ByteSlice input = file_read(arguments->arena, path, (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, input.length != 0);
+    for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && mirror.diagnostic_count == 0);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir_with_options(temporary.arena, path, tokens, parse, target,
+            (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+        BUSTER_TEST(arguments, lower.diagnostic_count == 0 && lower.program);
+        if (lower.program)
+        {
+            IrModule* module = lower.program->modules;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lower.program, module).error == IR_VALIDATION_NONE);
+            String8 names[] = {S8("constraint_am_identity"), S8("constraint_am_wide"), S8("constraint_am_early"),
+                               S8("constraint_dN_variable"), S8("constraint_dN_small"), S8("constraint_dN_large"),
+                               S8("constraint_numeric_clobber")};
+            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, names[name]);
+                IrInstruction* assembly = 0;
+                for (u32 row = 0; function && !assembly && row < function->instruction_count; row += 1)
+                    if (function->instructions[row].opcode == IR_OPCODE_INLINE_ASSEMBLY) assembly = function->instructions + row;
+                BUSTER_TEST_RAW(arguments, assembly != 0, names[name]);
+                if (!assembly) continue;
+                if (name < 6)
+                {
+                    u32 operand = name < 3 ? 0 : 1;
+                    u64 expected = name < 3 ? IR_INLINE_ASSEMBLY_CONSTRAINT_A : IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+                    BUSTER_TEST(arguments, assembly->immediate_count > operand &&
+                        (assembly->immediates[operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == expected);
+                    if (name == 0) BUSTER_TEST(arguments, !(assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER));
+                    if (name == 1) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE);
+                    if (name == 2) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER);
+                }
+                else
+                {
+                    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, assembly));
+                    BUSTER_TEST(arguments, extra.clobber_count == 2 && string_equal(extra.clobbers[0], S8("rax")));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    struct
+    {
+        String8 source;
+        bool omitted_static;
+    } invalid_sources[] = {
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=amx\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"am\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=dN\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dNx\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { __asm__(\"\" : : : \"00\"); return 0; }")},
+        {.source = S8("int invalid(void) { __asm__(\"\" : : : \"1\"); return 0; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dN\"(value) : \"rdx\"); return value; }")},
+        {.source = S8("int invalid(void) { __asm__(\"\" : : : \"0\", \"rax\"); return 0; }")},
+        {.source = S8("static int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; } int main(void) { return 0; }"), .omitted_static = true},
+        {.source = S8("int invalid(void) { __asm__(\"\" : : : \"rax\", \"rax\"); return 0; }")},
+        {.source = S8("static int invalid(void) { __asm__(\"\" : : : \"0\", \"rax\"); return 0; } int main(void) { return 0; }"), .omitted_static = true},
+        {.source = S8("static int invalid(void) { __asm__(\"\" : : : \"rax\", \"rax\"); return 0; } int main(void) { return 0; }"), .omitted_static = true},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_sources); row += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[row].source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("invalid-constraint-union.c"), tokens, parse, target);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+        // Direct lowering omits unused static bodies; their source-level
+        // rejection belongs to the semantic-only mirror rather than codegen.
+        if (!invalid_sources[row].omitted_static)
+            BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1, invalid_sources[row].source);
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, mirror.diagnostic_count == 1, invalid_sources[row].source);
+        scratch_end(temporary);
+    }
+    target.cpu_arch = CPU_ARCH_AARCH64;
+    String8 wrong_target_sources[] = {
+        S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value)); return value; }"),
+        S8("int invalid(int value) { __asm__(\"\" : : \"dN\"(value)); return value; }"),
+        S8("int invalid(void) { __asm__(\"\" : : : \"0\"); return 0; }"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(wrong_target_sources); row += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, wrong_target_sources[row],
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("wrong-target-constraint-union.c"), tokens, parse, target);
+        CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1 && mirror.diagnostic_count == 1, wrong_target_sources[row]);
+        scratch_end(temporary);
+    }
     return result;
 }
 
@@ -38832,11 +41014,14 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
+    BUSTER_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successor_limits);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
@@ -38884,6 +41069,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_separators);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_stack_capacity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_constraint_unions);
     BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
@@ -38993,6 +41179,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
     BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
     BUSTER_TEST_FIXTURE(arguments, c_test_target_abi_macros);
+    BUSTER_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
     BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_abi);

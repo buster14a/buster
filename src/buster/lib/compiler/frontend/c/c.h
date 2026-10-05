@@ -567,8 +567,12 @@ struct CPreprocessOptions
     // No report will read preprocessed.bytes (the driver passes its
     // invocation's omit_spelled_bytes), so the pass over the output stream
     // that sums spelling lengths is skipped and the field stays zero. Every
-    // other metric is still gathered. It takes the last reserved byte.
+    // other metric is still gathered.
     bool omit_spelled_bytes;
+    // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
+    u8 position_independent_level;
+    // The selected position-independent spelling was a PIE flag.
+    bool position_independent_executable;
     // Optional caller-owned arena for state whose last reader is inside the
     // phase: per-file lexed rows, macro records, include tables and line
     // staging. The phase allocates above the arena's position at entry and

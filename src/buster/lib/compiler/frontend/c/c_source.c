@@ -3875,6 +3875,7 @@ struct CMacroDefinition
     bool variadic;
     bool pragma_like;
     bool header_query;
+    bool target_os_query;
     // Does the list hold a `##`, and a `#` that stringifies a parameter?
     // 78,3% of the expansions of a unity build have neither and 99,97% have
     // no `#` at all, and that is the whole difference between substituting
@@ -3894,6 +3895,10 @@ typedef enum CMacroBuiltin
     C_MACRO_BUILTIN_NONE,
     C_MACRO_BUILTIN_LINE,
     C_MACRO_BUILTIN_FILE,
+    C_MACRO_BUILTIN_COUNTER,
+    C_MACRO_BUILTIN_INCLUDE_LEVEL,
+    C_MACRO_BUILTIN_BASE_FILE,
+    C_MACRO_BUILTIN_FILE_NAME,
 } CMacroBuiltin;
 
 struct CMacro
@@ -3914,14 +3919,17 @@ struct CMacro
     u32 by_symbol_capacity;
     u32 next_generation;
     bool disabled;
-    // Head-of-list state for the lazy builtin macros: the main preprocess
-    // loop stores the current frame and token offset here each iteration
-    // (two stores, no location recovery), and __LINE__/__FILE__ recover the
-    // logical line from them only when actually expanded.
+    // Head-of-list state for lazy builtin macros: the main preprocess loop
+    // stores the current frame and token offset here each iteration (two
+    // stores, no location recovery), and dynamic values are read on expansion.
     u32 builtin_line;
     struct CPreprocessSourceFrame* builtin_frame;
     u32 builtin_token_offset;
     String8 builtin_path;
+    // Per-translation-unit state: __COUNTER__ advances once per expansion,
+    // while __BASE_FILE__ retains the root path independently of #line.
+    u32 builtin_counter;
+    String8 builtin_base_path;
 };
 
 typedef struct CMacroPushMacro CMacroPushMacro;
@@ -5517,16 +5525,30 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
 }
 
 BUSTER_C_INTERNAL u32 c_preprocess_builtin_line(CMacro* first);
+BUSTER_C_INTERNAL u32 c_preprocess_builtin_include_level(CMacro* first);
 BUSTER_C_INTERNAL CSourceLocation c_preprocess_recover_location(struct CPreprocessSourceFrame* frame, u32 file, CToken token);
 
 BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* first, u8 builtin, u32 stamp, u32 line)
 {
-    if (builtin == C_MACRO_BUILTIN_LINE)
+    CPpToken result = {0};
+    if (builtin == C_MACRO_BUILTIN_LINE || builtin == C_MACRO_BUILTIN_COUNTER || builtin == C_MACRO_BUILTIN_INCLUDE_LEVEL)
     {
         char8* digits = c_space_allocate(space, 11);
-        // The invocation stamp owns the line, including argument tokens
-        // on another physical line within the same expansion batch.
-        u32 value = line ? line : c_preprocess_builtin_line(first);
+        u32 value = 0;
+        if (builtin == C_MACRO_BUILTIN_LINE)
+        {
+            // The invocation stamp owns the line, including argument tokens
+            // on another physical line within the same expansion batch.
+            value = line ? line : c_preprocess_builtin_line(first);
+        }
+        else if (builtin == C_MACRO_BUILTIN_COUNTER)
+        {
+            value = first->builtin_counter++;
+        }
+        else
+        {
+            value = c_preprocess_builtin_include_level(first);
+        }
         u32 length = 0;
         do
         {
@@ -5535,7 +5557,7 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
             length += 1;
         } while (value);
         digits[10] = 0;
-        return (CPpToken){
+        result = (CPpToken){
             .token =
                 {
                     .offset = c_space_offset(space, digits + 10 - length),
@@ -5546,33 +5568,49 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
             .foreign = true,
         };
     }
-    String8 path = first->builtin_path;
-    u64 capacity = path.length * 2 + 3;
-    char8* quoted = c_space_allocate(space, capacity);
-    u64 output = 0;
-    quoted[output++] = '"';
-    for (u64 index = 0; index < path.length; index += 1)
+    else
     {
-        char8 character = path.pointer[index];
-        if (character == '\\' || character == '"')
+        String8 path = builtin == C_MACRO_BUILTIN_BASE_FILE ? first->builtin_base_path : first->builtin_path;
+        if (builtin == C_MACRO_BUILTIN_FILE_NAME)
         {
-            quoted[output++] = '\\';
-        }
-        quoted[output++] = character;
-    }
-    quoted[output++] = '"';
-    quoted[output] = 0;
-    c_space_shrink(space, capacity - (output + 1));
-    return (CPpToken){
-        .token =
+            u64 basename_start = 0;
+            for (u64 index = 0; index < path.length; index += 1)
             {
-                .offset = c_space_offset(space, quoted),
-                .length = c_token_length_field(output),
-                .kind = C_TOKEN_STRING_LITERAL,
-            },
-        .stamp = stamp & C_PP_STAMP_MASK,
-        .foreign = true,
-    };
+                if (path.pointer[index] == '/' || path.pointer[index] == '\\')
+                {
+                    basename_start = index + 1;
+                }
+            }
+            path = string_slice(path, basename_start, path.length);
+        }
+        u64 capacity = path.length * 2 + 3;
+        char8* quoted = c_space_allocate(space, capacity);
+        u64 output = 0;
+        quoted[output++] = '"';
+        for (u64 index = 0; index < path.length; index += 1)
+        {
+            char8 character = path.pointer[index];
+            if (character == '\\' || character == '"')
+            {
+                quoted[output++] = '\\';
+            }
+            quoted[output++] = character;
+        }
+        quoted[output++] = '"';
+        quoted[output] = 0;
+        c_space_shrink(space, capacity - (output + 1));
+        result = (CPpToken){
+            .token =
+                {
+                    .offset = c_space_offset(space, quoted),
+                    .length = c_token_length_field(output),
+                    .kind = C_TOKEN_STRING_LITERAL,
+                },
+            .stamp = stamp & C_PP_STAMP_MASK,
+            .foreign = true,
+        };
+    }
+    return result;
 }
 
 // The invocation token is what a replacement token replaces, so it is what
@@ -5931,6 +5969,14 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
                     argument->tokens[token_index].no_expand = true;
                 }
             }
+        }
+        // Target-OS queries compare these spellings, not their GNU macro values.
+        if (definition->target_os_query && (argument->token_count & C_MACRO_ARGUMENT_COUNT_MASK) == 1 &&
+            argument->tokens[0].token.kind == C_TOKEN_IDENTIFIER &&
+            (c_token_spelling_equal(base, argument->tokens[0].token, S8("linux")) ||
+             c_token_spelling_equal(base, argument->tokens[0].token, S8("unix"))))
+        {
+            argument->tokens[0].no_expand = true;
         }
         bool used_expanded = definition->pragma_like || definition->parameter_expand_count[continuation->argument_index] != 0;
         bool needs_expansion = false;
@@ -7603,6 +7649,11 @@ struct CPreprocessSourceFrame
     FileMapRead source_map;
     CIncludeSearchOrigin include_origin;
 };
+
+BUSTER_C_INTERNAL u32 c_preprocess_builtin_include_level(CMacro* first)
+{
+    return first->builtin_frame ? first->builtin_frame->depth : 0;
+}
 
 // A frame's lexer diagnostics belong to the spelling that raised them, so the
 // walk releases them a line at a time: kept on a live line, ignored in a
@@ -9398,17 +9449,26 @@ BUSTER_C_INTERNAL void c_preprocess_command_operations(Arena* arena, CSpellingSp
     }
 }
 
-// __LINE__ and __FILE__ are defined once as builtin-kind macros; the main
-// preprocess loop refreshes the head-of-list line/path state each iteration
-// and c_macro_replacement_tokens materializes the value only on expansion.
+// Dynamic builtins are defined once as builtin-kind macros; the main
+// preprocess loop refreshes head-of-list frame/path state each iteration and
+// c_macro_replacement_tokens materializes their values only on expansion.
 BUSTER_C_INTERNAL void c_preprocess_builtins(Arena* arena, CSymbolTable* symbols, CMacro** first_macro, CMacro** last_macro, String8 path, CSourceLocation location)
 {
     CMacro* line_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__LINE__"), 0, 0, 0, 0, false, false);
     line_macro->definition.builtin = C_MACRO_BUILTIN_LINE;
     CMacro* file_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__FILE__"), 0, 0, 0, 0, false, false);
     file_macro->definition.builtin = C_MACRO_BUILTIN_FILE;
+    CMacro* counter_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__COUNTER__"), 0, 0, 0, 0, false, false);
+    counter_macro->definition.builtin = C_MACRO_BUILTIN_COUNTER;
+    CMacro* include_level_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__INCLUDE_LEVEL__"), 0, 0, 0, 0, false, false);
+    include_level_macro->definition.builtin = C_MACRO_BUILTIN_INCLUDE_LEVEL;
+    CMacro* base_file_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__BASE_FILE__"), 0, 0, 0, 0, false, false);
+    base_file_macro->definition.builtin = C_MACRO_BUILTIN_BASE_FILE;
+    CMacro* file_name_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__FILE_NAME__"), 0, 0, 0, 0, false, false);
+    file_name_macro->definition.builtin = C_MACRO_BUILTIN_FILE_NAME;
     (*first_macro)->builtin_line = location.line;
     (*first_macro)->builtin_path = path;
+    (*first_macro)->builtin_base_path = path;
 }
 
 BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable* symbols, CLexResult lex, u64* token_index, CMacro** first_macro, CMacro** last_macro,
@@ -10188,6 +10248,17 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)lock_free_macro_names[macro_index]), lock_free_replacement, 1, 0, 0, false,
                        false);
     }
+    static char const* gcc_lock_free_macro_names[] = {
+        "__GCC_ATOMIC_BOOL_LOCK_FREE", "__GCC_ATOMIC_CHAR_LOCK_FREE", "__GCC_ATOMIC_CHAR16_T_LOCK_FREE", "__GCC_ATOMIC_CHAR32_T_LOCK_FREE",
+        "__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "__GCC_ATOMIC_SHORT_LOCK_FREE", "__GCC_ATOMIC_INT_LOCK_FREE", "__GCC_ATOMIC_LONG_LOCK_FREE",
+        "__GCC_ATOMIC_LLONG_LOCK_FREE", "__GCC_ATOMIC_POINTER_LOCK_FREE",
+    };
+    for (u32 macro_index = 0; macro_index < BUSTER_ARRAY_LENGTH(gcc_lock_free_macro_names); macro_index += 1)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)gcc_lock_free_macro_names[macro_index]),
+                       lock_free_replacement, 1, 0, 0, false, false);
+    }
+    c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL"), S8("1"));
     String8* feature_parameters = arena_allocate(arena, String8, 1);
     feature_parameters[0] = S8("feature");
     static char const* feature_macro_names[] = {
@@ -10214,6 +10285,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         };
         CMacro* feature_macro = c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, feature_name, feature_replacement, 4, feature_parameters, 1, true, false);
         feature_macro->definition.header_query = string_equal(feature_name, S8("__has_include")) || string_equal(feature_name, S8("__has_include_next"));
+        feature_macro->definition.target_os_query = string_equal(feature_name, S8("__is_target_os"));
     }
     String8* pragma_parameters = arena_allocate(arena, String8, 1);
     pragma_parameters[0] = S8("value");
@@ -10289,6 +10361,122 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     String8 signed_max_type = intmax_uses_long ? S8("long") : S8("long long");
     String8 unsigned_max_type = intmax_uses_long ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
+    if (options.target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        C_DEFINE_TYPE_MACRO("__amd64__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__amd64", S8("1"));
+        C_DEFINE_TYPE_MACRO("__x86_64", S8("1"));
+        C_DEFINE_TYPE_MACRO("__MMX__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__SSE__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__FXSR__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__SSE_MATH__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__SSE2_MATH__", S8("1"));
+        C_DEFINE_TYPE_MACRO("__code_model_small__", S8("1"));
+        if (options.target.cpu_model == CPU_MODEL_BASELINE)
+        {
+            C_DEFINE_TYPE_MACRO("__k8", S8("1"));
+            C_DEFINE_TYPE_MACRO("__k8__", S8("1"));
+        }
+    }
+    if (options.target.cpu_arch == CPU_ARCH_X86_64 || apple_target)
+    {
+        C_DEFINE_TYPE_MACRO("__REGISTER_PREFIX__", S8(""));
+    }
+    if ((options.target.os == OPERATING_SYSTEM_LINUX || options.target.os == OPERATING_SYSTEM_ANDROID) &&
+        c_preprocess_dialect_is_gnu(options.dialect))
+    {
+        C_DEFINE_TYPE_MACRO("linux", S8("1"));
+        C_DEFINE_TYPE_MACRO("unix", S8("1"));
+    }
+    C_DEFINE_TYPE_MACRO("__STDC_UTF_16__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__STDC_UTF_32__", S8("1"));
+    if (options.dialect == C_PREPROCESS_DIALECT_GNU89)
+    {
+        C_DEFINE_TYPE_MACRO("__GNUC_GNU_INLINE__", S8("1"));
+    }
+    else
+    {
+        C_DEFINE_TYPE_MACRO("__GNUC_STDC_INLINE__", S8("1"));
+    }
+    C_DEFINE_TYPE_MACRO("__CHAR_BIT__", S8("8"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_SIZE_T__", string_format(arena, S8("{u32}"), layout.pointer.size));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_PTRDIFF_T__", string_format(arena, S8("{u32}"), layout.pointer.size));
+    // This is Clang-suitable alignment, intentionally not abi_max_alignment;
+    // #2513 changes that independent ABI property.
+    C_DEFINE_TYPE_MACRO("__BIGGEST_ALIGNMENT__",
+                        options.target.cpu_arch == CPU_ARCH_BPFEL || (apple_target && options.target.cpu_arch == CPU_ARCH_AARCH64) ? S8("8") : S8("16"));
+    String8 pointer_signed_max = layout.pointer.size == 8 ? S8("9223372036854775807") : S8("2147483647");
+    String8 pointer_unsigned_max = layout.pointer.size == 8 ? S8("18446744073709551615") : S8("4294967295");
+    String8 pointer_signed_suffix = string_equal(signed_pointer_type, S8("long")) ? S8("L")
+                                        : string_equal(signed_pointer_type, S8("long long")) ? S8("LL")
+                                                                                            : S8("");
+    String8 pointer_unsigned_suffix = string_equal(unsigned_pointer_type, S8("unsigned long")) ? S8("UL")
+                                          : string_equal(unsigned_pointer_type, S8("unsigned long long")) ? S8("ULL")
+                                                                                                        : string_equal(unsigned_pointer_type, S8("unsigned int")) ? S8("U") : S8("");
+    String8 int64_signed_max = int64_uses_long ? S8("9223372036854775807L") : S8("9223372036854775807LL");
+    String8 int64_unsigned_max = int64_uses_long ? S8("18446744073709551615UL") : S8("18446744073709551615ULL");
+    String8 intmax_signed_max = intmax_uses_long ? S8("9223372036854775807L") : S8("9223372036854775807LL");
+    String8 intmax_unsigned_max = intmax_uses_long ? S8("18446744073709551615UL") : S8("18446744073709551615ULL");
+    C_DEFINE_TYPE_MACRO("__SIZE_MAX__", string_format(arena, S8("{S8}{S8}"), pointer_unsigned_max, pointer_unsigned_suffix));
+    C_DEFINE_TYPE_MACRO("__UINTPTR_MAX__", string_format(arena, S8("{S8}{S8}"), pointer_unsigned_max, pointer_unsigned_suffix));
+    C_DEFINE_TYPE_MACRO("__PTRDIFF_MAX__", string_format(arena, S8("{S8}{S8}"), pointer_signed_max, pointer_signed_suffix));
+    C_DEFINE_TYPE_MACRO("__INTPTR_MAX__", string_format(arena, S8("{S8}{S8}"), pointer_signed_max, pointer_signed_suffix));
+    C_DEFINE_TYPE_MACRO("__INTMAX_MAX__", intmax_signed_max);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_MAX__", intmax_unsigned_max);
+    C_DEFINE_TYPE_MACRO("__INT64_MAX__", int64_signed_max);
+    C_DEFINE_TYPE_MACRO("__UINT64_MAX__", int64_unsigned_max);
+    C_DEFINE_TYPE_MACRO("__INT8_MAX__", S8("127"));
+    C_DEFINE_TYPE_MACRO("__INT16_MAX__", S8("32767"));
+    C_DEFINE_TYPE_MACRO("__INT32_MAX__", S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__UINT8_MAX__", S8("255"));
+    C_DEFINE_TYPE_MACRO("__UINT16_MAX__", S8("65535"));
+    C_DEFINE_TYPE_MACRO("__UINT32_MAX__", S8("4294967295U"));
+    String8 integer_widths[] = {S8("8"), S8("16"), S8("32"), S8("64")};
+    String8 signed_integer_types[] = {S8("signed char"), S8("short"), S8("int"), signed_64_type};
+    String8 unsigned_integer_types[] = {S8("unsigned char"), S8("unsigned short"), S8("unsigned int"), unsigned_64_type};
+    String8 signed_integer_maxima[] = {S8("127"), S8("32767"), S8("2147483647"), int64_signed_max};
+    String8 unsigned_integer_maxima[] = {S8("255"), S8("65535"), S8("4294967295U"), int64_unsigned_max};
+    for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(integer_widths); width_index += 1)
+    {
+        for (u32 kind_index = 0; kind_index < 2; kind_index += 1)
+        {
+            String8 family = kind_index ? S8("FAST") : S8("LEAST");
+            String8 signed_name = string_format(arena, S8("__INT_{S8}{S8}_TYPE__"), family, integer_widths[width_index]);
+            String8 unsigned_name = string_format(arena, S8("__UINT_{S8}{S8}_TYPE__"), family, integer_widths[width_index]);
+            String8 signed_max_name = string_format(arena, S8("__INT_{S8}{S8}_MAX__"), family, integer_widths[width_index]);
+            String8 unsigned_max_name = string_format(arena, S8("__UINT_{S8}{S8}_MAX__"), family, integer_widths[width_index]);
+            String8 signed_width_name = string_format(arena, S8("__INT_{S8}{S8}_WIDTH__"), family, integer_widths[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_name, signed_integer_types[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_name, unsigned_integer_types[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_max_name, signed_integer_maxima[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_max_name, unsigned_integer_maxima[width_index]);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_width_name, integer_widths[width_index]);
+        }
+    }
+    C_DEFINE_TYPE_MACRO("__SIG_ATOMIC_TYPE__", wasm_target ? S8("long") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__SIG_ATOMIC_MAX__",
+                        wasm_target ? (layout.long_integer.bit_width == 64 ? S8("9223372036854775807L") : S8("2147483647L")) : S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__SIG_ATOMIC_WIDTH__", wasm_target ? string_format(arena, S8("{u32}"), layout.long_integer.bit_width) : S8("32"));
+    C_DEFINE_TYPE_MACRO("__PTRDIFF_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
+    C_DEFINE_TYPE_MACRO("__INTMAX_WIDTH__", S8("64"));
+    C_DEFINE_TYPE_MACRO("__SHRT_WIDTH__", string_format(arena, S8("{u32}"), layout.short_integer.bit_width));
+    C_DEFINE_TYPE_MACRO("__USER_LABEL_PREFIX__", apple_target ? S8("_") : S8(""));
+    C_DEFINE_TYPE_MACRO("__FINITE_MATH_ONLY__", S8("0"));
+    C_DEFINE_TYPE_MACRO("__ORDER_PDP_ENDIAN__", S8("3412"));
+    if (options.position_independent_level)
+    {
+        String8 level = string_format(arena, S8("{u32}"), options.position_independent_level);
+        C_DEFINE_TYPE_MACRO("__PIC__", level);
+        C_DEFINE_TYPE_MACRO("__pic__", level);
+        if (options.position_independent_executable)
+        {
+            C_DEFINE_TYPE_MACRO("__PIE__", level);
+            C_DEFINE_TYPE_MACRO("__pie__", level);
+        }
+    }
+    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* has no matching __sync compare-and-swap builtins,
+    // __SIZEOF_FLOAT128__ is unmodeled, __SEG_FS/__SEG_GS have no keywords,
+    // and __PRAGMA_REDEFINE_EXTNAME is an unimplemented pragma.
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);
@@ -10509,8 +10697,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // parse the SHAPE -- CPython's platform.py rejects sys.version when the
     // date field carries anything outside [\w ], which is what the
     // getbuildinfo fallback ("xx/xx/xx") for a missing __DATE__ does.
+    // __TIMESTAMP__ follows the same fixed epoch in asctime shape ("Ddd Mmm dd hh:mm:ss yyyy").
     C_DEFINE_TYPE_MACRO("__DATE__", S8("\"Jan  1 1970\""));
     C_DEFINE_TYPE_MACRO("__TIME__", S8("\"00:00:00\""));
+    C_DEFINE_TYPE_MACRO("__TIMESTAMP__", S8("\"Thu Jan  1 00:00:00 1970\""));
     if (!layout.plain_char_is_signed)
     {
         C_DEFINE_TYPE_MACRO("__CHAR_UNSIGNED__", S8("1"));

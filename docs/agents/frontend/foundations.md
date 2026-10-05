@@ -326,6 +326,12 @@ without facts for identical bitcode and diagnostics.
   them; child argument contexts never execute macro-state effects.
   The saved definition includes the dynamic `__LINE__`/`__FILE__` builtin kind,
   so restoring one after an ordinary definition also restores its behavior.
+  Dynamic `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__` and
+  `__FILE_NAME__` are saved the same way; `__COUNTER__` is per-translation-unit
+  head-of-list state advanced once per materialization, so ordinary uses share
+  one argument prescan and no result cache memoizes it. `__BASE_FILE__` ignores
+  `#line`, while `__TIMESTAMP__` uses the same fixed epoch as `__DATE__` and
+  `__TIME__`.
   `c_macro_conditional_tests` checks these boundaries against literal token
   expectations, independent hosted Clang/GCC preprocessors and both frontend
   lowering forms. Its oracle rows record GCC's alias-newline `__LINE__` value
@@ -421,11 +427,35 @@ without facts for identical bitcode and diagnostics.
   The returned signed magnitude, rank and target width survive the query;
   temporary type IDs do not. Qualified enum aliases read integer facts through
   their original tag even when the alias was created before its completion.
-  Existing enumerator folding retains the
-  `C_CONSTANT_EVALUATION_ENUM` compatibility mode on the declaration machine,
-  including its machineless `sizeof` path. Migrating that consumer requires
-  declaration-owned preparation of source-ordered operand facts; this stage
-  adds the protected query without changing enum admission or arithmetic.
+  Enumerator folding retains `C_CONSTANT_EVALUATION_ENUM` compatibility
+  arithmetic and successful machineless `sizeof` answers. A failed `sizeof`
+  expression leaf instead uses the protected TYPE reader over its original
+  token range and live declaration-point model, including read-only earlier
+  pending-enumerator facts. Only nonnegative, single-limb integer magnitude
+  leaves that private query; the outer leaf creates its own stable size type.
+  The live declaration machine never participates in the private frames.
+  This bounded caller declines type-name/function-valued operands, nested
+  `sizeof`/`_Alignof` and attributes before their type-only paths can hide an
+  unsupported operand. Existing TYPE consumers retain their default admission
+  policy. The broader ENUM migration still needs declaration-owned preparation
+  of source-ordered facts and stored-layout authority (#1258/#1247).
+  The registered `c_test_enum_sizeof_expression` regression checks #1258's
+  original five non-designator expression operands with independent fixed
+  integer values, grouping/pending-enumerator/unevaluated neighbors and both
+  canonical frontend forms on six desktop layouts in C17/GNU17. Its native
+  sibling checks volatile observations in all four allocators and both forms;
+  mandatory Linux GCC/Clang C17/GNU17 O0/O2 controls use the same fixed source.
+  Native execution covers 16 profiles (two dialects, four allocators, two forms),
+  separately from the eight optimized/unoptimized reference controls. Owned
+  process groups bound deadline cleanup; captured reference diagnostics reject
+  overflow/truncation and capture/tree-cleanup failures. Executable paths are
+  removed after every attempt, and the source is read back and removed.
+  Process failures and 30-second timeouts fail. The existing machineless
+  function-size divergence remains read-only evidence outside this partial
+  repair. Refused function-valued/type-name operands, including nested queries,
+  remain policy controls, not cross-compiler conformance claims. The broader
+  stored-layout and GNU function-alignment obligations remain open under
+  #1258/#1247; no issue completion is claimed.
   Its caller supplies the semantic model at the expression's declaration point.
   Scope alone cannot reconstruct earlier tag completeness from a finished unit;
   deferred consumers must retain the bindings and layout facts of their operands.
@@ -1537,3 +1567,47 @@ the aligned-base case against Clang. `c_test_enum_runtime` runs these two source
 and the bit-field source in all four native allocator modes with strict codegen
 verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
 fallback.
+
+## Static address-to-integer initializers (#1273)
+
+The constant folder carries an address cast to an integer of exactly pointer
+width as a symbol and signed byte addend, retaining the integer's C type.
+Integer addition/subtraction uses byte scale one; casting back to a pointer
+restores that pointer's ordinary element scaling. Scalar and aggregate integer
+storage use BYTES with IrGlobalRelocation entries; canonical SYMBOL_ADDRESS
+remains pointer-only. Narrower destinations report truncation explicitly.
+Wider destinations, including 128-bit cross-limb relocations, remain refused;
+this implementation does not synthesize a zero-extension relocation.
+Negation, complement, masks, shifts, products and two-symbol subtraction stay
+outside the supported one-symbol-plus-addend representation. Bit-field
+initializers also refuse symbolic carriers instead of depositing placeholder
+integer bits.
+
+The required-initializer wrapper owns and restores a biased source-token
+context. General constant probes can decline unsupported casts without
+setting a new initializer diagnostic. A separate driver control makes two
+such probes precede a dynamic binary16 conversion and requires both probe
+and main function bodies to be emitted in both forms on the two ELF targets.
+
+`compiler_driver_test_static_address_integers` is a regression-first driver
+fixture for the address-constant extension: pointer-width signed and unsigned
+integer casts followed by byte addends. Its original 17 isolated sources cover scalar,
+member, function, aggregate, local-static and const storage; pointer scaling
+and negative subscripts retain the #1230 controls. Both frontend forms and
+C17/GNU17 emit serialized x86-64/AArch64 ELF objects. The independent oracle
+checks absolute 64-bit relocation width, owner-relative offsets, exact record
+counts and signed section coordinates S+A, allowing ELF section anchors.
+A plain pointer and fixed numeric byte image are positive controls.
+
+Nine narrower, truncating and nonlinear cases require a diagnostic and
+preservation of absent or sentinel output files. The narrow cases include the
+Windows LLP64 long model and require an explicit width diagnostic.
+
+`compiler_driver_test_static_address_integer_native` compares relocated
+storage through volatile reads with runtime addresses plus literal byte
+addends, then separately reads the const integer normally. The identical
+source runs with both frontend forms, all four allocators and O0/O2 in
+C17/GNU17 on desktop hosts. Linux requires configured GCC and Clang GNU17/
+GNU2x O0/O2 compile-and-run references. Two additional object controls cover
+integer-to-pointer recasting and unary plus; explicit wider-integer controls
+retain the unsupported boundary.
