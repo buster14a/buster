@@ -997,14 +997,14 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             {
                 if (format.pointer[right_brace_index] == '{')
                 {
-                    os_fail();
+                    os_fail_message_raw(S8("string_format: nested opening brace in placeholder (write a literal brace as {{)"));
                 }
                 right_brace_index += 1;
             }
 
             if (right_brace_index >= format.length)
             {
-                os_fail();
+                os_fail_message_raw(S8("string_format: unterminated placeholder (write a literal brace as {{)"));
             }
 
             String8 format_body = string_slice(format, format_index + 1, right_brace_index);
@@ -1073,7 +1073,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
             if (format_string_i >= BUSTER_ARRAY_LENGTH(possible_format_strings))
             {
-                os_fail();
+                os_fail_message_raw(S8("string_format: unknown placeholder type (write a literal brace as {{)"));
             }
 
             FormatTypeId format_type_id = (FormatTypeId)format_string_i;
