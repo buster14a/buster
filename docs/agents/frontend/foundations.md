@@ -326,6 +326,12 @@ without facts for identical bitcode and diagnostics.
   them; child argument contexts never execute macro-state effects.
   The saved definition includes the dynamic `__LINE__`/`__FILE__` builtin kind,
   so restoring one after an ordinary definition also restores its behavior.
+  Dynamic `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__` and
+  `__FILE_NAME__` are saved the same way; `__COUNTER__` is per-translation-unit
+  head-of-list state advanced once per materialization, so ordinary uses share
+  one argument prescan and no result cache memoizes it. `__BASE_FILE__` ignores
+  `#line`, while `__TIMESTAMP__` uses the same fixed epoch as `__DATE__` and
+  `__TIME__`.
   `c_macro_conditional_tests` checks these boundaries against literal token
   expectations, independent hosted Clang/GCC preprocessors and both frontend
   lowering forms. Its oracle rows record GCC's alias-newline `__LINE__` value
