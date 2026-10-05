@@ -1,5 +1,6 @@
 /* MCP regressions use the production parser, adapter and authenticated socket.
  * bq_test_mcp_protocol covers lifecycle/schema/bounds without a live service;
+ * bq_test_mcp_artifacts checks typed sealed-export receipt/slice retrieval;
  * bq_test_mcp_receipts checks reply integrity and private-path suppression;
  * bq_test_mcp_socket uses a disposable real queue daemon with no worker config.
  * It never starts a recipe, manager unit, remote connection or benchmark.
@@ -277,6 +278,86 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_program_codec(void)
     BQ_CHECK(!bq_mcp_recipe_available(S8("blocked-recipes=native-execute-v1\n"), S8(BQ_NATIVE_RECIPE)));
     BQ_CHECK(!bq_mcp_recipe_available(S8("service-recipes=native-execute-v1-extra\n"), S8(BQ_NATIVE_RECIPE)));
     BQ_CHECK(!bq_mcp_recipe_available(S8("xservice-recipes=native-execute-v1\n"), S8(BQ_NATIVE_RECIPE)));
+}
+
+#define BQ_TEST_ARTIFACT_COUNT 6000u
+/* Typed sealed-export retrieval: only job identities and an offset cross the
+ * boundary, a slice comes from the aligned backend chunk containing it, and a
+ * reply bound to another receipt or cursor is refused. */
+BUSTER_GLOBAL_LOCAL void bq_test_mcp_artifacts(void)
+{
+    char const* full = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    char const* receipt = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    BqMcpJson json;
+    BqPacket request, response;
+    BqMcpBuffer result = {0};
+    u64 slice = 0;
+    char text[512];
+    snprintf(text, sizeof(text), "{\"job_id\":\"7\",\"attempt_token\":\"8\",\"full_result_sha256\":\"%s\"}", full);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) &&
+             bq_mcp_artifact_arguments(&json, 0, false, &request, &slice) && slice == UINT64_MAX &&
+             request.size == BQ_CONTROL_HEADER + BQ_EXPORT_REQUEST_CAP && bq_u32(request.bytes + 8) == BQ_OP_EXPORT &&
+             bq_u64(request.bytes + BQ_CONTROL_HEADER) == 7 && bq_u64(request.bytes + BQ_CONTROL_HEADER + 8) == 8 &&
+             !memcmp(request.bytes + BQ_CONTROL_HEADER + 16, full, 64) &&
+             bq_u64(request.bytes + BQ_CONTROL_HEADER + 80) == UINT64_MAX);
+    /* A read needs the receipt digest and an offset; a receipt takes neither. */
+    BQ_CHECK(!bq_mcp_artifact_arguments(&json, 0, true, &request, &slice));
+    snprintf(text, sizeof(text), "{\"job_id\":\"7\",\"attempt_token\":\"8\",\"full_result_sha256\":\"%s\",\"path\":\"/etc/passwd\"}", full);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) && !bq_mcp_artifact_arguments(&json, 0, false, &request, &slice));
+    snprintf(text, sizeof(text), "{\"job_id\":\"0\",\"attempt_token\":\"8\",\"full_result_sha256\":\"%s\"}", full);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) && !bq_mcp_artifact_arguments(&json, 0, false, &request, &slice));
+    snprintf(text, sizeof(text), "{\"job_id\":\"7\",\"attempt_token\":\"8\",\"full_result_sha256\":\"%s\",\"receipt_sha256\":\"%s\",\"offset\":\"18446744073709551615\"}", full, receipt);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) && !bq_mcp_artifact_arguments(&json, 0, true, &request, &slice));
+    snprintf(text, sizeof(text), "{\"job_id\":\"7\",\"attempt_token\":\"8\",\"full_result_sha256\":\"%s\",\"receipt_sha256\":\"%s\",\"offset\":\"70000\"}", full, receipt);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) &&
+             bq_mcp_artifact_arguments(&json, 0, true, &request, &slice) && slice == 70000 &&
+             bq_u64(request.bytes + BQ_CONTROL_HEADER + 80) == BQ_EXPORT_CHUNK_CAP &&
+             !memcmp(request.bytes + BQ_CONTROL_HEADER + 88, receipt, 64));
+
+    /* The final 6000-byte chunk of a 71536-byte archive. Its tail spells an
+     * observation magic, which export replies must never be parsed for. */
+    u64 total = BQ_EXPORT_CHUNK_CAP + BQ_TEST_ARTIFACT_COUNT;
+    u8 body[BQ_EXPORT_REPLY_HEADER + BQ_TEST_ARTIFACT_COUNT] = {0};
+    bq_put64(body + 4, 7);
+    bq_put64(body + 12, 8);
+    bq_put64(body + 20, BQ_EXPORT_CHUNK_CAP);
+    bq_put64(body + 28, total);
+    bq_put64(body + 36, total);
+    bq_put32(body + 44, BQ_TEST_ARTIFACT_COUNT);
+    memcpy(body + 48, receipt, 64);
+    for (u32 i = 0; i < BQ_TEST_ARTIFACT_COUNT; i += 1) body[BQ_EXPORT_REPLY_HEADER + i] = (u8)i;
+    memcpy(body + sizeof(body) - BQ_OBSERVATION_SIZE, "BQOBS001", 8);
+    bq_packet(&response, BQ_OP_EXPORT | 0x80000000u, 1, body, sizeof(body));
+    BQ_CHECK(!bq_observation(&response) && bq_public_response_valid(&request, &response));
+    /* Offset 70000 is byte 4464 of the chunk: 1536 bytes remain, to the end. */
+    BQ_CHECK(bq_mcp_artifact_result(&request, &response, slice, &result) &&
+             bq_test_mcp_contains(&result, "\"job_id\":\"7\"") && bq_test_mcp_contains(&result, "\"attempt_token\":\"8\"") &&
+             bq_test_mcp_contains(&result, "\"archive_bytes\":\"71536\"") &&
+             bq_test_mcp_contains(&result, "\"offset\":\"70000\"") && bq_test_mcp_contains(&result, "\"bytes_hex\":\"70717273") &&
+             bq_test_mcp_contains(&result, "\"next_offset\":\"71536\"") && bq_test_mcp_contains(&result, "\"eof\":true") &&
+             bq_test_mcp_contains(&result, "\"sealed\":false") && !bq_test_mcp_contains(&result, "/"));
+    /* A full slice is capped, and its duplicated reply still fits one frame. */
+    result = (BqMcpBuffer){0};
+    BQ_CHECK(bq_mcp_artifact_result(&request, &response, BQ_EXPORT_CHUNK_CAP, &result) &&
+             bq_test_mcp_contains(&result, "\"bytes_hex\":\"00010203") &&
+             bq_test_mcp_contains(&result, "\"next_offset\":\"68608\"") && bq_test_mcp_contains(&result, "\"eof\":false") &&
+             result.count >= 2u * BQ_MCP_ARTIFACT_SLICE && result.count * 2u + 1024u < BQ_MCP_OUTPUT_CAP);
+    /* Offsets outside the served chunk, and a receipt request, do not match. */
+    result = (BqMcpBuffer){0};
+    BQ_CHECK(!bq_mcp_artifact_result(&request, &response, total, &result));
+    result = (BqMcpBuffer){0};
+    BQ_CHECK(!bq_mcp_artifact_result(&request, &response, BQ_EXPORT_CHUNK_CAP - 1u, &result));
+    result = (BqMcpBuffer){0};
+    BQ_CHECK(!bq_mcp_artifact_result(&request, &response, UINT64_MAX, &result));
+    /* A chunk bound to a different receipt is refused before rendering. */
+    body[48] = 'd';
+    bq_packet(&response, BQ_OP_EXPORT | 0x80000000u, 1, body, sizeof(body));
+    result = (BqMcpBuffer){0};
+    BQ_CHECK(!bq_mcp_artifact_result(&request, &response, slice, &result));
+    BQ_CHECK(bq_mcp_tool(S8("bench_artifact_receipt")) == BQ_MCP_ARTIFACT_RECEIPT &&
+             bq_mcp_tool(S8("bench_artifact_read")) == BQ_MCP_ARTIFACT_READ &&
+             bq_mcp_capability_contains(S8("admission=idle-only-atomic export=1 transport=x\n"), S8(" export=1")) &&
+             !bq_mcp_capability_contains(S8("admission=idle-only-atomic transport=x\n"), S8(" export=1")));
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_mcp_receipts(void)

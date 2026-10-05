@@ -67,7 +67,10 @@ BUSTER_GLOBAL_LOCAL u8 const* bq_observation(BqPacket const* packet)
 {
     u8 const* observation = packet->size >= BQ_CONTROL_HEADER + 4 + BQ_OBSERVATION_SIZE ?
                             packet->bytes + packet->size - BQ_OBSERVATION_SIZE : NULL;
-    if (observation && memcmp(observation, "BQOBS001", 8)) observation = NULL;
+    /* Export replies end in original archive bytes, which a job's own output
+     * influences; they never carry an observation, whatever their tail. */
+    if (observation && (bq_u32(packet->bytes + 8) == (BQ_OP_EXPORT | 0x80000000u) ||
+                        memcmp(observation, "BQOBS001", 8))) observation = NULL;
     return observation;
 }
 

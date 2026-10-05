@@ -674,7 +674,7 @@ ping, `tools/list` and `tools/call`, and writes only newline-delimited JSON-RPC
 to stdout. Diagnostics stay on stderr. No dependency, listener, privileged
 transition, queue writer, direct queue fallback or worker is added.
 
-The six tools describe the operations the public service actually implements:
+The tools describe the operations the public service actually implements:
 
 | Tool | Arguments and result |
 | --- | --- |
@@ -684,14 +684,21 @@ The six tools describe the operations the public service actually implements:
 | `bench_result` | `job_id`; the same receipt plus this job's manifest, bundle and full-result digests when durably bound. |
 | `bench_cancel` | `job_id`; durably request cancellation and report the service's observed state. |
 | `bench_logs` | `job_id`, optional `cursor` (default `"0"`); at most four lifecycle events and the next per-job ordinal cursor. |
+| `bench_program_begin` / `bench_program_write` / `bench_program_finish` | `program_sha256`, `program_size`, and for a write `offset` and `bytes_hex`; resumable immutable program upload returning the manifest digest to submit. |
+| `bench_artifact_receipt` | `job_id`, `attempt_token`, `full_result_sha256` as `bench_result` returned them; the canonical 1024-byte export receipt as hex, with the archive size and digest. |
+| `bench_artifact_read` | The same identities plus `receipt_sha256` and a byte `offset`; at most 3072 original archive bytes as hex, `next_offset` and `eof`. |
 
 Job IDs, attempt tokens and cursors are decimal strings to preserve uint64
 identities in clients that use floating-point JSON numbers. IDs are positive;
 cursors may be zero; leading zeroes and values above `18446744073709551615`
 are rejected. `bench_logs` does not fetch build stdout. `bench_result` returns
 validated artifact identities, not artifact bytes or the private host result
-pathname; the existing [authenticated exporter](EXPORT.md) remains the byte
-retrieval path. The public socket suppresses global sequence, queue occupancy
+pathname. The two artifact tools read the same sealed archive as the
+[authenticated exporter](EXPORT.md), through the same export operation and
+reply validation, and accept no path or member name. A slice is original
+bytes but not sealed evidence on its own: a client concatenates the slices,
+checks their SHA-256 against the receipt's `archive_sha256`, and may write the
+receipt bytes followed by the archive bytes as the input of `unpack-export`. The public socket suppresses global sequence, queue occupancy
 and reconciliation fields; the adapter does not invent freshness timestamps,
 queue positions or recovery claims from their zeroed bytes. Tool results have
 `structuredContent` and a text item containing that same serialized JSON.
@@ -727,13 +734,13 @@ This software adapter does not establish the full #437 deployment. The current
 service runs its worker synchronously and may defer every public operation
 until cleanup, causing a bounded request timeout. The adapter reports
 `off_host_cache=false`, `synchronous_backend=true`, `fixed_recipe_only=true`,
-`custom_workloads=false`, `compiler_benchmarks=false` and
-`artifact_download=false`. `native_program_upload`,
+`custom_workloads=false` and `compiler_benchmarks=false`;
+`artifact_download` follows the backend's `export=1` token. `native_program_upload`,
 `arbitrary_native_execution` and `custom_runtime_benchmarks` are true only
 when the installed backend serves `native-execute-v1` and `native-runtime-v1`
 respectively. Off-host cached queue/SSH transport, quiet-phase
-client-load evidence, write-capable ChatGPT/Codex installation and live raw
-artifact retrieval are still required. Follow the [MCP client installation
+client-load evidence, write-capable ChatGPT/Codex installation and raw
+artifact retrieval from a real installed job are still required. Follow the [MCP client installation
 boundary](deploy/MCP_CLIENT.md); local initialization/enumeration alone is not
 web/Codex-to-9700X acceptance.
 

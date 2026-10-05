@@ -534,7 +534,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_public(BqOffhostControl* control, u8 cons
     if (error == BQ_OK && operation == BQ_OP_CAPABILITIES)
     {
         char const capabilities[] = "schema=2 executor=off-host-control-unqualified pending=8 lifetime-jobs=512\n"
-            "service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1,native-runtime-v1 cache=control-local-original-sealed\n"
+            "service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1,native-runtime-v1 cache=control-local-original-sealed export=1\n"
             "worker=initiated-fixed-ssh quiet=whole-job no-heartbeat lease=no-expiry\n"
             "lifecycle=last-observed cancellation=durable-intent-until-worker-outcome\n"
             "qualification=local-fixtures-only native-remote=execute-and-runtime-unqualified observation=BQOBS001-utc-ms\n";

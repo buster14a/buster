@@ -1,6 +1,8 @@
 /* Bounded stdio MCP adapter for the existing authenticated public socket.
  * bq_mcp_json_parse owns an explicit-stack JSON tree and decoded string storage;
  * bq_mcp_program_arguments owns bounded native upload encoding and retry cursors;
+ * bq_mcp_artifact_arguments/bq_mcp_artifact_result own typed sealed-export
+ * receipt and bounded byte-slice retrieval over the existing export operation;
  * bq_mcp_message owns lifecycle, schemas and translation to public BQP1 only;
  * bq_mcp_run owns newline framing and protocol-only stdout. No queue is opened,
  * no worker is launched and disconnect/request cancellation never cancels jobs.
@@ -11,6 +13,12 @@
 #define BQ_MCP_OUTPUT_CAP 16384u
 #define BQ_MCP_NONE UINT32_MAX
 #define BQ_MCP_VERSION "2025-11-25"
+/* Adapter-only tool selectors; neither is a service operation. Both translate
+ * to BQ_OP_EXPORT. A slice is duplicated as hex in structured and text
+ * content, so 3072 bytes keeps the whole reply inside BQ_MCP_OUTPUT_CAP. */
+#define BQ_MCP_ARTIFACT_RECEIPT 0x100u
+#define BQ_MCP_ARTIFACT_READ 0x101u
+#define BQ_MCP_ARTIFACT_SLICE 3072u
 
 typedef enum BqMcpJsonKind
 {
@@ -86,6 +94,18 @@ BUSTER_GLOBAL_LOCAL void bq_mcp_u64(BqMcpBuffer* buffer, u64 value)
     int length = snprintf(text, sizeof(text), "\"%" PRIu64 "\"", (uint64_t)value);
     if (length > 0 && (u32)length < sizeof(text)) bq_mcp_append(buffer, (String8){(char8*)text, (u32)length});
     else buffer->failed = true;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_mcp_hex(BqMcpBuffer* buffer, u8 const* bytes, u32 count)
+{
+    char const hex[] = "0123456789abcdef";
+    bq_mcp_append(buffer, S8("\""));
+    for (u32 i = 0; i < count && !buffer->failed; i += 1)
+    {
+        char pair[2] = {hex[bytes[i] >> 4], hex[bytes[i] & 15]};
+        bq_mcp_append(buffer, (String8){(char8*)pair, 2});
+    }
+    bq_mcp_append(buffer, S8("\""));
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_mcp_hex4(String8 input, u32* cursor, u32* value)
@@ -360,9 +380,11 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_decimal(BqMcpJson const* json, u32 index, bool n
 BUSTER_GLOBAL_LOCAL u32 bq_mcp_tool(String8 name)
 {
     char const* names[] = {"bench_capabilities", "bench_submit", "bench_status", "bench_result", "bench_cancel", "bench_logs",
-                           "bench_program_begin", "bench_program_write", "bench_program_finish"};
+                           "bench_program_begin", "bench_program_write", "bench_program_finish",
+                           "bench_artifact_receipt", "bench_artifact_read"};
     u32 const operations[] = {BQ_OP_CAPABILITIES, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT, BQ_OP_CANCEL, BQ_OP_LOGS,
-                              BQ_OP_NATIVE_BEGIN, BQ_OP_NATIVE_WRITE, BQ_OP_NATIVE_FINISH};
+                              BQ_OP_NATIVE_BEGIN, BQ_OP_NATIVE_WRITE, BQ_OP_NATIVE_FINISH,
+                              BQ_MCP_ARTIFACT_RECEIPT, BQ_MCP_ARTIFACT_READ};
     u32 result = 0;
     for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
         if (string_equal(name, string_from_pointer(names[i]))) result = operations[i];
@@ -406,6 +428,104 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_program_arguments(BqMcpJson const* json, u32 arg
     }
     *packet = (BqPacket){0};
     if (ok) bq_packet(packet, operation, 1, body, write ? 80u + (u32)bytes.length / 2u : 72u);
+    return ok;
+}
+
+/* The caller names one finished job by the identities bench_result returned;
+ * no path, filename or archive member crosses the boundary. A read is served
+ * from the aligned backend chunk that contains the requested offset. */
+BUSTER_GLOBAL_LOCAL bool bq_mcp_artifact_arguments(BqMcpJson const* json, u32 arguments, bool read, BqPacket* packet, u64* slice)
+{
+    String8 const names[] = {S8("job_id"), S8("attempt_token"), S8("full_result_sha256"), S8("receipt_sha256"), S8("offset")};
+    String8 full = {0}, receipt = {0};
+    u64 id = 0, token = 0, offset = 0;
+    bool ok = bq_mcp_members(json, arguments, names, read ? 5u : 3u) &&
+              bq_mcp_decimal(json, bq_mcp_member(json, arguments, names[0]), true, &id) &&
+              bq_mcp_decimal(json, bq_mcp_member(json, arguments, names[1]), true, &token) &&
+              bq_mcp_text(json, bq_mcp_member(json, arguments, names[2]), &full) && full.length == 64 &&
+              bq_result_digest_valid((u8 const*)full.pointer);
+    if (ok && read)
+    {
+        ok = bq_mcp_text(json, bq_mcp_member(json, arguments, names[3]), &receipt) && receipt.length == 64 &&
+             bq_result_digest_valid((u8 const*)receipt.pointer) &&
+             bq_mcp_decimal(json, bq_mcp_member(json, arguments, names[4]), false, &offset) && offset < BQ_EXPORT_TOTAL_CAP;
+    }
+    u8 body[BQ_EXPORT_REQUEST_CAP] = {0};
+    if (ok)
+    {
+        bq_put64(body, id);
+        bq_put64(body + 8, token);
+        memcpy(body + 16, full.pointer, 64);
+        bq_put64(body + 80, read ? offset - offset % BQ_EXPORT_CHUNK_CAP : UINT64_MAX);
+        if (read) memcpy(body + 88, receipt.pointer, 64);
+    }
+    *packet = (BqPacket){0};
+    if (ok) bq_packet(packet, BQ_OP_EXPORT, 1, body, BQ_EXPORT_REQUEST_CAP);
+    *slice = read ? offset : UINT64_MAX;
+    return ok;
+}
+
+/* bq_public_response_valid has already bound the reply to this job, token,
+ * cursor and receipt digest. A slice is original archive bytes but is not by
+ * itself sealed evidence: the client must hash all reconstructed bytes and
+ * compare them with the receipt's archive digest. */
+BUSTER_GLOBAL_LOCAL bool bq_mcp_artifact_result(BqPacket const* request, BqPacket const* response, u64 slice, BqMcpBuffer* result)
+{
+    bool ok = bq_public_response_valid(request, response) && bq_u32(request->bytes + 8) == BQ_OP_EXPORT;
+    if (ok)
+    {
+        u8 const* arguments = request->bytes + BQ_CONTROL_HEADER;
+        u8 const* data = response->bytes + BQ_CONTROL_HEADER;
+        u8 const* payload = data + BQ_EXPORT_REPLY_HEADER;
+        u64 cursor = bq_u64(arguments + 80), total = bq_u64(data + 36);
+        u32 count = bq_u32(data + 44);
+        bq_mcp_append(result, S8("{\"job_id\":"));
+        bq_mcp_u64(result, bq_u64(arguments));
+        bq_mcp_append(result, S8(",\"attempt_token\":"));
+        bq_mcp_u64(result, bq_u64(arguments + 8));
+        bq_mcp_append(result, S8(",\"full_result_sha256\":"));
+        bq_mcp_string(result, (String8){(char8*)arguments + 16, 64});
+        bq_mcp_append(result, S8(",\"receipt_sha256\":"));
+        bq_mcp_string(result, (String8){(char8*)data + 48, 64});
+        bq_mcp_append(result, S8(",\"archive_bytes\":"));
+        bq_mcp_u64(result, total);
+        if (slice == UINT64_MAX)
+        {
+            ok = cursor == UINT64_MAX && count == BQ_EXPORT_RECEIPT_CAP;
+            if (ok)
+            {
+                bq_mcp_append(result, S8(",\"archive_sha256\":"));
+                bq_mcp_string(result, (String8){(char8*)payload + 304, 64});
+                bq_mcp_append(result, S8(",\"payload_bytes\":"));
+                bq_mcp_u64(result, bq_u64(payload + 32));
+                bq_mcp_append(result, S8(",\"files\":"));
+                bq_mcp_u64(result, bq_u32(payload + 40));
+                bq_mcp_append(result, S8(",\"entries\":"));
+                bq_mcp_u64(result, bq_u32(payload + 44));
+                bq_mcp_append(result, S8(",\"receipt_hex\":"));
+                bq_mcp_hex(result, payload, count);
+                bq_mcp_append(result, S8(",\"verification\":\"sha256(receipt bytes) is receipt_sha256; sha256(all archive bytes) must equal archive_sha256; receipt bytes followed by archive bytes are the unpack-export input\"}"));
+            }
+        }
+        else
+        {
+            ok = cursor != UINT64_MAX && slice >= cursor && slice - cursor < count;
+            if (ok)
+            {
+                u32 start = (u32)(slice - cursor);
+                u32 amount = count - start < BQ_MCP_ARTIFACT_SLICE ? count - start : BQ_MCP_ARTIFACT_SLICE;
+                bq_mcp_append(result, S8(",\"offset\":"));
+                bq_mcp_u64(result, slice);
+                bq_mcp_append(result, S8(",\"bytes_hex\":"));
+                bq_mcp_hex(result, payload + start, amount);
+                bq_mcp_append(result, S8(",\"next_offset\":"));
+                bq_mcp_u64(result, slice + amount);
+                bq_mcp_append(result, slice + amount == total ? S8(",\"eof\":true") : S8(",\"eof\":false"));
+                bq_mcp_append(result, S8(",\"sealed\":false}"));
+            }
+        }
+        ok = ok && !result->failed;
+    }
     return ok;
 }
 
@@ -455,6 +575,8 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_arguments(BqMcpJson const* json, u32 arguments, 
 #define BQ_MCP_CURSOR_SCHEMA "{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":20,\"description\":\"Decimal uint64 from 0 to 18446744073709551615.\"}"
 #define BQ_MCP_SOURCE_SCHEMA "{\"type\":\"string\",\"pattern\":\"^([0-9a-f]{40}|[0-9a-f]{64})$\"}"
 #define BQ_MCP_PROGRAM_SCHEMA "\"program_sha256\":{\"type\":\"string\",\"pattern\":\"^[0-9a-f]{64}$\"},\"program_size\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":7,\"description\":\"Declared program bytes from 64 to 4194304.\"}"
+#define BQ_MCP_DIGEST_SCHEMA "{\"type\":\"string\",\"pattern\":\"^[0-9a-f]{64}$\"}"
+#define BQ_MCP_ARTIFACT_SCHEMA "\"job_id\":" BQ_MCP_JOB_SCHEMA ",\"attempt_token\":" BQ_MCP_JOB_SCHEMA ",\"full_result_sha256\":" BQ_MCP_DIGEST_SCHEMA
 BUSTER_GLOBAL_LOCAL char const bq_mcp_tools[] =
     "{\"tools\":["
     "{\"name\":\"bench_capabilities\",\"description\":\"Read current service capabilities and adapter limits.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
@@ -463,12 +585,14 @@ BUSTER_GLOBAL_LOCAL char const bq_mcp_tools[] =
     "\"recipe\":{\"type\":\"string\",\"enum\":[\"validate-buster-v1\",\"zen5-calibration-v1\",\"native-execute-v1\",\"native-runtime-v1\"]},"
     "\"baseline_sha\":" BQ_MCP_SOURCE_SCHEMA ",\"candidate_sha\":" BQ_MCP_SOURCE_SCHEMA "},\"required\":[\"idempotency_key\",\"recipe\",\"baseline_sha\",\"candidate_sha\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_status\",\"description\":\"Read a service job receipt; the synchronous backend can time out while execution owns the host.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"job_id\":" BQ_MCP_JOB_SCHEMA "},\"required\":[\"job_id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
-    "{\"name\":\"bench_result\",\"description\":\"Read this job's bound manifest/bundle/full-result digests, if present. This tool returns receipts, not downloaded artifact bytes.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"job_id\":" BQ_MCP_JOB_SCHEMA "},\"required\":[\"job_id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
+    "{\"name\":\"bench_result\",\"description\":\"Read this job's bound manifest/bundle/full-result digests, if present. This tool returns receipts; fetch the sealed bytes with bench_artifact_receipt and bench_artifact_read.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"job_id\":" BQ_MCP_JOB_SCHEMA "},\"required\":[\"job_id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_cancel\",\"description\":\"Request durable job cancellation. cancel_requested does not prove execution stopped. A transport timeout requires retry; closing MCP does not cancel a job.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"job_id\":" BQ_MCP_JOB_SCHEMA "},\"required\":[\"job_id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_logs\",\"description\":\"Read at most four lifecycle events with a stable per-job ordinal cursor; these are not build stdout logs.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"job_id\":" BQ_MCP_JOB_SCHEMA ",\"cursor\":" BQ_MCP_CURSOR_SCHEMA "},\"required\":[\"job_id\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_program_begin\",\"description\":\"Start or resume a private immutable static Linux x86-64 program upload; read the durable byte cursor. No filename crosses the service boundary.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_PROGRAM_SCHEMA "},\"required\":[\"program_sha256\",\"program_size\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},"
     "{\"name\":\"bench_program_write\",\"description\":\"Persist 1-432 program bytes encoded as lowercase hex at an exact byte offset. Retry identical bytes after a lost reply; gaps and changed prefixes conflict.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_PROGRAM_SCHEMA ",\"offset\":" BQ_MCP_CURSOR_SCHEMA ",\"bytes_hex\":{\"type\":\"string\",\"pattern\":\"^([0-9a-f]{2}){1,432}$\",\"maxLength\":864}},\"required\":[\"program_sha256\",\"program_size\",\"offset\",\"bytes_hex\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},"
-    "{\"name\":\"bench_program_finish\",\"description\":\"Verify and commit all declared program bytes. Submit the returned program_manifest_sha256 as both source SHA fields with recipe native-execute-v1 (run once) or native-runtime-v1 (2 warmups and 9 diagnostic process samples); no compiler revisions or workflow dispatch are needed.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_PROGRAM_SCHEMA "},\"required\":[\"program_sha256\",\"program_size\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}}]}";
+    "{\"name\":\"bench_program_finish\",\"description\":\"Verify and commit all declared program bytes. Submit the returned program_manifest_sha256 as both source SHA fields with recipe native-execute-v1 (run once) or native-runtime-v1 (2 warmups and 9 diagnostic process samples); no compiler revisions or workflow dispatch are needed.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_PROGRAM_SCHEMA "},\"required\":[\"program_sha256\",\"program_size\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},"
+    "{\"name\":\"bench_artifact_receipt\",\"description\":\"Read the canonical 1024-byte sealed export receipt of one finished job, identified by the attempt_token and full_result_sha256 that bench_result returned. Returns the archive size and digest; no path is accepted.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_ARTIFACT_SCHEMA "},\"required\":[\"job_id\",\"attempt_token\",\"full_result_sha256\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}},"
+    "{\"name\":\"bench_artifact_read\",\"description\":\"Read at most 3072 original archive bytes as lowercase hex from an exact byte offset, bound to the receipt digest. Continue at next_offset until eof. A slice is not sealed evidence: hash every reconstructed byte and compare with archive_sha256 from the receipt.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{" BQ_MCP_ARTIFACT_SCHEMA ",\"receipt_sha256\":" BQ_MCP_DIGEST_SCHEMA ",\"offset\":" BQ_MCP_CURSOR_SCHEMA "},\"required\":[\"job_id\",\"attempt_token\",\"full_result_sha256\",\"receipt_sha256\",\"offset\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"idempotentHint\":true,\"openWorldHint\":false}}]}";
 
 BUSTER_GLOBAL_LOCAL bool bq_mcp_recipe_available(String8 capabilities, String8 recipe)
 {
@@ -545,7 +669,11 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_service_result(BqPacket const* request, BqPacket
             bq_mcp_append(result, native || runtime ? S8("true") : S8("false"));
             bq_mcp_append(result, native ? S8(",\"arbitrary_native_execution\":true") : S8(",\"arbitrary_native_execution\":false"));
             bq_mcp_append(result, runtime ? S8(",\"custom_runtime_benchmarks\":true") : S8(",\"custom_runtime_benchmarks\":false"));
-            bq_mcp_append(result, S8(",\"compiler_benchmarks\":false,\"artifact_download\":false}}"));
+            /* Both the local daemon and the off-host cache advertise the
+             * sealed export operation with this exact token. */
+            bool artifacts = bq_mcp_capability_contains(capabilities, S8(" export=1"));
+            bq_mcp_append(result, artifacts ? S8(",\"compiler_benchmarks\":false,\"artifact_download\":true}}") :
+                                              S8(",\"compiler_benchmarks\":false,\"artifact_download\":false}}"));
         }
         else if (operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
         {
@@ -730,7 +858,7 @@ BUSTER_GLOBAL_LOCAL void bq_mcp_message(BqMcpSession* session, char const* socke
             bq_mcp_id(output, &json, id);
             bq_mcp_append(output, S8(",\"result\":{\"protocolVersion\":"));
             bq_mcp_string(output, string_equal(requested, S8("2025-06-18")) ? requested : S8(BQ_MCP_VERSION));
-            bq_mcp_append(output, S8(",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"buster-bench-service\",\"version\":\"1\"},\"instructions\":\"Use bench_capabilities to check installed recipes. Native programs use typed begin/write/finish uploads and a native-execute-v1 or native-runtime-v1 submission with the manifest digest in both SHA fields. native-runtime-v1 returns diagnostic process-latency samples, not a qualified verdict. Compilation is unavailable. This adapter requires the authenticated Unix socket. Service capabilities identify local synchronous or unqualified off-host cached mode; the synchronous backend may time out while a job runs. No artifact byte download tool is implemented. EOF and MCP request cancellation do not cancel jobs; use bench_cancel.\"}}\n"));
+            bq_mcp_append(output, S8(",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"buster-bench-service\",\"version\":\"1\"},\"instructions\":\"Use bench_capabilities to check installed recipes. Native programs use typed begin/write/finish uploads and a native-execute-v1 or native-runtime-v1 submission with the manifest digest in both SHA fields. native-runtime-v1 returns diagnostic process-latency samples, not a qualified verdict. Compilation is unavailable. This adapter requires the authenticated Unix socket. Service capabilities identify local synchronous or unqualified off-host cached mode; the synchronous backend may time out while a job runs. bench_artifact_receipt and bench_artifact_read return the sealed result archive in bounded verified slices. EOF and MCP request cancellation do not cancel jobs; use bench_cancel.\"}}\n"));
             session->phase = 1;
         }
     }
@@ -757,13 +885,18 @@ BUSTER_GLOBAL_LOCAL void bq_mcp_message(BqMcpSession* session, char const* socke
         bool ok = bq_mcp_members(&json, params, names, BUSTER_ARRAY_LENGTH(names)) && bq_mcp_meta_valid(&json, params) &&
                   bq_mcp_text(&json, bq_mcp_member(&json, params, S8("name")), &name);
         u32 operation = ok ? bq_mcp_tool(name) : 0;
-        ok = ok && bq_mcp_arguments(&json, bq_mcp_member(&json, params, S8("arguments")), operation, &request);
+        bool artifact = operation == BQ_MCP_ARTIFACT_RECEIPT || operation == BQ_MCP_ARTIFACT_READ;
+        u64 slice = UINT64_MAX;
+        u32 arguments = bq_mcp_member(&json, params, S8("arguments"));
+        ok = ok && (artifact ? bq_mcp_artifact_arguments(&json, arguments, operation == BQ_MCP_ARTIFACT_READ, &request, &slice) :
+                               bq_mcp_arguments(&json, arguments, operation, &request));
         if (!ok) bq_mcp_rpc_error(output, &json, id, -32602, "Unknown tool or invalid arguments");
         else
         {
             BqMcpBuffer result = {0};
             BqError error = bq_transport_request(socket_path, &request, &response);
-            if (error == BQ_OK && !bq_mcp_service_result(&request, &response, &result)) error = BQ_BAD_REQUEST;
+            if (error == BQ_OK && !(artifact ? bq_mcp_artifact_result(&request, &response, slice, &result) :
+                                               bq_mcp_service_result(&request, &response, &result))) error = BQ_BAD_REQUEST;
             if (error != BQ_OK)
             {
                 result = (BqMcpBuffer){0};
