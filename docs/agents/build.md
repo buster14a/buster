@@ -165,6 +165,14 @@ retire it once no supported native producer uses upstream Clang older than
 add diagnostic flags for it through `CFLAGS` in workflows or reproduction
 steps: artifact fan-out's provenance capture rejects a nonempty `CFLAGS`.
 
+Optional Clang-family warnings (`CLANG_GNU_FAMILY_OPTIONAL_WARNING_CANDIDATES`,
+enabled by `BUSTER_CHECK_OPTIONAL_WARNINGS`) are probed with
+`buster_filter_supported_c_flags`. Results are keyed by compiler
+ID|version|path, and a changed signature re-probes every candidate (each
+`BUSTER_HAS_C_FLAG_*` entry is dropped first), so an in-place compiler upgrade
+does not need `./build.sh generate`; `tools/native_target_compatibility_test.py`
+covers this behavior.
+
 The Linux fixed `bench_service_recipe` publishes private frozen-tree receipts
 after each successful base-build and candidate-build cleanup. The files
 `validate-buster-v1.base-build.inventory` and
