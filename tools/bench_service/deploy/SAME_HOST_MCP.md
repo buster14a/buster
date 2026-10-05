@@ -21,7 +21,10 @@ not serve the public socket, so:
   **same** idempotency key afterwards;
 - an upload interrupted by a job resumes from its durable cursor.
 
-A timeout is the designed quiet behaviour, not a fault. Clients should wait
+When more clients are waiting than the daemon's small connection backlog
+holds, further requests are refused at once as `busy` without being sent.
+
+A timeout or `busy` is the designed quiet behaviour, not a fault. Clients should wait
 rather than poll in a tight loop.
 
 Two things run on the measured machine that an off-host deployment would

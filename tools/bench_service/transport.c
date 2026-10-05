@@ -347,7 +347,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
     if (request_size >= BQ_CONTROL_HEADER && request_size <= BQ_CONTROL_CAP &&
         bq_transport_socket_path(socket_path, (char[BQ_PATH_CAP + 1]){0}))
     {
-        client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        /* A blocking connect waits without limit while the synchronous daemon
+         * runs a job and its backlog is full. Nothing has been sent at that
+         * point, so report busy at once; the caller may retry safely. */
+        client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
         if (client >= 0)
         {
             char path[BQ_PATH_CAP + 1];
@@ -357,8 +360,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
             address.sun_family = AF_UNIX;
             memcpy(address.sun_path, path, length + 1);
             socklen_t address_size = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1);
-            if (connect(client, (struct sockaddr*)&address, address_size) == 0 &&
-                bq_transport_send(client, request, request_size) == BQ_OK)
+            int connected = connect(client, (struct sockaddr*)&address, address_size);
+            bool backlog_full = connected != 0 && errno == EAGAIN;
+            if (connected == 0 && bq_transport_send(client, request, request_size) == BQ_OK)
             {
                 u32 received = 0;
                 BqError receive_error = bq_transport_receive_timeout(client, response->bytes, &received,
@@ -382,7 +386,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
             }
             else
             {
-                error = BQ_IO;
+                error = backlog_full ? BQ_BUSY : BQ_IO;
             }
             close(client);
             client = -1;

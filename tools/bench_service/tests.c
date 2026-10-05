@@ -86,6 +86,48 @@ BUSTER_GLOBAL_LOCAL BqRequest bq_test_request(u32 number, bool failure)
     return request;
 }
 
+#ifdef __linux__
+/* A daemon that is running a job accepts nothing. Clients beyond its backlog
+ * must get a prompt busy, not an unbounded wait in connect. */
+BUSTER_GLOBAL_LOCAL void bq_test_transport_full_backlog_is_busy(void)
+{
+    char directory[] = "/tmp/bq-backlog-XXXXXX";
+    char path[64];
+    bool made = mkdtemp(directory) != NULL;
+    snprintf(path, sizeof(path), "%s/s", directory);
+    int listener = made ? socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0) : -1;
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    memcpy(address.sun_path, path, strlen(path) + 1);
+    made = listener >= 0 && bind(listener, (struct sockaddr*)&address, sizeof(address)) == 0 && listen(listener, 0) == 0;
+    int held[64];
+    u32 count = 0;
+    bool full = false;
+    while (made && !full && count < BUSTER_ARRAY_LENGTH(held))
+    {
+        int client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (client >= 0 && connect(client, (struct sockaddr*)&address, sizeof(address)) == 0) held[count++] = client;
+        else
+        {
+            full = client >= 0 && errno == EAGAIN;
+            made = full;
+            if (client >= 0) close(client);
+        }
+    }
+    BQ_CHECK(made && full && count > 0);
+    BqPacket request, response;
+    bq_packet(&request, BQ_OP_CAPABILITIES, 1, NULL, 0);
+    u64 start = bq_worker_monotonic_milliseconds();
+    BQ_CHECK(bq_transport_request(path, &request, &response) == BQ_BUSY && response.size == 0);
+    BQ_CHECK(bq_worker_monotonic_milliseconds() - start < BQ_TRANSPORT_CLIENT_MILLISECONDS / 2);
+    /* With room in the backlog the request is sent and the silent daemon is
+     * an uncertain outcome after the bounded receive wait, as before. */
+    for (u32 index = 0; index < count; index += 1) close(held[index]);
+    if (listener >= 0) close(listener);
+    unlink(path);
+    BQ_CHECK(rmdir(directory) == 0);
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
 {
     char* gateway[] = {"submit", "run-123-1", "1111111111111111111111111111111111111111",
@@ -5821,6 +5863,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_boot_and_identity_recovery();
     bq_test_worker_fixed_recipe_sigkill_recovery();
     bq_test_worker_lock_precedes_materialization();
+    bq_test_transport_full_backlog_is_busy();
     bq_test_transport_worker_retries_after_busy();
     bq_test_transport_worker_signal_handoff();
     bq_test_offhost_codec();
