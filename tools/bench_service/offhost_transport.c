@@ -768,16 +768,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerCo
     return error;
 }
 #else
-BUSTER_GLOBAL_LOCAL BqError bq_control_serve(char const* root, char const* public_path, char const* worker_path, char const machine[SHA256_HEX_CAPACITY])
-{
-    (void)root; (void)public_path; (void)worker_path; (void)machine;
-    return BQ_UNSUPPORTED;
-}
-BUSTER_GLOBAL_LOCAL BqError bq_worker_stdio(int input, int output, char const* socket_path)
-{
-    (void)input; (void)output; (void)socket_path;
-    return BQ_UNSUPPORTED;
-}
+/* control-serve and worker-stdio are refused at their call sites off Linux. */
 BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerConfig const* config)
 {
     (void)root; (void)config;

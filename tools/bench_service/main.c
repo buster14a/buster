@@ -247,8 +247,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     if (argc == 5 && !strcmp(argv[1], "control-serve"))
     {
         valid = true;
-        char machine[SHA256_HEX_CAPACITY] = {0};
 #ifdef __linux__
+        char machine[SHA256_HEX_CAPACITY] = {0};
         error = bq_offhost_operator_identity(machine);
         if (error == BQ_OK) error = bq_control_serve(argv[2], argv[3], argv[4], machine);
 #else
