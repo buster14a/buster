@@ -15,6 +15,7 @@
 // compiler_driver_test_sysv_indirect_variadic checks AL against a foreign probe.
 // compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
+// compiler_driver_test_wasm_index_signedness checks canonical signed/narrow indices.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 // compiler_driver_test_wasm_string_records checks multi-module lookup scaling.
 // compiler_driver_test_wasm_function_addresses checks escaping function markers and direct calls.
@@ -13356,6 +13357,426 @@ BUSTER_GLOBAL_LOCAL IrInstruction compiler_driver_test_wasm_canonical_row(IrOpco
                            .binary_operation = IR_BINARY_COUNT, .memory_order = IR_MEMORY_ORDER_COUNT,
                            .failure_memory_order = IR_MEMORY_ORDER_COUNT, .atomic_operation = IR_ATOMIC_OPERATION_COUNT};
 }
+enum
+{
+    COMPILER_DRIVER_WASM_INDEX_WIDTH_COUNT = 4,
+    COMPILER_DRIVER_WASM_INDEX_SIGN_COUNT = 2,
+    COMPILER_DRIVER_WASM_INDEX_BASE_COUNT = 2,
+    COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT = 2,
+    COMPILER_DRIVER_WASM_INDEX_ADDRESS_COUNT = COMPILER_DRIVER_WASM_INDEX_WIDTH_COUNT * COMPILER_DRIVER_WASM_INDEX_SIGN_COUNT *
+                                              COMPILER_DRIVER_WASM_INDEX_BASE_COUNT * COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT,
+    COMPILER_DRIVER_WASM_INDEX_FUNCTION_COUNT = COMPILER_DRIVER_WASM_INDEX_ADDRESS_COUNT + COMPILER_DRIVER_WASM_INDEX_BASE_COUNT,
+    COMPILER_DRIVER_WASM_INDEX_ENGINE_CHECK_COUNT = 534,
+};
+
+BUSTER_GLOBAL_LOCAL IrValueId compiler_driver_test_wasm_index_value(Arena* arena, IrFunction* function, IrTypeId type, IrValueCategory category)
+{
+    return ir_function_add_value(arena, function,
+        (IrValue){.canonical_type = type, .definition = IR_INSTRUCTION_ID_INVALID, .category = (u8)category});
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_wasm_index_append(
+    Arena* arena, IrFunction* function, IrInstruction row, u32 operand_count, IrValueId first, IrValueId second, bool* committed)
+{
+    if (operand_count)
+    {
+        row.operands = arena_allocate(arena, IrValueId, operand_count);
+        row.operands[0] = first;
+        if (operand_count == 2) row.operands[1] = second;
+        row.operand_count = operand_count;
+    }
+    u32 expected = function->instruction_count;
+    IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+    IrInstructionId id = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, row, (IrSourceRange){0}, &refusal);
+    *committed &= refusal == IR_COMMIT_ACCEPTED && id.value == expected;
+}
+
+BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_index_program(Arena* arena, Target target, bool* committed_out)
+{
+    IrProgram program = ir_program_initialize(arena, 1, 64, COMPILER_DRIVER_WASM_INDEX_FUNCTION_COUNT, 0);
+    program.data_layout = target_data_layout(target);
+    IrModule* module = program.modules;
+    module->name = S8("wasm-index-signedness");
+    IrTypeLayout pointer_layout = {.size = program.data_layout.pointer.size, .alignment = program.data_layout.pointer.alignment,
+                                  .abi_class = IR_ABI_CLASS_POINTER, .resolved = true};
+    IrTypeId void_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+    IrTypeId carrier_type = ir_program_add_type(&program,
+        (IrType){.kind = IR_TYPE_INTEGER, .bit_width = program.data_layout.pointer.size * 8,
+                 .layout = {.size = program.data_layout.pointer.size, .alignment = program.data_layout.pointer.alignment,
+                            .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    u32 widths[] = {8, 16, 32, 64};
+    u32 strides[] = {1, 4};
+    IrTypeId index_types[COMPILER_DRIVER_WASM_INDEX_SIGN_COUNT][COMPILER_DRIVER_WASM_INDEX_WIDTH_COUNT];
+    for (u32 sign = 0; sign < COMPILER_DRIVER_WASM_INDEX_SIGN_COUNT; sign += 1)
+    {
+        for (u32 width_index = 0; width_index < COMPILER_DRIVER_WASM_INDEX_WIDTH_COUNT; width_index += 1)
+        {
+            u32 width = widths[width_index];
+            u32 size = width / 8;
+            index_types[sign][width_index] = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_INTEGER, .bit_width = width, .is_signed = sign != 0,
+                         .layout = {.size = size, .alignment = size, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+        }
+    }
+    IrTypeId elements[COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT];
+    IrTypeId pointers[COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT];
+    IrTypeId arrays[COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT];
+    IrTypeId array_pointers[COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT];
+    for (u32 stride_index = 0; stride_index < COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT; stride_index += 1)
+    {
+        u32 stride = strides[stride_index];
+        elements[stride_index] = ir_program_add_type(&program,
+            (IrType){.kind = IR_TYPE_INTEGER, .bit_width = stride * 8,
+                     .layout = {.size = stride, .alignment = stride, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+        pointers[stride_index] = ir_program_add_type(&program,
+            (IrType){.kind = IR_TYPE_POINTER, .element_type = elements[stride_index], .layout = pointer_layout});
+        arrays[stride_index] = ir_program_add_type(&program,
+            (IrType){.kind = IR_TYPE_ARRAY, .element_type = elements[stride_index], .element_count = 5,
+                     .layout = {.size = stride * 5, .alignment = stride, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true}});
+        array_pointers[stride_index] = ir_program_add_type(&program,
+            (IrType){.kind = IR_TYPE_POINTER, .element_type = arrays[stride_index], .layout = pointer_layout});
+    }
+    bool committed = true;
+    for (u32 row_index = 0; row_index < COMPILER_DRIVER_WASM_INDEX_FUNCTION_COUNT; row_index += 1)
+    {
+        bool load = row_index >= COMPILER_DRIVER_WASM_INDEX_ADDRESS_COUNT;
+        u32 base_kind = load ? row_index - COMPILER_DRIVER_WASM_INDEX_ADDRESS_COUNT : row_index % COMPILER_DRIVER_WASM_INDEX_BASE_COUNT;
+        u32 stride_index = load ? 1 : (row_index / COMPILER_DRIVER_WASM_INDEX_BASE_COUNT) % COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT;
+        u32 width_index = load ? 2 : (row_index / (COMPILER_DRIVER_WASM_INDEX_BASE_COUNT * COMPILER_DRIVER_WASM_INDEX_STRIDE_COUNT)) % COMPILER_DRIVER_WASM_INDEX_WIDTH_COUNT;
+        u32 sign = load ? 1 : row_index / (COMPILER_DRIVER_WASM_INDEX_ADDRESS_COUNT / COMPILER_DRIVER_WASM_INDEX_SIGN_COUNT);
+        IrTypeId index_type = index_types[sign][width_index];
+        IrTypeId base_type = base_kind ? array_pointers[stride_index] : pointers[stride_index];
+        IrTypeId result_type = load ? elements[1] : carrier_type;
+        IrTypeId* parameters = arena_allocate(arena, IrTypeId, 2);
+        parameters[0] = base_type;
+        parameters[1] = index_type;
+        IrTypeId signature = ir_program_add_type(&program,
+            (IrType){.kind = IR_TYPE_FUNCTION, .return_type = result_type, .parameter_types = parameters, .parameter_count = 2,
+                     .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+        String8 name = load
+            ? string_format(arena, S8("load_s32_{S8}_4"), base_kind ? S8("array") : S8("pointer"))
+            : string_format(arena, S8("index_{S8}{u32}_{S8}_{u32}"), sign ? S8("s") : S8("u"), widths[width_index],
+                            base_kind ? S8("array") : S8("pointer"), strides[stride_index]);
+        IrSymbolId symbol = ir_program_add_symbol(&program,
+            (IrSymbol){.name = name, .link_name = name, .type = signature, .kind = IR_SYMBOL_FUNCTION,
+                       .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+        IrFunction* function = ir_module_add_function(arena, module,
+            (IrFunction){.name = name, .symbol = symbol, .canonical_type = signature, .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+        ir_function_add_block(arena, function,
+            (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+        IrValueId base = compiler_driver_test_wasm_index_value(arena, function, base_type, IR_VALUE_VALUE);
+        IrValueId index = compiler_driver_test_wasm_index_value(arena, function, index_type, IR_VALUE_VALUE);
+        IrValueId argument_values[] = {base, index};
+        for (u32 argument = 0; argument < BUSTER_ARRAY_LENGTH(argument_values); argument += 1)
+        {
+            IrInstruction row = compiler_driver_test_wasm_canonical_row(IR_OPCODE_ARGUMENT, parameters[argument], argument_values[argument]);
+            row.immediates = arena_allocate(arena, u64, 1);
+            row.immediates[0] = argument;
+            row.immediate_count = 1;
+            compiler_driver_test_wasm_index_append(arena, function, row, 0, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, &committed);
+        }
+        if (base_kind)
+        {
+            IrValueId place = compiler_driver_test_wasm_index_value(arena, function, arrays[stride_index], IR_VALUE_PLACE);
+            compiler_driver_test_wasm_index_append(arena, function,
+                compiler_driver_test_wasm_canonical_row(IR_OPCODE_DEREFERENCE, arrays[stride_index], place), 1, base, IR_VALUE_ID_INVALID, &committed);
+            base = place;
+        }
+        IrValueId indexed = compiler_driver_test_wasm_index_value(arena, function, elements[stride_index], IR_VALUE_PLACE);
+        compiler_driver_test_wasm_index_append(arena, function,
+            compiler_driver_test_wasm_canonical_row(IR_OPCODE_INDEX, elements[stride_index], indexed), 2, base, index, &committed);
+        IrValueId returned = compiler_driver_test_wasm_index_value(arena, function, result_type, IR_VALUE_VALUE);
+        if (load)
+        {
+            compiler_driver_test_wasm_index_append(arena, function,
+                compiler_driver_test_wasm_canonical_row(IR_OPCODE_LOAD, result_type, returned), 1, indexed, IR_VALUE_ID_INVALID, &committed);
+        }
+        else
+        {
+            IrValueId address = compiler_driver_test_wasm_index_value(arena, function, pointers[stride_index], IR_VALUE_VALUE);
+            compiler_driver_test_wasm_index_append(arena, function,
+                compiler_driver_test_wasm_canonical_row(IR_OPCODE_ADDRESS_OF, pointers[stride_index], address), 1, indexed, IR_VALUE_ID_INVALID, &committed);
+            IrInstruction cast = compiler_driver_test_wasm_canonical_row(IR_OPCODE_CAST, carrier_type, returned);
+            cast.conversion_operation = IR_CONVERSION_POINTER_TO_INTEGER;
+            compiler_driver_test_wasm_index_append(arena, function, cast, 1, address, IR_VALUE_ID_INVALID, &committed);
+        }
+        compiler_driver_test_wasm_index_append(arena, function,
+            compiler_driver_test_wasm_canonical_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID), 1, returned, IR_VALUE_ID_INVALID, &committed);
+    }
+    *committed_out = committed;
+    return program;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_index_engine(
+    UnitTestArguments* arguments, Arena* arena, ByteSlice bytes, String8 script, u32 pointer_bytes, String8 mode, u32 expected_checks)
+{
+    UnitTestResult result = {0};
+    String8 output = buster_test_temporary_path(arena, S8("buster-wasm-index"), S8(".wasm"));
+    String8 script_path = buster_test_temporary_path(arena, S8("buster-wasm-index"), S8(".cjs"));
+    bool written = file_write(output, bytes) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        ByteSlice before = file_read(arena, output, (FileReadOptions){0});
+        bool unchanged = before.pointer && before.length == bytes.length && memory_compare(before.pointer, bytes.pointer, bytes.length);
+        BUSTER_TEST(arguments, unchanged);
+        String8 node = executable_resolve_in_path(arena, S8("node"));
+        if (unchanged && node.length)
+        {
+            Sha256 hash;
+            char8 hash_bytes[SHA256_HEX_CAPACITY];
+            sha256_init(&hash);
+            sha256_add(&hash, bytes.pointer, bytes.length);
+            sha256_finish_hex(&hash, hash_bytes);
+            String8 hash_text = {.pointer = hash_bytes, .length = SHA256_HEX_CAPACITY - 1};
+            String8 node_arguments[] = {
+                node, script_path, output, hash_text, string_format(arena, S8("{u32}"), pointer_bytes),
+                mode, string_format(arena, S8("{u32}"), expected_checks),
+            };
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arena, S8("index"),
+                string_format(arena, S8("pointer-{u32}-{S8}"), pointer_bytes, mode),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
+                string_format(arena, S8("{u32}/{u32} Wasm index engine checks passed"), expected_checks, expected_checks),
+                compiler_driver_test_wasm_node_deadline_microseconds());
+            arguments->show(arguments, S8("{S8}"), BYTE_SLICE_TO_STRING(8, run.wait.streams[STANDARD_STREAM_OUTPUT]));
+            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(run));
+            ByteSlice after = file_read(arena, output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, after.pointer && after.length == bytes.length && memory_compare(after.pointer, bytes.pointer, bytes.length));
+        }
+        else if (!node.length)
+        {
+            arguments->show(arguments, S8("Wasm index engine execution skipped: Node is not installed\n"));
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_index_signedness(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_WASM32, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WASI},
+        {.cpu_arch = CPU_ARCH_WASM64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_FREESTANDING},
+    };
+    String8 script_parts[] = {
+        S8(
+            "'use strict';\n"
+            "const fs = require('node:fs');\n"
+            "const crypto = require('node:crypto');\n"
+            "const assert = require('node:assert/strict');\n"
+            "const bytes = fs.readFileSync(process.argv[2]);\n"
+            "const digest = crypto.createHash('sha256').update(bytes).digest('hex');\n"
+            "const pointerBytes = Number(process.argv[4]);\n"
+            "const mode = process.argv[5];\n"
+            "const expectedChecks = Number(process.argv[6]);\n"
+            "assert.equal(digest, process.argv[3], 'original compiler module consumed');\n"
+            "assert(WebAssembly.validate(bytes), 'valid canonical index module');\n"
+            "const guest = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;\n"
+            "const pointerBits = pointerBytes * 8;\n"
+            "const base = 65544n;\n"
+            "const baseArgument = pointerBytes === 8 ? base : Number(base);\n"
+            "let checks = 0;\n"
+            "let failures = 0;\n"
+            "const firstFailure = new Map();\n"
+            "function compare(name, args, expected, address) {\n"
+            "    assert.equal(typeof guest[name], 'function', 'export ' + name);\n"
+            "    checks += 1;\n"
+            "    let actual;\n"
+            "    try {\n"
+            "        actual = BigInt(guest[name](...args));\n"
+            "        if (address) actual = BigInt.asUintN(pointerBits, actual);\n"
+            "    } catch (error) {\n"
+            "        actual = String(error);\n"
+            "    }\n"
+            "    if (actual !== expected) {\n"
+            "        failures += 1;\n"
+            "        if (!firstFailure.has(name)) firstFailure.set(name, name + '(' + args.join(',') + '): expected=' + expected + ' actual=' + actual);\n"
+            "    }\n"
+            "}\n"
+            "function oracle(width, signed, stride, raw) {\n"
+            "    const index = signed ? BigInt.asIntN(width, raw) : BigInt.asUintN(width, raw);\n"
+            "    return BigInt.asUintN(pointerBits, base + index * BigInt(stride));\n"
+            "}\n"
+            "function addressCheck(width, signed, kind, stride, raw, expected) {\n"
+            "    const name = 'index_' + (signed ? 's' : 'u') + width + '_' + kind + '_' + stride;\n"
+            "    const input = width <= 32 ? Number(BigInt.asIntN(32, raw)) : BigInt.asIntN(64, raw);\n"
+            "    compare(name, [baseArgument, input], expected, true);\n"
+            "}\n"
+            "if (mode === 'canonical') {\n"
+            "    const literals = [\n"
+            "        [8,true,'pointer',4,-1n,65540n], [8,true,'array',4,255n,65540n],\n"
+            "        [16,true,'pointer',4,65535n,65540n], [32,true,'array',4,-2n,65536n],\n"
+            "        [64,true,'pointer',4,-2n,65536n], [8,false,'array',1,-1n,65799n],\n"
+            "        [16,false,'pointer',1,-1n,131079n], [32,false,'array',1,2147483648n,2147549192n],\n"
+            "        [32,false,'pointer',1,-1n,pointerBytes === 8 ? 4295032839n : 65543n],\n"
+            "        [64,false,'array',1,-1n,65543n], [8,true,'pointer',4,257n,65548n],\n"
+            "        [16,false,'array',4,65537n,65548n],\n"
+            "    ];\n"
+            "    for (const [width,signed,kind,stride,raw,expected] of literals) {\n"
+            "        assert.equal(oracle(width,signed,stride,raw), expected, 'independent literal oracle');\n"
+            "        addressCheck(width,signed,kind,stride,raw,expected);\n"
+            "    }\n"),
+        S8(
+            "    const rawValues = [0n,1n,2n,-1n,-2n,127n,128n,255n,32767n,32768n,65535n,\n"
+            "                       2147483647n,2147483648n,4294967295n,9223372036854775808n,18446744073709551615n];\n"
+            "    for (const width of [8,16,32,64]) {\n"
+            "        for (const signed of [false,true]) {\n"
+            "            for (const kind of ['pointer','array']) {\n"
+            "                for (const stride of [1,4]) {\n"
+            "                    for (const raw of rawValues) addressCheck(width,signed,kind,stride,raw,oracle(width,signed,stride,raw));\n"
+            "                }\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    // Only these LOAD rows touch memory; -2..2 stays inside one five-element region.\n"
+            "    const values = [17,23,31,41,53];\n"
+            "    const view = new DataView(guest.memory.buffer);\n"
+            "    for (let i = 0; i < values.length; i += 1) view.setUint32(65536 + i * 4, values[i], true);\n"
+            "    for (const kind of ['pointer','array']) {\n"
+            "        for (let index = -2; index <= 2; index += 1) compare('load_s32_' + kind + '_4', [baseArgument,index], BigInt(values[index+2]), false);\n"
+            "    }\n"
+            "} else {\n"
+            "    assert.equal(mode, 'c');\n"
+            "    const values = [17n,23n,31n,41n,53n];\n"
+            "    for (const name of ['c_index_pointer','c_index_array']) {\n"
+            "        for (let index = -2; index <= 2; index += 1) compare(name, [index], values[index+2], false);\n"
+            "    }\n"
+            "}\n"
+            "assert.equal(checks, expectedChecks, 'complete fixed matrix');\n"
+            "console.log('WASM_INDEX sha256=' + digest + ' pointer_bytes=' + pointerBytes + ' mode=' + mode + ' checks=' + checks + ' failures=' + failures);\n"
+            "assert.equal(failures, 0, Array.from(firstFailure.values()).join('\\n'));\n"
+            "console.log(checks + '/' + checks + ' Wasm index engine checks passed');\n"),
+    };
+    String8 c_source = S8(
+        "static unsigned items[5] = {17,23,31,41,53};\n"
+        "unsigned c_index_pointer(int i){unsigned* p=items+2;return p[i];}\n"
+        "unsigned c_index_array(int i){return items[i+2];}\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        bool committed = false;
+        IrProgram program = compiler_driver_test_wasm_index_program(arena, targets[target_index], &committed);
+        bool ready = BUSTER_REQUIRE(arguments, committed && program.modules->function_count == COMPILER_DRIVER_WASM_INDEX_FUNCTION_COUNT);
+        if (ready)
+        {
+            IrValidationResult validation = ir_prepare_canonical_module(&program, program.modules, false);
+            ready = BUSTER_REQUIRE(arguments, validation.error == IR_VALIDATION_NONE);
+        }
+        if (ready)
+        {
+            WasmOptions options = WASM64_OPTIONS_DEFAULT;
+            options.pointer_size = target_index == 0 ? 4 : 8;
+            WasmArtifact first = wasm_emit(arena, &program, program.modules, 1, options);
+            WasmArtifact second = wasm_emit(arena, &program, program.modules, 1, options);
+            BUSTER_TEST_RAW(arguments, first.success && second.success, first.error.message);
+            if (first.success && second.success)
+            {
+                BUSTER_TEST(arguments, first.bytes.pointer && first.bytes.length && first.bytes.length == second.bytes.length &&
+                                       memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                BUSTER_TEST(arguments, first.stats.memory64 == (options.pointer_size == 8) &&
+                                       first.stats.defined_function_count == COMPILER_DRIVER_WASM_INDEX_FUNCTION_COUNT);
+                String8 script = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(script_parts), false);
+                UnitTestResult engine = compiler_driver_test_wasm_index_engine(
+                    arguments, arena, first.bytes, script, (u32)options.pointer_size, S8("canonical"), COMPILER_DRIVER_WASM_INDEX_ENGINE_CHECK_COUNT);
+                result.test_count += engine.test_count;
+                result.succeeded_test_count += engine.succeeded_test_count;
+            }
+        }
+        scratch_end(temporary);
+    }
+    // Source-level negatives stay within items[0..4]. Record the canonical
+    // width actually emitted; frontend widening does not cover a narrow row.
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(arena, c_source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(arena, S8("wasm-index-signedness.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = frontend == 0});
+            bool ready = BUSTER_REQUIRE(arguments, !preprocess.error_count && lowered.program && !lowered.diagnostic_count);
+            if (ready)
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                u32 index_count = 0;
+                u32 dynamic_count = 0;
+                u32 signed32 = 0;
+                u32 signed64 = 0;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 row = 0; row < function->instruction_count; row += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + row;
+                        if (instruction->opcode == IR_OPCODE_INDEX)
+                        {
+                            bool valid = instruction->operand_count == 2 && instruction->operands &&
+                                         instruction->operands[1].value < function->value_count;
+                            IrType* type = valid
+                                ? ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type)
+                                : 0;
+                            valid &= type && type->kind == IR_TYPE_INTEGER;
+                            BUSTER_TEST(arguments, valid);
+                            ready &= valid;
+                            index_count += 1;
+                            IrValue* operand = valid ? function->values + instruction->operands[1].value : 0;
+                            IrInstruction* definition = operand && operand->definition.value < function->instruction_count
+                                ? function->instructions + operand->definition.value : 0;
+                            bool dynamic = definition && definition->opcode != IR_OPCODE_CONSTANT_INTEGER;
+                            dynamic_count += dynamic;
+                            if (dynamic && type)
+                            {
+                                arguments->show(arguments,
+                                    S8("WASM_C_INDEX_ROW pointer_bytes={u32} frontend={u32} function={S8} row={u32} width={u32} signed={u32} definition_opcode={u32}\n"),
+                                    (u32)program->data_layout.pointer.size, frontend, function->name, row, type->bit_width,
+                                    (u32)type->is_signed, (u32)definition->opcode);
+                            }
+                            signed32 += type && type->is_signed && type->bit_width == 32;
+                            signed64 += type && type->is_signed && type->bit_width == 64;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, index_count != 0 && dynamic_count >= 2);
+                ready &= index_count != 0 && dynamic_count >= 2;
+                arguments->show(arguments, S8("WASM_C_INDEX pointer_bytes={u32} frontend={u32} rows={u32} dynamic={u32} signed32={u32} signed64={u32}\n"),
+                                (u32)program->data_layout.pointer.size, frontend, index_count, dynamic_count, signed32, signed64);
+                if (ready)
+                {
+                    IrValidationResult validation = ir_prepare_canonical_module(program, module, false);
+                    ready = BUSTER_REQUIRE(arguments, validation.error == IR_VALIDATION_NONE);
+                }
+                if (ready)
+                {
+                    WasmOptions options = WASM64_OPTIONS_DEFAULT;
+                    options.pointer_size = target_index == 0 ? 4 : 8;
+                    WasmArtifact first = wasm_emit(arena, program, module, 1, options);
+                    WasmArtifact second = wasm_emit(arena, program, module, 1, options);
+                    BUSTER_TEST_RAW(arguments, first.success && second.success, first.error.message);
+                    if (first.success && second.success)
+                    {
+                        BUSTER_TEST(arguments, first.bytes.pointer && first.bytes.length && first.bytes.length == second.bytes.length &&
+                                               memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                        BUSTER_TEST(arguments, first.stats.memory64 == (options.pointer_size == 8) && first.stats.defined_function_count == 2);
+                        String8 script = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(script_parts), false);
+                        UnitTestResult engine = compiler_driver_test_wasm_index_engine(
+                            arguments, arena, first.bytes, script, (u32)options.pointer_size, S8("c"), 10);
+                        result.test_count += engine.test_count;
+                        result.succeeded_test_count += engine.succeeded_test_count;
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 
 BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_bit_count_program(Arena* arena, Target target, u32 const* widths, u32 width_count, bool* committed_out)
 {
@@ -20181,6 +20602,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_index_signedness);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_stack_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_bit_counts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_switch_images);
