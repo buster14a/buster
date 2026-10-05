@@ -267,6 +267,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_scratch_capacity(UnitTestArgu
                     BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_EVENTS));
                     BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_READS));
                     BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_BODY_TASKS));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_SSA_SLOTS));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_SSA_PARAMETERS));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_SSA_FINISH_CFG));
+                    BUSTER_TEST(arguments, c_test_ir_dynamic_scratch_rejection(preprocess, large, C_TEST_IR_SCRATCH_SSA_FINISH_PUBLISH));
                 }
                 else if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1))
                 {
