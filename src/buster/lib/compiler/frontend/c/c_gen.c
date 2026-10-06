@@ -2223,6 +2223,31 @@ struct CIrQueryResume
     u8 reserved[2];
 };
 
+// A persisted strict operand-type answer: the STRICT_OPERAND_TYPE key fields
+// and the result, without the rest of a query frame, so the per-unit table
+// costs a few words per entry rather than a whole frame.
+typedef struct CIrStrictResult CIrStrictResult;
+struct CIrStrictResult
+{
+    IrTypeId result_type;
+    u32 start;
+    u32 end;
+    u32 third;
+    u32 fourth;
+    bool flag;
+    bool success;
+    u8 reserved[2];
+};
+
+// One slot of the in-run strict index: the completed-table row of a strict
+// operand-type answer, valid only for the outermost run that wrote it.
+typedef struct CIrStrictRunSlot CIrStrictRunSlot;
+struct CIrStrictRunSlot
+{
+    u32 completed_plus_one;
+    u32 generation;
+};
+
 typedef struct CIrQueryMachine CIrQueryMachine;
 struct CIrQueryMachine
 {
@@ -2232,8 +2257,15 @@ struct CIrQueryMachine
     // table is rewound whenever a root finishes) so nested subexpressions are
     // typed once per unit instead of being re-derived by every enclosing
     // conditional or sizeof operand that walks them (GitHub #2531).
-    CIrQueryFrame* strict_results;
+    CIrStrictResult* strict_results;
     u32* strict_slots;
+    // Indexes this run's completed strict answers, failures included, so a
+    // request for an operand not typed yet is answered without scanning the
+    // whole completed table: a chain of N operands made N such misses
+    // (GitHub #2715). Slots of an earlier outermost run read as empty; a
+    // rewound row no longer matches its key, and a run that overflows the
+    // index falls back to the scan.
+    CIrStrictRunSlot* strict_run_slots;
     CIrConstantValue* values;
     CIrConstantOperator* operators;
     CIrQueryResume* resumes;
@@ -2251,7 +2283,10 @@ struct CIrQueryMachine
     // epoch advances whenever that state changes. Earlier answers stay in the
     // table but never match a later key.
     u32 strict_epoch;
+    u32 strict_run_generation;
+    u32 strict_run_count;
     bool strict_persist;
+    bool strict_run_complete;
     u32 value_count;
     u32 value_capacity;
     u32 operator_count;
@@ -3347,8 +3382,48 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
 
 BUSTER_C_INTERNAL u32 c_ir_strict_result_probe(CIrQueryMachine* machine, CIrQueryFrame key)
 {
-    u32 hash = key.start * 2654435761u ^ key.end * 2246822519u ^ (key.third * 2 + (u32)key.flag) * 3266489917u;
+    u32 hash = key.start * 2654435761u ^ key.end * 2246822519u ^ (key.third * 2 + (u32)key.flag) * 3266489917u ^ key.fourth * 668265263u;
     return (hash ^ (hash >> 16)) & machine->strict_slot_mask;
+}
+
+BUSTER_C_INTERNAL void c_ir_strict_run_insert(CIrQueryMachine* machine, u32 completed_index)
+{
+    if (machine->strict_run_complete && machine->strict_run_count < machine->strict_slot_mask / 2)
+    {
+        u32 probe = c_ir_strict_result_probe(machine, machine->completed[completed_index]);
+        while (machine->strict_run_slots[probe].generation == machine->strict_run_generation)
+        {
+            probe = (probe + 1) & machine->strict_slot_mask;
+        }
+        machine->strict_run_slots[probe] = (CIrStrictRunSlot){
+            .completed_plus_one = completed_index + 1,
+            .generation = machine->strict_run_generation,
+        };
+        machine->strict_run_count += 1;
+    }
+    else
+    {
+        machine->strict_run_complete = false;
+    }
+}
+
+// Looks a strict key up among this run's completed answers. `known` reports
+// whether the index covers every one of them, so a miss is final.
+BUSTER_C_INTERNAL bool c_ir_strict_run_find(CIrQueryMachine* machine, CIrQueryFrame key, CIrQueryFrame* result_out, bool* known_out)
+{
+    bool hit = false;
+    for (u32 probe = c_ir_strict_result_probe(machine, key); !hit && machine->strict_run_slots[probe].generation == machine->strict_run_generation;
+         probe = (probe + 1) & machine->strict_slot_mask)
+    {
+        u32 index = machine->strict_run_slots[probe].completed_plus_one - 1;
+        hit = index < machine->completed_count && c_ir_query_key_equal(machine->completed[index], key);
+        if (hit)
+        {
+            *result_out = machine->completed[index];
+        }
+    }
+    *known_out = hit || machine->strict_run_complete;
+    return hit;
 }
 
 BUSTER_C_INTERNAL bool c_ir_strict_result_find(CIrQueryMachine* machine, CIrQueryFrame key, CIrQueryFrame* result_out)
@@ -3356,11 +3431,13 @@ BUSTER_C_INTERNAL bool c_ir_strict_result_find(CIrQueryMachine* machine, CIrQuer
     bool hit = false;
     for (u32 probe = c_ir_strict_result_probe(machine, key); machine->strict_persist && machine->strict_slots[probe] && !hit; probe = (probe + 1) & machine->strict_slot_mask)
     {
-        CIrQueryFrame stored = machine->strict_results[machine->strict_slots[probe] - 1];
-        hit = c_ir_query_key_equal(stored, key);
+        CIrStrictResult stored = machine->strict_results[machine->strict_slots[probe] - 1];
+        hit = stored.start == key.start && stored.end == key.end && stored.flag == key.flag && stored.third == key.third && stored.fourth == key.fourth;
         if (hit)
         {
-            *result_out = stored;
+            *result_out = key;
+            result_out->result_type = stored.result_type;
+            result_out->success = stored.success;
         }
     }
     return hit;
@@ -3375,7 +3452,15 @@ BUSTER_C_INTERNAL void c_ir_strict_result_insert(CIrQueryMachine* machine, CIrQu
         {
             probe = (probe + 1) & machine->strict_slot_mask;
         }
-        machine->strict_results[machine->strict_result_count] = frame;
+        machine->strict_results[machine->strict_result_count] = (CIrStrictResult){
+            .result_type = frame.result_type,
+            .start = frame.start,
+            .end = frame.end,
+            .third = frame.third,
+            .fourth = frame.fourth,
+            .flag = frame.flag,
+            .success = frame.success,
+        };
         machine->strict_slots[probe] = machine->strict_result_count + 1;
         machine->strict_result_count += 1;
     }
@@ -3390,7 +3475,12 @@ BUSTER_C_INTERNAL bool c_ir_query_request(CIntegerIrBuilder* builder, CIrQueryFr
     {
         return true;
     }
-    for (u32 index = machine->completed_count; index != 0; index -= 1)
+    bool known = false;
+    if (key.kind == C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE && machine->strict_run_slots && c_ir_strict_run_find(machine, key, result_out, &known))
+    {
+        return true;
+    }
+    for (u32 index = known ? 0 : machine->completed_count; index != 0; index -= 1)
     {
         CIrQueryFrame completed = machine->completed[index - 1];
         if (c_ir_query_key_equal(completed, key))
@@ -3419,6 +3509,12 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
     u32 completed_start = machine->completed_count;
     u32 value_start = machine->value_count;
     u32 operator_start = machine->operator_count;
+    if (!frame_start)
+    {
+        machine->strict_run_generation += 1;
+        machine->strict_run_count = 0;
+        machine->strict_run_complete = true;
+    }
     machine->resumes[machine->frame_count] = (CIrQueryResume){0};
     machine->frames[machine->frame_count++] = root;
     while (machine->frame_count > frame_start)
@@ -3513,6 +3609,10 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
         CIrQueryFrame completed = *frame;
         machine->frame_count -= 1;
         machine->completed[machine->completed_count++] = completed;
+        if (completed.kind == C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE && machine->strict_run_slots)
+        {
+            c_ir_strict_run_insert(machine, machine->completed_count - 1);
+        }
         if (completed.kind == C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE && completed.success && machine->strict_slots)
         {
             c_ir_strict_result_insert(machine, completed);
@@ -3621,8 +3721,14 @@ BUSTER_C_INTERNAL bool c_ir_query_prediction(CIntegerIrBuilder* builder, u32 sta
 // same token range queried inside and outside a `({ ...; tail; })` tail stays
 // distinct. A miss leaves the request pending and returns false; the machine
 // reruns this frame after the child completes.
-BUSTER_C_INTERNAL bool c_ir_query_strict_operand_type(CIntegerIrBuilder* builder, u32 start, u32 end, bool promote_bit_fields, bool statement_tail,
-                                                      IrTypeId* type_out)
+//
+// `question_hint`/`colon_hint` name the range's top-level `?` and its `:` when
+// the requester already knows them (UINT32_MAX otherwise). They ride in the
+// frame's fifth/sixth fields, outside the key, so the false arm of a
+// conditional chain `a ? b : c ? d : ...` is not rescanned to its end at
+// every level (GitHub #2715).
+BUSTER_C_INTERNAL bool c_ir_query_strict_operand_type_hinted(CIntegerIrBuilder* builder, u32 start, u32 end, bool promote_bit_fields, bool statement_tail,
+                                                             u32 question_hint, u32 colon_hint, IrTypeId* type_out)
 {
     CIrQueryFrame result = {0};
     CIrQueryFrame key = {
@@ -3630,15 +3736,23 @@ BUSTER_C_INTERNAL bool c_ir_query_strict_operand_type(CIntegerIrBuilder* builder
         .end = end,
         .third = statement_tail || builder->sizeof_statement_expression_tail_depth != 0,
         .fourth = builder->queries->strict_epoch,
+        .fifth = question_hint == UINT32_MAX ? 0 : question_hint + 1,
+        .sixth = colon_hint,
         .kind = C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE,
         .flag = promote_bit_fields,
     };
-    if (!c_ir_query_request(builder, key, &result))
+    bool typed = c_ir_query_request(builder, key, &result) && result.success;
+    if (typed)
     {
-        return false;
+        *type_out = result.result_type;
     }
-    *type_out = result.result_type;
-    return result.success;
+    return typed;
+}
+
+BUSTER_C_INTERNAL bool c_ir_query_strict_operand_type(CIntegerIrBuilder* builder, u32 start, u32 end, bool promote_bit_fields, bool statement_tail,
+                                                      IrTypeId* type_out)
+{
+    return c_ir_query_strict_operand_type_hinted(builder, start, end, promote_bit_fields, statement_tail, UINT32_MAX, UINT32_MAX, type_out);
 }
 
 BUSTER_C_INTERNAL bool c_ir_query_conditional_type(CIntegerIrBuilder* builder, IrTypeId true_type, IrTypeId false_type, u32 true_start, u32 true_end,
@@ -28037,6 +28151,308 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, chain_start, end, promote_bit_fields);
 }
 
+// Left-associative operator tiers the strict walk folds as one chain. A chain
+// tier is only folded when no looser operator appears at the top level of the
+// range, so every operand between two chain operators holds tighter-binding
+// operators only.
+typedef enum CIrStrictChain
+{
+    C_IR_STRICT_CHAIN_NONE,
+    C_IR_STRICT_CHAIN_BIT_OR,
+    C_IR_STRICT_CHAIN_BIT_XOR,
+    C_IR_STRICT_CHAIN_BIT_AND,
+    C_IR_STRICT_CHAIN_ADDITIVE,
+    C_IR_STRICT_CHAIN_MULTIPLICATIVE,
+} CIrStrictChain;
+
+// The loosest top-level operator of every precedence tier in one token range.
+// Left-associative tiers record their last operator, the right-associative
+// assignment its first; `stop` is the first operator of the requested chain
+// tier when the scan was asked to stop there, otherwise the range end.
+typedef struct CIrStrictOperandScan CIrStrictOperandScan;
+struct CIrStrictOperandScan
+{
+    u32 last_comma;
+    u32 first_assign;
+    u32 first_question;
+    u32 first_colon;
+    u32 logical_index;
+    u32 bit_or_index;
+    u32 bit_xor_index;
+    u32 bit_and_index;
+    u32 comparison_index;
+    u32 first_shift_index;
+    u32 additive_index;
+    u32 multiplicative_index;
+    u32 stop;
+    bool valid;
+    u8 reserved[3];
+};
+
+// One top-level scan of [start, end). A `?` only counts at ternary depth zero
+// so operators inside conditional arms never split the outer expression. With
+// a chain tier in `stop_chain` the scan ends at that tier's first top-level
+// operator: after any binary operator at ternary depth zero the scan state is
+// "no operand yet, depth zero", so scanning onward from the operand after one
+// chain operator finds exactly the next operator a whole-range scan records,
+// and the chain fold visits each token once instead of once per operand.
+BUSTER_C_INTERNAL CIrStrictOperandScan c_ir_strict_operand_scan(CIntegerIrBuilder* builder, u32 start, u32 end, CIrStrictChain stop_chain)
+{
+    CIrStrictOperandScan scan = {
+        .last_comma = UINT32_MAX,
+        .first_assign = UINT32_MAX,
+        .first_question = UINT32_MAX,
+        .first_colon = UINT32_MAX,
+        .logical_index = UINT32_MAX,
+        .bit_or_index = UINT32_MAX,
+        .bit_xor_index = UINT32_MAX,
+        .bit_and_index = UINT32_MAX,
+        .comparison_index = UINT32_MAX,
+        .first_shift_index = UINT32_MAX,
+        .additive_index = UINT32_MAX,
+        .multiplicative_index = UINT32_MAX,
+        .stop = end,
+        .valid = true,
+    };
+    u32 ternary_depth = 0;
+    bool previous_is_operand = false;
+    for (u32 index = start; scan.valid && scan.stop == end && index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        u32 group_open = index;
+        CIrGroupScan group = c_ir_scan_delimiter_group(builder, &index, end);
+        u32 punctuator = token.punctuator;
+        CIrStrictChain chain = C_IR_STRICT_CHAIN_NONE;
+        if (group == C_IR_GROUP_SCAN_SKIPPED)
+        {
+            previous_is_operand = true;
+            // A parenthesized group is an operand -- unless it is a cast, in
+            // which case the `*`, `&`, `+` or `-` after it is a prefix
+            // operator over the cast's operand, not a binary one.  ctypes'
+            // SET macro writes `(signed char)*(signed char*)ptr & 3`, where
+            // reading the star as multiplication combined the mask against
+            // the pointer and predicted the whole conditional arm as one.
+            // The type-name test runs only when the next token is
+            // sign-ambiguous, so ordinary grouped operands pay one compare.
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end)
+            {
+                u32 following = builder->preprocess.tokens[index + 1].punctuator;
+                if ((following == C_PUNCTUATOR_STAR || following == C_PUNCTUATOR_AMPERSAND || following == C_PUNCTUATOR_PLUS ||
+                     following == C_PUNCTUATOR_MINUS) &&
+                    group_open + 1 < index && c_ir_group_type_name(builder, group_open, index).value != IR_ID_UNDERLYING_INVALID)
+                {
+                    previous_is_operand = false;
+                }
+            }
+        }
+        else if (group == C_IR_GROUP_SCAN_UNCLOSED)
+        {
+            scan.valid = false;
+        }
+        else if (punctuator == C_PUNCTUATOR_NONE)
+        {
+            // The sizeof/alignof words are prefix operators, so a `*` after one
+            // dereferences rather than multiplies.
+            previous_is_operand =
+                token.kind != C_TOKEN_IDENTIFIER || (!string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) && !c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)));
+        }
+        else if (punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            if (!ternary_depth && scan.first_question == UINT32_MAX)
+            {
+                scan.first_question = index;
+            }
+            ternary_depth += 1;
+            previous_is_operand = false;
+        }
+        else if (punctuator == C_PUNCTUATOR_COLON)
+        {
+            scan.valid = ternary_depth != 0;
+            if (scan.valid)
+            {
+                ternary_depth -= 1;
+                if (!ternary_depth && scan.first_colon == UINT32_MAX)
+                {
+                    scan.first_colon = index;
+                }
+            }
+            previous_is_operand = false;
+        }
+        else if (punctuator != C_PUNCTUATOR_PLUS_PLUS && punctuator != C_PUNCTUATOR_MINUS_MINUS)
+        {
+            // Postfix after an operand, prefix before one: either way `++`
+            // and `--` carry the operand state over, so only other operators
+            // reach here.
+            bool binary_allowed = previous_is_operand;
+            previous_is_operand = false;
+            if (!ternary_depth)
+            {
+                switch (punctuator)
+                {
+                case C_PUNCTUATOR_COMMA: scan.last_comma = index; break;
+                case C_PUNCTUATOR_ASSIGN:
+                case C_PUNCTUATOR_PLUS_ASSIGN:
+                case C_PUNCTUATOR_MINUS_ASSIGN:
+                case C_PUNCTUATOR_STAR_ASSIGN:
+                case C_PUNCTUATOR_SLASH_ASSIGN:
+                case C_PUNCTUATOR_PERCENT_ASSIGN:
+                case C_PUNCTUATOR_SHIFT_LEFT_ASSIGN:
+                case C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN:
+                case C_PUNCTUATOR_AMPERSAND_ASSIGN:
+                case C_PUNCTUATOR_CARET_ASSIGN:
+                case C_PUNCTUATOR_PIPE_ASSIGN:
+                    if (scan.first_assign == UINT32_MAX)
+                    {
+                        scan.first_assign = index;
+                    }
+                    break;
+                case C_PUNCTUATOR_PIPE_PIPE: scan.logical_index = index; break;
+                case C_PUNCTUATOR_AMPERSAND_AMPERSAND:
+                    // A leading `&&` is a label-address operand; leave it to the prediction paths.
+                    scan.valid = binary_allowed;
+                    scan.logical_index = index;
+                    break;
+                case C_PUNCTUATOR_PIPE:
+                    scan.bit_or_index = index;
+                    chain = C_IR_STRICT_CHAIN_BIT_OR;
+                    break;
+                case C_PUNCTUATOR_CARET:
+                    scan.bit_xor_index = index;
+                    chain = C_IR_STRICT_CHAIN_BIT_XOR;
+                    break;
+                case C_PUNCTUATOR_AMPERSAND:
+                    if (binary_allowed)
+                    {
+                        scan.bit_and_index = index;
+                        chain = C_IR_STRICT_CHAIN_BIT_AND;
+                    }
+                    break;
+                case C_PUNCTUATOR_EQUAL:
+                case C_PUNCTUATOR_NOT_EQUAL:
+                case C_PUNCTUATOR_LESS:
+                case C_PUNCTUATOR_GREATER:
+                case C_PUNCTUATOR_LESS_EQUAL:
+                case C_PUNCTUATOR_GREATER_EQUAL: scan.comparison_index = index; break;
+                case C_PUNCTUATOR_SHIFT_LEFT:
+                case C_PUNCTUATOR_SHIFT_RIGHT:
+                    if (scan.first_shift_index == UINT32_MAX)
+                    {
+                        scan.first_shift_index = index;
+                    }
+                    break;
+                case C_PUNCTUATOR_PLUS:
+                case C_PUNCTUATOR_MINUS:
+                    if (binary_allowed)
+                    {
+                        scan.additive_index = index;
+                        chain = C_IR_STRICT_CHAIN_ADDITIVE;
+                    }
+                    break;
+                case C_PUNCTUATOR_STAR:
+                    if (binary_allowed)
+                    {
+                        scan.multiplicative_index = index;
+                        chain = C_IR_STRICT_CHAIN_MULTIPLICATIVE;
+                    }
+                    break;
+                case C_PUNCTUATOR_SLASH:
+                case C_PUNCTUATOR_PERCENT:
+                    scan.multiplicative_index = index;
+                    chain = C_IR_STRICT_CHAIN_MULTIPLICATIVE;
+                    break;
+                case C_PUNCTUATOR_TILDE:
+                case C_PUNCTUATOR_EXCLAMATION:
+                case C_PUNCTUATOR_DOT:
+                case C_PUNCTUATOR_ARROW: break;
+                default: scan.valid = false; break;
+                }
+            }
+        }
+        if (scan.valid && stop_chain != C_IR_STRICT_CHAIN_NONE && chain == stop_chain)
+        {
+            scan.stop = index;
+        }
+    }
+    scan.valid = scan.valid && !ternary_depth;
+    return scan;
+}
+
+// Combines the type folded so far with the next chain operand, exactly as the
+// split at `operator_index` would have combined its two sides.
+BUSTER_C_INTERNAL bool c_ir_strict_chain_combine(CIntegerIrBuilder* builder, CIrStrictChain chain, IrTypeId left, IrTypeId right, u32 operator_index,
+                                                  IrTypeId* type_out)
+{
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    if (chain == C_IR_STRICT_CHAIN_ADDITIVE)
+    {
+        left = c_ir_sizeof_operand_decay(builder, left);
+        right = c_ir_sizeof_operand_decay(builder, right);
+        result = c_ir_usual_arithmetic_type(builder, left, right);
+        IrType* left_value = ir_type_from_id(&builder->program->types, left);
+        IrType* right_value = ir_type_from_id(&builder->program->types, right);
+        if (result.value == IR_ID_UNDERLYING_INVALID && left_value && right_value)
+        {
+            bool minus = c_token_is_punctuator(&builder->preprocess.tokens[operator_index], C_PUNCTUATOR_MINUS);
+            bool left_integer = left_value->kind == IR_TYPE_BOOLEAN || left_value->kind == IR_TYPE_INTEGER || left_value->kind == IR_TYPE_ENUM;
+            bool right_integer = right_value->kind == IR_TYPE_BOOLEAN || right_value->kind == IR_TYPE_INTEGER || right_value->kind == IR_TYPE_ENUM;
+            if (left_value->kind == IR_TYPE_POINTER && right_value->kind == IR_TYPE_POINTER && minus)
+            {
+                result = builder->ptrdiff_type;
+            }
+            else if (left_value->kind == IR_TYPE_POINTER && right_integer)
+            {
+                result = left;
+            }
+            else if (!minus && left_integer && right_value->kind == IR_TYPE_POINTER)
+            {
+                result = right;
+            }
+        }
+    }
+    else
+    {
+        result = c_ir_usual_arithmetic_type(builder, left, right);
+    }
+    bool combined = result.value != IR_ID_UNDERLYING_INVALID;
+    if (combined)
+    {
+        *type_out = result;
+    }
+    return combined;
+}
+
+// The first top-level `?` of [start, end) and the `:` that closes it, exactly
+// as c_ir_strict_operand_scan records them, or false when the range has none.
+// Scanning stops at that `:`, so finding the next level of a conditional
+// chain costs its condition and true arm only.
+BUSTER_C_INTERNAL bool c_ir_strict_next_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* question_out, u32* colon_out)
+{
+    u32 question = UINT32_MAX;
+    u32 colon = UINT32_MAX;
+    u32 depth = 0;
+    bool closed = true;
+    for (u32 index = start; closed && colon == UINT32_MAX && index < end; index += 1)
+    {
+        u32 punctuator = builder->preprocess.tokens[index].punctuator;
+        CIrGroupScan group = c_ir_scan_delimiter_group(builder, &index, end);
+        closed = group != C_IR_GROUP_SCAN_UNCLOSED;
+        if (group == C_IR_GROUP_SCAN_NOT_OPEN && punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            question = question == UINT32_MAX ? index : question;
+            depth += 1;
+        }
+        else if (group == C_IR_GROUP_SCAN_NOT_OPEN && punctuator == C_PUNCTUATOR_COLON && depth)
+        {
+            depth -= 1;
+            colon = depth ? colon : index;
+        }
+    }
+    bool found = closed && question != UINT32_MAX && colon != UINT32_MAX;
+    *question_out = found ? question : UINT32_MAX;
+    *colon_out = found ? colon : UINT32_MAX;
+    return found;
+}
+
 /* Resolves the C result type of a sizeof/alignof expression operand strictly: every
    sub-operand must resolve through a mapped entity, literal, cast, or call before any
    type is combined, and binary operators apply the usual arithmetic conversions (so
@@ -28046,7 +28462,11 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
    silently into the program (the 2026-08-08 array-bound incident, and the same
    defect shape in function bodies). The walk is not recursive: every sub-operand
    resolves through a STRICT_OPERAND_TYPE query frame (c_ir_query_strict_operand_type),
-   so expression depth is bounded by the query frame capacity, not the C stack. */
+   so expression depth is bounded by the query frame capacity, not the C stack.
+   Left-associative chains (`a + b + ... + z`) fold their operands left to right in
+   one frame whose progress survives suspension in the frame's CIrQueryResume slot, so
+   typing a chain of N operands costs O(N) rather than re-splitting every prefix
+   (GitHub #2715). */
 BUSTER_C_INTERNAL bool c_ir_strict_operand_type_walk(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields)
 {
     // GNU __extension__ is a diagnostic-only marker on the expression that
@@ -28080,170 +28500,46 @@ BUSTER_C_INTERNAL bool c_ir_strict_operand_type_walk(CIntegerIrBuilder* builder,
     {
         return false;
     }
-    // One top-level scan records the loosest-binding operator of every precedence tier.
-    // Left-associative tiers split at their last top-level operator, the right-associative
-    // assignment at its first; a `?` only counts at ternary depth zero so operators inside
-    // conditional arms never split the outer expression.
-    u32 last_comma = UINT32_MAX;
-    u32 first_assign = UINT32_MAX;
-    u32 first_question = UINT32_MAX;
-    u32 first_colon = UINT32_MAX;
-    u32 logical_index = UINT32_MAX;
-    u32 bit_or_index = UINT32_MAX;
-    u32 bit_xor_index = UINT32_MAX;
-    u32 bit_and_index = UINT32_MAX;
-    u32 comparison_index = UINT32_MAX;
-    u32 shift_index = UINT32_MAX;
-    u32 additive_index = UINT32_MAX;
-    u32 multiplicative_index = UINT32_MAX;
-    u32 ternary_depth = 0;
-    bool previous_is_operand = false;
-    for (u32 index = start; index < end; index += 1)
+    // A frame resuming a chain fold skips the whole-range scan: it already
+    // chose its tier, and the scan would cost the full range once per operand.
+    CIrQueryMachine* machine = builder->queries;
+    CIrQueryResume* resume = machine->resumes + machine->frame_count - 1;
+    CIrStrictChain chain = resume->valid ? (CIrStrictChain)resume->operator_start : C_IR_STRICT_CHAIN_NONE;
+    // A conditional's false arm arrives with its own top-level `?` and `:`
+    // already located. The enclosing range was scanned whole and chose the
+    // conditional, so this arm has no top-level comma or assignment and every
+    // token its own scan would check was already checked there.
+    CIrQueryFrame* frame = machine->frames + machine->frame_count - 1;
+    bool hinted = !chain && frame->fifth && frame->fifth - 1 >= start && frame->sixth < end;
+    CIrStrictOperandScan scan = {
+        .last_comma = UINT32_MAX,
+        .first_assign = UINT32_MAX,
+        .first_question = hinted ? frame->fifth - 1 : UINT32_MAX,
+        .first_colon = hinted ? frame->sixth : UINT32_MAX,
+        .logical_index = UINT32_MAX,
+        .bit_or_index = UINT32_MAX,
+        .bit_xor_index = UINT32_MAX,
+        .bit_and_index = UINT32_MAX,
+        .comparison_index = UINT32_MAX,
+        .first_shift_index = UINT32_MAX,
+        .additive_index = UINT32_MAX,
+        .multiplicative_index = UINT32_MAX,
+        .stop = end,
+        .valid = true,
+    };
+    if (chain == C_IR_STRICT_CHAIN_NONE && !hinted)
     {
-        CToken token = builder->preprocess.tokens[index];
-        u32 group_open = index;
-        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
-        if (scan == C_IR_GROUP_SCAN_SKIPPED)
-        {
-            previous_is_operand = true;
-            // A parenthesized group is an operand -- unless it is a cast, in
-            // which case the `*`, `&`, `+` or `-` after it is a prefix
-            // operator over the cast's operand, not a binary one.  ctypes'
-            // SET macro writes `(signed char)*(signed char*)ptr & 3`, where
-            // reading the star as multiplication combined the mask against
-            // the pointer and predicted the whole conditional arm as one.
-            // The type-name test runs only when the next token is
-            // sign-ambiguous, so ordinary grouped operands pay one compare.
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end)
-            {
-                u32 following = builder->preprocess.tokens[index + 1].punctuator;
-                if ((following == C_PUNCTUATOR_STAR || following == C_PUNCTUATOR_AMPERSAND || following == C_PUNCTUATOR_PLUS ||
-                     following == C_PUNCTUATOR_MINUS) &&
-                    group_open + 1 < index && c_ir_group_type_name(builder, group_open, index).value != IR_ID_UNDERLYING_INVALID)
-                {
-                    previous_is_operand = false;
-                }
-            }
-            continue;
-        }
-        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
-        {
-            return false;
-        }
-        u32 punctuator = token.punctuator;
-        if (punctuator == C_PUNCTUATOR_NONE)
-        {
-            // The sizeof/alignof words are prefix operators, so a `*` after one
-            // dereferences rather than multiplies.
-            previous_is_operand =
-                token.kind != C_TOKEN_IDENTIFIER || (!string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) && !c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)));
-            continue;
-        }
-        if (punctuator == C_PUNCTUATOR_QUESTION)
-        {
-            if (!ternary_depth && first_question == UINT32_MAX)
-            {
-                first_question = index;
-            }
-            ternary_depth += 1;
-            previous_is_operand = false;
-            continue;
-        }
-        if (punctuator == C_PUNCTUATOR_COLON)
-        {
-            if (!ternary_depth)
-            {
-                return false;
-            }
-            ternary_depth -= 1;
-            if (!ternary_depth && first_colon == UINT32_MAX)
-            {
-                first_colon = index;
-            }
-            previous_is_operand = false;
-            continue;
-        }
-        if (punctuator == C_PUNCTUATOR_PLUS_PLUS || punctuator == C_PUNCTUATOR_MINUS_MINUS)
-        {
-            // Postfix after an operand, prefix before one: either way the operand state carries over.
-            continue;
-        }
-        bool binary_allowed = previous_is_operand;
-        previous_is_operand = false;
-        if (ternary_depth)
-        {
-            continue;
-        }
-        switch (punctuator)
-        {
-        case C_PUNCTUATOR_COMMA: last_comma = index; break;
-        case C_PUNCTUATOR_ASSIGN:
-        case C_PUNCTUATOR_PLUS_ASSIGN:
-        case C_PUNCTUATOR_MINUS_ASSIGN:
-        case C_PUNCTUATOR_STAR_ASSIGN:
-        case C_PUNCTUATOR_SLASH_ASSIGN:
-        case C_PUNCTUATOR_PERCENT_ASSIGN:
-        case C_PUNCTUATOR_SHIFT_LEFT_ASSIGN:
-        case C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN:
-        case C_PUNCTUATOR_AMPERSAND_ASSIGN:
-        case C_PUNCTUATOR_CARET_ASSIGN:
-        case C_PUNCTUATOR_PIPE_ASSIGN:
-            if (first_assign == UINT32_MAX)
-            {
-                first_assign = index;
-            }
-            break;
-        case C_PUNCTUATOR_PIPE_PIPE: logical_index = index; break;
-        case C_PUNCTUATOR_AMPERSAND_AMPERSAND:
-            if (!binary_allowed)
-            {
-                // A leading `&&` is a label-address operand; leave it to the prediction paths.
-                return false;
-            }
-            logical_index = index;
-            break;
-        case C_PUNCTUATOR_PIPE: bit_or_index = index; break;
-        case C_PUNCTUATOR_CARET: bit_xor_index = index; break;
-        case C_PUNCTUATOR_AMPERSAND:
-            if (binary_allowed)
-            {
-                bit_and_index = index;
-            }
-            break;
-        case C_PUNCTUATOR_EQUAL:
-        case C_PUNCTUATOR_NOT_EQUAL:
-        case C_PUNCTUATOR_LESS:
-        case C_PUNCTUATOR_GREATER:
-        case C_PUNCTUATOR_LESS_EQUAL:
-        case C_PUNCTUATOR_GREATER_EQUAL: comparison_index = index; break;
-        case C_PUNCTUATOR_SHIFT_LEFT:
-        case C_PUNCTUATOR_SHIFT_RIGHT: shift_index = index; break;
-        case C_PUNCTUATOR_PLUS:
-        case C_PUNCTUATOR_MINUS:
-            if (binary_allowed)
-            {
-                additive_index = index;
-            }
-            break;
-        case C_PUNCTUATOR_STAR:
-            if (binary_allowed)
-            {
-                multiplicative_index = index;
-            }
-            break;
-        case C_PUNCTUATOR_SLASH:
-        case C_PUNCTUATOR_PERCENT: multiplicative_index = index; break;
-        case C_PUNCTUATOR_TILDE:
-        case C_PUNCTUATOR_EXCLAMATION:
-        case C_PUNCTUATOR_DOT:
-        case C_PUNCTUATOR_ARROW: break;
-        default: return false;
-        }
+        scan = c_ir_strict_operand_scan(builder, start, end, C_IR_STRICT_CHAIN_NONE);
     }
-    if (ternary_depth)
+    if (!scan.valid)
     {
         return false;
     }
+    u32 last_comma = scan.last_comma;
+    u32 first_assign = scan.first_assign;
+    u32 first_question = scan.first_question;
+    u32 first_colon = scan.first_colon;
+    u32 logical_index = scan.logical_index;
     if (last_comma != UINT32_MAX)
     {
         IrTypeId right = IR_TYPE_ID_INVALID;
@@ -28282,8 +28578,14 @@ BUSTER_C_INTERNAL bool c_ir_strict_operand_type_walk(CIntegerIrBuilder* builder,
         }
         IrTypeId true_type = IR_TYPE_ID_INVALID;
         IrTypeId false_type = IR_TYPE_ID_INVALID;
-        if (!c_ir_query_strict_operand_type(builder, true_start, true_end, true, false, &true_type) ||
-            !c_ir_query_strict_operand_type(builder, first_colon + 1, end, true, false, &false_type))
+        if (!c_ir_query_strict_operand_type(builder, true_start, true_end, true, false, &true_type))
+        {
+            return false;
+        }
+        u32 next_question = UINT32_MAX;
+        u32 next_colon = UINT32_MAX;
+        c_ir_strict_next_conditional(builder, first_colon + 1, end, &next_question, &next_colon);
+        if (!c_ir_query_strict_operand_type_hinted(builder, first_colon + 1, end, true, false, next_question, next_colon, &false_type))
         {
             return false;
         }
@@ -28308,105 +28610,95 @@ BUSTER_C_INTERNAL bool c_ir_strict_operand_type_walk(CIntegerIrBuilder* builder,
         *type_out = builder->s32_type;
         return true;
     }
-    u32 bitwise_index = bit_or_index != UINT32_MAX ? bit_or_index : bit_xor_index != UINT32_MAX ? bit_xor_index : bit_and_index;
-    if (bitwise_index != UINT32_MAX)
+    if (!chain)
     {
-        IrTypeId left = IR_TYPE_ID_INVALID;
-        IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_query_strict_operand_type(builder, start, bitwise_index, true, false, &left) ||
-            !c_ir_query_strict_operand_type(builder, bitwise_index + 1, end, true, false, &right))
+        chain = scan.bit_or_index != UINT32_MAX    ? C_IR_STRICT_CHAIN_BIT_OR
+                : scan.bit_xor_index != UINT32_MAX ? C_IR_STRICT_CHAIN_BIT_XOR
+                : scan.bit_and_index != UINT32_MAX ? C_IR_STRICT_CHAIN_BIT_AND
+                                                   : C_IR_STRICT_CHAIN_NONE;
+        if (!chain && scan.comparison_index != UINT32_MAX)
         {
-            return false;
-        }
-        IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
-        if (result.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return false;
-        }
-        *type_out = result;
-        return true;
-    }
-    if (comparison_index != UINT32_MAX)
-    {
-        *type_out = builder->s32_type;
-        return true;
-    }
-    if (shift_index != UINT32_MAX)
-    {
-        // A shift yields the promoted left operand; the right operand never widens it.
-        IrTypeId left = IR_TYPE_ID_INVALID;
-        if (!c_ir_query_strict_operand_type(builder, start, shift_index, true, false, &left))
-        {
-            return false;
-        }
-        IrTypeId promoted = c_ir_usual_arithmetic_type(builder, left, left);
-        IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
-        if (!promoted_value || promoted_value->kind != IR_TYPE_INTEGER)
-        {
-            return false;
-        }
-        *type_out = promoted;
-        return true;
-    }
-    if (additive_index != UINT32_MAX)
-    {
-        IrTypeId left = IR_TYPE_ID_INVALID;
-        IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_query_strict_operand_type(builder, start, additive_index, true, false, &left) ||
-            !c_ir_query_strict_operand_type(builder, additive_index + 1, end, true, false, &right))
-        {
-            return false;
-        }
-        left = c_ir_sizeof_operand_decay(builder, left);
-        right = c_ir_sizeof_operand_decay(builder, right);
-        IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, left, right);
-        if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
-        {
-            *type_out = arithmetic;
+            *type_out = builder->s32_type;
             return true;
         }
-        IrType* left_value = ir_type_from_id(&builder->program->types, left);
-        IrType* right_value = ir_type_from_id(&builder->program->types, right);
-        if (!left_value || !right_value)
+        if (!chain && scan.first_shift_index != UINT32_MAX)
         {
-            return false;
-        }
-        bool minus = c_token_is_punctuator(&builder->preprocess.tokens[additive_index], C_PUNCTUATOR_MINUS);
-        bool left_integer = left_value->kind == IR_TYPE_BOOLEAN || left_value->kind == IR_TYPE_INTEGER || left_value->kind == IR_TYPE_ENUM;
-        bool right_integer = right_value->kind == IR_TYPE_BOOLEAN || right_value->kind == IR_TYPE_INTEGER || right_value->kind == IR_TYPE_ENUM;
-        if (left_value->kind == IR_TYPE_POINTER && right_value->kind == IR_TYPE_POINTER && minus)
-        {
-            *type_out = builder->ptrdiff_type;
+            // A shift yields the promoted left operand; the right operand never
+            // widens it, so a shift chain is typed by its first operand alone.
+            IrTypeId left = IR_TYPE_ID_INVALID;
+            if (!c_ir_query_strict_operand_type(builder, start, scan.first_shift_index, true, false, &left))
+            {
+                return false;
+            }
+            IrTypeId promoted = c_ir_usual_arithmetic_type(builder, left, left);
+            IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+            if (!promoted_value || promoted_value->kind != IR_TYPE_INTEGER)
+            {
+                return false;
+            }
+            *type_out = promoted;
             return true;
         }
-        if (left_value->kind == IR_TYPE_POINTER && right_integer)
+        if (!chain)
         {
-            *type_out = left;
-            return true;
+            chain = scan.additive_index != UINT32_MAX         ? C_IR_STRICT_CHAIN_ADDITIVE
+                    : scan.multiplicative_index != UINT32_MAX ? C_IR_STRICT_CHAIN_MULTIPLICATIVE
+                                                              : C_IR_STRICT_CHAIN_NONE;
         }
-        if (!minus && left_integer && right_value->kind == IR_TYPE_POINTER)
-        {
-            *type_out = right;
-            return true;
-        }
-        return false;
     }
-    if (multiplicative_index != UINT32_MAX)
+    if (chain)
     {
-        IrTypeId left = IR_TYPE_ID_INVALID;
-        IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_query_strict_operand_type(builder, start, multiplicative_index, true, false, &left) ||
-            !c_ir_query_strict_operand_type(builder, multiplicative_index + 1, end, true, false, &right))
+        // Fold `o0 op1 o1 op2 ... ok` left to right: each operand holds only
+        // tighter operators, so it is scanned by its own frame once, and this
+        // frame scans each gap once. A missing operand suspends the fold with
+        // its position, the operator before it and the type folded so far.
+        u32 operand_start = start;
+        u32 operator_index = UINT32_MAX;
+        IrTypeId folded = IR_TYPE_ID_INVALID;
+        if (resume->valid)
         {
-            return false;
+            operand_start = resume->index;
+            operator_index = resume->value_count;
+            folded.value = resume->value_start;
+            resume->valid = false;
         }
-        IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
-        if (result.value == IR_ID_UNDERLYING_INVALID)
+        bool typed = true;
+        bool pending = false;
+        while (typed && !pending && operand_start <= end)
         {
-            return false;
+            CIrStrictOperandScan gap = c_ir_strict_operand_scan(builder, operand_start, end, chain);
+            IrTypeId operand = IR_TYPE_ID_INVALID;
+            typed = gap.valid && c_ir_query_strict_operand_type(builder, operand_start, gap.stop, true, false, &operand);
+            pending = machine->has_request;
+            if (pending)
+            {
+                *resume = (CIrQueryResume){
+                    .index = operand_start,
+                    .value_start = folded.value,
+                    .value_count = operator_index,
+                    .operator_start = (u32)chain,
+                    .valid = true,
+                };
+            }
+            else if (typed)
+            {
+                if (operator_index == UINT32_MAX)
+                {
+                    folded = operand;
+                }
+                else
+                {
+                    typed = c_ir_strict_chain_combine(builder, chain, folded, operand, operator_index, &folded);
+                }
+                operator_index = gap.stop;
+                operand_start = gap.stop + 1;
+            }
         }
-        *type_out = result;
-        return true;
+        if (typed && !pending)
+        {
+            *type_out = folded;
+        }
+        return typed && !pending;
     }
     CToken first = builder->preprocess.tokens[start];
     if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, first))))
@@ -51917,10 +52209,22 @@ bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult pars
     return valid;
 }
 
+// Slots of the strict-result and in-run strict indexes: a power of two at
+// least twice the query capacity, so open addressing keeps short probes.
+BUSTER_C_INTERNAL u64 c_ir_strict_slot_capacity(u64 query_frame_capacity)
+{
+    return next_power_of_two(query_frame_capacity * 2 + 16);
+}
+
+// Mirrors the allocation order in c_lower_to_ir_reserved_run.
 BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* position, u32 capacity)
 {
+    u64 strict_slot_capacity = c_ir_strict_slot_capacity(capacity);
     bool fits = c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryFrame), capacity, BUSTER_ALIGN_OF(CIrQueryFrame)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryFrame), capacity, BUSTER_ALIGN_OF(CIrQueryFrame)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrStrictResult), capacity, BUSTER_ALIGN_OF(CIrStrictResult)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(u32), strict_slot_capacity, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrStrictRunSlot), strict_slot_capacity, BUSTER_ALIGN_OF(CIrStrictRunSlot)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantValue), capacity, BUSTER_ALIGN_OF(CIrConstantValue)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantOperator), capacity, BUSTER_ALIGN_OF(CIrConstantOperator)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryResume), capacity, BUSTER_ALIGN_OF(CIrQueryResume));
@@ -52005,11 +52309,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     };
     queries.frames = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
     queries.completed = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
-    u64 strict_slot_capacity = next_power_of_two(query_frame_capacity * 2 + 16);
-    queries.strict_results = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
+    u64 strict_slot_capacity = c_ir_strict_slot_capacity(query_frame_capacity);
+    queries.strict_results = arena_allocate(temporary_arena, CIrStrictResult, query_frame_capacity);
     queries.strict_slots = arena_allocate_zeroed(temporary_arena, u32, strict_slot_capacity);
     queries.strict_result_capacity = (u32)query_frame_capacity;
     queries.strict_slot_mask = (u32)(strict_slot_capacity - 1);
+    queries.strict_run_slots = arena_allocate_zeroed(temporary_arena, CIrStrictRunSlot, strict_slot_capacity);
     queries.values = arena_allocate(temporary_arena, CIrConstantValue, query_frame_capacity);
     queries.operators = arena_allocate(temporary_arena, CIrConstantOperator, query_frame_capacity);
     queries.resumes = arena_allocate(temporary_arena, CIrQueryResume, query_frame_capacity);

@@ -278,7 +278,17 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   #2531). Strict results persist in a hashed per-unit table
   (`machine->strict_results`/`strict_slots`) across query roots, so nested
   conditional and sizeof operands share each subexpression's walk instead of
-  re-deriving it for every enclosing frame.
+  re-deriving it for every enclosing frame. Typing is linear in the operand
+  count (GitHub #2715): a left-associative chain such as `a + b + ... + z`
+  folds its operands left to right in one frame, keeping its position in the
+  frame's `CIrQueryResume` slot (`c_ir_strict_operand_scan` finds each next
+  operator from the previous one), and a conditional's false arm receives its
+  own top-level `?` and `:` in the frame's `fifth`/`sixth` fields instead of
+  rescanning the rest of the chain. An in-run index (`strict_run_slots`)
+  answers requests for operands not typed yet without scanning the completed
+  table. The parser's expression typer (`c_type_parse_sizeof_step`) mirrors
+  both: it pushes a chain's already-split prefixes at once and hands each
+  conditional false arm its `?`/`:` (`c_parse_expression_next_conditional`).
   `tests/basic_c_bit_field_promotion.c` covers widths 1, 3, 31, and 32,
   anonymous members, casts, assignments, and argument promotion under every
   allocator (GitHub #218).

@@ -25476,15 +25476,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
     }
     // The tallest operands only lower: each tall_H's _Static_assert already
     // fails lowering when the walk mistypes the operand, so no driver sweep.
-    // Skipped on mobile, where the test payload runs inside an emulator with
-    // a per-run deadline the quadratic walk cost would exhaust (CI Debug
-    // measured ~80 s for this fixture against a 180 s budget).
-#if !BUSTER_ANDROID && !BUSTER_IOS
-    // 4,096 is far past the old depth-64 cap and any C-stack budget. The
-    // walk still scans each operand range once per split, so cost grows with
-    // the square of the height: 10,000 took 9 s in Release and exhausted the
-    // 1,800 s fixture deadline under Linux sanitized-debug.
-    u32 lowered_heights[] = {4096};
+    // 4,096 and 10,000 are far past the old depth-64 cap and any C-stack
+    // budget. Typing is linear in the operand count (GitHub #2715): before,
+    // every prefix of the chain was rescanned, 10,000 took 9 s in Release,
+    // exhausted the 1,800 s fixture deadline under Linux sanitized-debug and
+    // was skipped on the mobile emulators' 180 s payload deadline.
+    u32 lowered_heights[] = {4096, 10000};
     String8 lowered_source_text = c_test_tall_expression_source(arguments->arena, lowered_heights, BUSTER_ARRAY_LENGTH(lowered_heights));
     for (u32 form = 0; form < 2; form += 1)
     {
@@ -25504,7 +25501,46 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
         }
         scratch_end(temporary);
     }
-#endif
+    // The other chain shapes: a conditional nested in every false arm, whose
+    // arms were each rescanned to the end of the chain, and a mixed chain of
+    // `|`, `^`, `*` and `-` levels. Only unevaluated operands use them, so
+    // the cost measured is typing rather than lowering control flow. The
+    // height keeps the whole unit inside one scratch arena.
+    {
+        u32 height = 4096;
+        String8* conditional_parts = arena_allocate(arguments->arena, String8, height + 1);
+        String8* mixed_parts = arena_allocate(arguments->arena, String8, height + 1);
+        for (u32 operand = 0; operand < height; operand += 1)
+        {
+            conditional_parts[operand] = S8("c ? i : ");
+            mixed_parts[operand] = operand % 4 == 3 ? S8("i * i - i | ") : S8("i * i - i ^ ");
+        }
+        conditional_parts[height] = S8("(int)u");
+        mixed_parts[height] = S8("(int)u");
+        String8 conditional = string_join_arena(arguments->arena, (SliceString8){conditional_parts, height + 1}, false);
+        String8 mixed = string_join_arena(arguments->arena, (SliceString8){mixed_parts, height + 1}, false);
+        String8 chain_source = string_format(arguments->arena,
+            S8("int chains(int i, unsigned long u, int c) {{\n"
+               "    _Static_assert(sizeof({S8}) == sizeof(int), \"conditional\");\n"
+               "    __typeof__({S8}) t = 0;\n"
+               "    return t + _Generic({S8}, int: 0, default: 1);\n"
+               "}}\n"),
+            conditional, mixed, conditional);
+        Arena* conflicts[] = {arguments->arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        Target target = target_native;
+        target.cpu_arch = CPU_ARCH_X86_64;
+        target.os = OPERATING_SYSTEM_LINUX;
+        CPreprocessResult tokens = c_preprocess(temporary.arena, chain_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tall-expression-chains.c"), tokens, parsed, target, (CIRLowerOptions){0});
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("tall-expression-types"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
