@@ -25106,12 +25106,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     };
     CompilerDriverResult assembly_file = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_file_command_line)));
-    BUSTER_TEST(arguments, assembly_file.error == COMPILER_DRIVER_ERROR_NONE);
-    ByteSlice assembly_file_bytes = file_read(arguments->arena, assembly_output_path, (FileReadOptions){0});
-    BUSTER_TEST(arguments, assembly_file_bytes.length == assembly_file.output.length);
-    if (assembly_file_bytes.length == assembly_file.output.length)
+    if (BUSTER_REQUIRE(arguments, assembly_file.error == COMPILER_DRIVER_ERROR_NONE))
     {
-        BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
+        ByteSlice assembly_file_bytes = file_read(arguments->arena, assembly_output_path, (FileReadOptions){0});
+        if (BUSTER_REQUIRE(arguments, assembly_file_bytes.length != 0 && assembly_file_bytes.length == assembly_file.output.length))
+        {
+            BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
+        }
     }
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("retired_buster_path"), false);
