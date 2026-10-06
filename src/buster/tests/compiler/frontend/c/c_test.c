@@ -5507,6 +5507,136 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
     return result;
 }
 
+// #1313: naming a member of a wide record costs work proportional to the
+// matches, not to the record's width. One translation unit per size holds a
+// struct of `count` members read `count` times (`p->mI`), initialized by
+// `count` designators and probed by `count` offsetof calls; the lowering's
+// field visits are counted, not timed, and quadrupling the width must
+// roughly quadruple them (a scan per lookup multiplies them by sixteen).
+BUSTER_GLOBAL_LOCAL void c_test_member_lookup_visits(UnitTestArguments* arguments, u32 count, bool* compiled, u64* visits_out)
+{
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 capacity = BUSTER_MB(2);
+    char8* source = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(source, capacity, &length, S8("struct S {"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" int m{u32};"), index));
+    }
+    c_test_append_source(source, capacity, &length, S8(" };\nstatic struct S s = {"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(".m{u32} = {u32},"), index, index));
+    }
+    c_test_append_source(source, capacity, &length, S8("};\nunsigned long offsets[] = {"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8("__builtin_offsetof(struct S, m{u32}),"), index));
+    }
+    c_test_append_source(source, capacity, &length, S8("};\nint read(struct S* p) { int t = 0;\n"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" t += p->m{u32};\n"), index));
+    }
+    c_test_append_source(source, capacity, &length, S8(" return t; }\n"));
+    u64 visits_before = 0;
+    u64 builds_before = 0;
+    c_test_ir_member_lookup_counts(&visits_before, &builds_before);
+    u64 parse_visits_before = 0;
+    u64 parse_builds_before = 0;
+    c_test_member_lookup_counts(&parse_visits_before, &parse_builds_before);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){source, length}, (CPreprocessOptions){
+        .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23,
+    });
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_analyze(temporary.arena, S8("member-lookup-linear.c"), preprocess, syntax, target_native);
+    *compiled = !preprocess.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count && lowered.canonical_ir_certified;
+    u64 visits = 0;
+    u64 builds = 0;
+    c_test_ir_member_lookup_counts(&visits, &builds);
+    u64 parse_visits = 0;
+    u64 parse_builds = 0;
+    c_test_member_lookup_counts(&parse_visits, &parse_builds);
+    c_test_scratch_end(temporary);
+    visits_out[0] = visits - visits_before;
+    visits_out[1] = parse_visits - parse_visits_before;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_lookup_linear_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SMALL = 1024, LARGE = 4096 };
+    bool compiled_small = false;
+    bool compiled_large = false;
+    u64 small[2] = {0, 0};
+    u64 large[2] = {0, 0};
+    c_test_member_lookup_visits(arguments, SMALL, &compiled_small, small);
+    c_test_member_lookup_visits(arguments, LARGE, &compiled_large, large);
+    BUSTER_TEST(arguments, compiled_small && compiled_large);
+    // Slot 0 counts the lowering's field visits, slot 1 the parser's member
+    // rows. Each shape names a member a few times per occurrence; a scan
+    // would visit about count / 2 per lookup, far above the bound.
+    for (u32 phase = 0; phase < 2; phase += 1)
+    {
+        String8 detail = string_format(arguments->arena, S8("phase={u32} small={u64} large={u64}"), phase, small[phase], large[phase]);
+        BUSTER_TEST_RAW(arguments, small[phase] != 0 && small[phase] < 24 * SMALL && large[phase] < 24 * LARGE, detail);
+        BUSTER_TEST_RAW(arguments, large[phase] < small[phase] * 6, detail);
+    }
+    return result;
+}
+
+// Anonymous members and ambiguity on records wide enough to be indexed. The
+// static assertions fix the offsets the promoted-member paths must produce;
+// the ambiguous variants must be rejected exactly as for a narrow record.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_member_lookup_semantics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 prefix = S8("#include <stddef.h>\nstruct W {"
+                        " int n0; int n1; int n2; int n3; int n4; int n5; int n6; int n7;"
+                        " struct { int a0; union { int u0; float f0; }; };"
+                        " int n8; int n9; int n10; int n11; int n12; int n13; int n14; int n15;"
+                        " struct { struct { int deep; }; long l0; };"
+                        " int last;");
+    String8 good = S8(" };\n"
+                      "_Static_assert(offsetof(struct W, a0) == 32, \"a0\");\n"
+                      "_Static_assert(offsetof(struct W, u0) == 36 && offsetof(struct W, f0) == 36, \"union\");\n"
+                      "_Static_assert(offsetof(struct W, n8) == 40, \"n8\");\n"
+                      "_Static_assert(offsetof(struct W, deep) == 72, \"deep\");\n"
+                      "_Static_assert(offsetof(struct W, l0) == 80, \"l0\");\n"
+                      "_Static_assert(offsetof(struct W, last) == 88, \"last\");\n"
+                      "static struct W w = {.n3 = 3, .a0 = 1, .f0 = 2.0f, .n15 = 4, .deep = 5, .l0 = 6, .last = 7};\n"
+                      "int read(struct W* p) { return p->n0 + p->a0 + p->u0 + p->n9 + p->deep + (int)p->l0 + p->last; }\n"
+                      "int mix(struct W* p) { return (int)sizeof(p->deep) + (int)offsetof(struct W, f0); }\n");
+    String8 ambiguous_tail[] = {
+        S8(" struct { int dup; }; struct { int dup; }; };\nint read(struct W* p) { return p->dup; }\n"),
+        S8(" struct { int dup; }; struct { int dup; }; };\nstatic struct W w = {.dup = 1};\n"),
+        S8(" struct { int dup; }; struct { int dup; }; };\nunsigned long o = __builtin_offsetof(struct W, dup);\n"),
+        S8(" struct { int dup; }; union { long dup; }; };\nint read(struct W* p) { return p->dup; }\n"),
+    };
+    String8 missing_tail[] = {
+        S8(" };\nint read(struct W* p) { return p->absent; }\n"),
+        S8(" };\nstatic struct W w = {.absent = 1};\n"),
+    };
+    for (u32 variant = 0; variant < 1 + BUSTER_ARRAY_LENGTH(ambiguous_tail) + BUSTER_ARRAY_LENGTH(missing_tail); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 tail = variant == 0 ? good
+                       : variant <= BUSTER_ARRAY_LENGTH(ambiguous_tail) ? ambiguous_tail[variant - 1]
+                                                                          : missing_tail[variant - 1 - BUSTER_ARRAY_LENGTH(ambiguous_tail)];
+        String8 text = string_format(temporary.arena, S8("{S8}{S8}"), prefix, tail);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, text, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("wide-member-lookup.c"), preprocess, syntax, target_native);
+        bool clean = !preprocess.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count && lowered.canonical_ir_certified;
+        BUSTER_TEST_RAW(arguments, clean == (variant == 0), string_format(arguments->arena, S8("variant={u32} clean={u32}"), variant, (u32)clean));
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Exercise the production search directly with unrelated types already in the
 // program. A fresh, separate arena makes its dirty high-water mark observable
 // even after the helper correctly rewinds every success and failure path.
@@ -44251,6 +44381,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
     C_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_member_lookup_linear_work);
     C_TEST_FIXTURE(arguments, c_test_member_search_scratch);
     C_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
     C_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
@@ -44389,6 +44520,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
     C_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
     C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
+    C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
     C_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
     C_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
     C_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
