@@ -38043,6 +38043,7 @@ BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
           index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
           c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_CASE) ||
           c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
+          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_ENUM) ||
           !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON)))
     {
         // Peel any attribute sequence prefixing the label, so the three
@@ -38199,8 +38200,10 @@ BUSTER_C_INTERNAL u32 c_ir_statement_labels_end(CPreprocessResult preprocess, u3
                 scanning = result < end;
             }
         }
+        // `enum :` opens a C23 enum with a fixed underlying type, never a label.
         else if (token.kind == C_TOKEN_IDENTIFIER && result + 1 < end &&
-                 c_token_is_punctuator(&preprocess.tokens[result + 1], C_PUNCTUATOR_COLON))
+                 c_token_is_punctuator(&preprocess.tokens[result + 1], C_PUNCTUATOR_COLON) &&
+                 !c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM))
         {
             result += 2;
             scanning = result < end;
