@@ -55,6 +55,19 @@ def corpus(decision: str = "no substantial regression detected", **summary_chang
                 "workloads": list(profile["workloads"]),
                 "compiler_provenance": [{"sha256": A256}, {"sha256": B256}]}
     return {"summary": result, "metadata": metadata}
+def scaling(status: str = "valid", compiler: str = B256) -> dict:
+    """A complete scaling-v1 run on the candidate of BINARIES, as {series: {summary, metadata}}."""
+    point = {"workers": 2, "placement": "core", "observed_workers": 2, "wall_median": 0.5, "speedup": 1.6,
+             "speedup_interval": [1.4, 1.8], "efficiency": 0.8, "cpu_inflation": 1.2, "rss_inflation": 1.3}
+    return {name: {"summary": {"schema": compiler_receipt.SCALING_SCHEMA, "status": status, "reason": "",
+                               "series": [{"name": "equal", "inputs": 28, "points": [point]},
+                                          {"name": "diagnostic", "diagnostics_identical": True, "exit_code": 1}]},
+                   "metadata": {"schema": compiler_receipt.SCALING_SCHEMA, "compiler_sha256": compiler,
+                                "cpu_set": "1-7,9-15", "excluded_cpus": "0,8", "physical_cores": 7,
+                                "logical_cpus": 14}}
+            for name in compiler_receipt.SCALING_PROFILE["series"]}
+
+
 HOST = {"hostname": "benchpress", "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor"}
 EXPECTED = {"mode": "main", "repository": "buster14a/buster", "ref": "refs/heads/main",
             "pull": "7", "pull_head": "c" * 40, "base": "b" * 40, "base_tree": "e" * 40, "head": "a" * 40,
@@ -194,6 +207,33 @@ class DecideTest(unittest.TestCase):
                 self.assertEqual(conclusion, "failure")
                 self.assertTrue(reasons)
 
+    def test_requested_scaling_is_validated_and_reported_not_decided(self) -> None:
+        asked = receipt()
+        asked["scaling_profile"] = copy.deepcopy(compiler_receipt.SCALING_PROFILE)
+        self.assertEqual(self.decide(receipt=asked, throughput=dict(corpus(), scaling=scaling())),
+                         ("success", self.decide()[1], []))
+        changed = copy.deepcopy(asked)
+        changed["scaling_profile"]["series"]["cores"] = ["--workers", "1"]
+        cases = {
+            "no bundles": {"receipt": asked, "throughput": corpus()},
+            "invalid bundle": {"receipt": asked, "throughput": dict(corpus(), scaling=scaling("invalid"))},
+            "another compiler": {"receipt": asked, "throughput": dict(corpus(), scaling=scaling(compiler=A256))},
+            "missing series": {"receipt": asked, "throughput": dict(corpus(), scaling={"cores": scaling()["cores"]})},
+            "changed profile": {"receipt": changed, "throughput": dict(corpus(), scaling=scaling())},
+        }
+        for label, change in cases.items():
+            with self.subTest(label=label):
+                conclusion, _, reasons = self.decide(**change)
+                self.assertEqual(conclusion, "failure")
+                self.assertIn("scaling", " ".join(reasons))
+        # A comparison that did not ask for scaling ignores any bundle.
+        self.assertEqual(self.decide(throughput=dict(corpus(), scaling=scaling("invalid")))[0], "success")
+        report = compiler_receipt.render(dict(asked, scaling=compiler_receipt.scaling_digest(scaling())), summary(),
+                                         "success", [])
+        self.assertIn("Series `cores`: valid on CPU set `1-7,9-15` (7 cores, 14 logical CPUs; housekeeping `0,8` "
+                      "excluded)", report)
+        self.assertIn("| equal (28) | 2 | core | 2 | 0.5000 | 1.600 | [1.400, 1.800] | 0.800 | 1.200 | 1.300 |", report)
+
     def test_only_recovery_of_a_legacy_receipt_skips_the_corpus(self) -> None:
         legacy = receipt()
         del legacy["throughput_profile"]
@@ -236,7 +276,14 @@ class EvidenceTest(unittest.TestCase):
         got = compiler_publish.read_evidence(FakeApi(payload), "92", "buster-9700x-compiler-x-1")
         self.assertEqual(got[:3], (receipt(), summary(), ""))
         self.assertEqual(got[3]["name"], "buster-9700x-compiler-x-1")
-        self.assertEqual(got[4], corpus())
+        unscaled = {name: {"summary": None, "metadata": None} for name in compiler_receipt.SCALING_PROFILE["series"]}
+        self.assertEqual(got[4], dict(corpus(), scaling=unscaled))
+        bundles = scaling()
+        members = {f"scaling/{name}/{leaf}": json.dumps(bundles[name][key]) for name in bundles
+                   for leaf, key in (("scaling.json", "summary"), ("scaling-metadata.json", "metadata"))}
+        payload = archive({"receipt.json": json.dumps(receipt()), **members})
+        self.assertEqual(compiler_publish.read_evidence(FakeApi(payload), "92", "buster-9700x-compiler-x-1")[4]["scaling"],
+                         bundles)
 
     def test_missing_ambiguous_or_malformed_evidence(self) -> None:
         payload = archive({"receipt.json": "{not json"})
@@ -252,7 +299,9 @@ class EvidenceTest(unittest.TestCase):
 
 FAKE_BUILD = """#!/usr/bin/env bash
 set -euo pipefail
-if [[ $1 == bench_throughput ]]; then
+if [[ $1 == bench_throughput && $2 == scale ]]; then
+    exec python3 scaling_fake.py "$@"
+elif [[ $1 == bench_throughput ]]; then
     exec python3 throughput_fake.py "$@"
 elif [[ $1 == generate ]]; then
     mkdir -p build/Release
@@ -299,12 +348,37 @@ open(os.path.join(output, "summary.json"), "w").write(json.dumps(summary))
 open(os.path.join(output, "metadata.json"), "w").write(json.dumps(metadata))
 sys.exit(3 if behavior == "fail" else 0)
 """
+# Stands in for `./build.sh bench_throughput scale`; FAKE_SCALING=fail makes
+# the bundle invalid and the command exit 2.
+FAKE_SCALING = """import hashlib, json, os, sys
+argv = sys.argv
+value = lambda flag: argv[argv.index(flag) + 1]
+digest = lambda path: hashlib.sha256(open(path, "rb").read()).hexdigest()
+failed = os.environ.get("FAKE_SCALING", "") == "fail"
+output = value("--output")
+os.makedirs(os.path.join(output, "inputs", "equal"))
+open(os.path.join(output, "inputs", "equal", "tu0000.c"), "w").write("int main(void) { return 0; }\\n")
+open(os.path.join(output, "samples.metrics"), "w").write("excluded")
+point = {"workers": 2, "placement": "core", "observed_workers": 2, "speedup": 1.5}
+summary = {"schema": "buster-throughput-scaling-v1", "status": "invalid" if failed else "valid", "reason": "",
+           "series": [] if failed else [{"name": "equal", "inputs": 28, "points": [point]}]}
+metadata = {"schema": "buster-throughput-scaling-v1", "compiler_sha256": digest(value("--compiler")),
+            "cpu_set": value("--cpu-set"), "arguments": argv[2:]}
+open(os.path.join(output, "scaling.json"), "w").write(json.dumps(summary))
+open(os.path.join(output, "scaling-metadata.json"), "w").write(json.dumps(metadata))
+sys.exit(2 if failed else 0)
+"""
 
 
 def retained(evidence: Path) -> dict:
-    """The corpus documents as the publisher reads them from the artifact."""
-    return {name.split(".")[0]: json.loads((evidence / "throughput" / name).read_text())
-            for name in ("summary.json", "metadata.json")}
+    """The corpus and scaling documents as the publisher reads them from the artifact."""
+    load = lambda path: json.loads(path.read_text()) if path.is_file() else None  # noqa: E731
+    result = {name.split(".")[0]: json.loads((evidence / "throughput" / name).read_text())
+              for name in ("summary.json", "metadata.json")}
+    result["scaling"] = {name: {"summary": load(evidence / "scaling" / name / "scaling.json"),
+                                "metadata": load(evidence / "scaling" / name / "scaling-metadata.json")}
+                         for name in compiler_receipt.SCALING_PROFILE["series"]}
+    return result
 
 
 class HarnessTest(unittest.TestCase):
@@ -324,6 +398,7 @@ class HarnessTest(unittest.TestCase):
         (self.repo / "build.sh").chmod(0o755)
         (self.repo / "compiler.txt").write_text("base compiler\n")
         (self.repo / "throughput_fake.py").write_text(FAKE_THROUGHPUT)
+        (self.repo / "scaling_fake.py").write_text(FAKE_SCALING)
         git("add", ".")
         git("commit", "-qm", "base")
         self.base = git("rev-parse", "HEAD")
@@ -343,7 +418,7 @@ class HarnessTest(unittest.TestCase):
         self.directory.cleanup()
 
     def run_harness(self, live: object, cpu: str = HOST["cpu_model"], corpus_behavior: str = "",
-                    **change) -> tuple[int, dict, Path]:
+                    scaling_behavior: str = "", **change) -> tuple[int, dict, Path]:
         values = {"mode": "main", "candidate": str(self.repo), "lab": str(self.lab), "work": str(self.root / "work"),
                   "evidence": str(self.root / "evidence"), "summary": str(self.root / "step.md"),
                   "repository": "buster14a/buster", "ref": "refs/heads/main",
@@ -354,7 +429,8 @@ class HarnessTest(unittest.TestCase):
         argv = [item for key, value in values.items() for item in ("--" + key, value)]
         with mock.patch.object(compiler_compare, "queue_head", return_value=live), \
                 mock.patch.object(compiler_compare, "cpu_model", return_value=cpu), \
-                mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", ""), "FAKE_THROUGHPUT": corpus_behavior}):
+                mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", ""), "FAKE_THROUGHPUT": corpus_behavior,
+                                             "FAKE_SCALING": scaling_behavior}):
             code = compiler_compare.main(argv)
         evidence = self.root / "evidence"
         return code, json.loads((evidence / "receipt.json").read_text()), evidence
@@ -413,6 +489,64 @@ class HarnessTest(unittest.TestCase):
         # A main-mode publisher never accepts a pull-mode receipt.
         self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "", retained(evidence))[0],
                          "failure")
+
+    def scaling_head(self) -> tuple[str, str]:
+        """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""
+        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
+                                                capture_output=True, text=True).stdout.strip()
+        git("checkout", "-q", "--detach", self.pull_head)
+        request = self.repo / compiler_receipt.SCALING_REQUEST
+        request.parent.mkdir(parents=True)
+        request.write_text("# request: scaling\n")
+        git("add", compiler_receipt.SCALING_REQUEST)
+        git("commit", "-qm", "request scaling")
+        return git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+    def test_requested_scaling_runs_on_the_candidate_only(self) -> None:
+        head, tree = self.scaling_head()
+        code, result, evidence = self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head,
+                                                  **{"pull-head": head, "head-tree": tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["scaling_profile"], compiler_receipt.SCALING_PROFILE)
+        self.assertIn("scaling_seconds", result["timings"])
+        documents = retained(evidence)["scaling"]
+        for name, arguments in compiler_receipt.SCALING_PROFILE["series"].items():
+            with self.subTest(series=name):
+                metadata = documents[name]["metadata"]
+                self.assertEqual(metadata["compiler_sha256"], result["binaries"]["candidate"]["sha256"])
+                self.assertEqual(metadata["arguments"][1:5], ["--compiler", metadata["arguments"][2], "--output",
+                                                              metadata["arguments"][4]])
+                self.assertEqual(metadata["arguments"][5:], arguments)
+                # Generated inputs and per-sample metrics stay out of the evidence.
+                self.assertFalse((evidence / "scaling" / name / "inputs").exists())
+                self.assertFalse((evidence / "scaling" / name / "samples.metrics").exists())
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        expected = dict(result["identity"])
+        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence))[0],
+                         "success")
+
+    def test_failed_scaling_fails_the_receipt(self) -> None:
+        head, tree = self.scaling_head()
+        code, result, _ = self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head, scaling_behavior="fail",
+                                           **{"pull-head": head, "head-tree": tree})
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("bench_throughput scale (cores) exited 2", " ".join(result["reasons"]))
+
+    def test_scaling_needs_the_request_in_this_pull_request(self) -> None:
+        # Pull mode without the request, and main mode with it, never run the scaling leg.
+        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        code, result, _ = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                           **{"head-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertNotIn("scaling_profile", result)
+        head, tree = self.scaling_head()
+        code, result, _ = self.run_harness(head, head=head, pull="0", base=self.pull_head,
+                                           **{"pull-head": head, "head-tree": tree,
+                                              "base-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertNotIn("scaling_profile", result)
 
     def test_corpus_runs_on_the_measured_binaries(self) -> None:
         code, result, evidence = self.run_harness(self.head)

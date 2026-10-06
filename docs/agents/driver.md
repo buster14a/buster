@@ -1318,3 +1318,16 @@ are NUL-terminated copies in the invocation arena.
 `compiler_driver_test_response_file_arguments` covers the grammar and bounds;
 `compiler_driver_test_response_file_batch` checks that a 400-input `-c` batch
 writes the same objects through `@file` as on the command line.
+
+## Opt-in source lex cache
+
+`-fsource-cache` requests one bounded 16 MiB raw translation/lex cache for the
+current invocation; `-fno-source-cache` cancels it (last wins, default disabled).
+Use it for serial multi-input builds; separate CLI processes start empty.
+Embedding callers can retain their own `CSourceCache` across serial invocations
+through `CompilerDriverInvocation.source_cache`. Cache presence clamps TU workers
+to one. `-v` prints a versioned `SOURCE_CACHE` record separately from conceptual
+SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
+IR validation, backends and publication run fresh. See
+[bounded raw source reuse](../source-lex-reuse.md), including ownership and
+qualified-host performance acceptance, which remains pending.
