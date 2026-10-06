@@ -16,6 +16,9 @@ enum
 // them into optimizer assumptions or unevaluated expressions (os.h, base.h),
 // and a false raw assumption is undefined behavior, never a test oracle.
 #define SANITIZER_TEST_CHECKED_CONTRACTS (!BUSTER_OPTIMIZE || BUSTER_SANITIZE)
+// Mobile test payloads run inside an app and cannot relaunch themselves as
+// `<argv0> test`, so the false-operand children run on desktop targets only.
+#define SANITIZER_TEST_CONTRACT_CHILDREN (SANITIZER_TEST_CHECKED_CONTRACTS && !BUSTER_ANDROID && !BUSTER_IOS)
 
 // The effective compiler flags, independently of the BUSTER_ defines that the
 // build passes. MSVC exposes no optimization macro; its row reports unknown.
@@ -185,7 +188,7 @@ ProcessResult sanitizer_test_canary_run(String8 mode)
     return result;
 }
 
-#if SANITIZER_TEST_CHECKED_CONTRACTS
+#if SANITIZER_TEST_CONTRACT_CHILDREN
 BUSTER_GLOBAL_LOCAL String8 sanitizer_test_contract_stream(ProcessWaitResult wait, StandardStream stream)
 {
     String8 result = {
@@ -323,10 +326,14 @@ BUSTER_GLOBAL_LOCAL void sanitizer_test_check_contracts(UnitTestArguments* argum
     BUSTER_ASSERT(sanitizer_test_count_operand(&assert_count, true));
 #if SANITIZER_TEST_CHECKED_CONTRACTS
     BUSTER_TEST(arguments, assert_count == 1);
+#if SANITIZER_TEST_CONTRACT_CHILDREN
     sanitizer_test_check_contract_failure(arguments, &result, S8("check"));
     sanitizer_test_check_contract_failure(arguments, &result, S8("assert"));
 #if !BUSTER_WINDOWS
     sanitizer_test_check_contract_unreachable(arguments, &result);
+#endif
+#else
+    arguments->show(arguments, S8("CONTRACT_CANARY kind=false-operand-children status=unsupported reason=mobile-payload\n"));
 #endif
 #else
     // Optimized unsanitized builds never evaluate an assertion operand, so an

@@ -203,8 +203,10 @@
   `BUSTER_ASSERT` must evaluate nothing), and, where the macros are
   diagnostics, requires false `BUSTER_CHECK`/`BUSTER_ASSERT` children to exit
   1 with their `assertion failed at` report and, outside Windows, a
-  `BUSTER_UNREACHABLE` child to die by SIGILL or SIGTRAP. It never executes a
-  false raw assumption.
+  `BUSTER_UNREACHABLE` child to die by SIGILL or SIGTRAP. Android and iOS
+  payloads cannot relaunch themselves, so they run only the in-process
+  controls and report the children as `status=unsupported`. It never executes
+  a false raw assumption.
 - **Adding a module** (`foo.c`/`foo.h` under `src/buster/lib/`) takes three
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;
