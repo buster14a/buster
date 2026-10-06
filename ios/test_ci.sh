@@ -22,7 +22,7 @@ if [[ -z $build_configs_string ]]; then
     if [[ -n ${BUSTER_IOS_BUILD_CONFIG:-} ]]; then
         build_configs_string=$BUSTER_IOS_BUILD_CONFIG
     else
-        build_configs_string="Debug Release"
+        build_configs_string="Release Debug"
     fi
 fi
 
@@ -33,7 +33,7 @@ if [[ $# -gt 0 ]]; then
                 echo "usage: $0 [--all|Debug|Release ...]" >&2
                 exit 2
             fi
-            build_configs_string="Debug Release"
+            build_configs_string="Release Debug"
             ;;
         --configs)
             shift
@@ -159,6 +159,12 @@ if [[ $arch == arm64 && ${GITHUB_ACTIONS:-false} == true &&
     export BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=180
 fi
 
+# The default order launches Release first. Hosted run 37504012934 (#2819)
+# reached Debug's native main about 50 s after its host launch, the first launch
+# on a newly booted device, while the later Release launch reached main in about
+# 1.4 s. Debug then fell about 3 s short of its 300 s budget. Release finishes in
+# under 60 s, so it absorbs any first-launch latency without a deadline change.
+# BUSTER_IOS_PROCESS_V1 records split host-launch->exec from exec->main.
 launch_args=(--batch)
 for index in "${!build_configs[@]}"; do
     launch_args+=("${build_configs[$index]}" "${app_paths[$index]}")

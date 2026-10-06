@@ -125,6 +125,28 @@ indexed and unindexed lowering, both frontend forms and all native allocators.
 The tiled position-index regression compares the window and scalar populations
 with anonymous member colons shifted across window boundaries.
 
+GNU's obsolete field designator `member: value` never reaches the parser
+(GitHub #2855). After macro replacement,
+`c_preprocess_rewrite_obsolete_designators` respells an identifier-colon pair
+that directly follows `{` or `,` inside an initializer brace as `. member =`,
+so every designator scanner sees the ISO form. Label discovery therefore never
+sees the pair and cannot create a phantom label. The rewrite classifies a brace
+as an initializer when `=` precedes it, when it closes a parenthesis that can
+hold a compound-literal type, or when it nests at an element boundary inside
+another initializer brace. A parenthesis can hold that type unless a call,
+declarator, attribute or control keyword precedes it; `return`, `sizeof`, `case`
+and `__extension__` still allow one. Bit-field widths, ternaries, `_Generic`
+associations and labels keep their colons. A one-byte shape scan gates the
+delimiter walk, so a unit without a candidate pays one pass over its shapes. In
+strict ISO dialects every rewrite also records a
+`C_DIAGNOSTIC_OBSOLETE_DESIGNATOR` warning. `-E`
+(`CPreprocessOptions.preserve_spellings`) and assembly preprocessing keep the
+source spelling. `c_test_obsolete_field_designators` covers scalar, nested,
+array-element, compound-literal, returned and statement-expression initializers;
+a designator that shares a real label's name; and `goto` to a designator-only
+name, which is rejected. It runs both frontend forms, every native allocator,
+and GNU17, GNU23 and C17.
+
 A named label can re-enter a token range after control skipped an ordinary
 automatic declaration. Fixed-size objects in a labeled function therefore
 receive their canonical local/place rows before the entry block terminates;
@@ -146,13 +168,36 @@ uninitialized owner; disconnected reads keep the ordinary predecessor path.
 The dependency walk is unnecessary when every retained owner already has entry
 initialization; restored loads still become independent definitions first.
 
+A named, non-temporary owner can also take this shortcut outside the entry
+block when its only write is its declaration's initializer. That store must
+directly follow the owner's `LOCAL` event, with no read between them. It may
+sit in the same block or, through `c_ir_emit_initializer_store`, in the join
+block of a branching initializer (`?:`, `&&`, `||`). The store dominates every
+reachable read unless a jump enters the scope past it.
+`c_ir_ssa_record_jump_targets` records each named label with the extent of its
+`goto`s, and each `case`/`default` with its enclosing `switch`.
+`c_ir_ssa_finish_jump_scopes` revokes the shortcut for an owner when a
+recorded target lies in its scope after the declarator starts and a jump to it
+starts before the declarator ends or outside the scope. A switch without a
+braced body disables the shortcut for the whole function, and so does a
+refused scratch carve. `CIRLowerOptions.disable_declaration_shortcut` is the
+differential reference: with and without it, the published IR must be
+identical.
+
 After predecessor propagation finishes, parameter simplification reuses its
-block cursor for a stable list of blocks that still own parameters. Empty
-blocks leave the list after each sweep. Simplification never adds parameters,
-so they cannot become active again. Retain ascending block order and each
-block's parameter order: changing elimination order can change replacement
-representatives and canonical value IDs. The allocation diagnostic census
-counts initial list construction as well as subsequent block visits.
+block cursor for a stable list of blocks that still own parameters.
+`c_ir_ssa_simplify_parameters` reproduces the repeated block-order sweep
+without its repeated visits: each retained parameter is numbered in sweep
+order and filed as a user of the roots its incoming rows read, and it is
+evaluated again only when one of those roots is replaced, at the (sweep,
+position) key the full sweep would next reach it, drawn from a min-heap. A
+nested chain of N joins therefore costs O(N log N), not N sweeps (#2801).
+Retain ascending block order and each block's parameter order: changing
+elimination order can change replacement representatives and canonical value
+IDs, for example which member of a closed parameter cycle survives. The
+allocation diagnostic census counts the initial list construction and the one
+final unlink sweep as block visits, and `SSA_SIMPLIFY_PASSES` reports the
+sweeps the full sweep would have taken.
 
 Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
@@ -326,6 +371,12 @@ without facts for identical bitcode and diagnostics.
   them; child argument contexts never execute macro-state effects.
   The saved definition includes the dynamic `__LINE__`/`__FILE__` builtin kind,
   so restoring one after an ordinary definition also restores its behavior.
+  Dynamic `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__` and
+  `__FILE_NAME__` are saved the same way; `__COUNTER__` is per-translation-unit
+  head-of-list state advanced once per materialization, so ordinary uses share
+  one argument prescan and no result cache memoizes it. `__BASE_FILE__` ignores
+  `#line`, while `__TIMESTAMP__` uses the same fixed epoch as `__DATE__` and
+  `__TIME__`.
   `c_macro_conditional_tests` checks these boundaries against literal token
   expectations, independent hosted Clang/GCC preprocessors and both frontend
   lowering forms. Its oracle rows record GCC's alias-newline `__LINE__` value
@@ -351,6 +402,19 @@ without facts for identical bitcode and diagnostics.
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
   `c_test_variadic_comma_omission` checks omission, explicit emptiness, forwarding,
   named variadics and ordinary placemarkers in every supported dialect.
+- C23 `__VA_OPT__ ( content )` is accepted in every dialect. A variadic
+  definition writing it sets `has_va_opt`, which stages it through
+  `c_macro_replacement_tokens` and prescans the variable argument: the content
+  stands when that argument has tokens after expansion and is a placemarker
+  otherwise, so `##` on either side pastes against the content's edge tokens.
+  `#__VA_OPT__` pastes the content on its own (`c_macro_paste_tokens`) before
+  stringifying it. `c_macro_va_opt_violation` rejects the definition when
+  `__VA_OPT__` appears in a non-variadic macro, lacks its parenthesized
+  content, nests, or has `##` at a content edge; a `__VA_OPT__` reaching
+  expansion output was written outside a replacement list and is diagnosed.
+  `c_test_variadic_va_opt` covers empty, macro-expanding-to-empty and
+  non-empty arguments, `#`/`##` operands, nested `__VA_ARGS__` and the
+  diagnostics (GitHub #2509).
 - `_Pragma` destringizes either an ordinary or `L`-prefixed string operand.
   It strips the optional `L` and the quotes, and removes a backslash only
   before a quote or another backslash. Macro-generated operands use the same
@@ -421,11 +485,35 @@ without facts for identical bitcode and diagnostics.
   The returned signed magnitude, rank and target width survive the query;
   temporary type IDs do not. Qualified enum aliases read integer facts through
   their original tag even when the alias was created before its completion.
-  Existing enumerator folding retains the
-  `C_CONSTANT_EVALUATION_ENUM` compatibility mode on the declaration machine,
-  including its machineless `sizeof` path. Migrating that consumer requires
-  declaration-owned preparation of source-ordered operand facts; this stage
-  adds the protected query without changing enum admission or arithmetic.
+  Enumerator folding retains `C_CONSTANT_EVALUATION_ENUM` compatibility
+  arithmetic and successful machineless `sizeof` answers. A failed `sizeof`
+  expression leaf instead uses the protected TYPE reader over its original
+  token range and live declaration-point model, including read-only earlier
+  pending-enumerator facts. Only nonnegative, single-limb integer magnitude
+  leaves that private query; the outer leaf creates its own stable size type.
+  The live declaration machine never participates in the private frames.
+  This bounded caller declines type-name/function-valued operands, nested
+  `sizeof`/`_Alignof` and attributes before their type-only paths can hide an
+  unsupported operand. Existing TYPE consumers retain their default admission
+  policy. The broader ENUM migration still needs declaration-owned preparation
+  of source-ordered facts and stored-layout authority (#1258/#1247).
+  The registered `c_test_enum_sizeof_expression` regression checks #1258's
+  original five non-designator expression operands with independent fixed
+  integer values, grouping/pending-enumerator/unevaluated neighbors and both
+  canonical frontend forms on six desktop layouts in C17/GNU17. Its native
+  sibling checks volatile observations in all four allocators and both forms;
+  mandatory Linux GCC/Clang C17/GNU17 O0/O2 controls use the same fixed source.
+  Native execution covers 16 profiles (two dialects, four allocators, two forms),
+  separately from the eight optimized/unoptimized reference controls. Owned
+  process groups bound deadline cleanup; captured reference diagnostics reject
+  overflow/truncation and capture/tree-cleanup failures. Executable paths are
+  removed after every attempt, and the source is read back and removed.
+  Process failures and 30-second timeouts fail. The existing machineless
+  function-size divergence remains read-only evidence outside this partial
+  repair. Refused function-valued/type-name operands, including nested queries,
+  remain policy controls, not cross-compiler conformance claims. The broader
+  stored-layout and GNU function-alignment obligations remain open under
+  #1258/#1247; no issue completion is claimed.
   Its caller supplies the semantic model at the expression's declaration point.
   Scope alone cannot reconstruct earlier tag completeness from a finished unit;
   deferred consumers must retain the bindings and layout facts of their operands.
@@ -469,6 +557,12 @@ without facts for identical bitcode and diagnostics.
   zero, a shift count outside the promoted width) is final. An assertion
   decided at the declaration reports `static assertion failed: "<message>"`
   (GitHub #1238).
+  Immediate assertions belong to parsing; `c_lower_to_ir`'s translation-unit
+  deferred loop owns the remaining checks at every scope. Function-body walks
+  consume their declarations without evaluating or diagnosing them again.
+  `c_test_deferred_assert_diagnostic_ownership` pins one source-located
+  diagnostic per failed assertion, including nonconstant controls, nested
+  blocks and multiple failures, through both frontend SSA forms (GitHub #1783).
 - Compile-time integer arithmetic has one implementation, `ir_integer_*`
   (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
   the canonical operations, each result carrying its exact-value faults
@@ -518,6 +612,18 @@ without facts for identical bitcode and diagnostics.
   predicate bits/effects, diagnostics and native execution (#1225).
   Its static const initializer cases use the existing GNU folding extension;
   ISO integer-constant-expression admission keeps its separate checks.
+  Read-only lvalue materialization requires the whole declared object at byte
+  offset zero with a matching canonical scalar access representation. Scalar
+  alignment aliases preserve their value and the access type; changed width,
+  signedness, integer rank, kind or pointer pointee identity stays unknown. Displaced accesses
+  also stay unknown rather than borrowing the whole initializer's value.
+  Static scalar materialization requires a concrete converted pointer, integer
+  or floating constant. A successful cast may carry UNKNOWN for a runtime
+  value; that carrier supplies no initializer bytes or relocation. Array-lvalue
+  pointer decay remains with the existing cast path.
+  The same fixture preserves direct, same-type, typedef and aligned reads, rejects the
+  static cast/offset neighbors, and pins conservative unevaluated predicate
+  answers with no loads or effects (#1566).
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
@@ -534,6 +640,48 @@ without facts for identical bitcode and diagnostics.
   addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
   non-null integer-to-pointer static casts remains unsupported; it is refused
   rather than folded as if the trailing operator belonged inside the cast.
+- Static literal-address regressions are registered in
+  `compiler_driver_test_static_literal_addresses` and
+  `compiler_driver_test_static_literal_native` (GitHub #1268). The isolated
+  original sources cover whole and concatenated strings, pointer casts,
+  signed subscripts, constant selection, UTF-16/UTF-32 element strides,
+  aggregate pointer members, file-scope compound literal arrays/records,
+  and block-static `__func__` offsets. Fixed payloads and byte addends are
+  checked in both the direct object and the serialized ELF. Resolve the
+  relocation's symbol plus addend before comparing the image: an ELF writer
+  may use a section anchor rather than the unnamed object's own symbol.
+  The shared native source reads every pointer through volatile pointees
+  under both frontend forms, all four allocators, C17/GNU17 and O0/O2.
+  Linux GCC/Clang GNU17/GNU2x references receive identical source bytes.
+  Two mutable compound literal occurrences must retain separate storage;
+  string literals and const-qualified compound literals may share storage.
+  Function-body compound literals retain automatic storage duration and
+  cannot initialize static pointers. This boundary follows WG14 N1570
+  6.4.5, 6.5.2.5 and 6.6; it does not admit non-null integer-pointer
+  arithmetic or unrepresentable signed relocation addends.
+  Literal operands now export typed static array/aggregate lvalues to the
+  existing constant folder, preserving its cast and subscript scaling. String
+  object emission is shared by runtime and static paths; all uses of the
+  implicit static `__func__` object in one function share its symbol.
+  Incomplete compatible character-array compound literals with one string
+  initializer include its terminator when determining their element count.
+  The general compound-address operand route materializes through the existing
+  initializer machinery with one guarded entry. Nested compound objects on
+  that new route remain unsupported and produce a diagnostic; existing whole
+  compound-address shortcuts retain their prior behavior. No general nested
+  initializer evaluator or pointer-to-integer capability is added.
+  `compiler_driver_test_static_literal_guard` checks refusal followed by valid
+  array, scalar-child, string-child, UTF and trailing-comma globals in the same
+  lowering builder, plus a one-element pointer array carrying a real string
+  relocation. `compiler_driver_test_function_literal_identity` compares static
+  and runtime `__func__` pointers twice under both forms/four allocators/O0/O2
+  and independent Linux GCC/Clang runs. The original 22 payload/addend sources
+  and shared 4554-byte native/reference program remain unchanged.
+  General function-body operand queries decline automatic compound objects
+  without leaving initializer failure state in benign `__builtin_constant_p`
+  probes. The same-function probe followed by a dynamic binary16 conversion
+  and an ordinary automatic compound-array use is checked in canonical
+  lowering and the Linux native/reference identity cells.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
@@ -726,6 +874,25 @@ without facts for identical bitcode and diagnostics.
   values own a fresh context. `c_test_initializer_relocation_index` replays
   random append/clear scripts through both paths and requires identical
   arrays and failure points.
+- Positional scalar stores replace earlier relocation records through the same
+  context clear as designated stores. Explicit braces, strings and compatible
+  compound literals replace the complete selected aggregate; a bare scalar
+  entering it through brace elision preserves its other subobjects. Bit-fields
+  still merge their storage unit. Ordinary scalar tables without relocation
+  records need no additional clear. Member designators update both ends of the
+  selected slot interval in semantic validation and array-bound inference, so
+  the following positional item resumes after the named member.
+  `c_test_positional_initializer_relocations` pins survivor symbols/offsets,
+  zeroed overwritten slots, complete-aggregate replacement and sibling
+  retention across target layouts and both frontend forms, plus native runs
+  through all four allocators.
+- Promoted initializer members retain the selected canonical union type and
+  union-member index separately from the outer aggregate's projection slot.
+  Clearing compares that identity and the union's object offset, so switching
+  promoted anonymous-union members resets the complete union while consecutive
+  writes into the same member preserve its other subobjects.
+  `c_test_promoted_union_initializer_overrides` covers numeric/pointer switches,
+  same-member preservation, nested anonymous promotion and named-union controls.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.
@@ -809,7 +976,7 @@ without facts for identical bitcode and diagnostics.
   `c_ir_end_control_flow_after_call`. Inside a branching operand (`? :`, `&&`,
   `||`, a lowered branch condition) or a consumer that emits rows after the
   value -- a return, an initializer, a switch controller -- the block stays
-  open, so `return (abort(), 0)` and the optimized `BUSTER_CHECK`'s
+  open, so `return (abort(), 0)` and the optimized unsanitized `BUSTER_CHECK`'s
   `(__builtin_unreachable(), 0)` arm reach their consumer or merge. An
   expression statement ends its block with `IR_OPCODE_UNREACHABLE` after its
   own rows. `c_test_cast_and_noreturn_operands` pins the shapes with canonical
@@ -1421,6 +1588,23 @@ member bounds keep their bindings. A header that defines no tag opens no scope.
 `c_test_controlling_expression_scope` and
 `compiler_driver_test_scoped_constant_execution` cover this (#1304).
 
+A direct, unqualified enum definition immediately following `(` in a
+function-body expression is published by that same lexical walk, including
+expression statements, return operands, casts and block static assertions.
+Its constants belong to the current block and become visible at their own
+declaration points; the enum braces do not create a child block. Ordinary
+enum declarations still take the local-declaration path so their declarators
+are retained. Publication skips an already published member and diagnoses a
+same-scope ordinary-name collision instead of appending a second entity.
+`c_test_expression_enum_scope` checks scope restoration, declaration order,
+one publication per member, refusal neighbors and both canonical frontend
+forms on Linux x86-64/AArch64 and Windows x86-64. The registered
+`c_test_expression_enum_runtime` executes the same scope/order family on
+supported desktop native targets in all four allocator modes and both forms.
+Expression enums inside
+initializers, qualified type names and expression-defined record members
+remain separate pending cases under #1615.
+
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,
 unsigned/wide narrowing, declaration-point and completed values, record offsets,
@@ -1525,3 +1709,73 @@ the aligned-base case against Clang. `c_test_enum_runtime` runs these two source
 and the bit-field source in all four native allocator modes with strict codegen
 verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
 fallback.
+
+## Unbraced switch bodies (#1617)
+
+A switch controls one C statement. Semantic validation measures that statement's
+extent instead of requiring a compound body. Lowering uses the existing
+controlled-body range helper and resumes at its separate after-statement token;
+label-prefixed blocks retain their braces and all labels in the statement.
+Nested switches keep ownership of their own labels. Break cleanup resolves the
+scope surrounding the switch keyword, including when the body introduces no
+scope. Integer promotion, supported control widths, duplicate/range diagnostics
+and the existing first-label-inside-a-nested-block restriction are unchanged.
+
+The registered `c_test_unbraced_switch_bodies` covers the three issue examples,
+empty and chained bodies, nested switches, nested labels and fallthrough,
+following-statement boundaries, label-prefixed block/if/while bodies,
+break/continue/return, exact-once control evaluation and GNU cleanup ownership.
+Semantic and canonical checks span six native data models, GNU17/GNU23 and both
+frontend forms. Supported desktop drivers execute independent result oracles in
+all four allocator modes and both forms with codegen verification. Negative
+controls retain floating/pointer/128-bit control refusals, duplicate cases and
+defaults, overlapping ranges and the existing first-nested-label refusal.
+
+The existing driver syntax/object diagnostic-equivalence corpus also accepts
+these standard unbraced bodies in C17/C23 and keeps invalid controlling types
+and duplicate labels rejected in both forms. Its former label-free switch
+refusal row now records the valid C behavior.
+
+## Static address-to-integer initializers (#1273)
+
+The constant folder carries an address cast to an integer of exactly pointer
+width as a symbol and signed byte addend, retaining the integer's C type.
+Integer addition/subtraction uses byte scale one; casting back to a pointer
+restores that pointer's ordinary element scaling. Scalar and aggregate integer
+storage use BYTES with IrGlobalRelocation entries; canonical SYMBOL_ADDRESS
+remains pointer-only. Narrower destinations report truncation explicitly.
+Wider destinations, including 128-bit cross-limb relocations, remain refused;
+this implementation does not synthesize a zero-extension relocation.
+Negation, complement, masks, shifts, products and two-symbol subtraction stay
+outside the supported one-symbol-plus-addend representation. Bit-field
+initializers also refuse symbolic carriers instead of depositing placeholder
+integer bits.
+
+The required-initializer wrapper owns and restores a biased source-token
+context. General constant probes can decline unsupported casts without
+setting a new initializer diagnostic. A separate driver control makes two
+such probes precede a dynamic binary16 conversion and requires both probe
+and main function bodies to be emitted in both forms on the two ELF targets.
+
+`compiler_driver_test_static_address_integers` is a regression-first driver
+fixture for the address-constant extension: pointer-width signed and unsigned
+integer casts followed by byte addends. Its original 17 isolated sources cover scalar,
+member, function, aggregate, local-static and const storage; pointer scaling
+and negative subscripts retain the #1230 controls. Both frontend forms and
+C17/GNU17 emit serialized x86-64/AArch64 ELF objects. The independent oracle
+checks absolute 64-bit relocation width, owner-relative offsets, exact record
+counts and signed section coordinates S+A, allowing ELF section anchors.
+A plain pointer and fixed numeric byte image are positive controls.
+
+Nine narrower, truncating and nonlinear cases require a diagnostic and
+preservation of absent or sentinel output files. The narrow cases include the
+Windows LLP64 long model and require an explicit width diagnostic.
+
+`compiler_driver_test_static_address_integer_native` compares relocated
+storage through volatile reads with runtime addresses plus literal byte
+addends, then separately reads the const integer normally. The identical
+source runs with both frontend forms, all four allocators and O0/O2 in
+C17/GNU17 on desktop hosts. Linux requires configured GCC and Clang GNU17/
+GNU2x O0/O2 compile-and-run references. Two additional object controls cover
+integer-to-pointer recasting and unary plus; explicit wider-integer controls
+retain the unsupported boundary.

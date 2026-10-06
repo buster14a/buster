@@ -119,6 +119,7 @@ BUSTER_GLOBAL_LOCAL void debug_fill_ir_type(Arena* arena, DebugModel* model, IrP
         .parameter_count = source->parameter_count,
         .bit_width = source->bit_width,
         .is_signed = source->is_signed,
+        .is_float = source->kind == IR_TYPE_FLOAT,
         .is_variadic = source->is_variadic,
         .is_const = false,
     };

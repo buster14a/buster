@@ -46,6 +46,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
         [C_DIAGNOSTIC_SOURCE_TOO_LARGE] = S8_INITIALIZER("c.source-too-large"),
         [C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS] = S8_INITIALIZER("c.extra-directive-tokens"),
         [C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL] = S8_INITIALIZER("c.error-attribute-call"),
+        [C_DIAGNOSTIC_OBSOLETE_DESIGNATOR] = S8_INITIALIZER("c.obsolete-designator"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == C_DIAGNOSTIC_KIND_COUNT);
     return (u32)kind < (u32)BUSTER_ARRAY_LENGTH(names) ? names[kind] : S8("not-applicable");

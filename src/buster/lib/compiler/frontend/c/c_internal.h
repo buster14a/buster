@@ -11,6 +11,7 @@
  */
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
@@ -106,8 +107,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShap
         // range are masked off the load and read as C_TOKEN_INVALID, which no
         // punctuator shape can equal, so the tail needs no separate trim.
         Simd512 window = simd512_load_masked(shapes + base, mask64_prefix(window_tokens));
-        Mask64 opens = simd512_equal_byte(window, open_lanes);
-        Mask64 closes = simd512_equal_byte(window, close_lanes);
+        Mask64 opens = simd512_equal_u8(window, open_lanes);
+        Mask64 closes = simd512_equal_u8(window, close_lanes);
         u32 close_count = mask64_count(closes);
         if (depth > close_count)
         {
@@ -334,6 +335,8 @@ BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, 
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base,
                                                        CScopeId scope, CToken const* token);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
+// The same answer from a nearby earlier answer under `root` (or `root` itself): O(tree distance), not O(depth).
+BUSTER_C_EXTERN CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId hint, u32 token_index);
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
 BUSTER_C_EXTERN u32 c_parse_definition_scan_start(CParseResult const* result, u32 definition_start);
 // CDefinitionIndex diagnostic counts, kept out of ordinary compilers and timing
@@ -676,6 +679,8 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_MATH,
     C_SYMBOL_BUILTIN_MEMORY,
     C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS,
+    C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS,
+    C_SYMBOL_BUILTIN_OVERFLOW,
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_FIND_FIRST_SET,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
@@ -778,6 +783,7 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONSTEXPR,
     C_SYMBOL_WELL_KNOWN_CONST,
     C_SYMBOL_WELL_KNOWN_ATOMIC,
+    C_SYMBOL_WELL_KNOWN_VA_OPT,
     C_SYMBOL_WELL_KNOWN_COUNT,
 } CSymbolWellKnown;
 
@@ -1077,7 +1083,10 @@ struct CParseExpressionTypeTask
     u8 state;
     // A unary child reuses the top-level operator scan until a group opens.
     bool operators_checked;
-    u8 reserved[2];
+    // The false arm of a conditional whose own top-level `?` and `:` its
+    // parent already found sits in `split` and `colon`; it skips the scan.
+    bool conditional_hinted;
+    u8 reserved[1];
 };
 
 struct CTypeParseFrame
@@ -1141,6 +1150,9 @@ struct CTypeParseFrame
     u32 shared_specifier_end;
     u32 mutation_mark;
     u32 definition_type_start;
+    // PARAMETER frames: the diagnostic count at entry, so a failed type
+    // specifier that said nothing can be named.
+    u32 diagnostic_start;
     u32 pending_index;
     u64 arena_mark;
     CTypeParseFrameKind kind;
@@ -1197,14 +1209,20 @@ struct CTypeLayoutCache
 #define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
 #define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
 #define C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION 16u
+#define C_PARSE_EXPRESSION_QUERY_FLAG_MASK (C_PARSE_EXPRESSION_QUERY_VALID | C_PARSE_EXPRESSION_QUERY_CHECKED | \
+    C_PARSE_EXPRESSION_QUERY_RUNTIME | C_PARSE_EXPRESSION_QUERY_CONSTANT | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)
+// The flags live in their own zeroed byte column so a body clears one byte per
+// token and an empty or mode-incompatible probe never touches the payload.
+BUSTER_CT_CHECK(C_PARSE_EXPRESSION_QUERY_FLAG_MASK <= UINT8_MAX);
 
+// Payload of one memo slot; meaningful only while the slot's flag byte is
+// nonzero, so it is never cleared. Publication writes it before the flags.
 typedef struct CParseExpressionQuery CParseExpressionQuery;
 struct CParseExpressionQuery
 {
     u32 end;
     CScopeId scope;
     CTypeId type;
-    u32 flags;
 };
 
 typedef enum CConstantEvaluationMode
@@ -1218,9 +1236,72 @@ typedef enum CConstantEvaluationMode
     C_CONSTANT_EVALUATION_TYPE,
 } CConstantEvaluationMode;
 
+// Name index of one aggregate's direct members, for the member searches in
+// c_parse.c (c_parse_member_type and c_parse_promoted_member_type). A record
+// of at least C_MEMBER_INDEX_MIN_MEMBERS members gets one on its first named
+// lookup: a hash table from member symbol to the members that carry it,
+// chained in member order, plus the members with an empty name, the only ones
+// a promoted search descends into. A search then visits the matches and the
+// unnamed members instead of every member, so naming each member of an
+// N-member struct costs O(N) in all rather than O(N^2) (#1313). An entry is
+// valid for the (generation, member_start, member_count) it was built under;
+// a rollback or a changed member range rebuilds it, and chains are compared
+// against the live member rows besides.
+#define C_MEMBER_INDEX_MIN_MEMBERS 16u
+
+typedef enum CMemberIndexState
+{
+    C_MEMBER_INDEX_ABSENT,
+    C_MEMBER_INDEX_BUILT,
+    // A named member without a symbol: name equality needs spellings.
+    C_MEMBER_INDEX_UNAVAILABLE,
+} CMemberIndexState;
+
+typedef struct CMemberIndexEntry CMemberIndexEntry;
+struct CMemberIndexEntry
+{
+    // Bucket heads and per-member links, both member offset + 1 and 0 for none.
+    u32* heads;
+    u32* next;
+    // Offsets of the members with an empty name, in member order.
+    u32* unnamed;
+    u32 unnamed_count;
+    u32 member_start;
+    u32 member_count;
+    u32 generation;
+    u32 shift;
+    CMemberIndexState state;
+};
+
+struct CMemberLookup
+{
+    // Indexed by type id; grown on demand, zero-filled.
+    CMemberIndexEntry* entries;
+    u32 capacity;
+    // Bumped by c_type_parse_rollback, which restores member rows and type
+    // records by value behind the entries' back.
+    u32 generation;
+};
+
+// One search of one aggregate's members for `symbol`: through the index when
+// it has one (the members carrying the symbol, then the unnamed ones), else
+// every member in order.
+typedef struct CMemberCursor CMemberCursor;
+struct CMemberCursor
+{
+    CParseResult const* result;
+    CMemberIndexEntry const* entry;
+    u32 member_start;
+    u32 member_count;
+    u32 symbol;
+    u32 chain;
+    u32 position;
+};
+
 struct CTypeParseMachine
 {
     CParseExpressionQuery* expression_queries;
+    u8* expression_query_flags;
     CParseResult* expression_query_result;
     CToken const* expression_query_tokens;
     u32 expression_query_start;
@@ -1256,6 +1337,11 @@ struct CTypeParseMachine
     u32 mutation_count;
     u32 mutation_capacity;
     u32 mutation_type_limit;
+    // Parenthesized declarators being parsed for an aggregate member or a
+    // declaration that creates storage. A parameter whose type specifier fails
+    // inside one is reported there, because neither path has a later fallback
+    // that names it.
+    u32 member_declarator_depth;
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
@@ -1269,6 +1355,8 @@ struct CTypeParseMachine
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool type_identity_queries_active;
+    // Only the private fallback for failed ENUM sizeof expression leaves.
+    bool enum_sizeof_expression_query;
     // How many GNU `_Alignof(object)` evaluations of an object's alignment
     // records enclose this one, and whether one of them hit
     // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_parse_alignof_object_alignment.
@@ -1286,6 +1374,7 @@ struct CParsePromotedMemberWork
 };
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
+BUSTER_C_EXTERN String8 c_semantic_asm_clobber_name(Target target, String8 clobber);
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint);
 
 BUSTER_C_EXTERN void c_parse_index_declarations(CParseResult* result, Arena* arena);
@@ -1312,6 +1401,10 @@ struct CIrConstantValue
     u64 integer_high;
     f64 floating;
     CIrConstantValueKind kind;
+    // Set only on the value a function identifier folds to, which is already
+    // its decayed pointer. Unary `&` accepts exactly that value, so `&f` is
+    // `f`; every operator result clears it, keeping `&(rvalue)` refused.
+    bool function_designator;
 };
 
 BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
@@ -1377,6 +1470,8 @@ BUSTER_C_EXTERN bool c_semantic_asm_x87_operand(IrType* type);
 
 BUSTER_C_EXTERN bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_out);
 
+BUSTER_C_EXTERN u64 c_semantic_asm_register_alternative(String8 text, bool output);
+
 BUSTER_C_EXTERN u64 c_semantic_asm_bound_register(Target target, String8 label);
 
 BUSTER_C_EXTERN bool c_semantic_asm_fixed_operands_conflict(u64 const* constraints, u32 count);
@@ -1384,14 +1479,15 @@ BUSTER_C_EXTERN bool c_semantic_asm_fixed_operands_conflict(u64 const* constrain
 BUSTER_C_EXTERN String8 c_semantic_asm_x87_operands_message(u64 const* constraints, u32 count, bool stack_clobber);
 
 BUSTER_C_EXTERN String8 c_ir_math_builtin_link_name(String8 name);
+BUSTER_C_EXTERN u32 c_semantic_memory_builtin_arity(String8 name);
 
 typedef enum CIrSimdArgument
 {
     C_IR_SIMD_ARGUMENT_ADDRESS,
     C_IR_SIMD_ARGUMENT_MASK,
     C_IR_SIMD_ARGUMENT_VECTOR,
-    C_IR_SIMD_ARGUMENT_BYTE,
-    C_IR_SIMD_ARGUMENT_WORD,
+    C_IR_SIMD_ARGUMENT_U8,
+    C_IR_SIMD_ARGUMENT_U32,
     C_IR_SIMD_ARGUMENT_IMMEDIATE,
 } CIrSimdArgument;
 

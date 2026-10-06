@@ -358,7 +358,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_section_set_edges(UnitTestArguments
         {
             BUSTER_TEST(arguments, text->data.pointer[0] == 0x10 && text->data.pointer[16] == 0x32 &&
                 text->data.pointer[17] == 0x21 && text->data.pointer[18] == 0x43);
-            for (u32 offset = 1; offset < 16; offset += 1) BUSTER_TEST(arguments, text->data.pointer[offset] == 0);
+            for (u32 offset = 1; offset < 16; offset += 1) BUSTER_TEST(arguments, text->data.pointer[offset] == 0x90);
         }
         u64 expected_bounds[] = {0, 17, 17, 19};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bounds); index += 1)
@@ -1262,7 +1262,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_single_input_alias(UnitTestArgument
         ObjectSection* section = padded.object.sections + OBJECT_SECTION_TEXT;
         BUSTER_TEST(arguments, section->data.pointer != text && section->data.length == sizeof(text) + 4);
         BUSTER_TEST(arguments, memcmp(section->data.pointer, text, sizeof(text)) == 0);
-        BUSTER_TEST(arguments, section->data.pointer[sizeof(text)] == 0 && section->data.pointer[sizeof(text) + 3] == 0);
+        BUSTER_TEST(arguments, section->data.pointer[sizeof(text)] == 0x90 && section->data.pointer[sizeof(text) + 3] == 0x90);
     }
 
     u8 first_text[] = {1, 2, 3};
@@ -3737,9 +3737,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_alignment(UnitTestArgument
     return result;
 }
 
+// The loader publishes its r_debug address through DT_DEBUG, and a debugger
+// finds the shared-library list there; an image without the tag never shows
+// libc to gdb.  The loader writes the slot, so .dynamic has to sit in a
+// writable PT_LOAD.  Check every dynamic ELF kind each architecture writes.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_debug_tag(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    NativeImageKind kinds[] = {NATIVE_IMAGE_EXECUTABLE, NATIVE_IMAGE_PIE};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u32 aarch64_text[] = {0x52800000, 0xd65f03c0};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+        {
+            if (architectures[architecture] == CPU_ARCH_AARCH64 && kinds[kind] == NATIVE_IMAGE_PIE)
+            {
+                continue;
+            }
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            ByteSlice text = architectures[architecture] == CPU_ARCH_X86_64
+                                 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text)
+                                 : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+            ObjectSymbol symbol = {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT,
+                                   .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX},
+                                                      text, &symbol, 1, 0, 0);
+            NativeDynamicLibrary library = {.name = S8("libdebugprobe.so")};
+            NativeExecutableLinkResult linked = link_native_executable(arena, &object, (NativeExecutableLinkOptions){
+                .dynamic_libraries = &library, .dynamic_library_count = 1, .image_kind = (u8)kinds[kind],
+            });
+            if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && linked.executable.length >= 64))
+            {
+                u8* image = linked.executable.pointer;
+                u64 debug_value = 1;
+                BUSTER_TEST(arguments, link_test_elf_dynamic_entry(linked.executable, 21, &debug_value) && debug_value == 0);
+                u64 header = 0;
+                bool found = link_test_elf_section_find(linked.executable, S8(".dynamic"), 0, &header);
+                BUSTER_TEST(arguments, found);
+                if (found)
+                {
+                    u64 dynamic_address = link_read_u64(image, header + 16);
+                    u64 dynamic_end = dynamic_address + link_read_u64(image, header + 32);
+                    u64 program_header_offset = link_read_u64(image, 32);
+                    u16 program_header_count = 0;
+                    memcpy(&program_header_count, image + 56, sizeof(program_header_count));
+                    bool writable = false;
+                    for (u32 index = 0; index < program_header_count && program_header_offset <= linked.executable.length &&
+                                        (u64)program_header_count <= (linked.executable.length - program_header_offset) / 56;
+                         index += 1)
+                    {
+                        u64 program_header = program_header_offset + (u64)index * 56;
+                        u64 start = link_read_u64(image, program_header + 16);
+                        u64 memory_size = link_read_u64(image, program_header + 40);
+                        if (link_read_u32(image, program_header) == 1 && (link_read_u32(image, program_header + 4) & 2) && start <= dynamic_address &&
+                            dynamic_end <= start + memory_size)
+                        {
+                            writable = true;
+                        }
+                    }
+                    BUSTER_TEST(arguments, writable);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Merged file-backed bytes must not depend on previous arena users. Check
 // whole section contents and serialized artifacts, including both kinds of
 // unwritten span: alignment gaps and virtual bytes past an input's data.
+// Data gaps are zero; text gaps are the target's executable padding.
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3754,6 +3825,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
     u8 poison_values[] = {0, 0xa5, 0x3c};
     for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(architectures); arch += 1)
     {
+        // Text gaps [3, 32) and [34, 43) take the target NOP: x86-64 0x90
+        // bytes; AArch64 0xd503201f only in whole aligned words, zeros around.
+        u8 expected_text[sizeof(expected)];
+        u8 aarch64_nop[] = {0x1f, 0x20, 0x03, 0xd5};
+        memcpy(expected_text, expected, sizeof(expected));
+        for (u32 offset = 0; offset < sizeof(expected_text); offset += 1)
+        {
+            bool gap = (offset >= 3 && offset < 32) || (offset >= 34 && offset < 43);
+            u32 word = offset & ~3u;
+            bool whole_word = (word >= 3 && word + 4 <= 32) || (word >= 34 && word + 4 <= 43);
+            if (gap)
+            {
+                expected_text[offset] = architectures[arch] == CPU_ARCH_X86_64 ? 0x90 : whole_word ? aarch64_nop[offset & 3] : 0;
+            }
+        }
         for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
         {
             Target target = {.cpu_arch = architectures[arch], .os = systems[system]};
@@ -3802,8 +3888,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
                             BUSTER_TEST(arguments, section->data.length == sizeof(expected));
                             BUSTER_TEST(arguments, section->virtual_size == sizeof(expected));
                             BUSTER_TEST(arguments, section->alignment == 32);
+                            u8* section_expected = kinds[kind_index] == OBJECT_SECTION_TEXT ? expected_text : expected;
                             BUSTER_TEST(arguments, section->data.length == sizeof(expected) &&
-                                                       memcmp(section->data.pointer, expected, sizeof(expected)) == 0);
+                                                       memcmp(section->data.pointer, section_expected, sizeof(expected)) == 0);
                         }
                         ObjectSection* zero = merged.object.sections + OBJECT_SECTION_ZERO;
                         BUSTER_TEST(arguments, zero->data.pointer == 0 && zero->data.length == 0 && zero->virtual_size == sizeof(expected));
@@ -3831,8 +3918,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
                                 for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
                                 {
                                     ObjectSection* section = decoded.sections + kinds[kind_index];
+                                    u8* section_expected = kinds[kind_index] == OBJECT_SECTION_TEXT ? expected_text : expected;
                                     BUSTER_TEST(arguments, section->data.length >= sizeof(expected) &&
-                                                               memcmp(section->data.pointer, expected, sizeof(expected)) == 0);
+                                                               memcmp(section->data.pointer, section_expected, sizeof(expected)) == 0);
                                 }
                             }
                         }
@@ -5387,6 +5475,240 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_failed_publication(UnitTestArgu
     return result;
 }
 
+// link_objects owns the merged-text bytes no input covers: alignment gaps
+// between inputs, a virtual tail past an input's data and the tail an empty,
+// more-aligned input adds. Those take the target NOP (x86-64 0x90, AArch64
+// 0xd503201f) so a structural decoder meets no stray zero in code; merged data
+// gaps stay zero and input bytes are copied unchanged.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_text_padding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        bool aarch64 = architecture != 0;
+        Arena* conflicts[] = {arguments->arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        Target target = {.cpu_arch = aarch64 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS};
+        u8 text_first[8] = {0xa1, 0xa2, 0xa3, 0xa4, 0xa5};
+        u8 text_second[4] = {0xb1, 0xb2, 0xb3, 0xb4};
+        u8 text_third[4] = {0xc1, 0xc2, 0xc3, 0xc4};
+        u8 data_first[3] = {0x11, 0x22, 0x33};
+        u8 data_second[2] = {0x44, 0x55};
+        u64 first_length = aarch64 ? 4 : 5;
+        u64 third_length = aarch64 ? 4 : 2;
+        ObjectFile objects[4];
+        objects[0] = link_test_object_make(temporary.arena, target, (ByteSlice){.pointer = text_first, .length = first_length}, 0, 0, 0, 0);
+        objects[0].sections[OBJECT_SECTION_TEXT].alignment = 4;
+        objects[0].sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data_first);
+        objects[1] = link_test_object_make(temporary.arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text_second), 0, 0, 0, 0);
+        objects[1].sections[OBJECT_SECTION_TEXT].alignment = 16;
+        objects[1].sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data_second);
+        objects[1].sections[OBJECT_SECTION_DATA].alignment = 8;
+        objects[2] = link_test_object_make(temporary.arena, target, (ByteSlice){.pointer = text_third, .length = third_length}, 0, 0, 0, 0);
+        objects[2].sections[OBJECT_SECTION_TEXT].alignment = 32;
+        objects[2].sections[OBJECT_SECTION_TEXT].virtual_size = 8;
+        objects[3] = link_test_object_make(temporary.arena, target, (ByteSlice){0}, 0, 0, 0, 0);
+        objects[3].sections[OBJECT_SECTION_TEXT].alignment = 64;
+        LinkObjectResult linked = link_objects(temporary.arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){.alias_single_input_sections = true});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+        if (linked.error == LINK_ERROR_NONE)
+        {
+            ByteSlice text = linked.object.sections[OBJECT_SECTION_TEXT].data;
+            ByteSlice data = linked.object.sections[OBJECT_SECTION_DATA].data;
+            // Empty data sections at the default 16-byte alignment leave a zero tail.
+            BUSTER_TEST(arguments, text.length == 64 && data.length == 16);
+            if (text.length == 64 && data.length == 16)
+            {
+                u8 nop[4] = {0x1f, 0x20, 0x03, 0xd5};
+                u8 expected[64];
+                for (u32 offset = 0; offset < sizeof(expected); offset += 1) expected[offset] = aarch64 ? nop[offset & 3] : 0x90;
+                memcpy(expected, text_first, first_length);
+                memcpy(expected + 16, text_second, sizeof(text_second));
+                memcpy(expected + 32, text_third, third_length);
+                BUSTER_TEST(arguments, memcmp(text.pointer, expected, sizeof(expected)) == 0);
+                u8 expected_data[16] = {0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0x44, 0x55};
+                BUSTER_TEST(arguments, memcmp(data.pointer, expected_data, sizeof(expected_data)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, text_first[0] == 0xa1 && text_first[5] == 0 && text_second[0] == 0xb1 && text_third[0] == 0xc1);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// The writers own only the gap after the complete object text and before
+// their aligned stub tables. Distinctive source bytes (including zero data),
+// a relocated main-address marker and one-import boundaries locate that range
+// independently of the padding helper. These fixtures never execute or publish.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        bool aarch64 = architecture != 0;
+        for (u32 format = 0; format < 2; format += 1)
+        {
+            bool pe = format == 0;
+            for (u32 imports = 0; imports < (aarch64 ? 1u : 2u); imports += 1)
+            {
+                for (u32 residue = 0; residue < 16; residue += aarch64 ? 4u : 1u)
+                {
+                    Arena* conflicts[] = {arguments->arena};
+                    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                    u8 text[32];
+                    memset(text, 0xa5, sizeof(text));
+                    if (aarch64)
+                    {
+                        u8 nop[] = {0x1f, 0x20, 0x03, 0xd5};
+                        for (u32 offset = 0; offset < sizeof(text); offset += 4) { memcpy(text + offset, nop, sizeof(nop)); }
+                        u8 ret[] = {0xc0, 0x03, 0x5f, 0xd6};
+                        memcpy(text, ret, sizeof(ret));
+                        memset(text + 8, 0, 4);
+                    }
+                    else
+                    {
+                        text[0] = 0xc3;
+                        text[7] = 0;
+                    }
+                    u8 original_text[sizeof(text)];
+                    memcpy(original_text, text, sizeof(text));
+                    u64 text_length = 16 + residue;
+                    u8 data[16] = {0};
+                    for (u32 index = 8; index < sizeof(data); index += 1) { data[index] = (u8)(0x40 + index); }
+                    u8 original_data[sizeof(data)];
+                    memcpy(original_data, data, sizeof(data));
+                    ObjectSymbol symbols[] = {
+                        {.name = S8("main"), .size = text_length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                        {.name = S8("padding_import"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                    };
+                    ObjectRelocation marker = {.section = OBJECT_SECTION_DATA, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+                    Target target = {
+                        .cpu_arch = aarch64 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64,
+                        .cpu_model = CPU_MODEL_BASELINE,
+                        .os = pe ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS,
+                    };
+                    ObjectFile object = link_test_object_make(temporary.arena, target, (ByteSlice){.pointer = text, .length = text_length},
+                                                              symbols, 1 + imports, &marker, 1);
+                    object.sections[OBJECT_SECTION_TEXT].alignment = 16;
+                    object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+                    String8 exports[] = {S8("padding_import")};
+                    NativeDynamicLibrary library = {
+                        .name = S8("padding-test.dll"), .exported_symbols = exports,
+                        .exported_symbol_count = BUSTER_ARRAY_LENGTH(exports), .exports_known = true,
+                    };
+                    NativeExecutableLinkResult linked = link_native_executable(temporary.arena, &object, (NativeExecutableLinkOptions){
+                        .entry_symbol = S8("main"), .dynamic_libraries = imports ? &library : 0, .dynamic_library_count = imports,
+                    });
+                    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+                    BUSTER_TEST(arguments, memcmp(text, original_text, sizeof(text)) == 0);
+                    BUSTER_TEST(arguments, memcmp(data, original_data, sizeof(data)) == 0);
+                    if (linked.error == LINK_ERROR_NONE)
+                    {
+                        ByteSlice image = linked.executable;
+                        u64 text_address = 0;
+                        u64 text_offset = 0;
+                        u64 text_size = 0;
+                        u64 raw_size = 0;
+                        u64 data_offset = 0;
+                        bool found = false;
+                        if (pe)
+                        {
+                            LinkTestUefiPeSection text_section = {0};
+                            LinkTestUefiPeSection data_section = {0};
+                            found = link_test_uefi_pe_section_find(image, S8(".text"), &text_section) &&
+                                    link_test_uefi_pe_section_find(image, S8(".data"), &data_section);
+                            if (found)
+                            {
+                                u64 optional = (u64)link_read_u32(image.pointer, 0x3c) + 24;
+                                found = optional <= image.length && 32 <= image.length - optional &&
+                                        text_section.virtual_size <= text_section.raw_size && data_section.raw_size >= sizeof(data);
+                                if (found)
+                                {
+                                    u64 image_base = link_read_u64(image.pointer, optional + 24);
+                                    found = image_base <= UINT64_MAX - text_section.virtual_address;
+                                    if (found)
+                                    {
+                                        text_address = image_base + text_section.virtual_address;
+                                        text_offset = text_section.raw_offset;
+                                        text_size = text_section.virtual_size;
+                                        raw_size = text_section.raw_size;
+                                        data_offset = data_section.raw_offset;
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            u64 text_header = 0;
+                            u64 data_header = 0;
+                            found = link_test_mach_section_find(image, S8("__TEXT"), S8("__text"), &text_header) &&
+                                    link_test_mach_section_find(image, S8("__DATA"), S8("__data"), &data_header);
+                            if (found)
+                            {
+                                text_address = link_read_u64(image.pointer, text_header + 32);
+                                text_size = link_read_u64(image.pointer, text_header + 40);
+                                text_offset = link_read_u32(image.pointer, text_header + 48);
+                                data_offset = link_read_u32(image.pointer, data_header + 48);
+                                found = link_read_u64(image.pointer, data_header + 40) >= sizeof(data);
+                            }
+                        }
+                        found = found && text_offset <= image.length && text_size <= image.length - text_offset &&
+                                data_offset <= image.length && sizeof(data) <= image.length - data_offset;
+                        BUSTER_TEST(arguments, found);
+                        if (found)
+                        {
+                            u64 main_address = link_read_u64(image.pointer, data_offset);
+                            bool main_valid = main_address >= text_address;
+                            u64 main_offset = main_valid ? main_address - text_address : 0;
+                            main_valid = main_valid && !(main_offset & 15) && main_offset <= text_size && text_length <= text_size - main_offset;
+                            BUSTER_TEST(arguments, main_valid);
+                            BUSTER_TEST(arguments, memcmp(image.pointer + data_offset + 8, original_data + 8, 8) == 0);
+                            if (main_valid)
+                            {
+                                BUSTER_TEST(arguments, memcmp(image.pointer + text_offset + main_offset, original_text, text_length) == 0);
+                                u64 end = main_offset + text_length;
+                                u64 gap = (16 - (end & 15)) & 15;
+                                bool gap_valid = gap <= text_size - end;
+                                BUSTER_TEST(arguments, gap_valid);
+                                if (gap_valid)
+                                {
+                                    bool bytes_valid = true;
+                                    for (u64 index = 0; index < gap; index += 1)
+                                    {
+                                        bytes_valid = image.pointer[text_offset + end + index] == (aarch64 ? 0 : 0x90) && bytes_valid;
+                                    }
+                                    BUSTER_TEST(arguments, bytes_valid);
+                                    if (!aarch64)
+                                    {
+                                        BUSTER_TEST(arguments, text_size == end + gap + (u64)imports * 6);
+                                        if (imports)
+                                        {
+                                            bool stub_valid = 6 <= text_size - end - gap && image.pointer[text_offset + end + gap] == 0xff &&
+                                                              image.pointer[text_offset + end + gap + 1] == 0x25;
+                                            BUSTER_TEST(arguments, stub_valid);
+                                        }
+                                    }
+                                }
+                            }
+                            if (pe)
+                            {
+                                bool raw_padding_valid = true;
+                                for (u64 index = text_size; index < raw_size; index += 1)
+                                {
+                                    raw_padding_valid = image.pointer[text_offset + index] == 0 && raw_padding_valid;
+                                }
+                                BUSTER_TEST(arguments, raw_padding_valid);
+                            }
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_function_addresses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5526,6 +5848,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult failed_publication = link_test_elf_failed_publication(arguments);
     result.succeeded_test_count += failed_publication.succeeded_test_count;
     result.test_count += failed_publication.test_count;
+    UnitTestResult merged_text_padding = link_test_merged_text_padding(arguments);
+    result.succeeded_test_count += merged_text_padding.succeeded_test_count;
+    result.test_count += merged_text_padding.test_count;
+    UnitTestResult final_text_padding = link_test_final_text_padding(arguments);
+    result.succeeded_test_count += final_text_padding.succeeded_test_count;
+    result.test_count += final_text_padding.test_count;
     UnitTestResult aarch64_ldst = link_test_aarch64_elf_ldst(arguments);
     result.succeeded_test_count += aarch64_ldst.succeeded_test_count;
     result.test_count += aarch64_ldst.test_count;
@@ -5588,6 +5916,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult alignment = link_test_elf_data_alignment(arguments);
     result.succeeded_test_count += alignment.succeeded_test_count;
     result.test_count += alignment.test_count;
+    UnitTestResult debug_tag = link_test_elf_debug_tag(arguments);
+    result.succeeded_test_count += debug_tag.succeeded_test_count;
+    result.test_count += debug_tag.test_count;
     static u8 const sha256_abc[32] = {
         0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
         0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
@@ -5595,6 +5926,16 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     u8 sha256_result[32] = {0};
     link_sha256(arguments->arena, (u8 const*)"abc", 3, sha256_result);
     BUSTER_TEST(arguments, memcmp(sha256_result, sha256_abc, sizeof(sha256_abc)) == 0);
+    {
+        // Regression (#2724): link_sha256 must not consume arena bytes per call.
+        u64 position_before = arguments->arena->position;
+        for (u32 iteration = 0; iteration < 64; iteration += 1)
+        {
+            link_sha256(arguments->arena, (u8 const*)"abc", 3, sha256_result);
+        }
+        BUSTER_TEST(arguments, arguments->arena->position == position_before);
+        BUSTER_TEST(arguments, memcmp(sha256_result, sha256_abc, sizeof(sha256_abc)) == 0);
+    }
     UnitTestResult uefi_x64 = link_test_uefi_pe64(arguments, CPU_ARCH_X86_64);
     result.succeeded_test_count += uefi_x64.succeeded_test_count;
     result.test_count += uefi_x64.test_count;
@@ -6377,6 +6718,36 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                               .entry_symbol = S8("main"),
                                                                           });
     BUSTER_TEST(arguments, a64_pe_executable.error == LINK_ERROR_NONE);
+    {
+        // Regression (#2724): the PE64 PDB identity builder must reject a debug
+        // module whose code range leaves the image's .text, as UEFI does.
+        // One minimal record: length 2 covering only its kind (S_END-like, no payload).
+        u8 codeview_symbols[4] = {0x02, 0x00, 0x06, 0x00};
+        ObjectDebugModule debug_module = {
+            .name = S8("module.c"),
+            .code_offset = 0,
+            .code_size = sizeof(a64_pe_code),
+            .symbols_size = sizeof(codeview_symbols),
+        };
+        ObjectFile debug_object = a64_pe_object;
+        debug_object.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(codeview_symbols);
+        debug_object.debug_modules = &debug_module;
+        debug_object.debug_module_count = 1;
+        NativeExecutableLinkOptions debug_options = {.entry_symbol = S8("main"), .debug_info = true};
+        NativeExecutableLinkResult valid = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, valid.error == LINK_ERROR_NONE && valid.pdb.length != 0);
+        debug_module.code_offset = 1 << 20;
+        NativeExecutableLinkResult outside_offset = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, outside_offset.error == LINK_ERROR_OBJECT_WRITE);
+        debug_module.code_offset = 0;
+        debug_module.code_size = 1 << 20;
+        NativeExecutableLinkResult outside_size = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, outside_size.error == LINK_ERROR_OBJECT_WRITE);
+        debug_module.code_size = sizeof(a64_pe_code);
+        debug_module.name = (String8){.length = 4};
+        NativeExecutableLinkResult null_name = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, null_name.error == LINK_ERROR_OBJECT_WRITE);
+    }
     u32 a64_pdata_rva = 0;
     u32 a64_pdata_raw = 0;
     u32 a64_xdata_rva = 0;

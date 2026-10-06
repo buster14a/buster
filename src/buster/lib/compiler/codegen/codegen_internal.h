@@ -112,6 +112,7 @@ BUSTER_F_DECL void a64_emit_store_pointer_offset(CodegenBuffer* buffer, u32 sour
 BUSTER_F_DECL bool codegen_test_canonical_block_offsets(u32* offsets, IrFunction* function, MachineSelectResult* selected,
                                                        MachineEncodeResult* encoded);
 BUSTER_F_DECL void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value);
+BUSTER_F_DECL bool codegen_test_debug_locations_reserve(Arena* arena, CodegenModule* result, u32* capacity, u64 additional);
 BUSTER_F_DECL bool codegen_test_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
                                                           MachineFunction const* function, MachineStackPlacement const* placement,
                                                           u32 const* row_offsets, u32 function_start, u32 function_end, u32 frame_base_offset,

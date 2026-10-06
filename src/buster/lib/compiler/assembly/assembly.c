@@ -587,6 +587,9 @@ struct AssemblyBuilder
     bool inline_assembly;
     // Set by assembly_instruction_parse for the statement it last parsed.
     TargetCpuFeature statement_feature;
+    // Set by assembly_instruction_parse when `movabs` named the accumulator
+    // and an absolute address: the metadata selector must take the moffs row.
+    bool statement_source_moffs;
     // The metadata parser reports this transient semantic fact to the outer
     // source adapter when a feature-gated typed decorator candidate is the
     // authoritative form.  It prevents the handwritten INVALID_OPERANDS
@@ -2165,29 +2168,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAmdForm const* assembly_x86_amd_form_select(Assembly
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_condition_parse(String8 name, u8* result)
 {
-    static const struct
-    {
-        String8 name;
-        u8 condition;
-    } conditions[] = {
-        {S8_INITIALIZER("o"), 0},   {S8_INITIALIZER("no"), 1},  {S8_INITIALIZER("b"), 2},   {S8_INITIALIZER("c"), 2},
-        {S8_INITIALIZER("nae"), 2}, {S8_INITIALIZER("ae"), 3},  {S8_INITIALIZER("nb"), 3},  {S8_INITIALIZER("nc"), 3},
-        {S8_INITIALIZER("e"), 4},   {S8_INITIALIZER("z"), 4},   {S8_INITIALIZER("ne"), 5},  {S8_INITIALIZER("nz"), 5},
-        {S8_INITIALIZER("be"), 6},  {S8_INITIALIZER("na"), 6},  {S8_INITIALIZER("a"), 7},   {S8_INITIALIZER("nbe"), 7},
-        {S8_INITIALIZER("s"), 8},   {S8_INITIALIZER("ns"), 9},  {S8_INITIALIZER("p"), 10},  {S8_INITIALIZER("pe"), 10},
-        {S8_INITIALIZER("np"), 11}, {S8_INITIALIZER("po"), 11}, {S8_INITIALIZER("l"), 12},  {S8_INITIALIZER("nge"), 12},
-        {S8_INITIALIZER("ge"), 13}, {S8_INITIALIZER("nl"), 13}, {S8_INITIALIZER("le"), 14}, {S8_INITIALIZER("ng"), 14},
-        {S8_INITIALIZER("g"), 15},  {S8_INITIALIZER("nle"), 15},
-    };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(conditions); index += 1)
-    {
-        if (assembly_word_equal(name, conditions[index].name))
-        {
-            *result = conditions[index].condition;
-            return true;
-        }
-    }
-    return false;
+    return buster_x86_metadata_condition_parse(name, result);
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic, AssemblyInstructionInfo* result)
@@ -7102,7 +7083,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_pc_operand(AssemblyBuilder* bu
                                                               BusterAarch64ControlOperandValue* value,
                                                               AssemblyExpression* expression)
 {
-    if (!builder || !value || !expression || !assembly_expression_parse(builder, assembly_trim(text), expression))
+    text = assembly_trim(text);
+    // `#8` is the immediate-displacement spelling of a PC-relative operand.
+    if (text.length > 1 && text.pointer[0] == '#')
+    {
+        text = assembly_trim(string_slice(text, 1, text.length));
+    }
+    if (!builder || !value || !expression || !assembly_expression_parse(builder, text, expression))
     {
         return false;
     }
@@ -8238,6 +8225,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
                 text.pointer += 1;
                 text.length -= 1;
             }
+            // llvm-mc spells an immediate branch displacement `b #8` as well as `b 8`.
+            if (target.cpu_arch == CPU_ARCH_AARCH64 && (info.opcode == ASSEMBLY_OPCODE_AARCH64_B || info.opcode == ASSEMBLY_OPCODE_AARCH64_BL) &&
+                text.length > 1 && text.pointer[0] == '#')
+            {
+                text = assembly_trim(string_slice(text, 1, text.length));
+            }
             if (target.cpu_arch == CPU_ARCH_AARCH64 &&
                 (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR ||
                  instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS))
@@ -9182,14 +9175,7 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
     if (assembly_word_equal(mnemonic, S8("cwtd"))) return S8("cwd");
     if (assembly_word_equal(mnemonic, S8("cltd"))) return S8("cdq");
     if (assembly_word_equal(mnemonic, S8("cqto"))) return S8("cqo");
-    // XED's condition-family spellings use Z/NZ and the negative aliases
-    // (NLE, etc.) as canonical keys.  The handwritten front end accepts the
-    // shorter Intel aliases (JE, SETNE, SETG, CMOVE); normalize those keys
-    // before metadata candidate selection.
-    if (assembly_word_equal(mnemonic, S8("je"))) return S8("jz");
-    if (assembly_word_equal(mnemonic, S8("setne"))) return S8("setnz");
-    if (assembly_word_equal(mnemonic, S8("setg"))) return S8("setnle");
-    if (assembly_word_equal(mnemonic, S8("cmove"))) return S8("cmovz");
+    mnemonic = buster_x86_metadata_condition_canonical_mnemonic(mnemonic);
     // GNU/AT&T scalar extension aliases carry both source and destination
     // widths in the mnemonic.  Metadata models the operation as MOVZX/MOVSX
     // (or MOVSXD for the dword-to-qword form); source memory width is restored
@@ -9384,7 +9370,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
         {
             suffix_width = info.suffix_width;
         }
-        if ((!info.operand_count && info.opcode != ASSEMBLY_OPCODE_X86_RET) || info.opcode == ASSEMBLY_OPCODE_X86_JCC ||
+        // RET takes the stack-release immediate and NOP the multi-byte padding
+        // operand (`nopw 0(%rax,%rax,1)`), so both keep their suffixed spellings.
+        if ((!info.operand_count && info.opcode != ASSEMBLY_OPCODE_X86_RET && info.opcode != ASSEMBLY_OPCODE_X86_NOP) ||
+            info.opcode == ASSEMBLY_OPCODE_X86_JCC ||
             info.opcode == ASSEMBLY_OPCODE_X86_SETCC)
         {
             return false;
@@ -9412,13 +9401,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
     {
         // The suffix describes the operand width; the condition alias remains
         // syntax policy and uses the same condition identity as the parser.
-        static String8 const canonical[] = {
-            S8_INITIALIZER("cmovo"), S8_INITIALIZER("cmovno"), S8_INITIALIZER("cmovb"), S8_INITIALIZER("cmovnb"),
-            S8_INITIALIZER("cmovz"), S8_INITIALIZER("cmovnz"), S8_INITIALIZER("cmovbe"), S8_INITIALIZER("cmovnbe"),
-            S8_INITIALIZER("cmovs"), S8_INITIALIZER("cmovns"), S8_INITIALIZER("cmovp"), S8_INITIALIZER("cmovnp"),
-            S8_INITIALIZER("cmovl"), S8_INITIALIZER("cmovnl"), S8_INITIALIZER("cmovle"), S8_INITIALIZER("cmovnle"),
-        };
-        if (info.condition < BUSTER_ARRAY_LENGTH(canonical)) candidate = canonical[info.condition];
+        candidate = buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_MOVE, info.condition);
     }
     *base = candidate;
     if (base_info)
@@ -9450,15 +9433,21 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_applies(AssemblyOpcode opc
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(AssemblyInstructionInfo info, u8 suffix_width,
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(String8 mnemonic, AssemblyInstructionInfo info, u8 suffix_width,
                                                                       AssemblyOperand const* operands,
                                                                       BusterX86MetadataPhysicalOperand* physical,
                                                                       u32 operand_count)
 {
     bool saw_width_operand = false;
+    // IN/OUT are metadata-only mnemonics, so COUNT carries no operand-role
+    // identity for suffix_applies. In normalized Intel order the accumulator
+    // is first for IN and second for OUT. Its suffix describes the transferred
+    // data; the port remains DX16 or imm8 and is checked by exact metadata.
+    bool port_io = operand_count == 2 && (assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out")));
+    u32 data_operand = assembly_word_equal(mnemonic, S8("in")) ? 0 : 1;
     for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
     {
-        if (!assembly_x86_metadata_suffix_applies(info.opcode, operand_index, operand_count))
+        if ((port_io && operand_index != data_operand) || !assembly_x86_metadata_suffix_applies(info.opcode, operand_index, operand_count))
         {
             continue;
         }
@@ -9553,7 +9542,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataSelectResult assembly_x86_metadata_select_s
     {
         return selection;
     }
-    if (!assembly_x86_metadata_suffix_width_matches(suffix_info, suffix_width, operands, physical, operand_count))
+    if (!assembly_x86_metadata_suffix_width_matches(suffix_base, suffix_info, suffix_width, operands, physical, operand_count))
     {
         selection.status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
         return selection;
@@ -9759,49 +9748,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         String8 alias_statement = string_format(builder->arena, S8("{S8} {S8}"), wait_alias, alias_operands);
         return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset + 1, target, syntax);
     }
-    // The condition-code aliases the metadata mnemonic table does not spell.
-    // `ja` and `jnbe` are one instruction, and hand-written assembly uses
-    // whichever reads better at the site, so the alias is rewritten to the
-    // canonical spelling the checked selector knows rather than reported as
-    // an unknown instruction.
-    static const struct
-    {
-        String8 alias;
-        String8 canonical;
-    } metadata_condition_aliases[] = {
-        {S8_INITIALIZER("c"), S8_INITIALIZER("b")},     {S8_INITIALIZER("nae"), S8_INITIALIZER("b")},
-        {S8_INITIALIZER("ae"), S8_INITIALIZER("nb")},   {S8_INITIALIZER("nc"), S8_INITIALIZER("nb")},
-        {S8_INITIALIZER("e"), S8_INITIALIZER("z")},     {S8_INITIALIZER("ne"), S8_INITIALIZER("nz")},
-        {S8_INITIALIZER("na"), S8_INITIALIZER("be")},
-        {S8_INITIALIZER("a"), S8_INITIALIZER("nbe")},   {S8_INITIALIZER("pe"), S8_INITIALIZER("p")},
-        {S8_INITIALIZER("po"), S8_INITIALIZER("np")},   {S8_INITIALIZER("nge"), S8_INITIALIZER("l")},
-        {S8_INITIALIZER("ge"), S8_INITIALIZER("nl")},   {S8_INITIALIZER("ng"), S8_INITIALIZER("le")},
-        {S8_INITIALIZER("g"), S8_INITIALIZER("nle")},
-    };
-    static String8 const metadata_condition_families[] = {S8_INITIALIZER("j"), S8_INITIALIZER("set"), S8_INITIALIZER("cmov")};
-    for (u32 family_index = 0; family_index < BUSTER_ARRAY_LENGTH(metadata_condition_families); family_index += 1)
-    {
-        String8 family = metadata_condition_families[family_index];
-        if (first_word.length <= family.length || !assembly_word_equal(string_slice(first_word, 0, family.length), family))
-        {
-            continue;
-        }
-        String8 condition = string_slice(first_word, family.length, first_word.length);
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(metadata_condition_aliases); index += 1)
-        {
-            if (!assembly_word_equal(condition, metadata_condition_aliases[index].alias))
-            {
-                continue;
-            }
-            String8 canonical = string_format(builder->arena, S8("{S8}{S8}"), family, metadata_condition_aliases[index].canonical);
-            String8 alias_statement =
-                first_space == trimmed_statement.length
-                    ? canonical
-                    : string_format(builder->arena, S8("{S8} {S8}"), canonical,
-                                    assembly_trim(string_slice(trimmed_statement, first_space, trimmed_statement.length)));
-            return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset, target, syntax);
-        }
-    }
+    // Ordinary condition aliases resolve at the shared metadata lookup boundary.
     // The handwritten x87 front end accepts the traditional omitted-operand
     // spellings (for example `fadd` and `fadd st(2)`).  Metadata rows expose
     // the visible stack operand, so materialize the same canonical operands
@@ -10700,7 +10647,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                      physical[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
                                      physical[0].reg.physical_class == physical[1].reg.physical_class &&
                                      physical[0].reg.index == physical[1].reg.index;
-    if ((suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_info, mnemonic_suffix_width, operands,
+    if ((suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_base, mnemonic_suffix_info, mnemonic_suffix_width, operands,
                                                                             physical, operand_count)) ||
         duplicate_pop2_destination)
     {
@@ -10952,12 +10899,17 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = true,
         .include_not64 = false,
-        .include_implicit = operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+        .source_moffs = builder->statement_source_moffs,
+        // XED's IN/OUT rows mark their source-spelled accumulator and DX
+        // registers IMPL. Consume the complete explicit two-operand topology;
+        // exact metadata still validates their identities and port width.
+        .include_implicit = (operand_count == 2 && (assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out")))) ||
+                            (operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
                             physical[operand_count - 1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
                             physical[operand_count - 1].reg.index == 1 && physical[operand_count - 1].reg.width == 8 &&
                             (assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
                              assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr")) ||
-                             assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd"))),
+                             assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd")))),
         .source_semantics = true,
     };
     bool relative_literal = false;
@@ -11144,6 +11096,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_instruction_is_novel(AssemblyInst
     // form and carries symbol relocations through to emission.
     if (assembly_word_equal(instruction.metadata_mnemonic, S8("PUSH")) && instruction.metadata_operand_count == 1 &&
         instruction.metadata_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+    {
+        return true;
+    }
+    // RET with a stack-release immediate (`ret $8`) and NOP with a register or
+    // memory operand (`nopw 0(%rax,%rax,1)`, `nop %eax`) are classic encodings
+    // whose handwritten rows take no operand. Metadata selects RET imm16 and
+    // the 0F 1F /0 NOP, so keep that result instead of the invalid-operand
+    // diagnostic.
+    if (instruction.metadata_operand_count == 1 &&
+        ((assembly_word_equal(instruction.metadata_mnemonic, S8("RET")) &&
+          instruction.metadata_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE) ||
+         (assembly_word_equal(instruction.metadata_mnemonic, S8("NOP")) &&
+          (instruction.metadata_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY ||
+           instruction.metadata_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER))))
     {
         return true;
     }
@@ -11695,10 +11661,119 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_vector_register(String8 operand)
            (name.length >= 3 && assembly_word_equal(string_slice(name, 0, 2), S8("mm")) && name.pointer[2] >= '0' && name.pointer[2] <= '7');
 }
 
+// The width of the accumulator spelled `%al`/`%ax`/`%eax`/`%rax` (AT&T) or
+// `al`/`ax`/`eax`/`rax` (Intel), else 0.
+BUSTER_GLOBAL_LOCAL u8 assembly_x86_spelling_accumulator_width(String8 operand, AssemblySyntax syntax)
+{
+    bool prefixed = operand.length && operand.pointer[0] == '%';
+    String8 name = prefixed ? string_slice(operand, 1, operand.length) : operand;
+    u8 width = 0;
+    if (prefixed == (syntax == ASSEMBLY_SYNTAX_ATT))
+    {
+        width = assembly_word_equal(name, S8("al")) ? 8 : assembly_word_equal(name, S8("ax")) ? 16 : assembly_word_equal(name, S8("eax")) ? 32
+                : assembly_word_equal(name, S8("rax")) ? 64 : 0;
+    }
+    return width;
+}
+
+// An absolute address as MOV moffs names it: AT&T `[%seg:]number`, Intel
+// `[size ptr] [seg:](number | [number])`. Registers, immediates, symbols and
+// based or indexed memory are not absolute addresses.
+BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_absolute_address(Arena* arena, String8 operand, AssemblySyntax syntax, String8* segment_text,
+                                                                 u8* segment_code, u8* size, String8* address)
+{
+    bool valid = operand.length != 0;
+    String8 text = operand;
+    u8 width = 0;
+    if (valid && syntax != ASSEMBLY_SYNTAX_ATT)
+    {
+        u64 word_end = 0;
+        while (word_end < text.length && !assembly_space(text.pointer[word_end])) word_end += 1;
+        String8 rest = assembly_trim(string_slice(text, word_end, text.length));
+        u64 ptr_end = 0;
+        while (ptr_end < rest.length && !assembly_space(rest.pointer[ptr_end])) ptr_end += 1;
+        if (word_end < text.length && assembly_word_equal(string_slice(rest, 0, ptr_end), S8("ptr")))
+        {
+            String8 word = string_slice(text, 0, word_end);
+            width = assembly_word_equal(word, S8("byte")) ? 8 : assembly_word_equal(word, S8("word")) ? 16 : assembly_word_equal(word, S8("dword")) ? 32
+                    : assembly_word_equal(word, S8("qword")) ? 64 : 0;
+            valid = width != 0;
+            text = assembly_trim(string_slice(rest, ptr_end, rest.length));
+        }
+    }
+    u64 colon = 0;
+    while (colon < text.length && text.pointer[colon] != ':' && text.pointer[colon] != '[') colon += 1;
+    u8 code = BUSTER_X86_METADATA_SEGMENT_NONE;
+    String8 segment = {0};
+    if (valid && colon < text.length && text.pointer[colon] == ':')
+    {
+        segment = assembly_trim(string_slice(text, 0, colon));
+        valid = assembly_x86_segment_parse(segment, syntax, &code);
+        text = assembly_trim(string_slice(text, colon + 1, text.length));
+    }
+    if (valid && syntax != ASSEMBLY_SYNTAX_ATT && text.length >= 2 && text.pointer[0] == '[' && text.pointer[text.length - 1] == ']')
+    {
+        text = assembly_trim(string_slice(text, 1, text.length - 1));
+    }
+    s64 signed_value = 0;
+    u64 unsigned_value = 0;
+    valid = valid && text.length && text.pointer[0] != '$' && (assembly_parse_s64(text, &signed_value) || assembly_parse_u64(text, &unsigned_value));
+    if (valid)
+    {
+        *segment_text = segment;
+        *segment_code = code;
+        *size = width;
+        // An address above INT64_MAX is the same 64 bits as a negative one;
+        // the operand parsers take the signed reading.
+        *address = unsigned_value > (u64)INT64_MAX
+                       ? string_format(arena, S8("-{u64}"), (u64)0 - unsigned_value)
+                       : text;
+    }
+    return valid;
+}
+
+// `movabs` between the accumulator and an absolute address is the MOV moffs
+// form. Rewrites the two operands into the plain `mov` spelling of the same
+// access, sized by the accumulator; GNU as writes the default `ds` segment
+// without a prefix byte, so it is dropped. The width is returned as the AT&T
+// suffix letter.
+BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_movabs_moffs(AssemblyBuilder* builder, String8* operands, AssemblySyntax syntax, char8 suffix,
+                                                             String8* rewritten, char8* width_suffix)
+{
+    bool result = false;
+    bool att = syntax == ASSEMBLY_SYNTAX_ATT;
+    u8 suffix_width = suffix == 'b' ? 8 : suffix == 'w' ? 16 : suffix == 'l' ? 32 : suffix == 'q' ? 64 : 0;
+    for (u32 order = 0; order < 2 && !result; order += 1)
+    {
+        u8 width = assembly_x86_spelling_accumulator_width(operands[order], syntax);
+        String8 segment_text = {0};
+        u8 segment_code = 0;
+        u8 size = 0;
+        String8 address = {0};
+        if (width && assembly_x86_spelling_absolute_address(builder->arena, operands[1 - order], syntax, &segment_text, &segment_code, &size, &address) &&
+            (!size || size == width) && (!suffix || suffix_width == width))
+        {
+            bool keep_segment = segment_text.length && segment_code != BUSTER_X86_METADATA_SEGMENT_DS;
+            String8 size_name = width == 8 ? S8("byte") : width == 16 ? S8("word") : width == 32 ? S8("dword") : S8("qword");
+            String8 memory = address;
+            if (att && keep_segment) memory = string_format(builder->arena, S8("{S8}:{S8}"), segment_text, address);
+            else if (!att && keep_segment) memory = string_format(builder->arena, S8("{S8} ptr {S8}:[{S8}]"), size_name, segment_text, address);
+            else if (!att) memory = string_format(builder->arena, S8("{S8} ptr [{S8}]"), size_name, address);
+            *rewritten = order == 0 ? string_format(builder->arena, S8("{S8}, {S8}"), operands[0], memory)
+                                    : string_format(builder->arena, S8("{S8}, {S8}"), memory, operands[1]);
+            *width_suffix = width == 8 ? 'b' : width == 16 ? 'w' : width == 32 ? 'l' : 'q';
+            result = true;
+        }
+    }
+    return result;
+}
+
 // GNU as accepts spellings that compilers emit but the instruction tables do
 // not name. Each is rewritten here into an equivalent accepted spelling with
 // identical bytes, ahead of both parsers:
 //   register-immediate movabs[q] -> mov[q]
+//   accumulator/absolute-address movabs[bwlq] -> mov[bwlq], with the metadata
+//   selector told to pick the moffs row (A0..A3) even for a short address
 //   AT&T retq/callq -> ret/call
 //   rep bsf/bsr -> tzcnt/lzcnt (GCC's spelling; F3 0F BC/BD either way,
 //   executing as BSF/BSR on CPUs without BMI1/LZCNT)
@@ -11708,7 +11783,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_vector_register(String8 operand)
 //   AT&T movq with an XMM/MMX operand -> MOVQ transfer (the q is the MOVQ name)
 // Anything else is returned unchanged; the parsers stay the authority.
 BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* builder, String8 statement, AssemblySyntax syntax, bool* movq_transfer,
-                                                               TargetCpuFeature* bit_scan_feature)
+                                                               TargetCpuFeature* bit_scan_feature, bool* source_moffs)
 {
     String8 result = statement;
     String8 text = assembly_trim(statement);
@@ -11750,6 +11825,8 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* bui
     String8 new_mnemonic = {0};
     String8 insert_before = {0};
     String8 insert_after = {0};
+    String8 replacement_operands = {0};
+    char8 mnemonic_suffix = suffix;
     bool swap = false;
     bool drop_prefix = false;
     if (operand_count != UINT32_MAX)
@@ -11778,6 +11855,17 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* bui
             // symbolic value would lose its 64-bit relocation. A value that
             // fits a sign-extended imm32 takes the shorter MOV row.
             new_mnemonic = suffix ? S8("mov?") : S8("mov");
+        }
+        else if ((assembly_word_equal(mnemonic, S8("movabs")) || (att && suffix && assembly_word_equal(base, S8("movabs")))) &&
+                 operand_count == 2 &&
+                 assembly_x86_spelling_movabs_moffs(builder, operands, syntax, suffix, &replacement_operands, &mnemonic_suffix))
+        {
+            // A register and a numeric address only: the accumulator and an
+            // absolute offset are exactly the MOV moffs row, which the flag
+            // makes the selector choose even when the address is short enough
+            // for a ModRM disp32.
+            new_mnemonic = att ? S8("mov?") : S8("mov");
+            *source_moffs = true;
         }
         else if (att && (assembly_word_equal(mnemonic, S8("retq")) || assembly_word_equal(mnemonic, S8("callq"))))
         {
@@ -11811,7 +11899,7 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* bui
     {
         if (!new_mnemonic.length) new_mnemonic = mnemonic;
         if (!drop_prefix && rep_prefix) prefix = words[0];
-        u64 capacity = text.length + 32;
+        u64 capacity = text.length + replacement_operands.length + 32;
         char8* buffer = arena_allocate(builder->arena, char8, capacity);
         u64 length = 0;
         if (prefix.length)
@@ -11822,7 +11910,7 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* bui
         }
         for (u64 index = 0; index < new_mnemonic.length; index += 1)
         {
-            buffer[length++] = new_mnemonic.pointer[index] == '?' ? suffix : new_mnemonic.pointer[index];
+            buffer[length++] = new_mnemonic.pointer[index] == '?' ? mnemonic_suffix : new_mnemonic.pointer[index];
         }
         buffer[length++] = ' ';
         if (insert_before.length)
@@ -11838,6 +11926,11 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* bui
             buffer[length++] = ',';
             memcpy(buffer + length, operands[0].pointer, operands[0].length);
             length += operands[0].length;
+        }
+        else if (replacement_operands.length)
+        {
+            memcpy(buffer + length, replacement_operands.pointer, replacement_operands.length);
+            length += replacement_operands.length;
         }
         else
         {
@@ -11859,12 +11952,14 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                                                      Target target, AssemblySyntax syntax)
 {
     bool movq_transfer = false;
+    bool source_moffs = false;
     TargetCpuFeature bit_scan_feature = TARGET_CPU_FEATURE_NONE;
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
-        statement = assembly_x86_spelling_normalize(builder, statement, syntax, &movq_transfer, &bit_scan_feature);
+        statement = assembly_x86_spelling_normalize(builder, statement, syntax, &movq_transfer, &bit_scan_feature, &source_moffs);
     }
     builder->statement_feature = bit_scan_feature;
+    builder->statement_source_moffs = source_moffs;
     if (bit_scan_feature != TARGET_CPU_FEATURE_NONE)
     {
         // `rep bsf`/`rep bsr` are GCC's spellings of TZCNT/LZCNT bytes. They
@@ -12914,6 +13009,10 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                         {
                             kind = ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19;
                         }
+                        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_ADR_BYTE21 && builder->unit_control_relocations)
+                        {
+                            kind = ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21;
+                        }
                     }
                     if (kind == ASSEMBLY_RELOCATION_COUNT ||
                         !assembly_relocation_append(builder, instruction->offset, expression, kind, 0))
@@ -12924,7 +13023,11 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                     }
                     continue;
                 }
-                if (target < 0 || (u64)target > UINT64_MAX)
+                // A unit assembles one statement at a time, so a bare or `#`
+                // constant is the byte displacement from the instruction
+                // itself and may be negative. Elsewhere it is an address.
+                bool backward_displacement = target < 0 && builder->unit_control_relocations && !expression.has_symbol;
+                if (target < 0 && !backward_displacement)
                 {
                     assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
                                         S8("AArch64 control target is out of range"));
@@ -12937,7 +13040,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                         (BusterAarch64ControlFixupRequest){
                             .target = builder->target,
                             .place_address = instruction->offset,
-                            .target_address = (u64)target,
+                            .target_address = backward_displacement ? instruction->offset : (u64)target,
+                            .addend = backward_displacement ? target : 0,
                             .symbol_defined = true,
                         },
                         &patched, &fixup))

@@ -140,6 +140,13 @@ struct GpuToolchain
     String8 dxc_path;
 };
 
+// Whole-invocation bound on retained tool output (stdout then stderr of every
+// process step, in step order). Output beyond it is drained but not kept; the
+// result reports the truncation. It also caps each child's captured streams
+// (never above the process-capture defaults), so one step cannot buffer more
+// than the invocation could retain.
+#define GPU_PIPELINE_LOG_LIMIT_DEFAULT_BYTES BUSTER_MB(32)
+
 typedef struct GpuPipelineOptions GpuPipelineOptions;
 struct CPreprocessorOperation;
 struct GpuPipelineOptions
@@ -168,6 +175,8 @@ struct GpuPipelineOptions
     GpuTarget target;
     // Zero selects the finite production default.
     u64 tool_timeout_microseconds;
+    // Zero selects GPU_PIPELINE_LOG_LIMIT_DEFAULT_BYTES.
+    u64 log_limit_bytes;
     u32 input_count;
     u32 include_path_count;
     u32 system_include_path_count;
@@ -236,15 +245,28 @@ struct GpuPipelineResult
     GpuArtifact artifact;
     String8 diagnostic;
     String8 command;
+    // Retained tool output, at most the invocation's log limit. A failing tool's
+    // own output is always kept (up to the limit), evicting the oldest earlier
+    // output if needed; `diagnostic` embeds this text for tool failures.
     String8 log;
     // Always names the private workspace created for this invocation. Unless
     // save_temporaries was requested or cleanup_failed is true, it has been
     // removed before return. A failed cleanup leaves this path for remediation.
     String8 temporary_directory;
     ProcessResult process_result;
+    // Tool output bytes that were observed but are not in `log`: dropped by a
+    // child's capture limit, beyond the invocation's log limit, or evicted to
+    // keep a failing tool's output.
+    u64 log_dropped_bytes;
     GpuPipelineError error;
     u32 failed_step;
     bool timed_out;
+    // `log` is missing output (log_dropped_bytes is nonzero).
+    bool log_truncated;
+    // Per-child facts from the process capture: at least one child reported
+    // output_truncated / capture_limit_exceeded.
+    bool tool_output_truncated;
+    bool tool_capture_limit_exceeded;
     // Set only after named publication commits. The artifact remains available
     // even if later workspace cleanup sets error/process_result to failure.
     bool published;
