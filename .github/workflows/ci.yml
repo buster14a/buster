@@ -99,6 +99,8 @@ jobs:
           python3 -B tools/ci_checks_sample_test.py -v
           python3 -B tools/ci_checks_tools_test.py -v
           python3 -B tools/ci_job_environment_test.py -v
+          python3 -B tests/ci_tools_test.py EvidencePackTests.test_workflow_packs_after_the_summary_and_never_loses_evidence WorkflowPolicyTests.test_bootstrap_keeps_every_native_gate_in_order -v
+          python3 -B tools/matrix_shard_test.py DraftMacosDeferralTests.test_every_step_after_checkout_skips_in_a_deferred_lane -v
           python3 -B tools/ci_ios_simulator_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
