@@ -432,9 +432,13 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
 - **The dedicated Ryzen 7 9700X is no longer a general GitHub Actions
-  executor.** `.github/workflows/zen5-audit.yml` is retired. The only GitHub
-  workflow admitted to the restricted `buster-9700x-service-dispatch` runner
-  group is `.github/workflows/9700x-service-dispatch.yml`; it selects that group
+  executor.** `.github/workflows/zen5-audit.yml` is retired. Two GitHub
+  workflows are admitted to the restricted `buster-9700x-service-dispatch`
+  runner group. `.github/workflows/9700x-direct-bench.yml` compiles and times
+  the owner's own pull-request workloads from `benchmarks/9700x/` without the
+  service; its numbers are diagnostic and unsealed (see
+  `benchmarks/9700x/README.md`). `.github/workflows/9700x-service-dispatch.yml`
+  selects that group
   and `[self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`, does not check out
   repository content, and invokes only the operator-installed fixed gateway.
   Its `recipe` input chooses from a reviewed allowlist

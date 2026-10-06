@@ -11,6 +11,12 @@ Nothing here needs a pull request, a branch, a compiler revision or a
 workflow dispatch. You submit directly to the service and get a job number
 back.
 
+Uploading through MCP costs one tool call per 432 bytes (#2701), and
+`native-runtime-v1` returns no program output (#2702). To time a small C
+workload and read what it printed, the owner can instead add the source under
+[`benchmarks/9700x/`](../../benchmarks/9700x/README.md) in a pull request; that
+path runs outside the service, without its containment or sealed results.
+
 ## The model in one page
 
 - **One job at a time.** The service owns the machine for a whole job, from
