@@ -318,8 +318,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unreachable_payload(UnitTes
         IrModule module = {.functions = &function, .function_count = 1};
         IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1,
                              .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
-        IrInstruction saved_instruction = instructions[1];
-        IrBlock saved_block = block;
+        // Byte snapshots: structure assignment need not copy padding.
+        u8 saved_instruction[sizeof(instructions[1])];
+        u8 saved_block[sizeof(block)];
+        memcpy(saved_instruction, &instructions[1], sizeof(saved_instruction));
+        memcpy(saved_block, &block, sizeof(saved_block));
         IrValidationError expected = variant ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE;
         IrValidationResult validation = ir_validate_canonical_module(&program, &module);
         BUSTER_TEST(arguments, validation.error == expected);
@@ -334,8 +337,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unreachable_payload(UnitTes
         {
             BUSTER_TEST(arguments, prepared.function.value == 0 && prepared.block.value == 0 && prepared.instruction.value == 1);
             BUSTER_TEST(arguments, !function.published_cfg && !module.local_promotion_complete && !module.fast_complete);
-            BUSTER_TEST(arguments, memcmp(&saved_instruction, &instructions[1], sizeof(saved_instruction)) == 0);
-            BUSTER_TEST(arguments, memcmp(&saved_block, &block, sizeof(saved_block)) == 0);
+            BUSTER_TEST(arguments, memcmp(saved_instruction, &instructions[1], sizeof(saved_instruction)) == 0);
+            BUSTER_TEST(arguments, memcmp(saved_block, &block, sizeof(saved_block)) == 0);
         }
         else
         {
