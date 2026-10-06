@@ -3,15 +3,17 @@
 
 Run from trusted `main` by `.github/workflows/9700x-direct-bench.yml` in one
 of two modes (compiler_receipt.MODES), after its hosted authorization:
-    main   (`compare` job) a commit after it landed on main against its first
-           parent; the checkout holds it with its parents (fetch depth 2)
+    main   (`compare` job) a commit after it landed on main against the
+           authorized baseline on its first-parent chain: its first parent,
+           or the nearest measured ancestor of a range (authorize_compiler);
+           the checkout holds its history without blobs
     pull   (`compare-pull` job) an owner pull request's head against its merge
            base, requested by benchmarks/9700x/compiler-compare.request
 The checkout has no persisted credentials. This harness, the build commands,
 the lab and the frozen PROFILE come from `main`.
 
 It follows the documented A/B recipe of docs/agents/benchmarking.md in one
-tree: a tests-off Clang Release `ide` of the base (first parent or merge base),
+tree: a tests-off Clang Release `ide` of the base (main baseline or merge base),
 then of the head, then the base again so the frozen workload has its generated
 closure; `tools/uarch_lab.py compare` then times both compilers on that same
 base source. Builds are preparation and are timed separately.
@@ -39,6 +41,7 @@ import sys
 import time
 from pathlib import Path
 
+from compiler_github import RECONCILE_DEPTH
 from compiler_receipt import IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, classify, dumps, host_problem, render
 from compiler_receipt import observed_cpu_model as cpu_model
 
@@ -175,10 +178,11 @@ def main(argv: list[str] | None = None) -> int:
     bins.mkdir()
     summary = None
 
-    # Identity first. A main commit has the base as first parent and, when a
-    # queue merge produced it, the pull request head as second (else it is its
-    # own pull head); a pull request head is its own pull head and descends
-    # from the base (its merge base). Both trees must match.
+    # Identity first. A main commit has the base on its first-parent chain (its
+    # first parent, or a range's measured ancestor) and, when a queue merge
+    # produced it, the pull request head as second parent (else it is its own
+    # pull head); a pull request head is its own pull head and descends from
+    # the base (its merge base). Both trees must match.
     problem = host_problem(receipt)
     if problem:
         reasons.append(problem)
@@ -186,7 +190,11 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.mode == "main":
             second = subprocess.run(["git", "-C", str(candidate), "rev-parse", "--verify", "--quiet", "HEAD^2"],
                                     capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False).stdout.strip()
-            parents = (git(candidate, "rev-parse", "HEAD^1"), second or git(candidate, "rev-parse", "HEAD"))
+            chain = git(candidate, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1").split()
+            parents = (arguments.base if arguments.base in chain else "base is not on the first-parent chain",
+                       second or git(candidate, "rev-parse", "HEAD"))
+            if arguments.base in chain:
+                receipt["coverage"] = {"first_parent": chain[0], "range": str(chain.index(arguments.base) + 1)}
         else:
             ancestry = subprocess.run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
                                       capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0

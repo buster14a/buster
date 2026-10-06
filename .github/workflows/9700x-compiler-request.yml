@@ -2,7 +2,8 @@ name: 9700X compiler benchmark request
 
 # Every push to main completes this run, and only that completion starts the
 # compiler comparison in 9700x-direct-bench.yml from main (#2752): the pushed
-# commit against its first parent, after it landed, so merging never waits
+# commit against its first parent (or, after a merge burst, the nearest
+# measured first-parent ancestor), after it landed, so merging never waits
 # for the 9700X. The request job is a marker: it runs on a hosted runner,
 # checks out nothing, executes no repository content and holds no capability.
 # The bench workflow re-reads the run, the commit and main from GitHub's

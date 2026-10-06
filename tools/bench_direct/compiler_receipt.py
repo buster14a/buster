@@ -9,7 +9,10 @@ these checks: they are report-only evidence.
 
 Two modes measure the same way and differ only in what they compare:
     main   a commit after it landed on main against its first parent, the
-           main commit it landed on (#2752); merging never waits for it
+           main commit it landed on, or, when that commit has no valid
+           measurement, the nearest first-parent ancestor with one, so a
+           merge burst's unmeasured commits are inside a measured range
+           (#2752); merging never waits for it
     pull   an owner pull request head against its merge base with the base
            branch, on request and without merging (#2769)
 Each mode publishes its own check name and marker.
@@ -21,6 +24,7 @@ Map (searchable symbols):
     APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     REGRESSION_POLICIES, regression_policy                 report-only switch
+    range_label                                            main baseline relation
     render                                                 readable report
 """
 
@@ -133,6 +137,23 @@ def regression_policy(value: str) -> tuple[str, str]:
     return policy, problem
 
 
+def range_label(commits: object, first_parent: object) -> str:
+    """A main baseline's relation to the head, from the authorized range size, or '' when unknown.
+
+    commits counts the first-parent main commits the comparison spans: 1 is
+    the head alone against its first parent.
+    """
+    label = ""
+    if commits == "1":
+        label = "first parent"
+    elif isinstance(commits, str) and DECIMAL.fullmatch(commits) and isinstance(first_parent, str) and \
+            SHA.fullmatch(first_parent):
+        label = (f"range of {commits} first-parent main commits: the nearest earlier main commit with a valid "
+                 f"measurement, because first parent `{first_parent}` has none; the result covers the whole range "
+                 "and does not isolate one commit")
+    return label
+
+
 def classify(summary: object, binaries: object) -> list[str]:
     """Reasons the lab summary is not a valid core measurement; empty when valid."""
     reasons: list[str] = []
@@ -187,6 +208,10 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
     ]
     for key in IDENTITY_KEYS:
         lines.append(f"| {key} | `{identity.get(key, 'NA')}` |")
+    coverage = receipt.get("coverage") if isinstance(receipt, dict) else None
+    label = range_label(coverage.get("range"), coverage.get("first_parent")) if isinstance(coverage, dict) else ""
+    if mode == "main" and label:
+        lines += ["", f"Baseline: {label}."]
     profile = receipt.get("profile", {}) if isinstance(receipt, dict) else {}
     host = receipt.get("host", {}) if isinstance(receipt, dict) else {}
     lines += ["", f"Profile `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}.",

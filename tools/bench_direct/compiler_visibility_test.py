@@ -245,13 +245,31 @@ class CheckLifecycleTest(unittest.TestCase):
         measured["conclusion"] = "success"
         pull_side = api.add_check("d" * 40, marker("d" * 40, request="75"))
         current = api.add_check(HEAD, marker())
-        closed = compiler_github.reconcile_main(api, HEAD, "run", "2026-10-06T16:00:00Z")
+        closed = compiler_github.reconcile_main(api, HEAD, PARENT, "run", "2026-10-06T16:00:00Z")
         self.assertEqual(sorted(closed), sorted([displaced["id"], unpublished["id"]]))
         self.assertEqual((displaced["conclusion"], displaced["output"]["title"]), ("skipped", "Not measured"))
         self.assertIn("displaced", displaced["output"]["summary"])
+        self.assertNotIn("range comparison", displaced["output"]["summary"])
         self.assertEqual(unpublished["conclusion"], "cancelled")
         self.assertEqual(measured["conclusion"], "success")
         self.assertEqual((current["status"], pull_side["status"]), ("queued", "queued"))
+
+    def test_main_reconciliation_names_the_range_that_covers_a_skipped_commit(self) -> None:
+        api = FakeGitHub()
+        api.commits = [{"sha": HEAD, "parents": [{"sha": PARENT}]}, {"sha": PARENT, "parents": [{"sha": OLDER}]},
+                       {"sha": OLDER, "parents": [{"sha": "e" * 40}]}]
+        displaced = api.add_check(PARENT, marker(PARENT, request="80"))
+        measured = api.add_check(OLDER, marker(OLDER, request="60"), status="completed")
+        measured["conclusion"] = "success"
+        chain = compiler_github.first_parent_chain(api, HEAD)
+        self.assertEqual(chain, [PARENT, OLDER, "e" * 40])
+        self.assertIn("range of 2 first-parent main commits", compiler_github.baseline_label(chain, OLDER))
+        self.assertEqual(compiler_github.baseline_label(chain, PARENT), "first parent")
+        self.assertEqual(compiler_github.baseline_label(chain, HEAD), "")
+        closed = compiler_github.reconcile_main(api, HEAD, OLDER, "run", "2026-10-06T16:00:00Z", chain)
+        self.assertEqual(closed, [displaced["id"]])
+        self.assertEqual(displaced["conclusion"], "skipped")
+        self.assertIn(f"inside the range comparison of `{HEAD}` against `{OLDER}`", displaced["output"]["summary"])
 
     def test_pull_reconciliation_supersedes_only_earlier_heads_of_that_pull_request(self) -> None:
         api = FakeGitHub()
@@ -477,6 +495,27 @@ class RecoveryTest(unittest.TestCase):
                 code, published = self.run_recovery(api)
                 self.assertEqual((code, published), (1, {}))
 
+    def test_recovered_range_keeps_its_baseline_only_on_the_first_parent_chain(self) -> None:
+        api = RecoveryApi()
+        api.commits = [{"sha": HEAD, "parents": [{"sha": "b" * 40}]}, {"sha": "b" * 40, "parents": [{"sha": OLDER}]},
+                       {"sha": OLDER, "parents": [{"sha": "e" * 40}]}]
+        recorded = RecoveryApi.recorded()
+        recorded["identity"].update(base=OLDER, base_tree="1" * 40)
+        recorded["coverage"] = {"first_parent": "b" * 40, "range": "2"}
+        api.payload = archive({"receipt.json": json.dumps(recorded), "lab/summary.json": json.dumps(summary())})
+        original = api.request
+        routed = lambda path, data=None, method="": {"sha": OLDER, "commit": {"tree": {"sha": "1" * 40}}} \
+            if path == f"/commits/{OLDER}" else original(path, data, method)  # noqa: E731
+        with mock.patch.object(api, "request", routed):
+            code, published = self.run_recovery(api)
+        self.assertEqual((code, published["conclusion"], published["base"]), (0, "success", OLDER))
+        self.assertIn("range of 2 first-parent main commits", published["markdown"])
+        # The same receipt without the chain cannot prove its baseline.
+        api.commits = []
+        with mock.patch.object(api, "request", routed):
+            code, published = self.run_recovery(api)
+        self.assertEqual((code, published), (1, {}))
+
     def test_recovered_failure_keeps_its_meaning(self) -> None:
         code, published = self.run_recovery(RecoveryApi(compare="failure"))
         self.assertEqual((code, published["conclusion"]), (0, "failure"))
@@ -499,8 +538,8 @@ class PublishTest(unittest.TestCase):
                       "BQ_HEAD_COMMIT": HEAD, "BQ_HEAD_TREE": "d" * 40, "BQ_TRUSTED_REVISION": "9" * 40,
                       "BQ_REQUEST_RUN_ID": "91", "BQ_REQUEST_ATTEMPT": "1", "BQ_RUN_ID": "92",
                       "BQ_RUN_ATTEMPT": "1", "BQ_AUTHORIZE_RESULT": "success", "BQ_AUTHORIZED_ATTEMPT": "1",
-                      "BQ_COMPARE_RESULT": "success", "GH_TOKEN": "t", "GITHUB_OUTPUT": str(output),
-                      "GITHUB_STEP_SUMMARY": os.devnull}
+                      "BQ_COMPARE_RESULT": "success", "BQ_FIRST_PARENT": "b" * 40, "BQ_RANGE": "1",
+                      "GH_TOKEN": "t", "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": os.devnull}
             original = api.request
             routed = lambda path, data=None, method="": listing if "/runs/92/artifacts" in path else \
                 {"jobs": []} if path.startswith("/actions/runs/92/") else original(path, data, method)  # noqa: E731
@@ -517,6 +556,7 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(written["head"], HEAD)
         self.assertEqual(published["check_url"], started["html_url"])
         self.assertEqual(compiler_comment.validate_entry(published, REPO), [])
+        self.assertIn(f"`{'b' * 40}` (first parent)", published["markdown"])
 
 
 if __name__ == "__main__":
