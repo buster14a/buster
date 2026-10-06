@@ -349,6 +349,104 @@ def retained(evidence: Path) -> dict:
             for name in ("summary.json", "metadata.json")}
 
 
+class ScratchPlanTest(unittest.TestCase):
+    """Path-plan validation: rejected plans must leave every sentinel untouched."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name).resolve()
+        self.candidate = self.root / "candidate"
+        self.candidate.mkdir()
+        (self.candidate / "sentinel").write_text("keep")
+        self.lab = self.root / "lab" / "uarch_lab.py"
+        self.lab.parent.mkdir()
+        self.lab.write_text("lab")
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def snapshot(self) -> list:
+        return sorted((str(path.relative_to(self.root)), path.read_text() if path.is_file() else None)
+                      for path in self.root.rglob("*") if not path.is_symlink())
+
+    def reject(self, work: Path, evidence: Path, text: str, candidate: Path | None = None) -> None:
+        before = self.snapshot()
+        with self.assertRaises(compiler_compare.ScratchError) as caught:
+            compiler_compare.plan_scratch(candidate or self.candidate, self.lab, work, evidence)
+        self.assertIn(text, str(caught.exception))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_fresh_paths_are_planned_and_prepared_with_a_marker(self) -> None:
+        work, evidence = compiler_compare.plan_scratch(self.candidate, self.lab, self.root / "s" / "work",
+                                                       self.root / "s" / "evidence")
+        for directory in (work, evidence):
+            compiler_compare.prepare_scratch(directory)
+            self.assertTrue(compiler_compare.owned_scratch(directory))
+
+    def test_retry_clears_a_marked_directory_and_adopts_an_empty_one(self) -> None:
+        work, evidence = self.root / "work", self.root / "evidence"
+        compiler_compare.prepare_scratch(work)
+        (work / "stale").write_text("old")
+        evidence.mkdir()
+        compiler_compare.plan_scratch(self.candidate, self.lab, work, evidence)
+        compiler_compare.prepare_scratch(work)
+        compiler_compare.prepare_scratch(evidence)
+        self.assertEqual(sorted(path.name for path in work.iterdir()), [compiler_compare.SCRATCH_MARKER])
+        self.assertTrue(compiler_compare.owned_scratch(evidence))
+
+    def test_equal_and_nested_paths_are_rejected(self) -> None:
+        work = self.root / "work"
+        work.mkdir()
+        (work / "sentinel").write_text("keep")
+        self.reject(work, work, "equal or nested")
+        self.reject(work, work / "inner", "equal or nested")
+        self.reject(work / "inner", work, "equal or nested")
+
+    def test_a_string_prefix_sibling_is_not_nesting(self) -> None:
+        compiler_compare.plan_scratch(self.candidate, self.lab, self.root / "work", self.root / "work2")
+
+    def test_symlink_alias_is_rejected(self) -> None:
+        work = self.root / "work"
+        work.mkdir()
+        (work / "sentinel").write_text("keep")
+        (self.root / "alias").symlink_to(work, target_is_directory=True)
+        self.reject(work, self.root / "alias", "equal or nested")
+        (self.root / "tocandidate").symlink_to(self.candidate, target_is_directory=True)
+        self.reject(self.root / "tocandidate", self.root / "evidence", "candidate checkout")
+
+    def test_unrelated_existing_content_is_refused_without_cleanup(self) -> None:
+        work = self.root / "work"
+        work.mkdir()
+        (work / "sentinel").write_text("keep")
+        self.reject(work, self.root / "evidence", "unrelated content")
+        self.reject(self.root / "evidence2", work, "unrelated content")
+
+    def test_overlap_with_candidate_and_trusted_inputs_is_rejected(self) -> None:
+        self.reject(self.candidate, self.root / "evidence", "candidate checkout")
+        self.reject(self.candidate / "build", self.root / "evidence", "candidate checkout")
+        self.reject(self.root, self.root.parent / "elsewhere", "overlaps")
+        self.reject(self.root / "work", self.lab, "trusted lab")
+        self.reject(self.root / "work", compiler_compare.TRUSTED_ROOT / "tools", "trusted repository")
+
+    def test_root_and_home_are_rejected(self) -> None:
+        self.reject(Path("/"), self.root / "evidence", "filesystem root")
+        with mock.patch.object(Path, "home", return_value=self.root / "home"):
+            self.reject(self.root, self.root.parent / "elsewhere", "home directory", candidate=self.root.parent / "c")
+
+    def test_main_refuses_before_any_mutation(self) -> None:
+        work = self.root / "work"
+        work.mkdir()
+        (work / "sentinel").write_text("keep")
+        before = self.snapshot()
+        argv = ["--mode", "main", "--candidate", str(self.candidate), "--lab", str(self.lab), "--work", str(work),
+                "--evidence", str(self.root / "evidence"), "--summary", str(self.root / "s.md")]
+        for key in compiler_receipt.IDENTITY_KEYS[1:]:
+            argv += ["--" + key.replace("_", "-"), "x"]
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(compiler_compare.main(argv), 2)
+        self.assertEqual(self.snapshot(), before)
+
+
 class HarnessTest(unittest.TestCase):
     """The host harness against a real two-parent group with stand-in builds and lab."""
 

@@ -172,6 +172,70 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
     return reasons, dict(throughput_digest(documents[0]), exit=status)
 
 
+SCRATCH_MARKER = ".buster-compiler-compare-scratch"
+SCRATCH_PROTOCOL = "buster-compiler-compare-scratch-v1\n"
+TRUSTED_ROOT = Path(__file__).resolve().parents[2]
+
+
+class ScratchError(Exception):
+    """The requested work/evidence directories are unsafe to create or clear."""
+
+
+def overlaps(first: Path, second: Path) -> bool:
+    """Whether two resolved paths are equal or one is an ancestor of the other."""
+    return first == second or first in second.parents or second in first.parents
+
+
+def owned_scratch(directory: Path) -> bool:
+    marker = directory / SCRATCH_MARKER
+    try:
+        return marker.is_file() and not marker.is_symlink() and marker.read_text(encoding="utf-8") == SCRATCH_PROTOCOL
+    except (OSError, ValueError):
+        return False
+
+
+def plan_scratch(candidate: Path, lab: Path, work: Path, evidence: Path) -> tuple[Path, Path]:
+    """Validate the whole work/evidence plan without touching the filesystem; return resolved paths.
+
+    Paths are compared after resolving symlinks, with path ancestry rather than string prefixes.
+    A scratch directory may not equal, contain or sit inside the candidate checkout, the trusted
+    tools or lab, or each other, nor contain the home directory or be the filesystem root. An
+    existing scratch directory must be empty or carry the ownership marker.
+    """
+    work, evidence = work.resolve(), evidence.resolve()
+    protected = {"candidate checkout": candidate.resolve(), "trusted repository": TRUSTED_ROOT,
+                 "trusted lab": lab.resolve()}
+    for label, directory in (("--work", work), ("--evidence", evidence)):
+        if directory.parent == directory:
+            raise ScratchError(f"{label} {directory} is a filesystem root")
+        try:
+            home = Path.home().resolve()
+        except (OSError, RuntimeError):
+            home = None
+        if home is not None and (directory == home or directory in home.parents):
+            raise ScratchError(f"{label} {directory} is the home directory or one of its ancestors")
+        for name, other in protected.items():
+            if overlaps(directory, other):
+                raise ScratchError(f"{label} {directory} overlaps the {name} {other}")
+    if overlaps(work, evidence):
+        raise ScratchError(f"--work {work} and --evidence {evidence} are equal or nested")
+    for label, directory in (("--work", work), ("--evidence", evidence)):
+        if directory.exists():
+            if not directory.is_dir():
+                raise ScratchError(f"{label} {directory} exists and is not a directory")
+            if not owned_scratch(directory) and any(directory.iterdir()):
+                raise ScratchError(f"{label} {directory} has unrelated content and no {SCRATCH_MARKER} marker")
+    return work, evidence
+
+
+def prepare_scratch(directory: Path) -> None:
+    """Recreate a planned scratch directory empty with its marker; only marked or empty ones are cleared."""
+    if directory.exists() and owned_scratch(directory):
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / SCRATCH_MARKER).write_text(SCRATCH_PROTOCOL, encoding="utf-8")
+
+
 def parse(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--candidate", type=Path, required=True)
@@ -190,12 +254,13 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     candidate = arguments.candidate.resolve()
-    work = arguments.work.resolve()
-    evidence = arguments.evidence.resolve()
-    for directory in (work, evidence):
-        if directory.exists():
-            shutil.rmtree(directory)
-        directory.mkdir(parents=True)
+    try:
+        work, evidence = plan_scratch(candidate, arguments.lab, arguments.work, arguments.evidence)
+    except ScratchError as error:
+        print(f"compiler_compare: refusing scratch paths: {error}", file=sys.stderr)
+        return 2
+    prepare_scratch(work)
+    prepare_scratch(evidence)
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
                "profile": PROFILE, "throughput_profile": THROUGHPUT_PROFILE, "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
