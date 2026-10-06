@@ -51,7 +51,7 @@ self-test pins representative paths from every rule.
 | `dormant` | no | Any `*.bbb`, and `DORMANT_CUSTOM_COMPILER.md` |
 | `docs` | no | `docs/**` (audits, evidence, ledgers, this baseline), `LICENSES/**`, any other `*.md` |
 | `generated` | no | A path with a `generated` directory component, or a file name containing `.generated.` |
-| `tests` | no | A `tests` or `fixtures` directory component; a file name starting `test_`; a stem (name before the first `.`) that is `test`, `tests` or `fixture` or ends in `_test`, `_tests` or `_fixture` |
+| `tests` | no | A `tests` or `fixtures` directory component; a file name starting `test_`; a stem (name before the first `.`) that is `test`, `tests` or `fixture` or ends in `_test`, `_tests` or `_fixture`; anything under `benchmarks/9700x/` (9700X workload payloads, their input data and the compiler-comparison request, #2770) |
 | `build` | yes | A `tools` directory component, including generator scripts nested under `src/` |
 | `production` | yes | Everything else under `src/` |
 | `build` | yes | Everything else: `build.c`, the bootstrap wrappers, CMake, `.github/`, `tools/`, `android/` and `ios/` scripts, root configuration |

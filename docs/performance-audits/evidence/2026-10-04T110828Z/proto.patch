@@ -1,0 +1,229 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 919c12613..d271b1bb9 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -2854,6 +2854,20 @@ struct CIntegerIrBuilder
+     CIrPreparedControlExpression* prepared_control_expressions;
+     u32 prepared_control_expression_count;
+     u32 prepared_control_expression_capacity;
++    // Open-addressed open_index -> index + 1 index over the live prefix of
++    // prepared_control_expressions; power-of-two capacity at least twice the
++    // expression capacity, zero is the empty slot.
++    u32* prepared_control_expression_slots;
++    u32 prepared_control_expression_slot_mask;
++    // Creation-order stack of the currently-lowering expression indices;
++    // lowering is strictly LIFO with the frame stack.
++    u32* prepared_control_lowering_stack;
++    u32 prepared_control_lowering_count;
++    // Per-token index + 1 of an emitted expression covering that token's
++    // interior, over [prepared_control_token_start, +count).
++    u32* prepared_control_emitted_tokens;
++    u32 prepared_control_token_start;
++    u32 prepared_control_token_count;
+     CIrSignature* signatures;
+     IrTypeId* c_type_ir_map;
+     IrTypeId* scalar_types;
+@@ -17939,21 +17953,74 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* bu
+     return 0;
+ }
+ 
++BUSTER_C_INTERNAL u32 c_ir_prepared_control_expression_hash(u32 open_index)
++{
++    u32 hash = open_index;
++    hash ^= hash >> 16;
++    hash *= 0x7feb352du;
++    hash ^= hash >> 15;
++    return hash;
++}
++
+ BUSTER_C_INTERNAL CIrPreparedControlExpression* c_ir_prepared_control_expression_find(CIntegerIrBuilder* builder, u32 open_index)
+ {
+-    for (u32 index = 0; index < builder->prepared_control_expression_count; index += 1)
++    // Slots left behind by a released typeof replay (index >= count) are not
++    // chain terminators: a live entry inserted past one must still be found.
++    u32 slot = c_ir_prepared_control_expression_hash(open_index) & builder->prepared_control_expression_slot_mask;
++    for (;;)
+     {
+-        CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
+-        if (expression->open_index == open_index)
++        u32 stored = builder->prepared_control_expression_slots[slot];
++        if (!stored)
++        {
++            return 0;
++        }
++        u32 index = stored - 1;
++        if (index < builder->prepared_control_expression_count &&
++            builder->prepared_control_expressions[index].open_index == open_index)
+         {
+-            return expression;
++            return builder->prepared_control_expressions + index;
+         }
++        slot = (slot + 1) & builder->prepared_control_expression_slot_mask;
++    }
++}
++
++BUSTER_C_INTERNAL void c_ir_prepared_control_expression_insert(CIntegerIrBuilder* builder, u32 expression_index, u32 open_index)
++{
++    u32 slot = c_ir_prepared_control_expression_hash(open_index) & builder->prepared_control_expression_slot_mask;
++    for (;;)
++    {
++        u32 stored = builder->prepared_control_expression_slots[slot];
++        if (!stored || stored - 1 >= builder->prepared_control_expression_count)
++        {
++            builder->prepared_control_expression_slots[slot] = expression_index + 1;
++            return;
++        }
++        slot = (slot + 1) & builder->prepared_control_expression_slot_mask;
+     }
+-    return 0;
+ }
+ 
+ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuilder* builder, u32 token_index)
+ {
++    if (token_index > builder->prepared_control_token_start &&
++        token_index - builder->prepared_control_token_start < builder->prepared_control_token_count)
++    {
++        u32 stored = builder->prepared_control_emitted_tokens[token_index - builder->prepared_control_token_start];
++        if (!stored)
++        {
++            return false;
++        }
++        u32 index = stored - 1;
++        if (index < builder->prepared_control_expression_count)
++        {
++            CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
++            if (expression->emitted && expression->open_index < token_index && token_index < expression->close_index)
++            {
++                return true;
++            }
++        }
++        // A stale mark (released by a typeof replay) can shadow another live
++        // emitted expression over the same token; fall back to the scan.
++    }
+     for (u32 index = 0; index < builder->prepared_control_expression_count; index += 1)
+     {
+         CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
+@@ -18184,8 +18251,13 @@ BUSTER_C_INTERNAL bool c_ir_has_top_level_comma(CIntegerIrBuilder* builder, u32
+ 
+ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+-    for (u32 index = 0; index < builder->prepared_control_expression_count; index += 1)
++    for (u32 stack_index = builder->prepared_control_lowering_count; stack_index > 0; stack_index -= 1)
+     {
++        u32 index = builder->prepared_control_lowering_stack[stack_index - 1];
++        if (index >= builder->prepared_control_expression_count)
++        {
++            continue;
++        }
+         CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
+         if (expression->lowering && expression->open_index < start && expression->close_index >= end)
+         {
+@@ -18226,6 +18298,26 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder*
+         expression->result = machine->child_result.value;
+         expression->lowering = false;
+         expression->emitted = true;
++        BUSTER_CHECK(builder->prepared_control_lowering_count &&
++                     builder->prepared_control_lowering_stack[builder->prepared_control_lowering_count - 1] ==
++                         frame->as.prepare_control.expression_index);
++        builder->prepared_control_lowering_count -= 1;
++        {
++            u32 mark_lo = expression->open_index > builder->prepared_control_token_start
++                              ? expression->open_index + 1 - builder->prepared_control_token_start
++                              : 0;
++            u32 mark_hi = expression->close_index > builder->prepared_control_token_start
++                              ? BUSTER_MIN(expression->close_index - builder->prepared_control_token_start,
++                                           builder->prepared_control_token_count)
++                              : 0;
++            for (u32 mark_index = mark_lo; mark_index < mark_hi; mark_index += 1)
++            {
++                if (!builder->prepared_control_emitted_tokens[mark_index])
++                {
++                    builder->prepared_control_emitted_tokens[mark_index] = frame->as.prepare_control.expression_index + 1;
++                }
++            }
++        }
+         frame->as.prepare_control.index = frame->as.prepare_control.close + 1;
+         c_ir_lazy_operand_scan_skip_group(&frame->as.prepare_control.lazy);
+         frame->stage = C_IR_LOWER_STAGE_FINISH;
+@@ -18360,6 +18452,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder*
+             .close_index = close,
+             .lowering = true,
+         };
++        c_ir_prepared_control_expression_insert(builder, expression_index, index);
++        builder->prepared_control_lowering_stack[builder->prepared_control_lowering_count++] = expression_index;
+         frame->as.prepare_control.close = close;
+         frame->as.prepare_control.expression_index = expression_index;
+         frame->stage = C_IR_LOWER_STAGE_CHILD;
+@@ -31524,6 +31618,12 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
+         }
+         builder->prepared_call_count = state->typeof_previous_call_count;
+         builder->prepared_control_expression_count = state->typeof_previous_control_count;
++        while (builder->prepared_control_lowering_count &&
++               builder->prepared_control_lowering_stack[builder->prepared_control_lowering_count - 1] >=
++                   builder->prepared_control_expression_count)
++        {
++            builder->prepared_control_lowering_count -= 1;
++        }
+         if (!machine->child_result.success)
+         {
+             if (!builder->failure_message.length)
+@@ -53284,6 +53384,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
+                                        string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm__"))));
+             }
+         }
++        u64 prepared_control_token_span = (u64)body_end - declaration_start;
++        u64 prepared_control_expression_slot_capacity = 2;
++        while (prepared_control_expression_slot_capacity < 2 * (prepared_control_expression_capacity ? prepared_control_expression_capacity : 1))
++        {
++            prepared_control_expression_slot_capacity *= 2;
++        }
+         u64 lowering_capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16;
+         // The frame stack is the one lowering capacity a parameter bound draws
+         // on, because the parameter loop runs it on an empty machine: give it
+@@ -53319,9 +53425,17 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
+             (stream_matching_delimiters_plus_one || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32))) &&
+             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedControlExpression),
+                                           prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
+-                                          BUSTER_ALIGN_OF(CIrPreparedControlExpression));
++                                          BUSTER_ALIGN_OF(CIrPreparedControlExpression)) &&
++            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), prepared_control_expression_slot_capacity,
++                                          BUSTER_ALIGN_OF(u32)) &&
++            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32),
++                                          prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
++                                          BUSTER_ALIGN_OF(u32)) &&
++            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), prepared_control_token_span,
++                                          BUSTER_ALIGN_OF(u32));
+         if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
+-            prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX || !scratch_fits)
++            prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX ||
++            prepared_control_token_span > UINT32_MAX || lower_frame_capacity > UINT32_MAX || !scratch_fits)
+         {
+             scratch_end(lowering_temporary);
+             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
+@@ -53427,6 +53541,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
+             .body_token_start = declaration.body_start,
+             .body_token_count = declaration.body_token_count,
+             .prepared_control_expression_capacity = prepared_control_expression_capacity ? (u32)prepared_control_expression_capacity : 1,
++            .prepared_control_expression_slot_mask = (u32)prepared_control_expression_slot_capacity - 1,
++            .prepared_control_token_start = declaration_start,
++            .prepared_control_token_count = (u32)prepared_control_token_span,
+             .returns_void = signatures[declaration_index].returns_void,
+             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
+         };
+@@ -53448,6 +53565,16 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
+         builder.matching_delimiters_plus_one = stream_matching_delimiters_plus_one ? 0 : arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+         builder.prepared_control_expressions = arena_allocate(lowering_temporary.arena, CIrPreparedControlExpression,
+                                                               prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
++        builder.prepared_control_expression_slots =
++            arena_allocate(lowering_temporary.arena, u32, (u64)prepared_control_expression_slot_capacity);
++        builder.prepared_control_lowering_stack =
++            arena_allocate(lowering_temporary.arena, u32, prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
++        builder.prepared_control_emitted_tokens =
++            arena_allocate(lowering_temporary.arena, u32, (u64)(prepared_control_token_span ? prepared_control_token_span : 1));
++        memset(builder.prepared_control_expression_slots, 0,
++               sizeof(*builder.prepared_control_expression_slots) * (u64)prepared_control_expression_slot_capacity);
++        memset(builder.prepared_control_emitted_tokens, 0,
++               sizeof(*builder.prepared_control_emitted_tokens) * (u64)(prepared_control_token_span ? prepared_control_token_span : 1));
+         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
+         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
+         {

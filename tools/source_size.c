@@ -84,6 +84,10 @@ BUSTER_GLOBAL_LOCAL SourceSizeRule source_size_rules[] = {
     {SOURCE_SIZE_CATEGORY_TESTS, SOURCE_SIZE_MATCH_STEM_WORD, S8_INITIALIZER("test")},
     {SOURCE_SIZE_CATEGORY_TESTS, SOURCE_SIZE_MATCH_STEM_WORD, S8_INITIALIZER("tests")},
     {SOURCE_SIZE_CATEGORY_TESTS, SOURCE_SIZE_MATCH_STEM_WORD, S8_INITIALIZER("fixture")},
+    // 9700X benchmark request payloads (#2770): standalone workloads up to
+    // 256 KiB, their input data and compiler-comparison requests. Most are
+    // never merged, so they measure like test inputs, not build code.
+    {SOURCE_SIZE_CATEGORY_TESTS, SOURCE_SIZE_MATCH_PREFIX, S8_INITIALIZER("benchmarks/9700x/")},
     // Generators and scripts nested in the source tree are tooling.
     {SOURCE_SIZE_CATEGORY_BUILD, SOURCE_SIZE_MATCH_DIRECTORY, S8_INITIALIZER("tools")},
     {SOURCE_SIZE_CATEGORY_PRODUCTION, SOURCE_SIZE_MATCH_PREFIX, S8_INITIALIZER("src/")},
@@ -743,13 +747,18 @@ BUSTER_GLOBAL_LOCAL bool source_size_self_test(Arena* arena)
         {S8_INITIALIZER("new_location/module.c"), SOURCE_SIZE_CATEGORY_BUILD},
         {S8_INITIALIZER("tools/native_retirement_dependency_binding.generated.h"), SOURCE_SIZE_CATEGORY_GENERATED},
         {S8_INITIALIZER("tools/merge_queue_admission_test.py"), SOURCE_SIZE_CATEGORY_TESTS},
-        {S8_INITIALIZER("tools/bench_service/tests.c"), SOURCE_SIZE_CATEGORY_TESTS},
-        {S8_INITIALIZER("tools/bench_service/export_tests.c"), SOURCE_SIZE_CATEGORY_TESTS},
+        {S8_INITIALIZER("tools/throughput/tests.c"), SOURCE_SIZE_CATEGORY_TESTS},
+        {S8_INITIALIZER("tools/example/export_tests.c"), SOURCE_SIZE_CATEGORY_TESTS},
         {S8_INITIALIZER("tools/throughput/qualification_test.h"), SOURCE_SIZE_CATEGORY_TESTS},
         {S8_INITIALIZER("tools/test_mach_o_unwind_lld.sh"), SOURCE_SIZE_CATEGORY_TESTS},
         {S8_INITIALIZER("tools/fixtures/atomic_or_overlap.c"), SOURCE_SIZE_CATEGORY_TESTS},
         {S8_INITIALIZER("tools/clang_analyze_fixture.c"), SOURCE_SIZE_CATEGORY_TESTS},
         {S8_INITIALIZER("tools/throughput/README.md"), SOURCE_SIZE_CATEGORY_DOCS},
+        {S8_INITIALIZER("benchmarks/9700x/memo_layout_1909.c"), SOURCE_SIZE_CATEGORY_TESTS},
+        {S8_INITIALIZER("benchmarks/9700x/memo_layout_1909.data"), SOURCE_SIZE_CATEGORY_TESTS},
+        {S8_INITIALIZER("benchmarks/9700x/compiler-compare.request"), SOURCE_SIZE_CATEGORY_TESTS},
+        {S8_INITIALIZER("benchmarks/9700x/README.md"), SOURCE_SIZE_CATEGORY_DOCS},
+        {S8_INITIALIZER("benchmarks/other/kernel.c"), SOURCE_SIZE_CATEGORY_BUILD},
     };
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(classifications); i += 1)
     {
