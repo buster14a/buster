@@ -10654,7 +10654,7 @@ BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResu
         if (by_program_symbol != UINT32_MAX)
         {
             symbol_index = by_program_symbol;
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
             u32 by_name = UINT32_MAX;
             for (u32 candidate_index = 0; candidate_index < object->symbol_count && by_name == UINT32_MAX; candidate_index += 1)
             {
@@ -10809,7 +10809,7 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
         if (by_program_symbol != UINT32_MAX)
         {
             relocation_symbol = by_program_symbol;
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
             ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, relocation.symbol_name);
             BUSTER_CHECK(slot->used && slot->defined == relocation_symbol);
 #endif

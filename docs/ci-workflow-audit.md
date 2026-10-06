@@ -1,7 +1,7 @@
 # GitHub workflow audit — 2026-09-07
 
 > Historical suite-level design/evidence. The subsequent internal desktop
-> partition and current 29-job completion contract are documented in
+> partition and current 25-job completion contract are documented in
 > [Desktop combination shards](ci-combination-shards.md). Historical timings
 > below are not matched before/after evidence for #333.
 
@@ -12,7 +12,7 @@ source-free broker under `.forgejo/github-bridge/`. Broker cache/artifact and
 credential restrictions remain untouched.
 
 > The job inventories and measurements in this audit describe its recorded
-> revisions. Current CI uses the [29-job inventory](ci-combination-shards.md)
+> revisions. Current CI uses the [25-job inventory](ci-combination-shards.md)
 > and [AArch64-only Apple policy](apple-ci-policy.md).
 
 ## Coverage contract and scheduling

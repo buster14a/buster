@@ -18081,7 +18081,7 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
 
     BUSTER_CHECK(result->entity_lookup_bucket_count != 0);
     CEntity* added = &result->entities[entity.value];
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
     // The token-kind gate of c_parse_lookup_entity_token relies on this: a
     // name is an identifier's spelling, never a punctuator's or a literal's.
     BUSTER_CHECK(!added->name.length || added->name.pointer[0] == '_' || added->name.pointer[0] == '$' ||
@@ -18138,7 +18138,7 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, C
     if (result->binding_by_symbol && symbol && symbol < result->binding_capacity && scope.value == result->binding_scope.value)
     {
         found = result->binding_by_symbol[symbol];
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name).value);
 #endif
     }
@@ -18191,7 +18191,7 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope(CParseResult* result,
         CEntityId innermost = result->binding_by_symbol[symbol];
         found = innermost.value != C_ID_UNDERLYING_INVALID && result->entities[innermost.value].scope.value == scope.value ? innermost
                                                                                                                           : C_ENTITY_ID_INVALID;
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
 #endif
     }
@@ -23127,13 +23127,13 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
     {
         c_parse_token_census_reference(preprocess, token_count, census, declaration_range_words);
     }
-#if !BUSTER_OPTIMIZE
-    // The differential gate. Unoptimized builds recompute the census the
+#if BUSTER_REFERENCE_CHECKS
+    // The differential gate. Debug and sanitized builds recompute the census the
     // reference way and require all nine counters to agree, which puts the
     // check on every translation unit the suite compiles rather than on a
     // hand-written list of token streams -- every fixture, every header of
-    // the include closure, and the whole unity unit when the Debug tree
-    // compiles it. Release pays nothing.  The candidate bitmap is checked
+    // the include closure, and the whole unity unit when a checked tree
+    // compiles it. Ordinary Release pays nothing.  The candidate bitmap is checked
     // bit by bit against the same predicate rather than through a second
     // array, because this function owns no arena to hold one.
     CTokenCensus reference_census = {0};
@@ -29716,7 +29716,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declares_static |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_STATIC);
             declares_extern |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_EXTERN);
         }
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(declaration_name_token >= token_count ||
                      string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_name_token]), declaration->name));
 #endif
