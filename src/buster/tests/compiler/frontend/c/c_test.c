@@ -37241,6 +37241,56 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
     return result;
 }
 
+// A conditional nested in every false arm opens each join before the deeper
+// one it reads, so every block-order simplification sweep removed only the
+// deepest remaining parameter: quadratic in the nesting depth (#2801). The
+// retry heap evaluates a parameter again only when a root it reads changes.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_join_simplify(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depth = 8192;
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 capacity = (u64)depth * 16 + 256;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int tall(int i, int c){int x="));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("(c?i:"));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("i"));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8(")"));
+    }
+    c_test_append_source(bytes, capacity, &length, S8(";return x+i+c;}"));
+    CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters before = ir_construction_counters();
+#endif
+    CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("nested-join.c"), tokens, parse, target_native);
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters after = ir_construction_counters();
+    u64 visits = after.values[IR_CONSTRUCTION_SSA_SIMPLIFY_PARAMETER_VISITS] - before.values[IR_CONSTRUCTION_SSA_SIMPLIFY_PARAMETER_VISITS];
+    u64 incoming = after.values[IR_CONSTRUCTION_SSA_SIMPLIFY_INCOMING_VISITS] - before.values[IR_CONSTRUCTION_SSA_SIMPLIFY_INCOMING_VISITS];
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+    // One visit per parameter plus one retry per replaced root it reads,
+    // although the equivalent block-order sweep takes one pass per level.
+    BUSTER_TEST(arguments, visits <= (u64)direct.direct_ssa.parameters_created * 3);
+    BUSTER_TEST(arguments, incoming <= (u64)direct.direct_ssa.parameters_created * 6);
+#endif
+    BUSTER_TEST(arguments, direct.program && !direct.diagnostic_count);
+    BUSTER_TEST(arguments, direct.direct_ssa.parameters_created >= depth);
+    if (direct.program && !direct.diagnostic_count)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // Entry initializer provenance must consume old rows before dense copies can
 // replace them. Two named owners share one initializer root; compaction must
 // keep its first identity and bind the later initializer to its own result.
@@ -43033,6 +43083,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     BUSTER_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);

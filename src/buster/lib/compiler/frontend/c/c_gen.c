@@ -5485,6 +5485,15 @@ struct CIrSsaParameter
     IrValueId forwarded;
 };
 
+// One incoming row of a retained parameter, filed under the root it reads.
+// c_ir_ssa_simplify_parameters splices a list onto its replacement's list.
+typedef struct CIrSsaUser CIrSsaUser;
+struct CIrSsaUser
+{
+    u32 parameter;
+    u32 next;
+};
+
 typedef struct CIrSsaLocal CIrSsaLocal;
 struct CIrSsaLocal
 {
@@ -6441,14 +6450,25 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_parameters(CIntegerIrBuilder* builder, u8
 // The scratch rows the publication step and its helpers carve, sized by the
 // value count the pending walk left behind: replacement and value maps, the
 // pending-parameter and parameter indexes, the initialization worklist and its
-// seen bytes, the memory-restore tails and the liveness worklist. Checked
-// before the first carve, in carve order, like the plan in finish step one.
+// seen bytes, the memory-restore tails, the simplification user lists, order,
+// retry heap and incoming user rows, and the liveness worklist. Checked before the first
+// carve, in carve order, like the plan in finish step one.
 BUSTER_C_INTERNAL bool c_ir_ssa_finish_reserve_publish(CIntegerIrBuilder* builder)
 {
     IrFunction* function = builder->function;
     u64 count = function->value_count;
     u64 reserved_size = builder->scratch_arena->reserved_size;
     u64 position = builder->scratch_arena->position;
+    // Simplification files one user row per incoming row, plus the one row a
+    // closed forwarded cycle gains before it starts.
+    u64 user_rows = 0;
+    for (u32 block = 0; block < function->block_count; block += 1)
+    {
+        for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
+        {
+            user_rows += (u64)parameter->incoming_count + 1;
+        }
+    }
     bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSsaParameter*), count, BUSTER_ALIGN_OF(CIrSsaParameter*)) &&
@@ -6456,12 +6476,250 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_reserve_publish(CIntegerIrBuilder* builde
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), count, BUSTER_ALIGN_OF(u8)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)function->instruction_count + function->block_count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(IrBlockParameter*), count, BUSTER_ALIGN_OF(IrBlockParameter*)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u64), count, BUSTER_ALIGN_OF(u64)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), count, BUSTER_ALIGN_OF(u8)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSsaUser), user_rows ? user_rows : 1, BUSTER_ALIGN_OF(CIrSsaUser)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32));
     if (!fits)
     {
         c_ir_ssa_refuse(builder, S8("C frontend SSA value capacity exceeds the lowering scratch reservation"));
     }
     return fits;
+}
+
+// A min-heap of simplification retries keyed by (sweep << 32 | position).
+BUSTER_C_INTERNAL void c_ir_ssa_retry_push(u64* heap, u32* heap_count, u64 key)
+{
+    u32 index = (*heap_count)++;
+    while (index && heap[(index - 1) / 2] > key)
+    {
+        heap[index] = heap[(index - 1) / 2];
+        index = (index - 1) / 2;
+    }
+    heap[index] = key;
+}
+
+BUSTER_C_INTERNAL u64 c_ir_ssa_retry_pop(u64* heap, u32* heap_count)
+{
+    u64 result = heap[0];
+    u32 count = --(*heap_count);
+    u64 key = heap[count];
+    u32 index = 0;
+    bool sifting = count != 0;
+    while (sifting)
+    {
+        u32 child = index * 2 + 1;
+        if (child + 1 < count && heap[child + 1] < heap[child])
+        {
+            child += 1;
+        }
+        sifting = child < count && heap[child] < key;
+        if (sifting)
+        {
+            heap[index] = heap[child];
+            index = child;
+        }
+    }
+    if (count)
+    {
+        heap[index] = key;
+    }
+    return result;
+}
+
+// Remove trivial parameters to a fixed point. This is the repeated
+// block-order sweep, minus every evaluation whose incoming roots did not
+// change since the parameter's last one: such a re-evaluation repeats its
+// verdict. A parameter becomes due again only when a root it reads is
+// replaced, at the sweep and position the full sweep would next reach it, so
+// elimination order, replacement representatives and canonical value IDs are
+// unchanged, while N nested joins cost O(N log N) instead of N sweeps.
+// `cursor` holds the parameter-bearing blocks on entry.
+BUSTER_C_INTERNAL void c_ir_ssa_simplify_parameters(CIntegerIrBuilder* builder, u8* memory, u32* replacements,
+                                                    CIrSsaParameter** pending_by_value, IrBlockParameter** parameter_by_value,
+                                                    u32* cursor, u32 active_block_count)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    IrFunction* function = builder->function;
+    u32 count = function->value_count;
+    u32* user_first = arena_allocate(builder->scratch_arena, u32, count);
+    u32* user_last = arena_allocate(builder->scratch_arena, u32, count);
+    u32* order = arena_allocate(builder->scratch_arena, u32, count);
+    u32* position = arena_allocate(builder->scratch_arena, u32, count);
+    u64* heap = arena_allocate(builder->scratch_arena, u64, count);
+    u8* queued = arena_allocate(builder->scratch_arena, u8, count);
+    u64 user_capacity = 0;
+    for (u32 active = 0; active < active_block_count; active += 1)
+    {
+        for (IrBlockParameter* parameter = function->blocks[cursor[active]].first_parameter; parameter; parameter = parameter->next)
+        {
+            user_capacity += parameter->incoming_count;
+        }
+    }
+    CIrSsaUser* users = arena_allocate(builder->scratch_arena, CIrSsaUser, user_capacity ? user_capacity : 1);
+    memset(user_first, 0xff, sizeof(*user_first) * count);
+    memset(queued, 0, count);
+    memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
+    IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, (sizeof(*user_first) * 4 + sizeof(*heap) + sizeof(*queued)) * (u64)count +
+                                                    sizeof(*users) * user_capacity);
+    IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, (sizeof(*user_first) + sizeof(*queued) + sizeof(*parameter_by_value)) * (u64)count);
+    // Number every retained parameter in sweep order, due in sweep zero, and
+    // file each incoming row under the root it currently reads. Ascending
+    // keys already form a valid heap.
+    u32 user_count = 0;
+    u32 heap_count = 0;
+    for (u32 active = 0; active < active_block_count; active += 1)
+    {
+        for (IrBlockParameter* parameter = function->blocks[cursor[active]].first_parameter; parameter; parameter = parameter->next)
+        {
+            u32 value = parameter->value.value;
+            CIrSsaParameter* pending = pending_by_value[value];
+            if ((!pending || !memory[pending->local]) && replacements[value] == value)
+            {
+                parameter_by_value[value] = parameter;
+                position[value] = heap_count;
+                order[heap_count] = value;
+                heap[heap_count] = heap_count;
+                heap_count += 1;
+                queued[value] = 1;
+                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                {
+                    u32 root = c_ir_ssa_root(replacements, incoming->value.value);
+                    if (root != value)
+                    {
+                        users[user_count] = (CIrSsaUser){.parameter = value, .next = UINT32_MAX};
+                        if (user_first[root] == UINT32_MAX)
+                        {
+                            user_first[root] = user_count;
+                        }
+                        else
+                        {
+                            users[user_last[root]].next = user_count;
+                        }
+                        user_last[root] = user_count;
+                        user_count += 1;
+                    }
+                }
+            }
+        }
+    }
+#if BUSTER_BENCH_ALLOCATIONS
+    // The census counts the sweeps the full block-order sweep would take.
+    u64 sweeps = heap_count != 0;
+#endif
+    while (heap_count)
+    {
+        u64 key = c_ir_ssa_retry_pop(heap, &heap_count);
+        u64 sweep = key >> 32;
+        u32 here = (u32)key;
+        u32 value = order[here];
+        queued[value] = 0;
+#if BUSTER_BENCH_ALLOCATIONS
+        sweeps = BUSTER_MAX(sweeps, sweep + 1);
+#endif
+        IrBlockParameter* parameter = parameter_by_value[value];
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PARAMETER_VISITS, 1);
+        // An edge out of an unreachable block never runs, so the
+        // value it carries cannot reach the parameter: when every
+        // edge that can run carries one value, the parameter is
+        // that value. A compound statement that ends in `break`,
+        // `goto` or `return` leaves its continuation block without
+        // predecessors, and the next `case` or label still gets an
+        // edge from it, whose value is an unfilled parameter of the
+        // dead block. Counting it would keep a merge of every
+        // variable read after that label -- and of everything
+        // downstream -- alive. With no runnable edge carrying a
+        // value, only the dead ones decide, as they always did:
+        // every dead root must agree, so the first mismatch is
+        // final and a later repeat cannot restore triviality.
+        u32 same = UINT32_MAX;
+        bool trivial = true;
+        u32 dead_same = UINT32_MAX;
+        bool dead_trivial = true;
+        for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
+        {
+            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, 1);
+            u32 root = c_ir_ssa_root(replacements, incoming->value.value);
+            bool runs = ssa->reachable[incoming->predecessor.value] != 0;
+            if (root != value && runs)
+            {
+                trivial = same == UINT32_MAX || root == same;
+                same = root;
+            }
+            else if (root != value)
+            {
+                dead_trivial = dead_trivial && (dead_same == UINT32_MAX || root == dead_same);
+                dead_same = root;
+            }
+        }
+        if (trivial && same == UINT32_MAX)
+        {
+            trivial = dead_trivial;
+            same = dead_same;
+        }
+        if (trivial && same != UINT32_MAX)
+        {
+            replacements[value] = same;
+            // Every parameter reading this one now reads `same`. The full
+            // sweep reaches a later position in this sweep, an earlier one
+            // in the next. Move the rows to `same` for its own replacement.
+            for (u32 user = user_first[value]; user != UINT32_MAX; user = users[user].next)
+            {
+                u32 reader = users[user].parameter;
+                if (!queued[reader] && replacements[reader] == reader)
+                {
+                    queued[reader] = 1;
+                    u64 due = position[reader] > here ? sweep : sweep + 1;
+                    c_ir_ssa_retry_push(heap, &heap_count, due << 32 | position[reader]);
+                }
+            }
+            if (user_first[value] != UINT32_MAX)
+            {
+                if (user_first[same] == UINT32_MAX)
+                {
+                    user_first[same] = user_first[value];
+                }
+                else
+                {
+                    users[user_last[same]].next = user_first[value];
+                }
+                user_last[same] = user_last[value];
+                user_first[value] = UINT32_MAX;
+            }
+        }
+    }
+#if BUSTER_BENCH_ALLOCATIONS
+    IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PASSES, sweeps);
+#endif
+    // Unlink every replaced or memory-owned parameter in one final sweep, the
+    // one block visit simplification makes; numbering above reads the same rows.
+    for (u32 active = 0; active < active_block_count; active += 1)
+    {
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_BLOCK_VISITS, 1);
+        IrBlock* destination = function->blocks + cursor[active];
+        IrBlockParameter** link = &destination->first_parameter;
+        destination->last_parameter = 0;
+        while (*link)
+        {
+            IrBlockParameter* parameter = *link;
+            CIrSsaParameter* pending = pending_by_value[parameter->value.value];
+            if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
+            {
+                *link = parameter->next;
+                destination->parameter_count -= 1;
+                ssa->statistics.parameters_removed += 1;
+            }
+            else
+            {
+                destination->last_parameter = parameter;
+                link = &parameter->next;
+            }
+        }
+    }
 }
 
 // Finish step three: with every value known, drop provisional parameters,
@@ -6523,10 +6781,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
         }
     }
     // Predecessor propagation is complete; its read-path cursor is now
-    // scratch. Keep parameter-bearing blocks in their original order and
-    // retire empty ones between sweeps. Simplification only removes rows,
-    // so a retired block can never become active again. Stable order keeps
-    // the same replacement representatives and canonical value IDs.
+    // scratch. Keep parameter-bearing blocks in their original order so the
+    // retained parameters keep their canonical value IDs.
     u32 active_block_count = 0;
     for (u32 block = 0; block < block_count; block += 1)
     {
@@ -6537,95 +6793,11 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
             cursor[active_block_count++] = block;
         }
     }
-    bool changed = true;
-    while (changed)
-    {
-        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PASSES, 1);
-        changed = false;
-        u32 remaining_block_count = 0;
-        for (u32 active = 0; active < active_block_count; active += 1)
-        {
-            u32 block = cursor[active];
-            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_BLOCK_VISITS, 1);
-            IrBlock* destination = function->blocks + block;
-            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, destination->first_parameter == 0);
-            IrBlockParameter** link = &destination->first_parameter;
-            destination->last_parameter = 0;
-            while (*link)
-            {
-                IrBlockParameter* parameter = *link;
-                IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PARAMETER_VISITS, 1);
-                CIrSsaParameter* pending = pending_by_value[parameter->value.value];
-                if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
-                {
-                    *link = parameter->next;
-                    destination->parameter_count -= 1;
-                    ssa->statistics.parameters_removed += 1;
-                    continue;
-                }
-                // An edge out of an unreachable block never runs, so the
-                // value it carries cannot reach the parameter: when every
-                // edge that can run carries one value, the parameter is
-                // that value. A compound statement that ends in `break`,
-                // `goto` or `return` leaves its continuation block without
-                // predecessors, and the next `case` or label still gets an
-                // edge from it, whose value is an unfilled parameter of the
-                // dead block. Counting it would keep a merge of every
-                // variable read after that label -- and of everything
-                // downstream -- alive. With no runnable edge carrying a
-                // value, only the dead ones decide, as they always did:
-                // every dead root must agree, so the first mismatch is
-                // final and a later repeat cannot restore triviality.
-                u32 same = UINT32_MAX;
-                bool trivial = true;
-                u32 dead_same = UINT32_MAX;
-                bool dead_trivial = true;
-                for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
-                {
-                    IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, 1);
-                    u32 value = c_ir_ssa_root(replacements, incoming->value.value);
-                    bool runs = ssa->reachable[incoming->predecessor.value] != 0;
-                    if (value != parameter->value.value && runs)
-                    {
-                        trivial = same == UINT32_MAX || value == same;
-                        same = value;
-                    }
-                    else if (value != parameter->value.value)
-                    {
-                        dead_trivial = dead_trivial && (dead_same == UINT32_MAX || value == dead_same);
-                        dead_same = value;
-                    }
-                }
-                if (trivial && same == UINT32_MAX)
-                {
-                    trivial = dead_trivial;
-                    same = dead_same;
-                }
-                if (trivial && same != UINT32_MAX)
-                {
-                    replacements[parameter->value.value] = same;
-                    *link = parameter->next;
-                    destination->parameter_count -= 1;
-                    ssa->statistics.parameters_removed += 1;
-                    changed = true;
-                }
-                else
-                {
-                    destination->last_parameter = parameter;
-                    link = &parameter->next;
-                }
-            }
-            if (destination->first_parameter)
-            {
-                cursor[remaining_block_count++] = block;
-            }
-        }
-        active_block_count = remaining_block_count;
-    }
+    IrBlockParameter** parameter_by_value = arena_allocate(builder->scratch_arena, IrBlockParameter*, count);
+    c_ir_ssa_simplify_parameters(builder, memory, replacements, pending_by_value, parameter_by_value, cursor, active_block_count);
     // A parenthesized assignment can recover a read's place without ever
     // consuming its provisional value. Prune such parameters (including
     // unused cyclic groups), starting only at actual instruction operands.
-    IrBlockParameter** parameter_by_value = arena_allocate(builder->scratch_arena, IrBlockParameter*, count);
     memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
     IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, sizeof(*parameter_by_value) * (u64)count);
     IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, sizeof(*parameter_by_value) * (u64)count);
