@@ -42912,6 +42912,96 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitT
     return result;
 }
 
+// An abstract declarator that groups a pointer before an array suffix is an
+// array of pointers: `int (*[3])(int)` is three function pointers, the same
+// type `int (*name[3])(int)` declares. Type names in sizeof, _Alignof,
+// _Static_assert, static initializers, _Generic and prototypes used to read
+// the group as a lone pointer, or fail, and runtime sizeof answered sizeof(int)
+// (#2850).
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_function_pointer_array_type_name_source = S8_INITIALIZER(
+    "typedef __SIZE_TYPE__ size_t;\n"
+    "#define P sizeof(void *)\n"
+    "static int inc(int a) { return a + 1; }\n"
+    "static int dbl(int a) { return a * 2; }\n"
+    "static int (*pick(void))(int) { return dbl; }\n"
+    "_Static_assert(sizeof(int (*[3])()) == 3 * P, \"array of three function pointers\");\n"
+    "_Static_assert(sizeof(void (*[5])(void)) == 5 * P, \"array of five function pointers\");\n"
+    "_Static_assert(sizeof(int (*[2][3])(int)) == 6 * P, \"two-dimensional array of function pointers\");\n"
+    "_Static_assert(sizeof(int (*(*[4])(void))(int)) == 4 * P, \"array of pointers to functions returning function pointers\");\n"
+    "_Static_assert(sizeof(int (*[3])) == 3 * P, \"grouped array of object pointers\");\n"
+    "_Static_assert(_Alignof(int (*[3])(int)) == _Alignof(void *), \"array alignment is the element's\");\n"
+    "static size_t file_size = sizeof(int (*[3])(int));\n"
+    "static int call_all(int (*table[3])(int), int value)\n"
+    "{\n"
+    "    return table[0](value) + table[1](value) + table[2](value);\n"
+    "}\n"
+    "static int apply(int (*[2])(int), int);\n"
+    "static int apply(int (*table[2])(int), int value) { return table[1](table[0](value)); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    int (*table[3])(int) = {inc, dbl, inc};\n"
+    "    int (*(*maker[1])(void))(int) = {pick};\n"
+    "    size_t sizes = sizeof(int (*[3])()) + sizeof(void (*[5])(void)) + sizeof(int (*[2][3])(int)) +\n"
+    "                   sizeof(int (*(*[4])(void))(int)) + sizeof(int (*[3])) + sizeof(int (**[3])[2]);\n"
+    "    if (sizes != (3 + 5 + 6 + 4 + 3 + 3) * P) return 1;\n"
+    "    if (_Alignof(void (*[5])(void)) != _Alignof(void *)) return 2;\n"
+    "    if (file_size != 3 * P || sizeof table != sizeof(int (*[3])(int))) return 3;\n"
+    "    if (_Generic(table, int (**)(int): 1, default: 2) != 1) return 4;\n"
+    "    if (_Generic(&table, int (*(*)[3])(int): 1, int (**)(int): 3, default: 2) != 1) return 5;\n"
+    "    if (_Generic(maker, int (*(**)(void))(int): 1, default: 2) != 1) return 6;\n"
+    "    int (**cast)(int) = (int (**)(int))table;\n"
+    "    if (cast[1](5) != 10 || call_all(table, 4) != 18 || apply(table, 3) != 8) return 7;\n"
+    "    if (maker[0]()(7) != 14) return 8;\n"
+    "    return 0;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_array_type_name_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("function-pointer-array-type-name"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_function_pointer_array_type_name_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("function-pointer-array-type-name-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("function pointer array type name {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("function pointer array type name runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A place is not a scalar value, and an unknown read is not known false.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArguments* arguments)
 {
@@ -44478,6 +44568,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_function_name_literals);
     C_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility);
     C_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility_runtime);
+    C_TEST_FIXTURE(arguments, c_test_function_pointer_array_type_name_runtime);
     C_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
     C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
