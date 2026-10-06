@@ -18,7 +18,7 @@ Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
     attempt_marker                                         one attempt's check (#2803)
     PROFILE                                                frozen profile
-    APPROVED_HOST, host_problem                            observed Zen 5 host
+    APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     REGRESSION_POLICIES, regression_policy                 report-only switch
     render                                                 readable report
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 RECEIPT_SCHEMA = "buster-9700x-compiler-receipt-v1"
 LAB_SCHEMA = "buster-uarch-lab-compare-v2"
@@ -96,6 +97,19 @@ def attempt_marker(head: str, mode: str, request_run_id: str, request_attempt: s
         if not (isinstance(value, str) and DECIMAL.fullmatch(value)):
             raise ValueError("attempt marker needs decimal run and attempt numbers")
     return f"{check_marker(head, mode)}:{request_run_id}.{request_attempt}:{run_attempt}"
+
+
+def observed_cpu_model() -> str:
+    """The running host's CPU model name from /proc/cpuinfo, or 'NA'."""
+    model = "NA"
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("model name"):
+                model = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    return model
 
 
 def host_problem(receipt: object) -> str:
