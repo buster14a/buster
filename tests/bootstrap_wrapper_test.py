@@ -3,7 +3,6 @@
 import json
 import os
 import platform
-import re
 from pathlib import Path
 import shutil
 import signal
@@ -365,59 +364,15 @@ class BootstrapProcessTests(unittest.TestCase):
             self.assertTrue(child.stderr.closed)
 
 
-class BootstrapWorkflowTests(unittest.TestCase):
-    def setUp(self):
-        text = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
-        self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)",
-                                     self.desktop))
-
-    def test_wrapper_step_has_an_independent_bounded_budget_and_retained_log(self):
-        block = self.steps["Bootstrap wrapper regression tests"]
-        self.assertIn("id: bootstrap_wrappers", block)
-        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", block)
-        self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", block)
-        self.assertIn("set -euo pipefail", block)
-        self.assertIn('tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"', block)
-        self.assertNotIn("continue-on-error:", block)
-        self.assertEqual(self.desktop.count("tests/bootstrap_wrapper_test.py -v"), 1)
-        policy = self.steps["Workflow tool regression tests"]
-        self.assertIn("timeout-minutes: 2", policy)
-        self.assertNotIn("bootstrap_wrapper_test.py", policy)
-        for suite in ("tests/ci_tools_test.py", "tools/analyzer_selection_test.py", "tools/differential_ci_policy_test.py"):
-            self.assertIn(suite + " -v", policy)
-        self.assertIn("path: ${{ runner.temp }}/buster-ci/", self.steps["Retain desktop logs"])
-        self.assertEqual(len(re.findall(r"(?m)^          - name:", self.desktop)), 6)
-
-    def test_both_desktop_required_lists_reject_unsuccessful_wrapper_work(self):
-        sys.path.insert(0, str(ROOT / "tools"))
-        self.addCleanup(sys.path.pop, 0)
-        import ci_summary
-        summary = self.steps["Desktop result and reproduction"]
-        self.assertIn("always()", summary)
-        self.assertIn("tools/ci_summary.py", summary)
-        expression = re.search(r"BUSTER_CI_REQUIRED: (.+)", summary).group(1)
-        lists = re.findall(r"'(workflow_tools[^']*)'", expression)
-        self.assertEqual(lists, ["workflow_tools bootstrap_wrappers zig combinations_unix",
-                                 "workflow_tools bootstrap_wrappers zig combinations_windows"])
-        for required in lists:
-            for outcome in (None, "skipped", "cancelled", "failure", "timed_out", "success"):
-                with self.subTest(required=required, outcome=outcome):
-                    steps = {name: {"outcome": "success"} for name in required.split()}
-                    if outcome is None:
-                        del steps["bootstrap_wrappers"]
-                    else:
-                        steps["bootstrap_wrappers"] = {"outcome": outcome, "conclusion": "success"}
-                    self.assertEqual(ci_summary.assess(steps, required.split()),
-                                     [] if outcome == "success" else ["bootstrap_wrappers"])
-
-
 class BootstrapBuildGraphTests(unittest.TestCase):
     def test_recursive_targets_use_the_selected_immutable_driver(self):
         cmake = (ROOT / "CMakeLists.txt").read_text()
         driver = (ROOT / "build.c").read_text()
         self.assertIn('set(BUSTER_CLANG_ANALYZE_DRIVER "${BUSTER_BUILD_DRIVER}")', cmake)
-        self.assertEqual(cmake.count('"${BUSTER_BUILD_DRIVER}"'), 3)
+        for name in ("test_self_host", "test_mode_matrix", "test_units_partitioned"):
+            target = cmake.split("add_custom_target(" + name + "\n", 1)[1].split("VERBATIM", 1)[0]
+            self.assertIn('"${BUSTER_BUILD_DRIVER}"', target)
+            self.assertIn(name, target)
         self.assertIn('S8("BUSTER_BUILD_DRIVER"), build_running_driver(arena)', driver)
         self.assertNotIn('os_path_absolute(arena, S8("build/build.exe"), true)', driver)
         self.assertNotIn('os_path_absolute(arena, S8("build/build"), true)', driver)

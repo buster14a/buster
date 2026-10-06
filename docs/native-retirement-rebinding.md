@@ -169,14 +169,20 @@ current-main identity and GitHub Actions attestation. A main-push run
 invalidates every open integration head whose recorded base no longer equals
 current `main`, except a catch-up that is still admissible. Dispatching the
 writer again reconstructs it without requiring a manual feature-branch rebase. The independent `API migration policy` check
-continues to enforce bounded API compatibility. Configure admission as a
+continues to enforce bounded API compatibility. The PR/main admission job lives
+in `native-retirement-admission.yml`, which has no merge-group trigger; for a
+merge-group head the trusted-main reconciler (`merge_queue_admission.py
+reconcile`) publishes the same required check only after the exact base lands
+and the native gate passes twice, so no runner waits for the predecessor.
+Configure admission as a
 required GitHub Actions check (integration ID `15368`) without enabling strict
 required-status-check policy or removing any existing required check.
 On PR events, both read-only admission jobs check out independent live `main`
 and require that checkout to match the remote `main` before checking the writer's
 recorded base. The PR event's base SHA may still name the commit that was main
-when the PR opened. Merge groups keep their exact queued base SHA and wait for
-the predecessor to land before final admission.
+when the PR opened. Merge groups keep their exact queued base SHA; native
+admission stays pending in the reconciler, and the rebinding job still waits
+in-job, until the predecessor lands before final admission.
 
 Merge-conflict preflight also waits for the exact queued predecessor with the
 trusted `merge_queue_admission.py wait-base` helper (bounded to 18,000 seconds
@@ -277,6 +283,58 @@ census producer's applicability-ledger pin, and the benchmark-service support
 pins; all 559 inputs, 411 subjects, and 78,912 row identities remain fixed.
 
 ### Solo-maintainer authorization
+
+For #1835, the trusted-reader bootstrap admits the exact successor support
+declaration digest
+`6d975980cc6df4945334fc2846dac8e03a1480a6c65e516db37be8adbccf1106` alongside
+the #1808 predecessor. Only `tests/bootstrap_wrapper_test.py` changes: its
+dependency-only row becomes 19,588 bytes with SHA-256
+`e03036ea0a44e47f62bb743abaa7c5e381c6f76df3dfc75ba349da1a15506862`.
+All 559 inputs, 411 subjects, roles, compilation obligations and 78,912 row
+identities stay fixed. The bootstrap leaves the reviewed ledger and frozen
+module intact; after it lands, a separate policy transition removes duplicate
+workflow assertions, repairs the immutable-driver graph assertion, updates
+this row and the blocked benchmark-service profile pins. It changes no
+benchmark thresholds or production wrapper behavior.
+
+The same bootstrap admits the exact #1836 successor digest
+`5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115`.
+It is the #1835 declaration with only the historical bridge path changed from
+`tests/github_runner_bridge_test.py` to
+`tests/retired/github_runner_bridge_test.py.txt`. The bridge bytes, role and
+obligation remain intact, and the census inventory keeps the same cardinality.
+That path move is a later policy transition; this reader bootstrap leaves both
+the bridge and the reviewed ledger at their existing paths.
+
+For #2203, the next trusted-reader bootstrap admits exact successor digest
+`7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51`.
+It is the #1836 declaration with only `tests/basic_c_ir_validation_values.c`
+changed from 3,124 bytes and SHA-256
+`9ed89c0ff3750cb6c9bc66a894fc617c15cde5732c857e5b9cccf55ddf233080` to
+3,241 bytes and SHA-256
+`8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65`;
+all 559 inputs, 411 subjects, roles, compilation obligations and 78,912 row
+identities remain fixed. The bootstrap leaves the reviewed ledger, fixture, support-declaration pin
+and blocked recipe policy unchanged; only the duplicated validator byte pin
+advances to the modified reader. After it lands, a separate policy transition may
+update that fixture row and the matching blocked-profile pins.
+
+For #2428, the next reader bootstrap admits exactly two successors while
+retaining every historical declaration digest. The #1836 declaration with only
+the dependency-only `tests/mobile_ci_scripts_test.sh` row changed from 40,218
+bytes / `7286628dfcbf37b6e34a6fbbd421af961ab93e6137dfc187a3ed14d4e37693a6`
+to 41,250 bytes / `0745356ff1ef84e3af0d09a851bf0af09647cd9961579e7a4420ae515f6b973c`
+is `f17dbde795c3afc99f4b3cfd59087d4a63721218dab5018e7e77e090228b3741`. Including the separately reviewed #2203 aligned-typedef row
+produces `8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2`. Both declarations remain 79,756 bytes with the same
+559 inputs, 411 subjects, roles, obligations and row identities. This bootstrap
+changes neither reviewed declaration nor fixture bytes, support pins, blocked
+recipe policy, applicability, schema or thresholds. Its only recipe pin update
+is the modified validator's exact byte digest. Private test projections accept
+only the known old/new mobile and aligned-fixture rows to replay historical
+declarations; unknown, missing and duplicate row versions reject. A separate
+protected policy transition may update the mobile fixture, its exact ledger
+row and support pins after this reader lands, preserving the recorded #2203
+integration order and source ownership.
 
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
 bootstrap or policy transition. It is recorded separately from independent

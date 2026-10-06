@@ -1,0 +1,36 @@
+0	self-test-exit	zero	-1	exit 0
+1	self-test-exit	seven	-1	exit 7
+2	self-test-quoting	literal	-1	printf '%s' 'a'\''b c'
+3	compile-smoke-inputs	setup	-1	clang -g -O0 -fPIC -c '/home/runner/work/_temp/wild-evaluation/evidence/probe.c' -o '/home/runner/work/_temp/wild-evaluation/evidence/probe.o' && clang -g -O0 -c '/home/runner/work/_temp/wild-evaluation/evidence/main.c' -o '/home/runner/work/_temp/wild-evaluation/evidence/main.o' && ar rcs '/home/runner/work/_temp/wild-evaluation/evidence/libprobe.a' '/home/runner/work/_temp/wild-evaluation/evidence/probe.o'
+4	archive-link	setup	-1	clang -fuse-ld=mold -Wl,-z,relro,-z,now '/home/runner/work/_temp/wild-evaluation/evidence/main.o' '/home/runner/work/_temp/wild-evaluation/evidence/libprobe.a' -o '/home/runner/work/_temp/wild-evaluation/evidence/smoke-mold'
+5	archive-runtime	setup	-1	'/home/runner/work/_temp/wild-evaluation/evidence/smoke-mold'
+6	shared-link	setup	-1	clang -shared -fuse-ld=mold -Wl,-z,relro,-z,now '/home/runner/work/_temp/wild-evaluation/evidence/probe.o' -o '/home/runner/work/_temp/wild-evaluation/evidence/libprobe-mold.so'
+7	shared-consumer	setup	-1	clang -fuse-ld=mold '/home/runner/work/_temp/wild-evaluation/evidence/main.o' '/home/runner/work/_temp/wild-evaluation/evidence/libprobe-mold.so' -o '/home/runner/work/_temp/wild-evaluation/evidence/shared-mold'
+8	shared-runtime	setup	-1	'/home/runner/work/_temp/wild-evaluation/evidence/shared-mold'
+9	elf-inspection	setup	-1	readelf -W -l '/home/runner/work/_temp/wild-evaluation/evidence/smoke-mold' && readelf -p .comment '/home/runner/work/_temp/wild-evaluation/evidence/smoke-mold' && readelf -S '/home/runner/work/_temp/wild-evaluation/evidence/smoke-mold'
+10	debugger	mold	-1	gdb -q -batch -ex 'break probe' -ex run -ex 'print x' -ex bt --args '/home/runner/work/_temp/wild-evaluation/evidence/smoke-mold'
+11	archive-link	setup	-1	clang -fuse-ld=wild -Wl,-z,relro,-z,now '/home/runner/work/_temp/wild-evaluation/evidence/main.o' '/home/runner/work/_temp/wild-evaluation/evidence/libprobe.a' -o '/home/runner/work/_temp/wild-evaluation/evidence/smoke-wild'
+12	archive-runtime	setup	-1	'/home/runner/work/_temp/wild-evaluation/evidence/smoke-wild'
+13	shared-link	setup	-1	clang -shared -fuse-ld=wild -Wl,-z,relro,-z,now '/home/runner/work/_temp/wild-evaluation/evidence/probe.o' -o '/home/runner/work/_temp/wild-evaluation/evidence/libprobe-wild.so'
+14	shared-consumer	setup	-1	clang -fuse-ld=wild '/home/runner/work/_temp/wild-evaluation/evidence/main.o' '/home/runner/work/_temp/wild-evaluation/evidence/libprobe-wild.so' -o '/home/runner/work/_temp/wild-evaluation/evidence/shared-wild'
+15	shared-runtime	setup	-1	'/home/runner/work/_temp/wild-evaluation/evidence/shared-wild'
+16	elf-inspection	setup	-1	readelf -W -l '/home/runner/work/_temp/wild-evaluation/evidence/smoke-wild' && readelf -p .comment '/home/runner/work/_temp/wild-evaluation/evidence/smoke-wild' && readelf -S '/home/runner/work/_temp/wild-evaluation/evidence/smoke-wild'
+17	debugger	wild	-1	gdb -q -batch -ex 'break probe' -ex run -ex 'print x' -ex bt --args '/home/runner/work/_temp/wild-evaluation/evidence/smoke-wild'
+18	missing-linker-negative-control	clang	-1	clang --ld-path=/nonexistent/buster-2645-linker '/home/runner/work/_temp/wild-evaluation/evidence/main.o' -o '/home/runner/work/_temp/wild-evaluation/evidence/missing'
+19	gcc-wild-selector	gcc	-1	gcc -fuse-ld=wild '/home/runner/work/_temp/wild-evaluation/evidence/main.o' '/home/runner/work/_temp/wild-evaluation/evidence/probe.o' -o '/home/runner/work/_temp/wild-evaluation/evidence/gcc-smoke'
+20	arm-smoke-full-dwarf	mold	-1	llvm-dwarfdump --verify '/home/runner/work/_temp/wild-evaluation/evidence/smoke-mold'
+21	arm-smoke-full-dwarf	wild	-1	llvm-dwarfdump --verify '/home/runner/work/_temp/wild-evaluation/evidence/smoke-wild'
+22	arm-driver-WILD-selection	WILD	-1	'/home/runner/work/_temp/wild-evaluation/build-driver' generate --build-directory build-wild-arm --cc clang --linker WILD --no-include-tests --no-fuzz --no-sanitize --no-lto -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-gc-sections
+23	arm-real-ide-build	WILD	-1	'/home/runner/work/_temp/wild-evaluation/build-driver' build --build-directory build-wild-arm --config Debug -t ide
+24	arm-actual-link-command	setup	-1	ninja -C build-wild-arm -f build-Debug.ninja -t commands ide
+25	arm-actual-elf	setup	-1	readelf -W -h -l build-wild-arm/Debug/ide
+26	arm-actual-full-dwarf	setup	-1	llvm-dwarfdump --verify build-wild-arm/Debug/ide
+27	arm-ide-object-emission	WILD	-1	build-wild-arm/Debug/ide cc -g -c '/home/runner/work/_temp/wild-evaluation/evidence/probe.c' -o '/home/runner/work/_temp/wild-evaluation/evidence/arm-produced.o'
+28	buster-object-producer	setup	-1	'build-wild-arm/Debug/ide' cc -g -fPIC -c '/home/runner/work/_temp/wild-evaluation/evidence/probe.c' -o '/home/runner/work/_temp/wild-evaluation/evidence/probe-buster.o' && 'build-wild-arm/Debug/ide' cc -g -fPIC -c '/home/runner/work/_temp/wild-evaluation/evidence/main.c' -o '/home/runner/work/_temp/wild-evaluation/evidence/main-buster.o'
+29	buster-object-external-link	setup	-1	clang -fuse-ld=mold '/home/runner/work/_temp/wild-evaluation/evidence/main-buster.o' '/home/runner/work/_temp/wild-evaluation/evidence/probe-buster.o' -o '/home/runner/work/_temp/wild-evaluation/evidence/buster-produced-mold'
+30	buster-object-runtime	setup	-1	'/home/runner/work/_temp/wild-evaluation/evidence/buster-produced-mold'
+31	buster-object-debug	setup	-1	llvm-dwarfdump --verify '/home/runner/work/_temp/wild-evaluation/evidence/buster-produced-mold'
+32	buster-object-external-link	setup	-1	clang -fuse-ld=wild '/home/runner/work/_temp/wild-evaluation/evidence/main-buster.o' '/home/runner/work/_temp/wild-evaluation/evidence/probe-buster.o' -o '/home/runner/work/_temp/wild-evaluation/evidence/buster-produced-wild'
+33	buster-object-runtime	setup	-1	'/home/runner/work/_temp/wild-evaluation/evidence/buster-produced-wild'
+34	buster-object-debug	setup	-1	llvm-dwarfdump --verify '/home/runner/work/_temp/wild-evaluation/evidence/buster-produced-wild'
+35	arm-actual-ide-source-and-unwind	WILD	-1	gdb -q -batch -ex 'break entry_point' -ex run -ex bt --args build-wild-arm/Debug/ide cc -g -c '/home/runner/work/_temp/wild-evaluation/evidence/probe.c' -o '/home/runner/work/_temp/wild-evaluation/evidence/gdb-object.o'
