@@ -15001,6 +15001,58 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         malformed_fixup.source_offset = 2;
         BUSTER_TEST(arguments, !machine_a64_test_relax_sparse(arguments->arena, 64, &malformed_fixup, 1, &overflow_size));
     }
+    {
+        // Scaling regression for batched relaxation (issue #2616): a compare
+        // chain of K conditional edges whose targets sit just past the
+        // conditional range all grow in the same pass.  Counting the work
+        // keeps the check deterministic: a one-expansion-at-a-time planner
+        // shifts the whole layout and every metadata stream once per
+        // expansion, so its bytes moved and metadata visits grow with K
+        // squared, while the batched planner needs a fixed number of passes
+        // and visits each entry once per pass.  One boundary BCC and one
+        // boundary B are pushed out of range only by the chain's insertions,
+        // forcing the later passes and the second tier.
+        u32 scaling_code_size = 150000000u;
+        u32 scaling_counts[2] = {1000u, 4000u};
+        MachineA64TestRelaxStats scaling_stats[2] = {0};
+        for (u32 scaling_index = 0; scaling_index < BUSTER_ARRAY_LENGTH(scaling_counts); scaling_index += 1)
+        {
+            u32 chain = scaling_counts[scaling_index];
+            u32 total = chain + 2u;
+            MachineA64TestSparseFixup* scaling_fixups = arena_allocate(arguments->arena, MachineA64TestSparseFixup, total);
+            scaling_fixups[0] = (MachineA64TestSparseFixup){.source_offset = 0, .target_offset = 1048572u, .opcode = A64_OPCODE_B_COND};
+            scaling_fixups[1] = (MachineA64TestSparseFixup){.source_offset = 8u, .target_offset = 134217732u, .opcode = A64_OPCODE_B, .condition = 0xff};
+            for (u32 index = 0; index < chain; index += 1)
+            {
+                u32 source = 4096u + 16u * index;
+                scaling_fixups[2u + index] = (MachineA64TestSparseFixup){.source_offset = source,
+                                                                         .target_offset = 2097152u + 8u * index,
+                                                                         .row_offset = source,
+                                                                         .call_offset = source + 8u,
+                                                                         .epilog_offset = source + 12u,
+                                                                         .opcode = A64_OPCODE_B_COND};
+            }
+            u32 scaling_size = 0;
+            BUSTER_TEST(arguments, machine_a64_test_relax_sparse_stats(arguments->arena, scaling_code_size, scaling_fixups, total, &scaling_size,
+                                                                       scaling_stats + scaling_index));
+            // The chain grows by one word each, the boundary BCC by one word
+            // and the boundary B by the 24-byte long-transfer tail.
+            BUSTER_TEST(arguments, scaling_size == scaling_code_size + 4u * chain + 4u + 24u);
+            BUSTER_TEST(arguments, scaling_fixups[0].tier == 1 && scaling_fixups[1].tier == 2);
+            u32 last = 1u + chain;
+            BUSTER_TEST(arguments, scaling_fixups[last].tier == 1);
+            BUSTER_TEST(arguments, scaling_fixups[last].source_offset == 4096u + 16u * (chain - 1u) + 4u * (chain - 1u) + 28u);
+            BUSTER_TEST(arguments, scaling_fixups[last].target_offset == 2097152u + 8u * (chain - 1u) + 4u * chain + 28u);
+        }
+        BUSTER_TEST(arguments, scaling_stats[0].passes >= 2 && scaling_stats[0].passes <= 4 && scaling_stats[1].passes == scaling_stats[0].passes);
+        BUSTER_TEST(arguments, scaling_stats[0].expansions == 1000u + 2u && scaling_stats[1].expansions == 4000u + 2u);
+        // Linear: 4x the chain costs about 4x the visits (quadratic would be
+        // 16x); the shifted bytes per pass depend only on the code size.
+        BUSTER_TEST(arguments, scaling_stats[1].metadata_visits <= 5u * scaling_stats[0].metadata_visits);
+        BUSTER_TEST(arguments, scaling_stats[1].metadata_visits <= 6u * scaling_stats[1].passes * (4000u + 2u));
+        BUSTER_TEST(arguments, scaling_stats[1].bytes_moved <= scaling_stats[1].passes * (u64)scaling_code_size);
+        BUSTER_TEST(arguments, scaling_stats[1].bytes_moved <= 2u * scaling_stats[0].bytes_moved);
+    }
     IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_stage11, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
     if (machine_a64_program && machine_a64_program->module_count)
