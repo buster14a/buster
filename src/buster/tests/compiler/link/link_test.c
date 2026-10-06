@@ -3737,6 +3737,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_alignment(UnitTestArgument
     return result;
 }
 
+// The loader publishes its r_debug address through DT_DEBUG, and a debugger
+// finds the shared-library list there; an image without the tag never shows
+// libc to gdb.  The loader writes the slot, so .dynamic has to sit in a
+// writable PT_LOAD.  Check every dynamic ELF kind each architecture writes.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_debug_tag(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    NativeImageKind kinds[] = {NATIVE_IMAGE_EXECUTABLE, NATIVE_IMAGE_PIE};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u32 aarch64_text[] = {0x52800000, 0xd65f03c0};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+        {
+            if (architectures[architecture] == CPU_ARCH_AARCH64 && kinds[kind] == NATIVE_IMAGE_PIE)
+            {
+                continue;
+            }
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            ByteSlice text = architectures[architecture] == CPU_ARCH_X86_64
+                                 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text)
+                                 : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+            ObjectSymbol symbol = {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT,
+                                   .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX},
+                                                      text, &symbol, 1, 0, 0);
+            NativeDynamicLibrary library = {.name = S8("libdebugprobe.so")};
+            NativeExecutableLinkResult linked = link_native_executable(arena, &object, (NativeExecutableLinkOptions){
+                .dynamic_libraries = &library, .dynamic_library_count = 1, .image_kind = (u8)kinds[kind],
+            });
+            if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && linked.executable.length >= 64))
+            {
+                u8* image = linked.executable.pointer;
+                u64 debug_value = 1;
+                BUSTER_TEST(arguments, link_test_elf_dynamic_entry(linked.executable, 21, &debug_value) && debug_value == 0);
+                u64 header = 0;
+                bool found = link_test_elf_section_find(linked.executable, S8(".dynamic"), 0, &header);
+                BUSTER_TEST(arguments, found);
+                if (found)
+                {
+                    u64 dynamic_address = link_read_u64(image, header + 16);
+                    u64 dynamic_end = dynamic_address + link_read_u64(image, header + 32);
+                    u64 program_header_offset = link_read_u64(image, 32);
+                    u16 program_header_count = 0;
+                    memcpy(&program_header_count, image + 56, sizeof(program_header_count));
+                    bool writable = false;
+                    for (u32 index = 0; index < program_header_count && program_header_offset <= linked.executable.length &&
+                                        (u64)program_header_count <= (linked.executable.length - program_header_offset) / 56;
+                         index += 1)
+                    {
+                        u64 program_header = program_header_offset + (u64)index * 56;
+                        u64 start = link_read_u64(image, program_header + 16);
+                        u64 memory_size = link_read_u64(image, program_header + 40);
+                        if (link_read_u32(image, program_header) == 1 && (link_read_u32(image, program_header + 4) & 2) && start <= dynamic_address &&
+                            dynamic_end <= start + memory_size)
+                        {
+                            writable = true;
+                        }
+                    }
+                    BUSTER_TEST(arguments, writable);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Merged file-backed bytes must not depend on previous arena users. Check
 // whole section contents and serialized artifacts, including both kinds of
 // unwritten span: alignment gaps and virtual bytes past an input's data.
@@ -5588,6 +5658,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult alignment = link_test_elf_data_alignment(arguments);
     result.succeeded_test_count += alignment.succeeded_test_count;
     result.test_count += alignment.test_count;
+    UnitTestResult debug_tag = link_test_elf_debug_tag(arguments);
+    result.succeeded_test_count += debug_tag.succeeded_test_count;
+    result.test_count += debug_tag.test_count;
     static u8 const sha256_abc[32] = {
         0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
         0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
@@ -5595,6 +5668,16 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     u8 sha256_result[32] = {0};
     link_sha256(arguments->arena, (u8 const*)"abc", 3, sha256_result);
     BUSTER_TEST(arguments, memcmp(sha256_result, sha256_abc, sizeof(sha256_abc)) == 0);
+    {
+        // Regression (#2724): link_sha256 must not consume arena bytes per call.
+        u64 position_before = arguments->arena->position;
+        for (u32 iteration = 0; iteration < 64; iteration += 1)
+        {
+            link_sha256(arguments->arena, (u8 const*)"abc", 3, sha256_result);
+        }
+        BUSTER_TEST(arguments, arguments->arena->position == position_before);
+        BUSTER_TEST(arguments, memcmp(sha256_result, sha256_abc, sizeof(sha256_abc)) == 0);
+    }
     UnitTestResult uefi_x64 = link_test_uefi_pe64(arguments, CPU_ARCH_X86_64);
     result.succeeded_test_count += uefi_x64.succeeded_test_count;
     result.test_count += uefi_x64.test_count;

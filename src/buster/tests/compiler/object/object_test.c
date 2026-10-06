@@ -3693,6 +3693,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_x64_tls_index_addends(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        RAW_OFFSET = 60,
+        RELOCATION_OFFSET = 68,
+        SYMBOL_OFFSET = 78,
+        STRING_OFFSET = 96,
+        INPUT_SIZE = 112,
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+    String8 names[] = {S8("__tls_index"), S8("__tls_plain")};
+    s32 stored_addends[] = {0, -8, 8, 4, INT32_MIN, INT32_MAX};
+    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+    {
+        ObjectRelocationKind expected_kind = name_index == 0 ? OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32
+                                                             : OBJECT_RELOCATION_X86_64_PC32;
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(stored_addends); addend_index += 1)
+        {
+            TemporalArena scope = arena_begin_temporal(arguments->arena);
+            // Independent regular COFF input: REL32 uses the byte after its
+            // four-byte field, so canonical A is signed inline B minus four.
+            u8 input[INPUT_SIZE] = {0};
+            object_test_coff_write_u16(input, 0, 0x8664);
+            object_test_coff_write_u16(input, 2, 1);
+            object_test_coff_write_u32(input, 8, SYMBOL_OFFSET);
+            object_test_coff_write_u32(input, 12, 1);
+            object_test_coff_write_name(input, 20, S8(".text"));
+            object_test_coff_write_u32(input, 36, 8);
+            object_test_coff_write_u32(input, 40, RAW_OFFSET);
+            object_test_coff_write_u32(input, 44, RELOCATION_OFFSET);
+            object_test_coff_write_u16(input, 52, 1);
+            object_test_coff_write_u32(input, 56, 0x60500020);
+            input[RAW_OFFSET] = 0x8b;
+            input[RAW_OFFSET + 1] = 0x05;
+            object_test_coff_write_u32(input, RAW_OFFSET + 2, (u32)stored_addends[addend_index]);
+            input[RAW_OFFSET + 6] = 0xc3;
+            input[RAW_OFFSET + 7] = 0x90;
+            object_test_coff_write_u32(input, RELOCATION_OFFSET, 2);
+            object_test_coff_write_u16(input, RELOCATION_OFFSET + 8, 4);
+            object_test_coff_write_u32(input, SYMBOL_OFFSET + 4, 4);
+            input[SYMBOL_OFFSET + 16] = 2;
+            object_test_coff_write_u32(input, STRING_OFFSET, 16);
+            object_test_coff_write_name(input, STRING_OFFSET + 4, names[name_index]);
+            u8 original[INPUT_SIZE];
+            memcpy(original, input, sizeof(input));
+            ObjectFile object = object_read(arguments->arena, (ByteSlice){.pointer = input, .length = sizeof(input)}, target);
+            s64 expected_addend = (s64)stored_addends[addend_index] - 4;
+            for (u32 cycle = 0; cycle < 3; cycle += 1)
+            {
+                bool valid = object.error == OBJECT_ERROR_NONE && object.relocations && object.relocation_count == 1 &&
+                             object.symbols && object.relocations[0].symbol < object.symbol_count;
+                if (BUSTER_REQUIRE(arguments, valid))
+                {
+                    ObjectRelocation* relocation = object.relocations;
+                    BUSTER_TEST(arguments, relocation->kind == expected_kind && relocation->offset == 2 &&
+                                               relocation->addend == expected_addend);
+                    BUSTER_STRING_TEST(arguments, object.symbols[relocation->symbol].name, names[name_index]);
+                    ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+                    u32 raw_offset = 0;
+                    u32 relocation_offset = 0;
+                    u16 relocation_count = 0;
+                    bool raw_valid = artifact.error == OBJECT_ERROR_NONE &&
+                                     object_test_coff_named_section(artifact.bytes, S8(".text"), &raw_offset, &relocation_offset,
+                                                                   &relocation_count, 0) &&
+                                     relocation_count == 1 && raw_offset <= artifact.bytes.length &&
+                                     8 <= artifact.bytes.length - raw_offset;
+                    if (BUSTER_REQUIRE(arguments, raw_valid))
+                    {
+                        s32 stored = 0;
+                        u32 site = 0;
+                        u16 type = 0;
+                        memcpy(&stored, artifact.bytes.pointer + raw_offset + 2, sizeof(stored));
+                        memcpy(&site, artifact.bytes.pointer + relocation_offset, sizeof(site));
+                        memcpy(&type, artifact.bytes.pointer + relocation_offset + 8, sizeof(type));
+                        BUSTER_TEST(arguments, stored == stored_addends[addend_index] && site == 2 && type == 4);
+                        BUSTER_TEST(arguments, artifact.bytes.pointer[raw_offset] == 0x8b &&
+                                                   artifact.bytes.pointer[raw_offset + 1] == 0x05 &&
+                                                   artifact.bytes.pointer[raw_offset + 6] == 0xc3 &&
+                                                   artifact.bytes.pointer[raw_offset + 7] == 0x90);
+                        object = object_read(arguments->arena, artifact.bytes, target);
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, memcmp(input, original, sizeof(input)) == 0);
+            arena_set_position(arguments->arena, scope.position);
+        }
+    }
+    return result;
+}
+
 #include <buster/tests/compiler/object/executable_test.c>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArguments* arguments)
@@ -3836,6 +3929,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    BUSTER_TEST_FIXTURE(arguments, object_test_coff_x64_tls_index_addends);
     UnitTestResult aarch64_printer = object_test_aarch64_printer_fields(arguments);
     result.test_count += aarch64_printer.test_count;
     result.succeeded_test_count += aarch64_printer.succeeded_test_count;
@@ -5347,6 +5441,46 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         memcpy(&mach_magic, mach.bytes.pointer, 4);
     }
     BUSTER_TEST(arguments, mach_magic == 0xfeedfacf);
+    // A `__bss`-named section whose type is rewritten from S_ZEROFILL to
+    // S_REGULAR has no buffer to copy into; the reader must refuse it, not
+    // write through a null pointer.
+    if (BUSTER_REQUIRE(arguments, mach.bytes.length >= 32 + 72))
+    {
+        TemporalArena bss_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice bss_mutation = {
+            .pointer = arena_allocate(arguments->arena, u8, mach.bytes.length),
+            .length = mach.bytes.length,
+        };
+        memcpy(bss_mutation.pointer, mach.bytes.pointer, mach.bytes.length);
+        u32 bss_section_count = 0;
+        memcpy(&bss_section_count, bss_mutation.pointer + 32 + 64, sizeof(bss_section_count));
+        u32 bss_flipped = 0;
+        for (u32 bss_index = 0; bss_index < bss_section_count && 32 + 72 + (u64)(bss_index + 1) * 80 <= bss_mutation.length; bss_index += 1)
+        {
+            u64 bss_section = 32 + 72 + (u64)bss_index * 80;
+            u32 bss_flags = 0;
+            memcpy(&bss_flags, bss_mutation.pointer + bss_section + 64, sizeof(bss_flags));
+            if (memcmp(bss_mutation.pointer + bss_section, "__bss", 5) == 0 && (bss_flags & 0xff) == 1)
+            {
+                bss_flags &= ~UINT32_C(0xff);
+                memcpy(bss_mutation.pointer + bss_section + 64, &bss_flags, sizeof(bss_flags));
+                // Keep the source bytes in bounds so only the name/flag split is wrong.
+                u64 bss_size = 4;
+                u32 bss_offset = 0;
+                memcpy(bss_mutation.pointer + bss_section + 40, &bss_size, sizeof(bss_size));
+                memcpy(bss_mutation.pointer + bss_section + 48, &bss_offset, sizeof(bss_offset));
+                bss_flipped += 1;
+            }
+        }
+        BUSTER_TEST(arguments, bss_flipped == 1);
+        ObjectFile bss_object = object_read(arguments->arena, bss_mutation,
+                                            (Target){
+                                                .cpu_arch = CPU_ARCH_X86_64,
+                                                .os = OPERATING_SYSTEM_MACOS,
+                                            });
+        BUSTER_TEST(arguments, bss_object.error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, bss_scope.position);
+    }
     sections[0].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text);
     object.target.cpu_arch = CPU_ARCH_AARCH64;
     relocation = (ObjectRelocation){
@@ -7716,6 +7850,40 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             if (BUSTER_REQUIRE(arguments, compact_x64_roundtrip.relocation_count == 1 && compact_x64_roundtrip.relocations != 0))
             {
                 BUSTER_TEST(arguments, compact_x64_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+            }
+        }
+        // r_symbolnum is attacker-controlled: zero (local) underflowed the
+        // section lookup and an oversized external index walked off
+        // symbol_map; each must be a clean refusal.
+        u32 compact_raw_offset = 0;
+        u32 compact_relocation_offset = 0;
+        u32 compact_relocation_count = 0;
+        if (BUSTER_REQUIRE(arguments, object_test_mach_section_offsets(compact_x64_artifact.bytes, OBJECT_SECTION_READ_ONLY_DATA, &compact_raw_offset,
+                                                                       &compact_relocation_offset, &compact_relocation_count) &&
+                                          compact_relocation_count == 1))
+        {
+            u32 compact_bad_information[] = {
+                (3u << 25),                       // local, r_symbolnum 0
+                (3u << 25) | 0x00ffffffu,         // local, past the section count
+                (3u << 25) | (1u << 27),          // external, symbol 0 is not a valid text reference here
+                (3u << 25) | (1u << 27) | 1000u,  // external, past symbol_count
+                (3u << 25) | (1u << 27) | 0x00ffffffu,
+            };
+            for (u32 bad_index = 0; bad_index < BUSTER_ARRAY_LENGTH(compact_bad_information); bad_index += 1)
+            {
+                TemporalArena compact_scope = arena_begin_temporal(arguments->arena);
+                ByteSlice compact_mutation = {
+                    .pointer = arena_allocate(arguments->arena, u8, compact_x64_artifact.bytes.length),
+                    .length = compact_x64_artifact.bytes.length,
+                };
+                memcpy(compact_mutation.pointer, compact_x64_artifact.bytes.pointer, compact_x64_artifact.bytes.length);
+                object_test_write_u32(compact_mutation, (u64)compact_relocation_offset + 4, compact_bad_information[bad_index]);
+                ObjectFile compact_bad = object_read(arguments->arena, compact_mutation, compact_x64_object.target);
+                if (bad_index != 2)
+                {
+                    BUSTER_TEST(arguments, compact_bad.error != OBJECT_ERROR_NONE);
+                }
+                arena_set_position(arguments->arena, compact_scope.position);
             }
         }
     }

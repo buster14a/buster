@@ -1703,6 +1703,16 @@ BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPrep
 // the mapping for the next unit on this thread. The caller must be the thread
 // that created it (docs/agents/parallelism.md).
 BUSTER_F_DECL void c_phase_arena_retire(Arena* arena);
+// Ends the use of the private arenas c_preprocess reserved for one unit (the
+// spelling space, the token rows and the token shapes). Each returns every
+// committed page beyond C_PHASE_ARENA_RETAINED_SIZE to the OS and parks its
+// reservation in the creating thread's reuse pool, so a process that compiles
+// many units in turn holds a bounded address space. Call once the unit's
+// compilation is complete: afterwards `tokens`, `spelling_base` and every
+// token spelling of the result are gone; the source map, symbols, files and
+// diagnostics live in the caller's arena and stay valid. Idempotent, and a
+// no-op for a hand-built result.
+BUSTER_F_DECL void c_preprocess_release(CPreprocessResult* result);
 BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics const* part);
 // translated_bytes minus comments and whitespace: the bytes that became
 // tokens, literal spellings included.

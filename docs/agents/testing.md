@@ -50,6 +50,11 @@
   `ui_core` module and an inert native renderer boundary. It is included in
   `test_all` and `test_units` when tests and libc are enabled, without adding UI
   dependencies or a descriptor to `ide`; see [graphics/UI](../projects/graphics-ui.md).
+- The desktop `test_ui_scale` component target (`ui_scale_component_test.c`)
+  counts keyed-box lookup probes and focus-navigation work against the
+  production `ui_core` and an inert renderer, with behavior controls for the box
+  table. It is part of `test_all` and `test_units` when tests and libc are
+  enabled; see [graphics/UI](../projects/graphics-ui.md).
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
@@ -193,6 +198,25 @@
   of being reported as a canary pass. The canary environment variable is a
   private subprocess seam; use the registered suite rather than invoking it as
   standalone evidence.
+- `sanitizer_tests` also pins the invariant-macro selection in every
+  configuration. `BUSTER_CHECK`, `BUSTER_ASSERT` and `BUSTER_UNREACHABLE`
+  become optimizer assumptions or unevaluated expressions only under
+  `BUSTER_OPTIMIZE && !BUSTER_SANITIZE`; Debug and sanitized builds at every
+  optimization level keep them as diagnostics. The suite compares the BUSTER_
+  defines with the compiler's own `__OPTIMIZE__` and AddressSanitizer
+  predicates, counts operand evaluations (an optimized unsanitized
+  `BUSTER_ASSERT` must evaluate nothing), and, where the macros are
+  diagnostics, requires false `BUSTER_CHECK`/`BUSTER_ASSERT` children to exit
+  1 with their `assertion failed at` report and, outside Windows, a
+  `BUSTER_UNREACHABLE` child to die by SIGILL or SIGTRAP. Android and iOS
+  payloads cannot relaunch themselves, so they run only the in-process
+  controls and report the children as `status=unsupported`. It never executes
+  a false raw assumption.
+  It also requires `BUSTER_REFERENCE_CHECKS` (the reference-equivalence
+  checks once reached only in Debug) to equal that checked-contract
+  configuration. Routine CI runs this suite in the optimized sanitized
+  Release tree; sanitized Debug is compile-and-link coverage there
+  ([sanitizer execution policy](../ci-combination-shards.md#sanitizer-execution-policy-2657)).
 - **Adding a module** (`foo.c`/`foo.h` under `src/buster/lib/`) takes three
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;
@@ -211,7 +235,28 @@
   resolves safe `.` and `..` segments inside the rooted APK asset namespace so
   nested quoted includes consume the same fixture bytes as desktop tests;
   traversal above the asset root is rejected.
-- The iOS payload runs `test --verbose=1 --ci=1`. Failed launches report
+- The iOS payload runs `test --verbose=1 --ci=1`. Launches emit
+  opt-in `BUSTER_IOS_LAUNCH_V1` records, enabled by the launcher through
+  `SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE=1`, from native `main`, UIKit entry,
+  delegate entry, window readiness, worker creation/entry, runtime and argument
+  readiness, suite entry, compiler prewarm completion, fixture readiness and
+  entry completion. Each fixed-size direct stderr write carries PID, app
+  monotonic/wall microseconds, process CPU microseconds and separate clock/query
+  statuses; nonzero statuses make the corresponding measurement unavailable.
+  This path needs no arena or thread context. `BUSTER_IOS_LAUNCH_OBSERVATION`
+  records the host's first polled console, app trace and fixture receipt using
+  the existing Bash launch clock. Poll observations include scheduling and
+  scanning delay and are not native timestamps; missing events stay absent.
+  Compare app monotonic deltas to separate UIKit, worker/runtime and pre-fixture
+  preparation, process CPU deltas to distinguish CPU use from elapsed time,
+  and app wall time with host log receipt to investigate console delay (wall
+  clocks can adjust). No record proves a cause for a historical timeout or
+  changes marker acceptance, process ownership or the launch deadline.
+  `python3 ios/launch_trace_test.py -v` executes the native producer with
+  host POSIX clocks. `bash ios/launch_trace_monitor_test.sh` checks delayed
+  receipt and trace-only deadline rejection without modifying the frozen shared
+  fixtures; UIKit and actual simulator acceptance remain in mobile CI.
+  Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;
   `unavailable` means no such record arrived. The last observed module is
@@ -324,6 +369,20 @@
   payload with real CoreSimulator boot, probes and shutdown on hosted macOS
   ARM64. The mobile lifecycle workflow retains actual probe availability and
   failure reasons there; real app compilation/execution remains in mobile CI.
+  These optional diagnostics retain a ten-second command deadline and a
+  thirty-second caller capture cap. A hosted phase observed at 42 seconds in
+  #2742 had no promoted snapshot; increasing those evidence budgets would delay
+  failure reporting without making the launch verdict stronger. The native
+  control therefore accepts an explicitly unavailable probe with an actual
+  command- or caller-clock expiry receipt and warning, including expiry before
+  native admission when the requested command and declined-admission proof are
+  retained. Missing proof of a native attempt cannot establish probe success.
+  Missing/malformed protocol
+  evidence, tracebacks and oversized output still fail. A closed final
+  completion pipe becomes a private helper-failure receipt without retry;
+  native exit, deadline and cancellation facts remain separate. The bridge
+  controls cover closed completion after native success, deadline and INT/TERM,
+  plus accepted/rejected native-control receipt shapes without a simulator.
 - On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
   codesign deadline when the caller has not supplied one. This is separate
   from the test-execution, boot, install, and shutdown deadlines. Local and
@@ -466,45 +525,6 @@ before compiler/configuration trees. The tool links shared foundations through
 timeout/descendant cleanup, argv, diagnostics and dedicated-host locking.
 SHA-256 and recoverable file/path contracts also run in the registered hash and
 OS module tests. See `tools/throughput/README.md` for the diagnostic build.
-
-## Bench service self-test
-
-`./build.sh bench_service self-test` (and its `--sanitize` variant) runs the
-POSIX queue, materializer, journal-replay and fake-worker regressions plus the
-Linux lease-handoff and result-evidence suites; see
-`tools/bench_service/README.md` for the full contract. `mcp_tests.c` is included
-by this same registered suite: it checks bounded JSON/Unicode/duplicate keys,
-lifecycle and tool schemas, no-ID write suppression, uint64 string identities,
-validated receipt privacy and a real authenticated Unix-socket daemon with a
-disposable journal and no worker configuration. Socket cases cover the six
-job tools and program upload, lost-reply idempotency/reconnect,
-conflicting-key refusal, foreign-job privacy, durable cancellation and
-disconnected-service errors. Artifact receipt/slice retrieval is covered at
-the codec and reply-binding level only. None of this proves an off-host
-cache, a web/Codex installation or retrieval from a real installed job.
-Interrupted workers
-retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
-index, a bundle-only crash prefix completes idempotently, and invalid
-published controls are never repaired. The coordinator removes the
-`.lease-handoff` socket before the worker is continued. On Linux the suite
-also runs a materializer-to-recipe bridge: a real `bq_materialize` fixture
-feeds the real `bench_service_recipe` build graph through
-`bench_service_recipe_self_test JOB TOKEN WORKSPACE BASE CANDIDATE RESULT`,
-with only the external build and throughput programs stubbed, followed by the
-fixed no-argument recipe suite. These tests are fake-backend and
-stubbed-external evidence; privileged live-systemd and deployment
-qualification remain explicit operator gates and are not covered here.
-`./build.sh bench_service_broker self-test` also compiles the opt-in
-`systemd-broker-live-test` probe. Run that probe only in a provisioned,
-disposable real-systemd container while an exact outer unit holds the lease;
-it exercises the constrained socket instance and positive/negative private
-state requests. The broker self-test also runs the probe's unprivileged
-identity-policy controls. Opt-in `--isolation-only JOB ATTEMPT` checks actual
-account groups and non-destructive private-file/traversal denial without
-manager calls; it is not live broker evidence. `service-tests
---cleanup-identity-only` needs disposable root-capable infrastructure and the
-three fixed accounts, and tests the real cleanup helper under the service UID.
-See `tools/bench_service/deploy/SYSTEMD_BROKER.md` for both gates.
 
 ## Configured external compiler fixtures
 

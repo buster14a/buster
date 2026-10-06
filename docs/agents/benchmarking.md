@@ -29,13 +29,10 @@ sensitivity. Matching paths does not eliminate source-induced layout sensitivity
 keep conclusions scoped to the measured binaries and workloads. See the
 [matched-build #791 audit](../performance-audits/2026-09-20T050606Z.md).
 For dedicated 9700X calibration, retain a same-root rebuild control and a
-cross-root control beside the immutable-binary A/A capture. The
-[`zen5_build_control.py`](../../tools/zen5_build_control.py) reader checks their
-predeclared, fixed-count records and summarizes build, path, order and drift
-effects. Its schema and execution boundary are in the
-[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls).
-These offline checks cannot authenticate the capture or prove that the family
-was frozen before sampling; the admitted service receipt must bind both facts.
+cross-root control beside the immutable-binary A/A capture; the
+[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls)
+describes them. No repository tool currently produces or analyzes these
+captures (#2741).
 
 - **`./build.sh bench_throughput`** provides deterministic startup, scaling,
   symbol, CFG, backend and frozen-source self-host workloads with raw paired
@@ -85,6 +82,13 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   python3 tools/uarch_lab.py report "$session_root/lab-attempt-1" [--perf PATH]
   python3 -B tools/uarch_lab_test.py
   ```
+
+  The offline tests run every fake `perf`/`ide` script under the interpreter
+  that runs them (its path becomes the shebang), so a standalone Python works
+  even when `PATH` selects another. The retirement fixtures run a lone copy of
+  that interpreter as a stage-1 compiler; when the copy cannot find its
+  standard library they set `PYTHONHOME` (and the shared-library directory),
+  and skip with the probe's errors only if it still cannot start.
 
   Its `compare` mode is the A/B benchmark for a compiler change; see
   [Benchmarking a compiler change (A/B)](#benchmarking-a-compiler-change-ab).
@@ -431,40 +435,57 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   escape for method testing. `--skip-build` reuses the existing Release binary
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
-- **The dedicated Ryzen 7 9700X is no longer a general GitHub Actions
-  executor.** `.github/workflows/zen5-audit.yml` is retired. Two GitHub
-  workflows are admitted to the restricted `buster-9700x-service-dispatch`
-  runner group. `.github/workflows/9700x-direct-bench.yml` compiles and times
-  the owner's own pull-request workloads from `benchmarks/9700x/` without the
-  service; its numbers are diagnostic and unsealed (see
-  `benchmarks/9700x/README.md`). `.github/workflows/9700x-service-dispatch.yml`
-  selects that group
-  and `[self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`, does not check out
-  repository content, and invokes only the operator-installed fixed gateway.
-  Its `recipe` input chooses from a reviewed allowlist
-  (`validate-buster-v1`, `zen5-calibration-v1`) and refuses anything else;
-  the installed service still serves only its compiled registry, which today
-  serves the one-pair `validate-buster-v1` smoke recipe and the
-  `zen5-calibration-v1` (#426) A/A calibration capture (one revision named
-  twice; see `tools/bench_service/README.md`). A service installed before
-  this registry refuses zen5 until the operator reinstalls service, broker and
-  gate together from protected main. The smoke recipe is
-  not the former stage-1 diagnostic, an A/A qualification, or a performance
-  verdict, and the calibration capture never authorizes A/B. The result wait
-  is the broker's `RuntimeMaxSec` plus a finalization allowance and is capped
-  by the job timeout; see
-  [`tools/bench_service/deploy/VALIDATE_BUSTER_V1.md`](../../tools/bench_service/deploy/VALIDATE_BUSTER_V1.md).
-  Only dispatches by `davidgmbb` (user 39247043) reach the runner, without a
-  manual approval step: a per-attempt `authorize` job and the `submit` job
-  condition skip every other requester and re-run.
-  Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
-  ruleset, main-only environment without a required reviewer, workflow gate,
-  host authorization, installed identities, and clean queue are
-  verified as described in
-  [`tools/bench_service/deploy/GITHUB_ADMISSION.md`](../../tools/bench_service/deploy/GITHUB_ADMISSION.md).
-  `native-retirement-performance-v1` remains blocked. Use the local trusted
-  capture methods above for ad-hoc profiling. Historical audit notes retain
-  `zen5-audit.yml` only as provenance for runs made before its retirement.
+- **Performance validation needs Zen 5 execution evidence (#2761).** Every
+  performance-validation test requires actual execution of its relevant
+  workload on the approved Zen 5 benchmark host. Without complete evidence
+  matching the candidate, workload and configuration, report performance
+  validation as incomplete. Cloud-only and static evidence is diagnostic, not
+  a substitute: hosted timing, static instruction counts, a `znver5` target, a
+  request or policy check, or an unrelated self-host benchmark. Correctness and
+  native-platform CI stay on their current infrastructure. The comparison
+  routes below cover only the stage-1 self-host compile. Every entry point
+  that can claim performance validation has a row in
+  [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
+  either a 9700X route with the consumer that checks its evidence, or an
+  explicit `NOT VALIDATED` with a resolution. `tools/bench_direct/performance_inventory_test.py`
+  (part of the required benchmark policy check) discovers entry points from
+  `build.c`, `uarch_lab.py`, `ide`, `tools/` and the workflows, and fails on an
+  unregistered or stale one. Each published 9700X compiler receipt must name
+  the observed CPU, the Ryzen 7 9700X; a runner label, target flag or other
+  host is refused. The direct workload harness reads the same observed CPU
+  model, prints it in its report, and on any other host compiles and runs
+  nothing and fails.
+- **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
+  The queued benchmark service, its dispatch workflow and the earlier
+  `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
+  admitted to the restricted runner group is
+  `.github/workflows/9700x-direct-bench.yml`. It compiles and times the
+  owner's own pull-request workloads from `benchmarks/9700x/` and reports
+  diagnostic, unsealed process latency; see
+  [`benchmarks/9700x/README.md`](../../benchmarks/9700x/README.md) and its
+  [admission guide](../../benchmarks/9700x/ADMISSION.md). Once enabled, it
+  also runs the routine `uarch_lab.py compare` of each commit after it lands
+  on main against its first parent, or against the nearest earlier measured
+  main commit when a merge burst left the first parent unmeasured (#2752;
+  frozen `compiler-compare-v1`
+  profile, report-only, merging never waits). Each comparison is published as
+  the `9700X compiler benchmark` check on that main commit, queued before the
+  run starts and in progress while the 9700X measures (#2803), plus one
+  maintained report comment on the commit (#2804). During merge bursts only
+  the newest pending commit is measured; the others' checks read
+  **Not measured** and name the range comparison that covers their change.
+  A range result does not isolate one commit. See the
+  [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
+  An owner pull request can request the same comparison of its head against
+  its merge base before merging by changing
+  `benchmarks/9700x/compiler-compare.request` (#2769); see the
+  [workload guide](../../benchmarks/9700x/README.md#compiler-comparison-of-a-pull-request).
+  These are the only sanctioned compiler A/B paths on that host; they run no
+  profile steps and no A/A. `native-retirement-performance-v1` remains blocked,
+  and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
+  removed (#2741; tag `bench-service-final` retains them). Use the local
+  trusted capture methods above for ad-hoc profiling. Historical audit notes retain
+  the removed workflows and service job numbers only as provenance.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
   the CI critical path, so it is the configuration most worth profiling. Record
   it exactly like any other build; there is no sanitizer-specific obstacle:
@@ -674,6 +695,21 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    python3 tools/uarch_lab.py report "$session_root/ab-attempt-1"     # re-render report.md and summary.json
    ```
 
+   **Without perf (#2768).** Before the first timed run the lab runs
+   `perf stat -- true` once (`probe_counters`). If perf is missing, exits
+   nonzero (for example under a strict `perf_event_paranoid`), or writes no
+   task-clock line, every timed run executes the workload directly. Wall time,
+   CPU time (`task_clock`, from wait4's user plus system time) and peak RSS are
+   still measured, and the verdict still comes from wall time. Every perf
+   counter is NA, never zero. `summary.json` records this in `counters`
+   (`perf_stat`, `reason`) and adds a warning. A perf that runs but counts
+   zero is still a degraded measurement, not a fallback. `--profile-steps`
+   need perf: without it, `compare` stops before the first pair with that
+   reason. When no pair completes, `compare` exits nonzero, so a failed series
+   cannot pass for a neutral result. A cloud container therefore yields a
+   usable, diagnostic wall-time A/B; Zen 5 evidence still needs the 9700X
+   routes below.
+
    Both binaries are probed for `-fsource-metrics`/`-fmetrics-out` before
    either is warmed up. Compare enables `-fmetrics-out` in both variants'
    warm-ups, pilot and timed pairs only when both support it; otherwise it
@@ -755,6 +791,24 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    code. A count metric whose ratio of medians and median of per-pair ratios
    differ by more than 5% carries the note "bimodal counts: compare medians,
    not the paired ratio" (page faults in LAB3: 0.921 against 0.9965).
+   **Thread timeline (opt-in).** `run --threads` or `compare --profile-steps
+   threads` adds one Superluminal-style capture per binary,
+   `DIR/[a|b/]threads/threads.data`, for [Hotspot](https://github.com/KDAB/hotspot).
+   Hotspot shows a per-thread timeline, off-CPU time, flame graphs and
+   caller/callee views. The capture runs `perf record -F 10000 --call-graph fp
+   --switch-events` on the binary in place, so its symbols stay resolvable; the
+   Release `ide` keeps frame pointers. `step_threads` takes the richest mode the
+   host permits and records why richer ones were refused:
+   - `full`: kernel and user `cycles` stacks plus `sched:sched_switch` and
+     `sched:sched_wakeup`, which give off-CPU waits and `perf sched timehist
+     --summary`. It needs `kernel.perf_event_paranoid = -1`, tracefs readable by
+     the account, and `kernel.kptr_restrict = 0` for kernel symbol names.
+   - `user`: `cycles:u` stacks and context switches; works at `2`.
+   - `cpu-clock`: the same with a software clock, for hosts without a PMU.
+
+   The step is never part of the automated 9700X comparisons, whose policy
+   forbids profile steps.
+
    With `--profile-steps`, the top-down table and the per-symbol share movers
    show where the time moved. Movers come from one capture per variant and are
    hints only: a capture with fewer than 2,000 samples on either side is
@@ -775,7 +829,8 @@ meaning or a removal bumps the schema id):
   `repo_root`, `cpu`, `host`, `baseline`/`candidate` (`path`, `sha256`,
   `size_bytes`, `runs`, `failed`, `identical_runs`, `deterministic`,
   `metrics_out`, `metrics_out_supported`, `metrics_out_enabled`,
-  `source_metrics`), `phase_metrics` (`enabled`, `reason`), `outputs_identical`, `plan` (`pairs`,
+  `source_metrics`), `phase_metrics` (`enabled`, `reason`), `counters` (`perf_stat`: true, false when
+  timed without perf, or null for an older directory; `reason`), `outputs_identical`, `plan` (`pairs`,
   `reason`, `order`, `fresh_copy`, `seed`, `confidence`,
   `bootstrap_resamples`, `complete_pairs`), `method`, `verdict` (`metric`,
   `outcome`, `ratio`, `ci_low`, `ci_high`, `ci_coverage`, `change_percent`,

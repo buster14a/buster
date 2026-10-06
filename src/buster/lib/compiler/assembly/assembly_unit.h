@@ -58,10 +58,18 @@ struct AssemblyUnitSymbol
     bool global;
     bool weak;
     bool hidden;
-    // STT_FUNC rather than STT_OBJECT. `.type name,@function` is the only
-    // producer; a label alone does not promote the kind.
+    // STT_FUNC rather than STT_OBJECT. `.type name,@function` sets it; the
+    // finished unit also sets it on a defined global or weak label in an
+    // executable section, which is an entry point the linker must call.
     bool function;
-    u8 reserved[3];
+    // `.type` named this symbol's kind, as function or object.
+    bool typed;
+    // The ELF writer states STT_NOTYPE: a defined local label in an
+    // executable section that no `.type` described, as GNU as writes it.
+    // `function` stays what consumers of the unit read; this only changes
+    // the symbol type a disassembler sees.
+    bool untyped;
+    u8 reserved[1];
 };
 
 typedef struct AssemblyUnitRelocation AssemblyUnitRelocation;

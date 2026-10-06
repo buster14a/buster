@@ -95,6 +95,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed
   arena allocation clears only the dirty overlap. BSS and thread-local BSS
   keep their virtual sizes without allocating serialized storage (GitHub #303).
+- **AMD64 COFF TLS-index REL32 fields use the ordinary inline addend convention.**
+  The reader normalizes the signed inline displacement B to canonical A=B-4,
+  including references named `__tls_index`. The writer restores B=A+4 for
+  `OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32`, just as for ordinary PC32.
+  The registered object regression constructs raw COFF bytes independently,
+  checks both signed boundaries and a near-name ordinary-symbol control,
+  and inspects serialized fields across repeated read/write cycles. This
+  preserves addends within the current TLS model; platform TLS symbol spelling,
+  section conventions and runtime interoperability remain separate contracts
+  tracked by GitHub #1323.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
@@ -208,9 +218,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unit whose only function is a static constructor came out with an empty
   `.text`. The registration is a module-level list, `IrModule.initializers`,
   for the reason aliases are: it is a relation, not a property of a symbol,
-  and nearly every module has none. And the two targets with no initializer
-  array at all -- core Wasm, which starts one function of its own, and eBPF,
-  which has no startup -- **diagnose** the attribute rather than dropping it.
+  and nearly every module has none. And the targets with no initializer
+  array at all -- wasm32 and wasm64, whose direct output is a finished module
+  that starts one function of its own, and eBPF, which has no startup --
+  **diagnose** the attribute rather than dropping it. The message names the
+  actual target (`wasm32`, `wasm64` or `eBPF`; issue 2679, covered by
+  `c_test_gnu_attribute_queries`). Clang accepts the attribute on Wasm by
+  recording `InitFunctions` (subsection 6, priority then symbol index) in the
+  relocatable object's `linking` custom section for `wasm-ld` to turn into
+  `__wasm_call_ctors`; Buster refuses instead because `wasm.c` writes no
+  relocatable object, so there is no `linking` section, symbol table or
+  `wasm-ld` step to carry the entries. Destructors stay refused: the object
+  format has no finalizer list, and Buster has no atexit-registration lowering.
 - **`__attribute__((section("name")))` places a definition in a section of
   its own name on ELF and is refused elsewhere** (issue #1276). The frontend
   records it in `IrSymbol.section_name`: from the definition, else from any
@@ -506,7 +525,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   staging and patches them after layout; imported data uses its dynamic
   symbol's copy-slot address, including aliases. Untyped exported AArch64
   ELF text labels can serve as assembly entry points; explicit object types
-  remain data. Mach-O, PE and TLS relocation contracts remain separate.
+  remain data. `ELF_ADR_PREL_LO21` (relocation 274, an assembly `adr` to a
+  target the unit could not fold, #2706) rides the same family: its REL addend
+  is the unscaled signed imm21 byte displacement and the relocated value is
+  S + A - P with no page truncation. Mach-O, PE and TLS relocation contracts
+  remain separate.
 
 - AArch64 ELF `ELF_GOT_PAGE21`/`ELF_GOT_LD64_LO12` (types 311/312)
   use `GDAT(S)` and require zero addends under AAELF64. The importer rejects

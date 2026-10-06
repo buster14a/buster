@@ -26,13 +26,8 @@ SCHEMA = "buster-benchmark-policy-reuse-v1"
 MAX_AGE = timedelta(hours=2)
 MAX_RECEIPT_BYTES = 32768
 WORK_STEPS = (
-    "Prove exclusive fixed-gateway dispatch",
-    "Replay Zen 5 qualification formats",
+    "Prove the direct 9700X workflow gate",
     "Replay micro-architecture lab formats",
-    "Exercise atomic exclusive admission",
-    "Reject contaminated broker account groups before state inspection",
-    "Build and exercise the static effective-credential gate",
-    "Exercise credential and numeric account receipt rejection",
 )
 CONTROL_STEP = "Test benchmark policy reuse"
 DECISION_STEP = "Decide verified queue reuse"

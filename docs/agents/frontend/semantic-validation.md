@@ -72,6 +72,20 @@ source locations and matching semantic-only/full-compilation refusal. Both
 frontend forms validate positive neighbors in those dialects, including
 enum/typedef shadowing, and GNU-zero neighbors independently.
 
+Structure and union member validation walks array, pointer and function-return derivations,
+including those inherited through typedefs, and rejects variably modified
+types at the member's original source site. Each bound is queried in its
+declaring scope using the existing typed constant predicate. The check runs
+after expression/type-name validation and also visits members appended by its
+own bound queries. Completed aggregate definitions retain their source identity,
+so deeply nested `sizeof` type names are covered without declaring an object.
+Flexible arrays, constant expression bounds and function-pointer prototype
+parameters keep their existing rules. `c_test_variable_member_types` checks
+rejected file/block/type-name/nested/typedef forms, exact member locations and
+valid neighbors through semantic-only analysis and both canonical frontend
+forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
+[WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
 pointers to arrays and functions retain their pointer size. Its explicit task
@@ -183,6 +197,15 @@ slot, and root snapshots and rollbacks are passed by pointer. A rollback that
 does not continue into a successful parse is masked by its root's rollback, so
 `c_test_type_parse_snapshot_rows` checks row independence directly.
 
+GNU `__attribute__((fallthrough));` and its `__fallthrough__` alias
+are null statements, including in C99/GNU11/C17. Leading attribute lists
+are skipped by the lowering body walker; `c_parse_validate_gnu_fallthrough`
+therefore checks the empty statement and zero-argument constraint (allowing
+an empty parenthesized parameter list) before lowering can erase the attribute prefix. Other attributes retain their own
+handling. Embedded driver regressions cover both spellings, dialects, both
+frontend forms and all four allocators, with syntax/object diagnostic
+equivalence for a missing semicolon or attribute arguments.
+
 A modification destination is typed from its whole operand.
 `c_parse_assignment_identifier_is_operand` is the one rule both assignment
 scans in `c_parse_validate_const_assignments` use for when the identifier in
@@ -212,6 +235,36 @@ conjunction operator shares the spelling; a body with a goto label and
 `a && b` is not walked, and a parenthesized sizeof/alignof operand before
 `&&` is that operator's operand, not a cast. `c_test_label_values_gate` pins
 the gate through the private seam beside the unchanged diagnostics.
+
+## Reservation failure contract
+
+Required preprocessing spelling/token/shape/phase and semantic machine/phase
+reservations produce an error row in the caller's result arena, with the phase
+and requested size in its message. Parsing has no private arena reservation;
+it forwards failed preprocessing and diagnoses absent or oversized token input.
+Semantic analysis stays incomplete on a reservation failure. Lowering refuses
+an incomplete semantic model and never publishes its partially constructed
+program after a required arena reservation fails, including scratch growth.
+The driver preserves these diagnostics for syntax-only and object actions and
+has a nonempty fallback for an incomplete producer result.
+
+`c_test_frontend_reservation_failures` and
+`compiler_driver_test_frontend_reservation_failures` select each mandatory
+phase-local creation through a calling-thread private seam, which arms the
+existing `arena_test_fail_next_reserve` immediately at that creation and
+disables pool reuse for that attempt. Both SSA forms cover all four
+preprocessing, two analysis and one ordinary lowering reservations, failed
+result publication and successful next-call recovery. Driver coverage includes
+syntax-only for phases it actually executes. Oversized query/function growth
+uses the same reservation boundary and reports the requested bytes. A private
+tests-only initial function budget forces real growth with a small valid input;
+a synthetic query extent refuses its mapping before any oversized source walk.
+The attribute-role regression also forces its deep semantic spill reservation
+and checks recovery. The frontend reservation fixture releases each complete
+preprocessed unit with `c_preprocess_release` before rewinding scratch, so the
+test-unit registry is unregistered and cannot retain destroyed arena pointers. Existing scratch-limit regressions cover checked plan refusal.
+The lexer diagnostic arena remains an optional optimization with a tested
+result-arena fallback; failure there retains the original lexical diagnostics.
 
 ## Regression contract
 
@@ -295,3 +348,17 @@ large translation units and the compiler unity source. Then run the complete
 suite, sanitized suite and byte-identical self-host fixed point. Record compiler
 identities, input identities, actual results and limits in a new performance
 audit; do not substitute cross-path agreement for a baseline comparison.
+
+The final member check defers failed bound classifications until its live
+member walk has materialized nested aggregate definitions. It retries only failed
+candidates and visits physical members appended by retries, until neither member
+rows nor unique completed source-backed aggregate definitions grow. A lazy scratch
+bitset keyed by definition tokens includes GNU empty records; qualified copies
+and temporary type-only derivations do not count as progress. It then reports
+VM members, so a valid deeply nested sizeof
+bound does not become a runtime bound merely because its first layout query
+could not yet resolve a copied type name. Pending rows are sparse scratch data,
+released after validation; completed definitions reuse their source identity.
+The multidimensional constant/runtime pair pins a later array derivation that
+first materializes a member during retry, including its exact source diagnostic.
+A GNU17-only empty-record dimension pins completion without member-row growth.

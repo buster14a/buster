@@ -4,7 +4,8 @@
 // (general packing), select_form/prepare_source_tuple_query (source contracts),
 // emit_machine_fast (derived hot plans), tls_prepare
 // and forwarding_prepare/got_prepare (fixed-envelope recipes), prewarm_all_forms
-// (worker publication). x86_64_encode_register_operation retains the existing
+// (worker publication), condition_parse/condition_mnemonic (shared ordinary
+// condition syntax and identity). x86_64_encode_register_operation retains the existing
 // narrow register-operation entry point at this compiler-owned byte boundary.
 // Parsing, allocation, scheduling and object-format relocation policy remain
 // consumers. See docs/x86-64-encoding-authority.md for the remaining escapes.
@@ -1484,6 +1485,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_operand_view(BusterX86Gene
                                                                       BusterX86GeneratedOperand operand,
                                                                       u8* physical_class, u16* physical_width_flags);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_input_equal(u32 offset, String8 input);
+BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_lowercase_character(char8 character);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_input_string_equal(String8 left, String8 right);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_has_token(u32 offset, String8 token);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_is_fixed_not16_nop(BusterX86MetadataForm form);
@@ -9395,13 +9397,15 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                     filter_view = &filter_storage;
                 }
                 if (!filter_parsed) continue;
-                // The public one-memory NOP spelling is the architectural 0F 1F /0
-                // padding form.  XED also indexes decode-only 0F 18/19 aliases under
+                // The public one-memory or one-register NOP spelling is the architectural
+                // 0F 1F /0 padding form.  XED also indexes decode-only 0F 18/19 aliases under
                 // the NOP mnemonic; keep those aliases out of source/link selection.
                 if (buster_x86_metadata_input_string_equal(query.mnemonic, S8("NOP")) && query.operand_count == 1 &&
-                    query.operands && query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                    query.operands && (query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY ||
+                                       query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) &&
                     filter_view->opcode_count >= 2 && filter_view->opcode[0] == 0x0f && filter_view->opcode[1] != 0x1f)
                     continue;
+                if (query.source_moffs && !buster_x86_metadata_emit_is_moffs(form, *filter_view)) continue;
                 bool x87_free_pop = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87")) &&
                                     buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FFREEP"));
                 if ((!x87_free_pop && buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED"))) ||
@@ -11871,7 +11875,6 @@ bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86Metada
 bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, BusterX86MetadataExactPlan* result)
 {
     if (!result || !buster_x86_metadata_prewarmed || !key.stable_hash || key.form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
     u16 slot_plus_one = buster_x86_metadata_exact_plan_slots[key.form_id];
     if (slot_plus_one)
     {
@@ -11891,6 +11894,9 @@ bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, Buster
         *result = existing->identity;
         return true;
     }
+    // A prepared identity is immutable even while the persistent gang lives.
+    // Only a miss can build or publish state and requires serial prewarm.
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     if (buster_x86_metadata_exact_plan_count >= BUSTER_X86_METADATA_EXACT_PLAN_CAPACITY) return false;
     BusterX86MetadataForm form = {0};
     if (!buster_x86_metadata_lookup_form_key(key, &form) || form.operand_count > BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY)
@@ -13147,6 +13153,22 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataCandidateRange buster_x86_metadata_lookup_t
     u32 length = 0;
     if (buster_x86_metadata_normalize_lookup(input, kind == BUSTER_X86_METADATA_INDEX_MNEMONIC, buffer, sizeof(buffer), &length))
     {
+        // Lookup accepts padding and complete disassembly text. Resolve only
+        // its normalized first token, while the public spelling helper keeps
+        // its exact-name contract. Iclass/iform identities are not aliases.
+        if (kind == BUSTER_X86_METADATA_INDEX_MNEMONIC)
+        {
+            String8 token = {.pointer = buffer, .length = length};
+            String8 canonical = buster_x86_metadata_condition_canonical_mnemonic(token);
+            if (canonical.pointer != token.pointer)
+            {
+                for (u32 index = 0; index < canonical.length; index += 1)
+                {
+                    buffer[index] = buster_x86_metadata_lowercase_character(canonical.pointer[index]);
+                }
+                length = (u32)canonical.length;
+            }
+        }
         u32 low = 0;
         u32 high = buster_x86_metadata_text_range_count(kind);
         while (low < high)
@@ -13169,6 +13191,93 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataCandidateRange buster_x86_metadata_lookup_t
         }
     }
 
+    return result;
+}
+
+typedef struct BusterX86ConditionDescription BusterX86ConditionDescription;
+struct BusterX86ConditionDescription
+{
+    String8 suffixes[3];
+    String8 mnemonics[BUSTER_X86_CONDITION_FAMILY_COUNT];
+};
+
+// Compile-time projections of the explicit shared rows. There is no separate
+// generated output to refresh; every consumer includes the current table.
+BUSTER_GLOBAL_LOCAL BusterX86ConditionDescription const buster_x86_condition_descriptions[BUSTER_X86_CONDITION_COUNT] = {
+#define BUSTER_X86_CONDITION(name, nibble, suffix, alias1, alias2, jump, set, move) \
+    [nibble] = {{S8_INITIALIZER(suffix), S8_INITIALIZER(alias1), S8_INITIALIZER(alias2)}, \
+                {S8_INITIALIZER(jump), S8_INITIALIZER(set), S8_INITIALIZER(move)}},
+#include <buster/lib/compiler/assembly/x86_64_conditions.inc>
+#undef BUSTER_X86_CONDITION
+};
+
+bool buster_x86_metadata_condition_parse(String8 suffix, u8* condition)
+{
+    bool result = false;
+    if (suffix.pointer && suffix.length && condition)
+    {
+        for (u32 index = 0; index < BUSTER_X86_CONDITION_COUNT && !result; index += 1)
+        {
+            BusterX86ConditionDescription const* description = buster_x86_condition_descriptions + index;
+            for (u32 alias = 0; alias < BUSTER_ARRAY_LENGTH(description->suffixes) && !result; alias += 1)
+            {
+                if (buster_x86_metadata_input_string_equal(suffix, description->suffixes[alias]))
+                {
+                    *condition = (u8)index;
+                    result = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+String8 buster_x86_metadata_condition_mnemonic(u32 family, u32 condition)
+{
+    String8 result = {0};
+    if (family < BUSTER_X86_CONDITION_FAMILY_COUNT && condition < BUSTER_X86_CONDITION_COUNT)
+    {
+        result = buster_x86_condition_descriptions[condition].mnemonics[family];
+    }
+    return result;
+}
+
+String8 buster_x86_metadata_condition_canonical_mnemonic(String8 mnemonic)
+{
+    String8 result = mnemonic;
+    if (mnemonic.pointer && mnemonic.length)
+    {
+        // Dispatch on the prefix before touching condition rows: unrelated
+        // instructions pay no condition-table scan. Suffixes match exactly,
+        // excluding JRCXZ, LOOP, FCMOV and APX extended condition spellings.
+        u32 family = BUSTER_X86_CONDITION_FAMILY_COUNT;
+        u32 prefix_length = 0;
+        char8 first = buster_x86_metadata_lowercase_character(mnemonic.pointer[0]);
+        if (first == 'j')
+        {
+            family = BUSTER_X86_CONDITION_FAMILY_JUMP;
+            prefix_length = 1;
+        }
+        else if (first == 's' && mnemonic.length > 3 &&
+                 buster_x86_metadata_input_string_equal((String8){.pointer = mnemonic.pointer, .length = 3}, S8("set")))
+        {
+            family = BUSTER_X86_CONDITION_FAMILY_SET;
+            prefix_length = 3;
+        }
+        else if (first == 'c' && mnemonic.length > 4 &&
+                 buster_x86_metadata_input_string_equal((String8){.pointer = mnemonic.pointer, .length = 4}, S8("cmov")))
+        {
+            family = BUSTER_X86_CONDITION_FAMILY_MOVE;
+            prefix_length = 4;
+        }
+        u8 condition = 0;
+        if (family < BUSTER_X86_CONDITION_FAMILY_COUNT && mnemonic.length > prefix_length &&
+            buster_x86_metadata_condition_parse((String8){.pointer = mnemonic.pointer + prefix_length,
+                                                         .length = mnemonic.length - prefix_length}, &condition))
+        {
+            result = buster_x86_metadata_condition_mnemonic(family, condition);
+        }
+    }
     return result;
 }
 

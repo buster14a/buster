@@ -621,6 +621,196 @@ BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_readonly_source_scratch(UnitTestArgu
 }
 #endif
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+// Fake tools find the -o operand, run `body`, then write a minimal valid SPIR-V
+// module there so a step that does not fail still produces its artifact.
+BUSTER_GLOBAL_LOCAL bool gpu_test_write_tool(Arena* arena, String8 path, String8 body, bool produce_output)
+{
+    String8 head = S8("#!/bin/sh\nout=\nwhile [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = -o ]; then out=$2; fi\n    shift\ndone\n");
+    String8 tail = produce_output ? S8("printf '\\003\\002\\043\\007\\000\\000\\000\\000' > \"$out\"\n") : S8("");
+    String8 script = string_format(arena, S8("{S8}{S8}{S8}"), head, body, tail);
+    return file_write(path, (ByteSlice){(u8*)script.pointer, script.length}) && chmod((const char*)path.pointer, 0700) == 0;
+}
+
+BUSTER_GLOBAL_LOCAL GpuPipelineResult gpu_test_run_log_pipeline(Arena* arena, String8* inputs, u32 input_count, String8 clang, String8 link, String8 output,
+                                                                u64 log_limit, u64 timeout)
+{
+    GpuPipelineOptions options = gpu_test_options(inputs, input_count, gpu_test_target(S8("spirv64")), GPU_PIPELINE_ACTION_LINK);
+    options.temporary_directory = (String8){0};
+    options.output_path = output;
+    options.tools.clang_path = clang;
+    options.tools.spirv_link_path = link;
+    options.log_limit_bytes = log_limit;
+    options.tool_timeout_microseconds = timeout;
+    return gpu_pipeline_execute(arena, options);
+}
+
+// The pipeline log is built from many small chunks. These cases pin the exact
+// text for ordinary output, the one-pass (linear) copy cost, empty chunks, the
+// whole-invocation limit boundary, per-child truncation facts that reach the
+// API, and a later failing tool whose own output survives the limit.
+BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_log_retention(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    enum
+    {
+        input_capacity = 40,
+    };
+    String8 chatty = buster_test_temporary_path(arena, S8("gpu-log-chatty"), S8(".sh"));
+    String8 quiet = buster_test_temporary_path(arena, S8("gpu-log-quiet"), S8(".sh"));
+    String8 stderr_only = buster_test_temporary_path(arena, S8("gpu-log-stderr"), S8(".sh"));
+    String8 flood = buster_test_temporary_path(arena, S8("gpu-log-flood"), S8(".sh"));
+    String8 failing = buster_test_temporary_path(arena, S8("gpu-log-failing"), S8(".sh"));
+    String8 hanging = buster_test_temporary_path(arena, S8("gpu-log-hanging"), S8(".sh"));
+    String8 output = buster_test_temporary_path(arena, S8("gpu-log-output"), S8(".spv"));
+    String8 failure_marker = S8("LINK-FAILED-MARKER\n");
+    String8 timeout_marker = S8("LINK-TIMEOUT-MARKER\n");
+    String8 inputs[input_capacity];
+    u8 source_byte = 'x';
+    bool ready = true;
+    for (u32 index = 0; index < input_capacity; index += 1)
+    {
+        inputs[index] = buster_test_temporary_path(arena, string_format(arena, S8("gpu-log-input-{u32}"), index), S8(".cl"));
+        ready = ready && file_write(inputs[index], (ByteSlice){&source_byte, 1});
+    }
+    // Each ordinary step writes "OOO" to stdout and "EEE" to stderr.
+    ready = ready && gpu_test_write_tool(arena, chatty, S8("printf 'OOO'\nprintf 'EEE' >&2\n"), true);
+    ready = ready && gpu_test_write_tool(arena, quiet, S8(""), true);
+    ready = ready && gpu_test_write_tool(arena, stderr_only, S8("printf 'EEE' >&2\n"), true);
+    ready = ready && gpu_test_write_tool(arena, flood, S8("head -c 300000 /dev/zero | tr '\\000' 'X'\n"), true);
+    ready = ready && gpu_test_write_tool(arena, failing, S8("printf 'LINK-FAILED-MARKER\\n' >&2\nexit 7\n"), false);
+    ready = ready && gpu_test_write_tool(arena, hanging, S8("printf 'LINK-TIMEOUT-MARKER\\n' >&2\nwhile :; do sleep 1; done\n"), false);
+    BUSTER_TEST(arguments, ready);
+    if (ready)
+    {
+        String8 expected_three = S8("OOOEEEOOOEEEOOOEEE");
+        u64 no_limit = 0;
+        u64 ordinary_timeout = 20000000;
+
+        // Ordinary output keeps its exact text; copying is admission plus one
+        // flatten, so it stays 2x the retained bytes as the step count grows.
+        u32 step_inputs[] = {2, 10, input_capacity};
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(step_inputs); case_index += 1)
+        {
+            u32 count = step_inputs[case_index];
+            (void)gpu_test_take_log_copied_bytes();
+            GpuPipelineResult ok = gpu_test_run_log_pipeline(arena, inputs, count, chatty, chatty, output, no_limit, ordinary_timeout);
+            u64 copied = gpu_test_take_log_copied_bytes();
+            u64 steps = (u64)count + 1;
+            BUSTER_TEST_RAW(arguments, ok.error == GPU_PIPELINE_ERROR_NONE, ok.diagnostic);
+            BUSTER_TEST(arguments, ok.log.length == steps * 6);
+            bool exact = ok.log.length == steps * 6;
+            for (u64 index = 0; exact && index < ok.log.length; index += 1)
+            {
+                exact = ok.log.pointer[index] == ((index % 6) < 3 ? 'O' : 'E');
+            }
+            BUSTER_TEST(arguments, exact);
+            BUSTER_TEST(arguments, copied == 2 * ok.log.length);
+            BUSTER_TEST(arguments, !ok.log_truncated && !ok.log_dropped_bytes && !ok.tool_output_truncated && !ok.tool_capture_limit_exceeded);
+            if (count == 2)
+            {
+                BUSTER_STRING_TEST(arguments, ok.log, expected_three);
+            }
+        }
+
+        // Empty chunks are not stored and cost nothing.
+        {
+            (void)gpu_test_take_log_copied_bytes();
+            GpuPipelineResult silent = gpu_test_run_log_pipeline(arena, inputs, 2, quiet, quiet, output, no_limit, ordinary_timeout);
+            BUSTER_TEST_RAW(arguments, silent.error == GPU_PIPELINE_ERROR_NONE, silent.diagnostic);
+            BUSTER_TEST(arguments, silent.log.length == 0 && !silent.log_truncated && gpu_test_take_log_copied_bytes() == 0);
+            GpuPipelineResult errors = gpu_test_run_log_pipeline(arena, inputs, 2, stderr_only, quiet, output, no_limit, ordinary_timeout);
+            BUSTER_TEST_RAW(arguments, errors.error == GPU_PIPELINE_ERROR_NONE, errors.diagnostic);
+            BUSTER_STRING_TEST(arguments, errors.log, S8("EEEEEE"));
+            BUSTER_TEST(arguments, !errors.log_truncated);
+        }
+
+        // Aggregate limit boundary over 18 bytes of output: retained text is
+        // the exact prefix and retained + dropped always accounts for it all.
+        {
+            u64 limits[] = {18, 19, 17, 7, 6, 3, 1};
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(limits); case_index += 1)
+            {
+                u64 limit = limits[case_index];
+                GpuPipelineResult limited = gpu_test_run_log_pipeline(arena, inputs, 2, chatty, chatty, output, limit, ordinary_timeout);
+                u64 expected_length = BUSTER_MIN(limit, expected_three.length);
+                BUSTER_TEST_RAW(arguments, limited.error == GPU_PIPELINE_ERROR_NONE, limited.diagnostic);
+                BUSTER_STRING_TEST(arguments, limited.log, string_slice(expected_three, 0, expected_length));
+                BUSTER_TEST(arguments, limited.log_dropped_bytes == expected_three.length - expected_length);
+                BUSTER_TEST(arguments, limited.log_truncated == (limit < expected_three.length));
+                // Each step emits 3 + 3 bytes, so only a budget under 6 reaches the child.
+                BUSTER_TEST(arguments, limited.tool_output_truncated == (limit < 6) && limited.tool_capture_limit_exceeded == (limit < 6));
+            }
+            // A budget below one stream's output also bounds the child capture.
+            GpuPipelineResult tiny = gpu_test_run_log_pipeline(arena, inputs, 2, chatty, chatty, output, 2, ordinary_timeout);
+            BUSTER_TEST_RAW(arguments, tiny.error == GPU_PIPELINE_ERROR_NONE, tiny.diagnostic);
+            BUSTER_STRING_TEST(arguments, tiny.log, S8("OO"));
+            BUSTER_TEST(arguments, tiny.log_truncated && tiny.tool_output_truncated && tiny.tool_capture_limit_exceeded);
+            BUSTER_TEST(arguments, tiny.log_dropped_bytes == expected_three.length - 2);
+        }
+
+        // A flooding child is drained to completion while only the capped
+        // prefix is kept; the child's truncation facts reach the API.
+        {
+            u64 limit = 1000;
+            GpuPipelineResult flooded = gpu_test_run_log_pipeline(arena, inputs, 1, flood, flood, output, limit, ordinary_timeout);
+            BUSTER_TEST_RAW(arguments, flooded.error == GPU_PIPELINE_ERROR_NONE && !flooded.timed_out, flooded.diagnostic);
+            BUSTER_TEST(arguments, flooded.log.length == limit);
+            bool all_x = flooded.log.length == limit;
+            for (u64 index = 0; all_x && index < flooded.log.length; index += 1)
+            {
+                all_x = flooded.log.pointer[index] == 'X';
+            }
+            BUSTER_TEST(arguments, all_x);
+            BUSTER_TEST(arguments, flooded.log_truncated && flooded.tool_output_truncated && flooded.tool_capture_limit_exceeded);
+            BUSTER_TEST(arguments, flooded.log_dropped_bytes == 300000 - limit);
+            GpuPipelineResult unbounded = gpu_test_run_log_pipeline(arena, inputs, 1, flood, flood, output, no_limit, ordinary_timeout);
+            BUSTER_TEST_RAW(arguments, unbounded.error == GPU_PIPELINE_ERROR_NONE, unbounded.diagnostic);
+            BUSTER_TEST(arguments, unbounded.log.length == 300000 && !unbounded.log_truncated && !unbounded.tool_output_truncated);
+        }
+
+        // A later failing tool keeps its own error text even when earlier
+        // output already used the budget: the oldest output is evicted.
+        {
+            u64 limit = 8 + failure_marker.length;
+            GpuPipelineResult failed = gpu_test_run_log_pipeline(arena, inputs, 2, chatty, failing, output, limit, ordinary_timeout);
+            BUSTER_TEST(arguments, failed.error == GPU_PIPELINE_ERROR_TOOL_FAILED && failed.failed_step == 2);
+            BUSTER_TEST(arguments, failed.process_result != PROCESS_RESULT_SUCCESS && !failed.timed_out);
+            BUSTER_TEST(arguments, string_first_sequence(failed.diagnostic, S8("GPU tool failed:")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(failed.diagnostic, failure_marker) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, failed.log.length <= limit && string_ends_with_sequence(failed.log, failure_marker));
+            BUSTER_STRING_TEST(arguments, failed.log, string_format(arena, S8("OOOEEE{S8}"), failure_marker));
+            BUSTER_TEST(arguments, failed.log_truncated && failed.log_dropped_bytes == 6);
+            BUSTER_TEST(arguments, string_first_sequence(failed.diagnostic, S8("GPU tool output truncated: 6 bytes not retained")) != BUSTER_STRING_NO_MATCH);
+            // Within budget the failure text is unchanged and not marked.
+            GpuPipelineResult plain = gpu_test_run_log_pipeline(arena, inputs, 2, chatty, failing, output, no_limit, ordinary_timeout);
+            BUSTER_TEST(arguments, plain.error == GPU_PIPELINE_ERROR_TOOL_FAILED && !plain.log_truncated);
+            BUSTER_STRING_TEST(arguments, plain.log, string_format(arena, S8("OOOEEEOOOEEE{S8}"), failure_marker));
+            BUSTER_STRING_TEST(arguments, plain.diagnostic, string_format(arena, S8("GPU tool failed: {S8}\n{S8}"), plain.command, plain.log));
+
+            GpuPipelineResult timed = gpu_test_run_log_pipeline(arena, inputs, 2, chatty, hanging, output, limit, 1000000);
+            BUSTER_TEST(arguments, timed.error == GPU_PIPELINE_ERROR_TOOL_TIMEOUT && timed.timed_out && timed.failed_step == 2);
+            BUSTER_TEST(arguments, string_first_sequence(timed.diagnostic, S8("GPU tool timed out:")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(timed.diagnostic, timeout_marker) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_ends_with_sequence(timed.log, timeout_marker) && timed.log.length <= limit);
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(output));
+    for (u32 index = 0; index < input_capacity; index += 1)
+    {
+        BUSTER_TEST(arguments, os_file_delete(inputs[index]));
+    }
+    BUSTER_TEST(arguments, os_file_delete(chatty));
+    BUSTER_TEST(arguments, os_file_delete(quiet));
+    BUSTER_TEST(arguments, os_file_delete(stderr_only));
+    BUSTER_TEST(arguments, os_file_delete(flood));
+    BUSTER_TEST(arguments, os_file_delete(failing));
+    BUSTER_TEST(arguments, os_file_delete(hanging));
+    return result;
+}
+#endif
+
 UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -629,6 +819,7 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, gpu_test_scratch_roots);
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, gpu_test_readonly_source_scratch);
+    BUSTER_TEST_FIXTURE(arguments, gpu_test_log_retention);
 #endif
 #if BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, gpu_test_windows_scratch_environment);

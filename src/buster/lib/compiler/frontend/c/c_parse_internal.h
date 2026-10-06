@@ -91,6 +91,19 @@ BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreproce
 // values; the analysis must already have built the scope index.
 BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);
 
+// Token work this thread's nested-control-statement paths have done so far
+// (#2676). Tests take the difference across one parse and bound its growth
+// with nesting depth.
+enum
+{
+    C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS,
+    C_TEST_PARSE_NESTING_CALL_KEYWORDS_SKIPPED,
+    C_TEST_PARSE_NESTING_CALL_LOOKUPS,
+    C_TEST_PARSE_NESTING_BODY_SCOPE_STORES,
+    C_TEST_PARSE_NESTING_SLOTS,
+};
+BUSTER_F_DECL u64 c_test_parse_nesting_count(u32 slot);
+
 // Observable answers of the five production specifier-word token queries,
 // including their qualifier writes. No counters or state enter production.
 enum

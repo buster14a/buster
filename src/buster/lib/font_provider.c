@@ -1,9 +1,15 @@
 // System font discovery for the retained UI stack: resolves platform font
 // paths (fontconfig on Linux, the system font folders on Windows/macOS,
-// bundled resources on iOS) into files truetype.c can parse. Resolved
-// paths are a
-// lazily built global; font_provider_prewarm fills them serially before
+// bundled resources on iOS) into files truetype.c can parse. A candidate is
+// selected only when truetype_font_select_first_usable accepts it, so a font
+// the rasterizer cannot read never hides a later candidate. Resolved paths are
+// a lazily built global; font_provider_prewarm fills them serially before
 // parallel readers (AGENTS.md).
+//
+// Map: font_fontconfig_match (Linux discovery of one face),
+// font_select_first_usable (probe + keep the chosen path),
+// font_print_attempted_paths (failure report), font_file_get_path (entry),
+// font_texture_atlas_create (atlas through truetype_font_atlas_build).
 
 #include <buster/lib/font_provider.h>
 #include <buster/lib/file.h>
@@ -11,6 +17,7 @@
 #include <buster/lib/system_headers.h>
 #include <buster/lib/float.h>
 #include <buster/lib/string.h>
+#include <buster/lib/truetype.h>
 
 #ifndef BUSTER_USE_FONTCONFIG
 #if BUSTER_LINUX
@@ -42,51 +49,45 @@ typedef enum FcResult
 #define FC_FAMILY "family"
 #define FC_STYLE "style"
 #define FC_FILE "file"
+#define FC_SPACING "spacing"
+#define FC_WEIGHT "weight"
+#define FC_MONO 100
+#define FC_WEIGHT_REGULAR 80
 extern FcBool FcInit(void);
 extern void FcFini(void);
 extern FcPattern* FcPatternCreate(void);
 extern void FcPatternDestroy(FcPattern* p);
 extern FcBool FcPatternAddString(FcPattern* p, const char* object, const FcChar8* s);
+extern FcBool FcPatternAddInteger(FcPattern* p, const char* object, int i);
 extern FcBool FcConfigSubstitute(FcConfig* config, FcPattern* p, FcMatchKind kind);
 extern void FcDefaultSubstitute(FcPattern* pattern);
 extern FcPattern* FcFontMatch(FcConfig* config, FcPattern* p, FcResult* result);
+typedef struct _FcFontSet
+{
+    int nfont;
+    int sfont;
+    FcPattern** fonts;
+} FcFontSet;
+extern FcFontSet* FcFontSort(FcConfig* config, FcPattern* p, FcBool trim, void* csp, FcResult* result);
+extern void FcFontSetDestroy(FcFontSet* s);
 extern FcResult FcPatternGetString(const FcPattern* p, const char* object, int n, FcChar8** s);
+extern FcResult FcPatternGetInteger(const FcPattern* p, const char* object, int n, int* i);
 #elif BUSTER_USE_FONTCONFIG
 #include <fontconfig/fontconfig.h>
 #endif
 
+// Configurations with nowhere to look (Linux without fontconfig) have no
+// candidates to append or probe.
+#if BUSTER_USE_FONTCONFIG || BUSTER_WINDOWS || BUSTER_IOS || BUSTER_MACOS || BUSTER_ANDROID
+#define BUSTER_FONT_HAS_SEARCH 1
+#else
+#define BUSTER_FONT_HAS_SEARCH 0
+#endif
+
 #define BUSTER_FONT_CANDIDATE_CAPACITY 32u
+#define BUSTER_FONT_NOTE_CAPACITY 4u
 
 BUSTER_GLOBAL_LOCAL bool font_config_initialized = false;
-
-BUSTER_GLOBAL_LOCAL bool font_path_is_usable(String8 path)
-{
-    bool result = false;
-    if (path.pointer && path.length)
-    {
-#if BUSTER_IOS
-        // iOS font paths are resources in the application bundle. file_read()
-        // knows how to resolve those relative paths, while os_file_open() only
-        // sees the process working directory.
-        if (path.pointer[0] != '/')
-        {
-            ByteSlice file = file_read(os_state.arena, path, (FileReadOptions){0});
-            result = file.pointer != 0 && file.length != 0;
-        }
-        else
-#endif
-        {
-            OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-            if (file)
-            {
-                FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1});
-                result = stats.valid && stats.size != 0;
-                os_file_close(file);
-            }
-        }
-    }
-    return result;
-}
 
 #if BUSTER_WINDOWS || BUSTER_MACOS
 BUSTER_GLOBAL_LOCAL String8 font_path_join(Arena* arena, String8 directory, String8 file)
@@ -102,6 +103,7 @@ BUSTER_GLOBAL_LOCAL String8 font_path_join(Arena* arena, String8 directory, Stri
 }
 #endif
 
+#if BUSTER_FONT_HAS_SEARCH
 BUSTER_GLOBAL_LOCAL void font_candidate_append(String8* candidates, u64* count, String8 path)
 {
     if (path.pointer && path.length)
@@ -111,6 +113,7 @@ BUSTER_GLOBAL_LOCAL void font_candidate_append(String8* candidates, u64* count, 
         *count += 1;
     }
 }
+#endif
 
 #if BUSTER_WINDOWS || BUSTER_MACOS
 BUSTER_GLOBAL_LOCAL void font_candidate_append_file(Arena* arena, String8* candidates, u64* count, String8 directory, String8 file)
@@ -119,35 +122,128 @@ BUSTER_GLOBAL_LOCAL void font_candidate_append_file(Arena* arena, String8* candi
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL String8 font_select_first_usable(String8* candidates, u64 count, u64 first_candidate)
+#if BUSTER_FONT_HAS_SEARCH
+// Probes the candidates with the TrueType parser the atlas builder uses and
+// keeps a copy of the first accepted path. statuses records every outcome for
+// font_print_attempted_paths.
+BUSTER_GLOBAL_LOCAL String8 font_select_first_usable(const String8* candidates, u64 count, TTF_FontCandidateStatus* statuses)
 {
     String8 result = {0};
-    for (u64 i = first_candidate; i < count; i += 1)
+    u64 index = truetype_font_select_first_usable(candidates, count, statuses);
+    if (index < count)
     {
-        if (font_path_is_usable(candidates[i]))
-        {
-            result = string_duplicate_arena(os_state.arena, candidates[i], true);
-            break;
-        }
+        result = string_duplicate_arena(os_state.arena, candidates[index], true);
     }
     return result;
 }
+#endif
 
-BUSTER_GLOBAL_LOCAL void font_print_attempted_paths(String8* candidates, u64 count)
+// Reports to stderr every location that was considered and why it was not
+// used. notes describe fontconfig answers that were rejected before probing.
+BUSTER_GLOBAL_LOCAL void font_print_attempted_paths(const String8* candidates, const TTF_FontCandidateStatus* statuses, u64 count, const String8* notes,
+                                                    u64 note_count)
 {
-    string_print(S8("No usable monospace font was found. Attempted locations:\n"));
-    if (!count)
+    string_print_error(S8("No usable monospace font was found. Attempted locations:\n"));
+    if (!count && !note_count)
     {
-        string_print(S8("  (none)\n"));
+        string_print_error(S8("  (none)\n"));
     }
-    else
+
+    for (u64 i = 0; i < count; i += 1)
     {
-        for (u64 i = 0; i < count; i += 1)
-        {
-            string_print(S8("  {S8}\n"), candidates[i]);
-        }
+        string_print_error(S8("  {S8}: {S8}\n"), candidates[i], truetype_font_candidate_status_description(statuses[i]));
+    }
+
+    for (u64 i = 0; i < note_count; i += 1)
+    {
+        string_print_error(S8("  {S8}\n"), notes[i]);
     }
 }
+
+#if BUSTER_USE_FONTCONFIG
+// Asks fontconfig for faces ordered by how well they match family (and style
+// when given) and returns the first one acceptable within the first
+// scan_limit entries (0 scans all): a face whose own family list contains
+// family, or one the font itself marks FC_MONO. The font's own properties are
+// read from the sorted set rather than from FcFontMatch, because FcFontMatch
+// fills properties the font lacks from the request, so a proportional font
+// would appear to satisfy FC_SPACING=FC_MONO. require_mono adds that request
+// so monospace faces sort first. path is empty when nothing was acceptable and
+// is allocated from arena, outliving FcFini(); rejected_path names the best
+// match when it was rejected, for the failure report. accept_family also
+// accepts a face by family name alone (Fira Code need not report FC_SPACING).
+typedef struct FontConfigMatch FontConfigMatch;
+struct FontConfigMatch
+{
+    String8 path;
+    String8 rejected_path;
+};
+
+BUSTER_GLOBAL_LOCAL FontConfigMatch font_fontconfig_match(Arena* arena, const char* family, const char* style, bool require_mono, bool accept_family,
+                                                          int scan_limit)
+{
+    FontConfigMatch result = {0};
+    FcPattern* pattern = FcPatternCreate();
+    if (pattern)
+    {
+        FcPatternAddString(pattern, FC_FAMILY, (const FcChar8*)family);
+        if (style)
+        {
+            FcPatternAddString(pattern, FC_STYLE, (const FcChar8*)style);
+        }
+        else
+        {
+            FcPatternAddInteger(pattern, FC_WEIGHT, FC_WEIGHT_REGULAR);
+        }
+
+        if (require_mono)
+        {
+            FcPatternAddInteger(pattern, FC_SPACING, FC_MONO);
+        }
+
+        FcConfigSubstitute(NULL, pattern, FcMatchPattern);
+        FcDefaultSubstitute(pattern);
+
+        FcResult sort_result = FcResultNoMatch;
+        FcFontSet* fonts = FcFontSort(NULL, pattern, 1, NULL, &sort_result);
+        if (fonts)
+        {
+            String8 wanted = string_from_pointer((char8*)family);
+            int limit = scan_limit > 0 && scan_limit < fonts->nfont ? scan_limit : fonts->nfont;
+            for (int font_index = 0; font_index < limit && !result.path.length; font_index += 1)
+            {
+                FcPattern* font = fonts->fonts[font_index];
+                FcChar8* file = NULL;
+                if (FcPatternGetString(font, FC_FILE, 0, &file) == FcResultMatch && file)
+                {
+                    String8 path = string_from_pointer((char8*)file);
+                    int spacing = 0;
+                    bool acceptable = FcPatternGetInteger(font, FC_SPACING, 0, &spacing) == FcResultMatch && spacing == FC_MONO;
+                    FcChar8* font_family = NULL;
+                    for (int family_index = 0; accept_family && !acceptable && FcPatternGetString(font, FC_FAMILY, family_index, &font_family) == FcResultMatch && font_family;
+                         family_index += 1)
+                    {
+                        acceptable = string_equal(string_from_pointer((char8*)font_family), wanted);
+                    }
+
+                    if (acceptable)
+                    {
+                        result.path = string_duplicate_arena(arena, path, true);
+                    }
+                    else if (!result.rejected_path.length)
+                    {
+                        result.rejected_path = string_duplicate_arena(arena, path, true);
+                    }
+                }
+            }
+            FcFontSetDestroy(fonts);
+        }
+
+        FcPatternDestroy(pattern);
+    }
+    return result;
+}
+#endif
 
 String8 font_file_get_path(FontIndex index)
 {
@@ -166,46 +262,55 @@ String8 font_file_get_path(FontIndex index)
         TemporalArena temp = scratch_begin(0, 0);
         String8 candidates[BUSTER_FONT_CANDIDATE_CAPACITY] = {0};
         u64 candidate_count = 0;
+        TTF_FontCandidateStatus statuses[BUSTER_FONT_CANDIDATE_CAPACITY] = {0};
+        String8 notes[BUSTER_FONT_NOTE_CAPACITY] = {0};
+        u64 note_count = 0;
 
 #if BUSTER_USE_FONTCONFIG
-        font_candidate_append(candidates, &candidate_count, S8("fontconfig: Fira Code (Regular)"));
+        // FcFontMatch answers with the nearest installed font even when
+        // nothing resembles the request (a proportional sans without Fira
+        // Code), so each answer is checked: Fira Code must come back as Fira
+        // Code, and the fallback must be a face fontconfig marks monospace.
         if (FcInit())
         {
-            FcPattern* pat = FcPatternCreate();
-            if (pat)
+            // Only the best answer counts for Fira Code: a later entry would
+            // be some other font.
+            FontConfigMatch fira = font_fontconfig_match(temp.arena, "Fira Code", "Regular", false, true, 1);
+            if (fira.path.length)
             {
-                const char* family = "Fira Code";
-                const char* style = "Regular";
-                FcPatternAddString(pat, FC_FAMILY, (const FcChar8*)family);
-                // Try to request "Regular" but allow fontconfig to substitute.
-                if (style && style[0])
+                font_candidate_append(candidates, &candidate_count, fira.path);
+            }
+            else
+            {
+                notes[note_count] = fira.rejected_path.length
+                                        ? string_format(temp.arena, S8("fontconfig: Fira Code (Regular) resolved to {S8}, which is not Fira Code or monospace"), fira.rejected_path)
+                                        : S8("fontconfig: Fira Code (Regular) matched no font");
+                note_count += 1;
+            }
+
+            // The monospace alias is whatever the user's fontconfig maps it
+            // to; take the best face that is actually marked monospace.
+            FontConfigMatch mono = font_fontconfig_match(temp.arena, "monospace", 0, true, false, 0);
+            if (mono.path.length)
+            {
+                if (!candidate_count || !string_equal(candidates[candidate_count - 1], mono.path))
                 {
-                    FcPatternAddString(pat, FC_STYLE, (const FcChar8*)style);
+                    font_candidate_append(candidates, &candidate_count, mono.path);
                 }
-
-                FcConfigSubstitute(NULL, pat, FcMatchPattern);
-                FcDefaultSubstitute(pat);
-
-                FcResult result = FcResultNoMatch;
-                FcPattern* match = FcFontMatch(NULL, pat, &result);
-                if (match)
-                {
-                    FcChar8* file = NULL;
-                    if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch && file)
-                    {
-                        String8 path = string_from_pointer((char8*)file);
-                        // Keep the attempted path valid after FcFini() so a
-                        // failed probe can still be reported below.
-                        font_candidate_append(candidates, &candidate_count, string_duplicate_arena(temp.arena, path, true));
-                    }
-                    FcPatternDestroy(match);
-                }
-
-                FcPatternDestroy(pat);
+            }
+            else
+            {
+                notes[note_count] = S8("fontconfig: no installed font marked monospace matches the monospace alias");
+                note_count += 1;
             }
             FcFini();
         }
-        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 1);
+        else
+        {
+            notes[note_count] = S8("fontconfig: initialization failed");
+            note_count += 1;
+        }
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, statuses);
         bool searched = true;
 #elif BUSTER_WINDOWS
         String8 windir = os_get_environment_variable(S8("WINDIR"));
@@ -247,13 +352,13 @@ String8 font_file_get_path(FontIndex index)
                 font_candidate_append_file(temp.arena, candidates, &candidate_count, user_fonts, fallback_files[i]);
             }
         }
-        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, statuses);
         bool searched = true;
 #elif BUSTER_IOS
         // Bundled into the app's Resources by CMake; resolved via file_read's
         // bundle-path lookup when an application chooses to package this font.
         font_candidate_append(candidates, &candidate_count, S8("FiraCode-Regular.ttf"));
-        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, statuses);
         bool searched = true;
 #elif BUSTER_MACOS
         font_candidate_append_file(temp.arena, candidates, &candidate_count, S8("/Library/Fonts"), S8("FiraCode-Regular.ttf"));
@@ -269,12 +374,12 @@ String8 font_file_get_path(FontIndex index)
         font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("SFNSMono.ttf"));
         font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("Menlo.ttc"));
         font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("Monaco.ttf"));
-        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, statuses);
         bool searched = true;
 #elif BUSTER_ANDROID
         font_candidate_append(candidates, &candidate_count, S8("/system/fonts/DroidSansMono.ttf"));
         font_candidate_append(candidates, &candidate_count, S8("/system/fonts/RobotoMono-Regular.ttf"));
-        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+        table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, statuses);
         bool searched = true;
 #else
         // Nowhere to look on this configuration. The table stays empty and the
@@ -285,7 +390,7 @@ String8 font_file_get_path(FontIndex index)
 
         if (searched && !table[(u64)FONT_INDEX_MONO].pointer)
         {
-            font_print_attempted_paths(candidates, candidate_count);
+            font_print_attempted_paths(candidates, statuses, candidate_count, notes, note_count);
             os_fail_message(S8("no usable monospace font was found"));
         }
 
@@ -305,54 +410,6 @@ void font_provider_prewarm(void)
     (void)font_file_get_path(FONT_INDEX_MONO);
 }
 
-#define USE_STB_TRUETYPE 0
-
-#if USE_STB_TRUETYPE
-
-#define STBTT_STATIC
-#define STB_TRUETYPE_IMPLEMENTATION
-#define stbtt_uint8 u8
-#define stbtt_uint16 u16
-#define stbtt_uint32 u32
-#define stbtt_int8 s8
-#define stbtt_int16 s16
-#define stbtt_int32 s32
-
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wreserved-identifier"
-#endif
-
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wconversion"
-#endif
-
-#define STBTT_ifloor(x) ((int)floor_f64(x))
-#define STBTT_iceil(x) ((int)ceil_f64(x))
-#define STBTT_sqrt(x) sqrt_f64(x)
-#define STBTT_pow(x, y) pow_f64(x, y)
-#define STBTT_fmod(x, y) fmod_f64(x, y)
-#define STBTT_cos(x) cos_f64(x)
-#define STBTT_acos(x) acos_f64(x)
-#define STBTT_fabs(x) fabs_f64(x)
-#define STBTT_malloc(x, u) ((void)(u), malloc(x))
-#define STBTT_free(x, u) ((void)(u), free(x))
-#define STBTT_assert(x) BUSTER_CHECK(x)
-#define STBTT_strlen(x) strlen(x)
-#define STBTT_memcpy memcpy
-#define STBTT_memset memset
-
-#include <stb/stb_truetype.h>
-
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
-
 FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureAtlasCreate create)
 {
     FontTextureAtlasDescription result = {0};
@@ -363,215 +420,34 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
     }
 
     ByteSlice font_file = file_read(arena, create.font_path, (FileReadOptions){0});
-    stbtt_fontinfo font_info;
-    if (!stbtt_InitFont(&font_info, font_file.pointer, stbtt_GetFontOffsetForIndex(font_file.pointer, 0)))
-    {
-        os_fail();
-    }
-
-    u32 character_count = 256;
-    result.characters = arena_allocate(arena, FontCharacter, character_count);
-    result.kerning_tables = arena_allocate(arena, s32, character_count * character_count);
-    result.height = (u32)sqrt_f32((f32)(create.text_height * create.text_height * character_count));
-    result.width = result.height;
-    result.pointer = arena_allocate(arena, u32, result.width * result.height);
-    f32 scale_factor = stbtt_ScaleForPixelHeight(&font_info, (f32)create.text_height);
-
-    int ascent;
-    int descent;
-    int line_gap;
-    stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
-
-    result.ascent = (int)round_f32((f32)ascent * scale_factor);
-    result.descent = (int)round_f32((f32)descent * scale_factor);
-    result.line_gap = (int)round_f32((f32)line_gap * scale_factor);
-
-    u32 x = 0;
-    u32 y = 0;
-    u32 max_row_height = 0;
-    u32 first_character = ' ';
-    u32 last_character = '~';
-
-    for (u32 i = first_character; i <= last_character; i += 1)
-    {
-        u32 width = 0;
-        u32 height = 0;
-        int advance = 0;
-        int left_bearing = 0;
-
-        u32 ch = i;
-        FontCharacter* character = &result.characters[i];
-        stbtt_GetCodepointHMetrics(&font_info, (int)ch, &advance, &left_bearing);
-
-        character->advance = (u32)round_f32((float)advance * scale_factor);
-        character->left_bearing = (u32)round_f32((float)left_bearing * scale_factor);
-
-        u8* bitmap = stbtt_GetCodepointBitmap(&font_info, 0.0f, scale_factor, (int)ch, (int*)&width, (int*)&height, &character->x_offset, &character->y_offset);
-        s32* kerning_table = result.kerning_tables + i * character_count;
-        for (u32 j = first_character; j <= last_character; j += 1)
-        {
-            int kerning_advance = stbtt_GetCodepointKernAdvance(&font_info, (int)i, (int)j);
-            kerning_table[j] = (s32)round_f32((float)kerning_advance * scale_factor);
-        }
-
-        if (x + width > result.width)
-        {
-            y += max_row_height;
-            max_row_height = height;
-            x = 0;
-        }
-        else
-        {
-            max_row_height = BUSTER_MAX(height, max_row_height);
-        }
-
-        character->x = x;
-        character->y = y;
-        character->width = width;
-        character->height = height;
-
-        // The atlas is sized to fit the full glyph set with headroom, but only the horizontal axis
-        // wraps; if a glyph doesn't fit vertically either, fail loudly instead of writing past result.pointer.
-        BUSTER_CHECK(y + height <= result.height);
-        BUSTER_CHECK(x + width <= result.width);
-
-        u8* source = bitmap;
-        u32* destination = result.pointer;
-
-        for (u32 bitmap_y = 0; bitmap_y < height; bitmap_y += 1)
-        {
-            for (u32 bitmap_x = 0; bitmap_x < width; bitmap_x += 1)
-            {
-                u32 source_index = bitmap_y * width + bitmap_x;
-                u32 destination_index = (bitmap_y + y) * result.width + (bitmap_x + x);
-                u32 value = source[source_index];
-                destination[destination_index] = ((u32)value << 24) | 0xffffff;
-            }
-        }
-
-        x += width;
-
-        stbtt_FreeBitmap(bitmap, 0);
-    }
-
-    return result;
-}
-#else
-#include <buster/lib/truetype.h>
-
-FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureAtlasCreate create)
-{
-    FontTextureAtlasDescription result = {0};
-
-    if (!create.font_path.pointer)
-    {
-        os_fail();
-    }
-
-    string_print(S8("Font path: {S8}\n"), create.font_path);
-    ByteSlice font_file = file_read(arena, create.font_path, (FileReadOptions){0});
-    string_print(S8("Font. Pointer: {u64:x}. Length: {u64}\n"), font_file.pointer, font_file.length);
     if (font_file.pointer)
     {
-        TTF_FontInitialization font_initialization = truetype_font_initialize(font_file, 0);
-        TTF_FontInformation font_information = font_initialization.information;
-
-        if (font_initialization.result == TTF_FONT_INITIALIZATION_SUCCESS)
+        // truetype_font_atlas_build bounds every glyph against the atlas in
+        // every build; a failed build is reported here, never as a partial atlas.
+        TTF_AtlasBuild build = truetype_font_atlas_build(arena, font_file, create.text_height);
+        if (build.status == TTF_ATLAS_SUCCESS)
         {
-            u32 character_count = UINT8_MAX + 1u;
-            result.characters = arena_allocate(arena, FontCharacter, character_count);
-            result.kerning_tables = arena_allocate(arena, s32, (u64)character_count * (u64)character_count);
-            // Only ' '..'~' get filled below, but the renderer indexes these
-            // tables with arbitrary bytes; zero the rest so unknown bytes
-            // render as empty glyphs instead of reading stale arena memory.
-            memset(result.characters, 0, sizeof(*result.characters) * character_count);
-            memset(result.kerning_tables, 0, sizeof(*result.kerning_tables) * (u64)character_count * (u64)character_count);
-            result.height = (u32)sqrt_f32((f32)(create.text_height * create.text_height * character_count));
-            result.width = result.height;
-            result.pointer = arena_allocate(arena, u32, (u64)result.width * (u64)result.height);
-            f32 scale_factor = truetype_scale_for_pixel_height(&font_information, (f32)create.text_height);
-
-            TTF_VerticalMetrics vertical_metrics = truetype_get_font_vertical_metrics(&font_information);
-
-            result.ascent = (s32)round_f32((f32)vertical_metrics.ascent * scale_factor);
-            result.descent = (s32)round_f32((f32)vertical_metrics.descent * scale_factor);
-            result.line_gap = (s32)round_f32((f32)vertical_metrics.line_gap * scale_factor);
-
-            u32 x = 0;
-            u32 y = 0;
-            u32 max_row_height = 0;
-            u32 first_character = ' ';
-            u32 last_character = '~';
-
-            u64 loop_start_position = arena->position;
-
-            for (u32 i = first_character; i <= last_character; i += 1)
-            {
-                u32 ch = i;
-                FontCharacter* character = &result.characters[i];
-                TTF_HorizontalMetrics horizontal_metrics = truetype_get_codepoint_horizontal_metrics(&font_information, ch);
-
-                character->advance = (u32)round_f32((f32)horizontal_metrics.advance_width * scale_factor);
-                character->left_bearing = (u32)round_f32((f32)horizontal_metrics.left_side_bearing * scale_factor);
-
-                TTF_Bitmap bitmap = truetype_get_codepoint_bitmap(arena, &font_information, scale_factor, scale_factor, ch);
-
-                s32* kerning_table = result.kerning_tables + (u64)i * character_count;
-                for (u32 j = first_character; j <= last_character; j += 1)
-                {
-                    s32 kerning_advance = truetype_get_codepoint_kern_advance(&font_information, i, j);
-                    kerning_table[j] = (s32)round_f32((f32)kerning_advance * scale_factor);
-                }
-
-                if ((x + (u32)bitmap.width) > result.width)
-                {
-                    y += max_row_height;
-                    max_row_height = (u32)bitmap.height;
-                    x = 0;
-                }
-                else
-                {
-                    max_row_height = BUSTER_MAX((u32)bitmap.height, max_row_height);
-                }
-
-                character->x = x;
-                character->y = y;
-                character->width = (u32)bitmap.width;
-                character->height = (u32)bitmap.height;
-                character->x_offset = bitmap.x_offset;
-                character->y_offset = bitmap.y_offset;
-
-                // The atlas is sized to fit the full glyph set with headroom, but only the horizontal axis
-                // wraps; if a glyph doesn't fit vertically either, fail loudly instead of writing past result.pointer.
-                BUSTER_CHECK(y + (u32)bitmap.height <= result.height);
-                BUSTER_CHECK(x + (u32)bitmap.width <= result.width);
-
-                for (u32 bitmap_y = 0; bitmap_y < (u32)bitmap.height; bitmap_y += 1)
-                {
-                    for (u32 bitmap_x = 0; bitmap_x < (u32)bitmap.width; bitmap_x += 1)
-                    {
-                        u64 source_index = (u64)bitmap_y * (u64)(u32)bitmap.width + bitmap_x;
-                        u64 destination_index = (u64)(bitmap_y + y) * (u64)result.width + (bitmap_x + x);
-                        u32 value = bitmap.pixels[source_index];
-                        result.pointer[destination_index] = (value << 24u) | 0x00ffffffu;
-                    }
-                }
-
-                x += (u32)bitmap.width;
-
-                arena_set_position(arena, loop_start_position);
-            }
+            result = build.description;
+        }
+        else if (build.status == TTF_ATLAS_INVALID_TEXT_HEIGHT)
+        {
+            os_fail_message_format(S8("font text height {u32} is outside 1..{u32}"), create.text_height, (u32)BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT);
+        }
+        else if (build.status == TTF_ATLAS_INVALID_FONT)
+        {
+            os_fail_message_format(S8("font file {S8} is not a usable TrueType font (initialization result {u32})"), create.font_path,
+                                   (u32)build.initialization);
         }
         else
         {
-            os_fail();
+            os_fail_message_format(S8("font file {S8} has a glyph that does not fit the atlas for text height {u32}"), create.font_path,
+                                   create.text_height);
         }
     }
     else
     {
-        os_fail();
+        os_fail_message_format(S8("font file {S8} could not be read"), create.font_path);
     }
 
     return result;
 }
-#endif
