@@ -1606,7 +1606,7 @@ BUSTER_GLOBAL_LOCAL u32* object_assembly_initializer_priorities(ObjectFile* obje
 {
     u32* result = 0;
     if (object_assembly_is_x86_64_elf(target) && (section_index == OBJECT_SECTION_INIT_ARRAY || section_index == OBJECT_SECTION_FINI_ARRAY) &&
-        section_index < object->section_count && object->sections[section_index].kind == section_index)
+        section_index < object->section_count && (u32)object->sections[section_index].kind == section_index)
     {
         result = object->initializer_priorities[section_index == OBJECT_SECTION_FINI_ARRAY];
     }
