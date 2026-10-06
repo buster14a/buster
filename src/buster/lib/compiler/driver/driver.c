@@ -4640,13 +4640,17 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
-    if (!lowered.program || lowered.diagnostic_count)
+    if (!lowered.program || lowered.diagnostic_count || !lowered.program->modules || lowered.program->module_count != 1)
     {
         result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
         if (lowered.diagnostic_count)
         {
             result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, lowered.diagnostics,
                                                                       lowered.diagnostic_count, invocation.input_paths[0], (String8){0});
+        }
+        else
+        {
+            result.diagnostic = string_format(arena, S8("{S8}: C analysis or lowering did not publish a complete program"), invocation.input_paths[0]);
         }
         goto end;
     }
