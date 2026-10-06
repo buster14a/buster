@@ -25233,6 +25233,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
         {S8("two function parameters"), S8("int f(int callback(int [2]));\nint f(int callback(int [3]));\n"), true, true},
         {S8("function typedef parameters"), S8("typedef int A(int); typedef int B(int);\nint f(A);\nint f(B);\n"), true, true},
         {S8("nested callback qualifiers"), S8("int f(int callback(const int *));\nint f(int callback(int *));\n"), false, false},
+        {S8("stack growth many parameters"), S8("typedef void A(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int);\ntypedef void B(const int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int);\n_Static_assert(__builtin_types_compatible_p(A, B), \"top qualifier parameters\");\n"), true, true},
+        {S8("stack growth last parameter mismatch"), S8("typedef void A(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int);\ntypedef void B(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, long);\n_Static_assert(!__builtin_types_compatible_p(A, B), \"last parameter\");\n"), true, true},
         {S8("variadic mismatch"), S8("int f();\nint f(int, ...);\n"), false, false},
         {S8("return mismatch"), S8("int f(int [2]);\nlong f(int [3]);\n"), false, false},
         {S8("parameter count mismatch"), S8("int f(int [2]);\nint f(int [3], int);\n"), false, false},

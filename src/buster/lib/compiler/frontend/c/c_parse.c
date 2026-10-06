@@ -18172,6 +18172,23 @@ BUSTER_C_INTERNAL CTypeSelfVerdict c_parse_types_self_compatible(CParseResult* r
     return verdict;
 }
 
+enum { C_TYPE_PAIR_STACK_LOCAL_CAPACITY = 16 };
+
+// Appends a pair, doubling the stack into `arena` when it is full. Earlier
+// storage is abandoned to the scratch arena's rewind.
+BUSTER_GLOBAL_LOCAL void c_parse_type_pair_push(Arena* arena, CTypePair** stack, u32* count, u32* capacity, CTypePair pair)
+{
+    if (*count == *capacity)
+    {
+        u32 grown_capacity = *capacity * 2;
+        CTypePair* grown = arena_allocate(arena, CTypePair, grown_capacity);
+        memcpy(grown, *stack, sizeof(*grown) * *count);
+        *stack = grown;
+        *capacity = grown_capacity;
+    }
+    (*stack)[(*count)++] = pair;
+}
+
 // `ignore_array_qualifiers` compares the pair as C11 6.7.3p9 reads array
 // qualification -- an array of qualified elements is itself qualified -- so
 // the qualifiers of the pair and of every array element beneath it are
@@ -18183,13 +18200,17 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
         result_arena,
     };
     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    CTypePair* stack = arena_allocate(temporary.arena, CTypePair, result->type_count * 2 + 1);
+    // A query visits a handful of pairs, so the stack starts on the C stack
+    // and grows geometrically in the scratch arena only when a deep type needs it.
+    CTypePair local_stack[C_TYPE_PAIR_STACK_LOCAL_CAPACITY];
+    CTypePair* stack = local_stack;
+    u32 stack_capacity = C_TYPE_PAIR_STACK_LOCAL_CAPACITY;
     u32 stack_count = 0;
-    stack[stack_count++] = (CTypePair){
+    c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
         .left = left,
         .right = right,
         .ignore_qualifiers = ignore_array_qualifiers,
-    };
+    });
     bool compatible = true;
     WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_CALLS, 1);
     while (stack_count && compatible)
@@ -18222,10 +18243,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
         {
         case C_TYPE_POINTER:
         {
-            stack[stack_count++] = (CTypePair){
+            c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                 .left = left_type.element_type,
                 .right = right_type.element_type,
-            };
+            });
             break;
         }
         case C_TYPE_ARRAY:
@@ -18281,11 +18302,11 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             {
                 break;
             }
-            stack[stack_count++] = (CTypePair){
+            c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                 .left = left_type.element_type,
                 .right = right_type.element_type,
                 .ignore_qualifiers = pair.ignore_qualifiers && ignore_array_qualifiers,
-            };
+            });
             break;
         }
         case C_TYPE_VECTOR:
@@ -18295,10 +18316,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                 compatible = false;
                 break;
             }
-            stack[stack_count++] = (CTypePair){
+            c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                 .left = left_type.element_type,
                 .right = right_type.element_type,
-            };
+            });
             break;
         }
         case C_TYPE_FUNCTION:
@@ -18334,10 +18355,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                 {
                     break;
                 }
-                stack[stack_count++] = (CTypePair){
+                c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                     .left = left_type.return_type,
                     .right = right_type.return_type,
-                };
+               });
                 break;
             }
             if (left_type.parameter_count != right_type.parameter_count || left_type.is_variadic != right_type.is_variadic)
@@ -18345,10 +18366,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                 compatible = false;
                 break;
             }
-            stack[stack_count++] = (CTypePair){
+            c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                 .left = left_type.return_type,
                 .right = right_type.return_type,
-            };
+            });
             for (u32 parameter_index = 0; parameter_index < left_type.parameter_count; parameter_index += 1)
             {
                 CTypeId left_parameter = result->parameters[left_type.parameter_start + parameter_index].type;
@@ -18368,17 +18389,17 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                     (left_adjusted || left_parameter_kind == C_TYPE_POINTER) &&
                     (right_adjusted || right_parameter_kind == C_TYPE_POINTER))
                 {
-                    stack[stack_count++] = (CTypePair){
+                    c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                         .left = left_parameter_kind == C_TYPE_FUNCTION ? left_parameter : result->types[left_parameter.value].element_type,
                         .right = right_parameter_kind == C_TYPE_FUNCTION ? right_parameter : result->types[right_parameter.value].element_type,
-                    };
+                   });
                     continue;
                 }
-                stack[stack_count++] = (CTypePair){
+                c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                     .left = left_parameter,
                     .right = right_parameter,
                     .ignore_qualifiers = true,
-                };
+               });
             }
             break;
         }
@@ -18404,10 +18425,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                 }
                 else
                 {
-                    stack[stack_count++] = (CTypePair){
+                    c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                         .left = left_type.element_type,
                         .right = right_type.element_type,
-                    };
+                   });
                 }
             }
             break;
