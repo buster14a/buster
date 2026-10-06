@@ -2232,14 +2232,103 @@ BUSTER_GLOBAL_LOCAL String8 gpu_command_to_string(Arena* arena, SliceString8 arg
     return (String8){.pointer = pointer, .length = position};
 }
 
-BUSTER_GLOBAL_LOCAL void gpu_result_append_log(Arena* arena, GpuPipelineResult* result, ByteSlice bytes)
+// Tool output is collected as one admitted chunk per nonempty stream, copied
+// once into the result arena (so the capture scratch can be released), and
+// concatenated exactly once when execution ends. The retained bytes never
+// exceed `limit`; every append is O(chunk) and the flatten O(retained).
+typedef struct GpuLogBuilder GpuLogBuilder;
+struct GpuLogBuilder
 {
-    if (!bytes.length)
+    String8* chunks;
+    u64 chunk_count;
+    u64 chunk_capacity;
+    // Chunks before this index were evicted to make room for a failing tool.
+    u64 first_chunk;
+    u64 limit;
+    u64 retained;
+    // Bytes offered to the builder that are not retained.
+    u64 dropped;
+};
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 gpu_log_copied_bytes;
+
+u64 gpu_test_take_log_copied_bytes(void)
+{
+    u64 result = gpu_log_copied_bytes;
+    gpu_log_copied_bytes = 0;
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL GpuLogBuilder gpu_log_begin(Arena* arena, u64 chunk_capacity, u64 limit)
+{
+    return (GpuLogBuilder){
+        .chunks = chunk_capacity ? arena_allocate(arena, String8, chunk_capacity) : 0,
+        .chunk_capacity = chunk_capacity,
+        .limit = limit,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL void gpu_log_append(Arena* arena, GpuLogBuilder* builder, ByteSlice bytes)
+{
+    u64 admitted = BUSTER_MIN(bytes.length, builder->limit - builder->retained);
+    if (builder->chunk_count >= builder->chunk_capacity)
     {
-        return;
+        admitted = 0;
     }
-    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
-    result->log = result->log.length ? string_format(arena, S8("{S8}{S8}"), result->log, text) : text;
+    if (admitted)
+    {
+        char8* storage = arena_allocate(arena, char8, admitted);
+        memcpy(storage, bytes.pointer, admitted);
+        builder->chunks[builder->chunk_count] = (String8){.pointer = storage, .length = admitted};
+        builder->chunk_count += 1;
+        builder->retained += admitted;
+#if BUSTER_INCLUDE_TESTS
+        gpu_log_copied_bytes += admitted;
+#endif
+    }
+    builder->dropped += bytes.length - admitted;
+}
+
+// Evicts the oldest chunks until `needed` more bytes fit, so a failing tool's
+// own output survives earlier steps' output.
+BUSTER_GLOBAL_LOCAL void gpu_log_make_room(GpuLogBuilder* builder, u64 needed)
+{
+    needed = BUSTER_MIN(needed, builder->limit);
+    while (builder->first_chunk < builder->chunk_count && builder->retained > builder->limit - needed)
+    {
+        u64 length = builder->chunks[builder->first_chunk].length;
+        builder->retained -= length;
+        builder->dropped += length;
+        builder->first_chunk += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL String8 gpu_log_flatten(Arena* arena, GpuLogBuilder* builder)
+{
+    String8 result = {0};
+    u64 live = builder->chunk_count - builder->first_chunk;
+    if (live == 1)
+    {
+        result = builder->chunks[builder->first_chunk];
+    }
+    else if (live > 1)
+    {
+        char8* storage = arena_allocate(arena, char8, builder->retained);
+        u64 position = 0;
+        for (u64 index = builder->first_chunk; index < builder->chunk_count; index += 1)
+        {
+            String8 chunk = builder->chunks[index];
+            memcpy(storage + position, chunk.pointer, chunk.length);
+            position += chunk.length;
+        }
+        result = (String8){.pointer = storage, .length = position};
+#if BUSTER_INCLUDE_TESTS
+        gpu_log_copied_bytes += position;
+#endif
+    }
+    return result;
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -2444,6 +2533,7 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
     };
     GpuPipelinePlan plan = {0};
     String8 publication_path = {0};
+    GpuLogBuilder tool_log = {0};
 
     if (!arena || !options.input_paths || !options.input_count)
     {
@@ -2486,6 +2576,11 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
         else
         {
             result.temporary_directory = temporary.path;
+            u64 log_limit = options.log_limit_bytes ? options.log_limit_bytes : GPU_PIPELINE_LOG_LIMIT_DEFAULT_BYTES;
+            tool_log = gpu_log_begin(arena, (u64)plan.step_count * STANDARD_STREAM_COUNT, log_limit);
+            // The failing tool's diagnostic embeds the log, which is only
+            // complete once flattened after the loop; remember its headline.
+            String8 failure_headline = {0};
 
             if (result.error == GPU_PIPELINE_ERROR_NONE && plan.output_format != GPU_OUTPUT_NONE && !plan.output_is_temporary)
             {
@@ -2521,6 +2616,12 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                 else
                 {
                     result.command = gpu_command_to_string(arena, step.arguments);
+                    // A child never needs to buffer more than the log can keep.
+                    ProcessCaptureLimits capture_limits = {
+                        .per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_MIN(log_limit, PROCESS_CAPTURE_DEFAULT_PER_STREAM_BYTES),
+                                       [STANDARD_STREAM_ERROR] = BUSTER_MIN(log_limit, PROCESS_CAPTURE_DEFAULT_PER_STREAM_BYTES)},
+                        .total = BUSTER_MIN(log_limit, PROCESS_CAPTURE_DEFAULT_TOTAL_BYTES),
+                    };
                     GpuSpawnEnvironment environment = gpu_spawn_environment();
                     ProcessSpawnResult spawn = os_process_spawn(step.arguments,
                                                                 (SliceString8){.pointer = environment.keys, .length = environment.count},
@@ -2529,6 +2630,7 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                                                                     .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
                                                                     .search_path = true,
                                                                     .new_process_group = true,
+                                                                    .capture_limits = capture_limits,
                                                                 });
                     if (!spawn.handle)
                     {
@@ -2542,26 +2644,48 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                     else
                     {
                         u64 tool_timeout = options.tool_timeout_microseconds ? options.tool_timeout_microseconds : GPU_TOOL_TIMEOUT_DEFAULT_MICROSECONDS;
-                        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, tool_timeout);
-                        gpu_result_append_log(arena, &result, wait.streams[STANDARD_STREAM_OUTPUT]);
-                        gpu_result_append_log(arena, &result, wait.streams[STANDARD_STREAM_ERROR]);
+                        // Capture into scratch and keep only the admitted bytes.
+                        TemporalArena scratch = scratch_begin(&arena, 1);
+                        ProcessWaitResult wait = os_process_wait_deadline(scratch.arena, spawn, tool_timeout);
+                        bool failed = wait.timed_out || wait.result != PROCESS_RESULT_SUCCESS;
+                        if (failed)
+                        {
+                            gpu_log_make_room(&tool_log, wait.streams[STANDARD_STREAM_OUTPUT].length + wait.streams[STANDARD_STREAM_ERROR].length);
+                        }
+                        gpu_log_append(arena, &tool_log, wait.streams[STANDARD_STREAM_OUTPUT]);
+                        gpu_log_append(arena, &tool_log, wait.streams[STANDARD_STREAM_ERROR]);
+                        tool_log.dropped += wait.dropped_total;
+                        result.tool_output_truncated = result.tool_output_truncated || wait.output_truncated != 0;
+                        result.tool_capture_limit_exceeded = result.tool_capture_limit_exceeded || wait.capture_limit_exceeded != 0;
+                        scratch_end(scratch);
                         result.process_result = wait.result;
                         result.timed_out = wait.timed_out != 0;
                         if (wait.timed_out)
                         {
                             result.error = GPU_PIPELINE_ERROR_TOOL_TIMEOUT;
                             result.failed_step = step_index;
-                            result.diagnostic = result.log.length ? string_format(arena, S8("GPU tool timed out: {S8}\n{S8}"), result.command, result.log)
-                                                                  : string_format(arena, S8("GPU tool timed out: {S8}"), result.command);
+                            failure_headline = string_format(arena, S8("GPU tool timed out: {S8}"), result.command);
                         }
                         else if (wait.result != PROCESS_RESULT_SUCCESS)
                         {
                             result.error = GPU_PIPELINE_ERROR_TOOL_FAILED;
                             result.failed_step = step_index;
-                            result.diagnostic = result.log.length ? string_format(arena, S8("GPU tool failed: {S8}\n{S8}"), result.command, result.log)
-                                                                  : string_format(arena, S8("GPU tool failed: {S8}"), result.command);
+                            failure_headline = string_format(arena, S8("GPU tool failed: {S8}"), result.command);
                         }
                     }
+                }
+            }
+
+            result.log = gpu_log_flatten(arena, &tool_log);
+            result.log_dropped_bytes = tool_log.dropped;
+            result.log_truncated = tool_log.dropped != 0;
+            if (failure_headline.length)
+            {
+                result.diagnostic = result.log.length ? string_format(arena, S8("{S8}\n{S8}"), failure_headline, result.log) : failure_headline;
+                if (result.log_truncated)
+                {
+                    result.diagnostic = string_format(arena, S8("{S8}\nGPU tool output truncated: {u64} bytes not retained"), result.diagnostic,
+                                                      result.log_dropped_bytes);
                 }
             }
 

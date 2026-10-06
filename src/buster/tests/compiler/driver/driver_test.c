@@ -22,12 +22,16 @@
 // compiler_driver_test_scalar_argument_boundaries exchanges fixed-prototype scalar
 // register/stack boundaries with independent objects, controls, and native-only runs.
 // compiler_driver_test_wasm_string_records checks multi-module lookup scaling.
+// compiler_driver_test_wasm_signature_interning checks hashed signature numbering.
+// compiler_driver_test_wasm_export_names checks hashed export-name uniqueness.
 // compiler_driver_test_wasm_function_addresses checks escaping function markers and direct calls.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
 // compiler_driver_test_quoted_assembly_round_trip covers printed string/call symbols.
 // compiler_driver_test_compiler_listing_round_trip covers movabs and GCC/Clang listings.
 // compiler_driver_test_aarch64_assembly_round_trip reassembles AArch64 -S listings.
+// compiler_driver_test_assembly_private_labels checks ELF .L drops and NOTYPE labels.
+// compiler_driver_test_assembly_section_start_round_trip checks -S/-c leaves no undefined `.text`.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
 // compiler_driver_test_static_literal_addresses checks original literal bytes
@@ -2840,6 +2844,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(char *c) { int *q = c; return *q; }\n"), false, false, S8("cannot convert from 'char *' to 'int *'")},
         {S8("int g(void) { const int *source = 0; int *target = 0; target = source; return 0; }\n"), false, false, S8("cannot convert from 'const int *' to 'int *'")},
         {S8("int g(void) { int *source = 0; const int *target = 0; target = source; return target != 0; }\n"), true},
+        // #2585: qualifiers on an array apply to its elements (C11 6.7.3p9), so a
+        // row of a const array -- a member of a const struct, a const local --
+        // is a pointer to const elements and converts to `T const (*)[N]`.
+        {S8("struct A { char s[2][3]; }; static int f(char const (*t)[3]) { return t[0][0]; } int g(struct A const *k) { return f(k->s); }\n"), true},
+        {S8("struct A { char s[2][3]; }; static int f(char const (*t)[3]) { return t[0][0]; } int g(struct A const *k) { char const (*r)[3] = k->s; return r[1][0]; }\n"), true},
+        {S8("struct A { char s[2][3]; }; static int f(char const (*t)[3]) { return t[0][0]; } int g(void) { char const a[2][3] = {{1}}; return f(a); }\n"), true},
+        {S8("struct A { char s[2][3]; }; static int f(char const (*t)[3]) { return t[0][0]; } int g(void) { char a[2][3] = {{1}}; return f(a); }\n"), true},
+        {S8("struct A { char s[2][3]; }; static int f(char const (*t)[3]) { return t[0][0]; } int g(struct A *k) { return f(k->s); }\n"), true},
+        {S8("typedef char R[3]; static int f(char const (*t)[3]) { return t[0][0]; } int g(void) { const R a[2] = {{1}}; return f(a); }\n"), true},
+        {S8("struct B { char s[2][3][4]; }; static int f(char const (*t)[3][4]) { return t[0][0][0]; } int g(struct B const *k) { return f(k->s); }\n"), true},
+        {S8("struct V { char s[2][3]; }; static int f(volatile char (*t)[3]) { return t[0][0]; } int g(struct V volatile *k) { return f(k->s); }\n"), true},
+        {S8("struct V { char s[2][3]; }; static int f(volatile char (*t)[3]) { return t[0][0]; } int g(struct V *k) { return f(k->s); }\n"), true},
+        {S8("struct V { char s[2][3]; }; static int f(char const (*t)[3]) { return t[0][0]; } int g(struct V volatile *k) { return f(k->s); }\n"), false, false,
+         S8("cannot convert from 'volatile char (*)[3]' to 'const char (*)[3]': incompatible pointer types")},
+        {S8("struct A { char s[2][3]; }; static int f(char const (*t)[3]) { return t[0][0]; } int g(struct A const *k) { return f(&k->s[0]); }\n"), true},
+        {S8("struct A { char s[2][3]; }; static int f(char (*t)[3]) { return t[0][0]; } int g(struct A const *k) { return f(k->s); }\n"), false, false,
+         S8("cannot convert from 'const char (*)[3]' to 'char (*)[3]': incompatible pointer types")},
+        {S8("static int f(char (*t)[3]) { return t[0][0]; } int g(void) { const char a[2][3] = {{1}}; return f(a); }\n"), false, false,
+         S8("cannot convert from 'const char (*)[3]' to 'char (*)[3]': incompatible pointer types")},
+        {S8("int g(void) { const char (*s)[3] = 0; char (*t)[3] = 0; t = s; return t != 0; }\n"), false, false,
+         S8("cannot convert from 'const char (*)[3]' to 'char (*)[3]': incompatible pointer types")},
+        {S8("int g(void) { char (*s)[3] = 0; const char (*t)[3] = 0; t = s; return t != 0; }\n"), true},
+        {S8("static int f(char const (*t)[4]) { return t[0][0]; } int g(void) { char a[2][3] = {{1}}; return f(a); }\n"), false, false,
+         S8("cannot convert from 'char (*)[3]' to 'const char (*)[4]': incompatible pointer types")},
+        {S8("struct A { char s[2][3]; }; static int f(char const (*t)[4]) { return t[0][0]; } int g(struct A const *k) { return f(k->s); }\n"), false, false,
+         S8("cannot convert from 'const char (*)[3]' to 'const char (*)[4]': incompatible pointer types")},
+        {S8("static int f(char const (*t)[3]) { return t[0][0]; } int g(void) { int a[2][3] = {{1}}; return f(a); }\n"), false, false,
+         S8("cannot convert from 'int (*)[3]' to 'const char (*)[3]': incompatible pointer types")},
+        {S8("static int f(char const (*t)[3][4]) { return t[0][0][0]; } int g(void) { char a[2][3][5] = {{{1}}}; return f(a); }\n"), false, false,
+         S8("cannot convert from 'char (*)[3][5]' to 'const char (*)[3][4]': incompatible pointer types")},
         {S8("int g(void) { int *target = 0; target = 0; return target != 0; }\n"), true},
         {S8("int g(void) { long l = g; return (int)l; }\n"), false, false, S8("cannot convert from 'function pointer' to 'long'")},
         {S8("int x = \"s\";\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
@@ -4625,6 +4659,179 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_statements(Unit
     scratch_end(temporary);
     return result;
 }
+// The st_info type nibble the ELF64 symbol table of `bytes` states for `name`,
+// or -1 when the table has no such symbol; -2 when the file is malformed.
+BUSTER_GLOBAL_LOCAL s32 compiler_driver_test_elf_symbol_type(ByteSlice bytes, String8 name)
+{
+    s32 result = -1;
+    u64 section_offset = 0;
+    u32 section_count = 0;
+    bool valid = bytes.length >= 64 && bytes.pointer[4] == 2;
+    if (valid)
+    {
+        for (u32 byte = 0; byte < 8; byte += 1) section_offset |= (u64)bytes.pointer[0x28 + byte] << (byte * 8);
+        section_count = (u32)bytes.pointer[0x3c] | ((u32)bytes.pointer[0x3d] << 8);
+        valid = section_offset + (u64)section_count * 64 <= bytes.length;
+    }
+    for (u32 section = 0; valid && section < section_count; section += 1)
+    {
+        u8 const* header = bytes.pointer + section_offset + (u64)section * 64;
+        u32 type = (u32)header[4] | ((u32)header[5] << 8) | ((u32)header[6] << 16) | ((u32)header[7] << 24);
+        if (type == 2)
+        {
+            u64 offset = 0, size = 0;
+            u32 link = (u32)header[0x28] | ((u32)header[0x29] << 8);
+            for (u32 byte = 0; byte < 8; byte += 1)
+            {
+                offset |= (u64)header[0x18 + byte] << (byte * 8);
+                size |= (u64)header[0x20 + byte] << (byte * 8);
+            }
+            valid = link < section_count && offset + size <= bytes.length;
+            u64 strings = 0, strings_size = 0;
+            if (valid)
+            {
+                u8 const* string_header = bytes.pointer + section_offset + (u64)link * 64;
+                for (u32 byte = 0; byte < 8; byte += 1)
+                {
+                    strings |= (u64)string_header[0x18 + byte] << (byte * 8);
+                    strings_size |= (u64)string_header[0x20 + byte] << (byte * 8);
+                }
+                valid = strings + strings_size <= bytes.length;
+            }
+            for (u64 entry = 0; valid && entry + 24 <= size; entry += 24)
+            {
+                u8 const* symbol = bytes.pointer + offset + entry;
+                u32 name_offset = (u32)symbol[0] | ((u32)symbol[1] << 8) | ((u32)symbol[2] << 16) | ((u32)symbol[3] << 24);
+                if (name_offset < strings_size && name_offset + name.length < strings_size + 1 &&
+                    !memcmp(bytes.pointer + strings + name_offset, name.pointer, name.length) &&
+                    bytes.pointer[strings + name_offset + name.length] == 0)
+                {
+                    result = symbol[4] & 0xf;
+                }
+            }
+        }
+    }
+    return valid ? result : -2;
+}
+
+// GitHub #2686: assembling `.L` temporaries writes no symbol for them, and a
+// plain local label is STT_NOTYPE, on both ELF targets. A `.type` function
+// stays STT_FUNC, as does an exported label without `.type`; a `.L` name that
+// a relocation still needs stays.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_private_labels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    String8 sources[] = {
+        S8(".text\nf:\n  jmp .Lx\n.Lx:\n  ret\n.Lunused:\n  ret\n.globl entry\nentry:\n  ret\n"
+           ".type typed,@function\ntyped:\n  ret\n  leaq .Lstring(%rip), %rax\n.section .rodata\n.Lstring: .byte 65\n"),
+        S8(".text\nf:\n  b .Lx\n.Lx:\n  ret\n.Lunused:\n  ret\n.globl entry\nentry:\n  ret\n"
+           ".type typed,%function\ntyped:\n  ret\n.data\n  .quad .Lstring\n"
+           ".section .rodata\n.Lstring: .byte 65\n"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 input = buster_test_temporary_path(arena, S8("assembly-private-labels"), S8(".s"));
+        String8 output = buster_test_temporary_path(arena, S8("assembly-private-labels"), S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[target]))))
+        {
+            String8 command[] = {S8("-target"), targets[target], S8("-c"), input, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+            {
+                ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, bytes.length != 0);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8(".Lx")) == -1);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8(".Lunused")) == -1);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8(".Lstring")) >= 0);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8("f")) == 0);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8("entry")) == 2);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8("typed")) == 2);
+            }
+        }
+        os_file_delete(input);
+        os_file_delete(output);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// GitHub #2707: the CFI in a -S listing names `.text` as the section start. The
+// assembler must define that name locally, so -S then -c leaves no undefined
+// `.text` and the .eh_frame relocation targets a defined symbol at the start of
+// the text section, on both ELF targets.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_section_start_round_trip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    Target object_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 source = buster_test_temporary_path(arena, S8("section-start-source"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("section-start-listing"), S8(".s"));
+    String8 object = buster_test_temporary_path(arena, S8("section-start-listing"), S8(".o"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(
+        S8("int section_start_callee(int);\nint section_start_entry(int x) { return section_start_callee(x) + 1; }\n")))))
+    {
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            String8 print_command[] = {S8("-target"), targets[target], S8("-g0"), S8("-S"), source, S8("-o"), listing};
+            CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print_command)));
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+            String8 assemble_command[] = {S8("-target"), targets[target], S8("-c"), listing, S8("-o"), object};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_command)));
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE && assembled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                           assembled.has_object, assembled.diagnostic);
+            if (printed.error == COMPILER_DRIVER_ERROR_NONE && assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+            {
+                FileMapRead map = file_map_read(arena, object, (FileReadOptions){0});
+                ObjectFile round_trip = object_read(arena, map.bytes, object_targets[target]);
+                if (BUSTER_REQUIRE(arguments, round_trip.error == OBJECT_ERROR_NONE))
+                {
+                    u32 starts = 0;
+                    u32 start_relocations = 0;
+                    for (u32 index = 0; index < round_trip.symbol_count; index += 1)
+                    {
+                        ObjectSymbol const* symbol = round_trip.symbols + index;
+                        if (string_equal(symbol->name, S8(".text")))
+                        {
+                            starts += 1;
+                            BUSTER_TEST(arguments, !symbol->global && symbol->section < round_trip.section_count &&
+                                                       round_trip.sections[symbol->section].kind == OBJECT_SECTION_TEXT && symbol->value == 0);
+                        }
+                    }
+                    for (u32 index = 0; index < round_trip.relocation_count; index += 1)
+                    {
+                        ObjectRelocation const* relocation = round_trip.relocations + index;
+                        if (relocation->symbol < round_trip.symbol_count && string_equal(round_trip.symbols[relocation->symbol].name, S8(".text")))
+                        {
+                            start_relocations += round_trip.sections[relocation->section].kind == OBJECT_SECTION_UNWIND;
+                        }
+                    }
+                    BUSTER_TEST(arguments, starts == 1 && start_relocations == 1);
+                    BUSTER_TEST(arguments, !compiler_driver_test_object_symbol(&round_trip, S8("section_start_entry")) ||
+                                               compiler_driver_test_object_symbol(&round_trip, S8("section_start_entry"))->global);
+                }
+                file_map_unmap(map);
+            }
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(object);
+    scratch_end(temporary);
+    return result;
+}
+
 // The pristine atomic-pair source must assemble as one unit. The literals
 // cover both functions, including the retry branch at byte 40 back to byte 0.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_control_labels(UnitTestArguments* arguments)
@@ -14182,6 +14389,384 @@ BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_bit_count_program(Arena*
     return program;
 }
 
+// Signature interning: `distinct` parameter sequences over i32/i64/f32/f64,
+// each declared by two functions through separate canonical function types,
+// then `callers` functions that call a zero-parameter function pointer, a
+// signature first used after every one of the distinct ones. Interning must
+// number types in first-use order and cost O(1) hash-slot visits per query.
+enum
+{
+    COMPILER_DRIVER_WASM_SIGNATURE_WIDTH = 8,
+};
+
+BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_signature_program(Arena* arena, u32 pointer_size, u32 distinct, u32 callers,
+                                                                          bool* committed_out)
+{
+    u32 functions = distinct * 2 + 1 + callers;
+    IrProgram program = ir_program_initialize(arena, 1, 8 + distinct * 2, functions, 0);
+    Target target = {.cpu_arch = pointer_size == 4 ? CPU_ARCH_WASM32 : CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING};
+    program.data_layout = target_data_layout(target);
+    IrModule* module = program.modules;
+    module->name = S8("wasm-signatures");
+    IrTypeLayout pointer_layout = {.size = pointer_size, .alignment = pointer_size, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true};
+    IrTypeId void_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+    IrTypeId scalars[4];
+    scalars[0] = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true,
+        .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    scalars[1] = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 64, .is_signed = true,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    scalars[2] = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 32,
+        .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true}});
+    scalars[3] = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true}});
+    bool committed = true;
+    IrTypeId late_signature = {0};
+    IrTypeId late_pointer = {0};
+    IrTypeId caller_signature = {0};
+    for (u32 function_index = 0; function_index < functions; function_index += 1)
+    {
+        bool declared = function_index < distinct * 2;
+        bool is_late = function_index == distinct * 2;
+        IrTypeId signature;
+        if (declared)
+        {
+            u32 pattern = function_index % distinct;
+            IrTypeId* parameters = arena_allocate(arena, IrTypeId, COMPILER_DRIVER_WASM_SIGNATURE_WIDTH);
+            for (u32 parameter = 0; parameter < COMPILER_DRIVER_WASM_SIGNATURE_WIDTH; parameter += 1)
+            {
+                parameters[parameter] = scalars[(pattern >> (parameter * 2)) & 3];
+            }
+            signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = void_type, .parameter_types = parameters,
+                         .parameter_count = COMPILER_DRIVER_WASM_SIGNATURE_WIDTH, .calling_convention = IR_CALLING_CONVENTION_C,
+                         .layout = pointer_layout});
+        }
+        else if (is_late)
+        {
+            late_signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = void_type, .calling_convention = IR_CALLING_CONVENTION_C,
+                         .layout = pointer_layout});
+            late_pointer = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_POINTER, .element_type = late_signature, .layout = pointer_layout});
+            IrTypeId* parameters = arena_allocate(arena, IrTypeId, 1);
+            parameters[0] = late_pointer;
+            caller_signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = void_type, .parameter_types = parameters, .parameter_count = 1,
+                         .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+            signature = late_signature;
+        }
+        else
+        {
+            signature = caller_signature;
+        }
+        String8 name = string_format(arena, S8("signature_{u32}"), function_index);
+        IrSymbolId symbol = ir_program_add_symbol(&program,
+            (IrSymbol){.name = name, .link_name = name, .type = signature, .kind = IR_SYMBOL_FUNCTION,
+                       .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+        IrFunction* function = ir_module_add_function(arena, module,
+            (IrFunction){.name = name, .symbol = symbol, .canonical_type = signature, .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+        ir_function_add_block(arena, function,
+            (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+        IrInstruction rows[3];
+        u32 row_count = 0;
+        if (!declared && !is_late)
+        {
+            IrValueId callee = ir_function_add_value(arena, function,
+                (IrValue){.canonical_type = late_pointer, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+            rows[0] = compiler_driver_test_wasm_canonical_row(IR_OPCODE_ARGUMENT, late_pointer, callee);
+            rows[0].immediates = arena_allocate(arena, u64, 1);
+            rows[0].immediates[0] = 0;
+            rows[0].immediate_count = 1;
+            rows[1] = compiler_driver_test_wasm_canonical_row(IR_OPCODE_CALL, void_type, IR_VALUE_ID_INVALID);
+            rows[1].operands = arena_allocate(arena, IrValueId, 1);
+            rows[1].operands[0] = callee;
+            rows[1].operand_count = 1;
+            row_count = 2;
+        }
+        rows[row_count] = compiler_driver_test_wasm_canonical_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID);
+        row_count += 1;
+        for (u32 row = 0; row < row_count; row += 1)
+        {
+            IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+            IrInstructionId id = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, rows[row], (IrSourceRange){0}, &refusal);
+            committed &= refusal == IR_COMMIT_ACCEPTED && id.value == row;
+        }
+    }
+    *committed_out = committed;
+    return program;
+}
+
+// Reads the function section's type indices from a finished module.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_function_section(ByteSlice module, u32* count_out, u32** types_out, Arena* arena)
+{
+    bool found = false;
+    u64 cursor = 8;
+    while (!found && cursor < module.length)
+    {
+        u8 id = module.pointer[cursor];
+        cursor += 1;
+        u64 size = 0;
+        for (u32 shift = 0; cursor < module.length; shift += 7)
+        {
+            u8 byte = module.pointer[cursor];
+            cursor += 1;
+            size |= (u64)(byte & 0x7f) << shift;
+            if (!(byte & 0x80))
+            {
+                break;
+            }
+        }
+        if (id == 3)
+        {
+            u64 count = 0;
+            u64 position = cursor;
+            for (u32 shift = 0; position < module.length; shift += 7)
+            {
+                u8 byte = module.pointer[position];
+                position += 1;
+                count |= (u64)(byte & 0x7f) << shift;
+                if (!(byte & 0x80))
+                {
+                    break;
+                }
+            }
+            u32* types = arena_allocate(arena, u32, count ? count : 1);
+            for (u64 index = 0; index < count && position < module.length; index += 1)
+            {
+                u64 value = 0;
+                for (u32 shift = 0; position < module.length; shift += 7)
+                {
+                    u8 byte = module.pointer[position];
+                    position += 1;
+                    value |= (u64)(byte & 0x7f) << shift;
+                    if (!(byte & 0x80))
+                    {
+                        break;
+                    }
+                }
+                types[index] = (u32)value;
+            }
+            *count_out = (u32)count;
+            *types_out = types;
+            found = true;
+        }
+        cursor += size;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_signature_interning(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 populations[] = {64, 256, 1024, 4096};
+    for (u32 width = 4; width <= 8; width += 4)
+    {
+        for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(populations); population += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            u32 distinct = populations[population];
+            u32 callers = width == 8 ? distinct : 0;
+            bool committed = false;
+            IrProgram program = compiler_driver_test_wasm_signature_program(arena, width, distinct, callers, &committed);
+            if (BUSTER_REQUIRE(arguments, committed))
+            {
+                WasmOptions options = WASM_OPTIONS_DEFAULT;
+                options.pointer_size = (u8)width;
+                WasmArtifact first = wasm_emit_program(arena, &program, options);
+                WasmArtifact second = wasm_emit_program(arena, &program, options);
+                BUSTER_TEST_RAW(arguments, first.success && second.success,
+                                first.error.diagnostic.length ? first.error.diagnostic : first.error.message);
+                if (BUSTER_REQUIRE(arguments, first.success && second.success))
+                {
+                    u32 declarations = distinct * 2 + 1;
+                    // Every function interns once; each caller interns its own
+                    // signature on the first pass of collection and again at
+                    // emission, plus the indirect target twice.
+                    u64 lookups = (u64)declarations + callers + callers * 2;
+                    u32 type_count = distinct + 1 + (callers ? 1 : 0);
+                    BUSTER_TEST(arguments, first.stats.type_count == type_count);
+                    // Exact comparisons only follow a full hash match: one per
+                    // repeated structure, never one per prior signature.
+                    BUSTER_TEST(arguments, first.stats.signature_comparisons == lookups - type_count);
+                    BUSTER_TEST(arguments, first.stats.signature_lookup_probes >= lookups - type_count &&
+                                           first.stats.signature_lookup_probes <= lookups * 4);
+                    BUSTER_TEST(arguments, first.stats.signature_lookup_probes == second.stats.signature_lookup_probes);
+                    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                                           memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                    u32 function_count = 0;
+                    u32* types = 0;
+                    bool section = compiler_driver_test_wasm_function_section(first.bytes, &function_count, &types, arena);
+                    BUSTER_TEST(arguments, section && function_count == declarations + callers);
+                    if (section && function_count == declarations + callers)
+                    {
+                        // First-use numbering: a new type is always the next
+                        // integer, and the second declaration of a pattern
+                        // reuses the first one's type.
+                        u32 next = 0;
+                        bool first_use = true;
+                        for (u32 index = 0; index < function_count; index += 1)
+                        {
+                            first_use &= types[index] <= next;
+                            next += types[index] == next;
+                        }
+                        BUSTER_TEST(arguments, first_use && next == type_count);
+                        bool shared = true;
+                        for (u32 index = 0; index < distinct; index += 1)
+                        {
+                            shared &= types[index] == types[distinct + index];
+                        }
+                        BUSTER_TEST(arguments, shared);
+                    }
+                    arguments->show(arguments, S8("WASM_SIGNATURE_INTERNING width={u32} distinct={u32} lookups={u64} probes={u64} comparisons={u64}\n"),
+                                    width, distinct, lookups, first.stats.signature_lookup_probes, first.stats.signature_comparisons);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// Export-name uniqueness: one void() function per name, exported under the
+// text after any `module#` prefix. Validation hashes each name once in record
+// order, so cost stays linear and the later record of a pair is the one named.
+BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_export_program(Arena* arena, u32 pointer_size, String8 const* names, u32 count,
+                                                                       IrSymbolId* symbols, bool* committed_out)
+{
+    IrProgram program = ir_program_initialize(arena, 1, 2, count, 0);
+    Target target = {.cpu_arch = pointer_size == 4 ? CPU_ARCH_WASM32 : CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING};
+    program.data_layout = target_data_layout(target);
+    IrModule* module = program.modules;
+    module->name = S8("wasm-exports");
+    IrTypeLayout pointer_layout = {.size = pointer_size, .alignment = pointer_size, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true};
+    IrTypeId void_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+    IrTypeId signature = ir_program_add_type(&program,
+        (IrType){.kind = IR_TYPE_FUNCTION, .return_type = void_type, .calling_convention = IR_CALLING_CONVENTION_C, .layout = pointer_layout});
+    bool committed = true;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        String8 internal_name = string_format(arena, S8("exported_{u32}"), index);
+        symbols[index] = ir_program_add_symbol(&program,
+            (IrSymbol){.name = internal_name, .link_name = names[index], .type = signature, .kind = IR_SYMBOL_FUNCTION,
+                       .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+        IrFunction* function = ir_module_add_function(arena, module,
+            (IrFunction){.name = internal_name, .symbol = symbols[index], .canonical_type = signature, .entry = {.value = 0},
+                         .state = IR_FUNCTION_LOWERED});
+        ir_function_add_block(arena, function,
+            (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+        IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+        IrInstructionId id = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0},
+            compiler_driver_test_wasm_canonical_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID), (IrSourceRange){0}, &refusal);
+        committed &= refusal == IR_COMMIT_ACCEPTED && id.value == 0;
+    }
+    *committed_out = committed;
+    return program;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_export_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 populations[] = {64, 256, 1024, 4096, 16384};
+    for (u32 width = 4; width <= 8; width += 4)
+    {
+        for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(populations); population += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            u32 count = populations[population];
+            String8* names = arena_allocate(arena, String8, count);
+            IrSymbolId* symbols = arena_allocate(arena, IrSymbolId, count);
+            for (u32 index = 0; index < count; index += 1)
+            {
+                // Half the names carry an import-style prefix that is stripped.
+                names[index] = index % 2 ? string_format(arena, S8("module#name_{u32}"), index) : string_format(arena, S8("name_{u32}"), index);
+            }
+            bool committed = false;
+            IrProgram program = compiler_driver_test_wasm_export_program(arena, width, names, count, symbols, &committed);
+            if (BUSTER_REQUIRE(arguments, committed))
+            {
+                WasmOptions options = WASM_OPTIONS_DEFAULT;
+                options.pointer_size = (u8)width;
+                WasmArtifact first = wasm_emit_program(arena, &program, options);
+                WasmArtifact second = wasm_emit_program(arena, &program, options);
+                BUSTER_TEST_RAW(arguments, first.success && second.success,
+                                first.error.diagnostic.length ? first.error.diagnostic : first.error.message);
+                if (BUSTER_REQUIRE(arguments, first.success && second.success))
+                {
+                    BUSTER_TEST(arguments, first.stats.export_count == count + 1);
+                    // A unique name never reaches an exact comparison unless its
+                    // full 64-bit hash matches another's.
+                    BUSTER_TEST(arguments, first.stats.export_name_comparisons == 0);
+                    BUSTER_TEST(arguments, first.stats.export_name_probes <= (u64)count);
+                    BUSTER_TEST(arguments, first.stats.export_name_probes == second.stats.export_name_probes);
+                    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                                           memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                    arguments->show(arguments, S8("WASM_EXPORT_NAMES width={u32} exports={u32} probes={u64} comparisons={u64}\n"), width, count,
+                                    first.stats.export_name_probes, first.stats.export_name_comparisons);
+                }
+            }
+            scratch_end(temporary);
+        }
+        // Refusals: the later record of the first repeated name is reported,
+        // whichever spelling each side uses, and an empty or reserved name is
+        // refused at its own record.
+        enum { REFUSAL_COUNT = 4 };
+        String8 messages[REFUSAL_COUNT] = {
+            S8("duplicate WebAssembly export name"), S8("duplicate WebAssembly export name"),
+            S8("empty or reserved WebAssembly export name"), S8("empty or reserved WebAssembly export name"),
+        };
+        u32 culprits[REFUSAL_COUNT] = {40, 20, 7, 12};
+        for (u32 scenario = 0; scenario < REFUSAL_COUNT; scenario += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            enum { REFUSAL_FUNCTIONS = 64 };
+            String8 names[REFUSAL_FUNCTIONS];
+            IrSymbolId symbols[REFUSAL_FUNCTIONS];
+            for (u32 index = 0; index < REFUSAL_FUNCTIONS; index += 1)
+            {
+                names[index] = string_format(arena, S8("unique_{u32}"), index);
+            }
+            if (scenario == 0)
+            {
+                names[5] = S8("module#shared");
+                names[40] = S8("shared");
+                names[50] = S8("other#shared");
+            }
+            else if (scenario == 1)
+            {
+                names[3] = S8("pair");
+                names[8] = S8("first#pair2");
+                names[20] = S8("pair");
+                names[30] = S8("pair2");
+            }
+            else if (scenario == 2)
+            {
+                names[7] = S8("module#");
+            }
+            else
+            {
+                names[12] = S8("memory");
+                names[30] = S8("memory");
+            }
+            bool committed = false;
+            IrProgram program = compiler_driver_test_wasm_export_program(arena, width, names, REFUSAL_FUNCTIONS, symbols, &committed);
+            if (BUSTER_REQUIRE(arguments, committed))
+            {
+                WasmOptions options = WASM_OPTIONS_DEFAULT;
+                options.pointer_size = (u8)width;
+                WasmArtifact artifact = wasm_emit_program(arena, &program, options);
+                BUSTER_TEST(arguments, !artifact.success);
+                BUSTER_TEST(arguments, artifact.error.code == WASM64_ERROR_DUPLICATE_SYMBOL);
+                BUSTER_TEST(arguments, string_equal(artifact.error.message, messages[scenario]));
+                BUSTER_TEST(arguments, artifact.error.symbol.value == symbols[culprits[scenario]].value);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_bit_counts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -22414,6 +22999,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_compiler_listing_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_assembly_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_private_labels);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_section_start_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integers);
@@ -22473,6 +23060,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_records);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_signature_interning);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_export_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
@@ -29390,6 +29979,36 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             ProcessWaitResult c_conditional_operand_wait = os_process_wait_sync(arguments->arena, c_conditional_operand_spawn);
             BUSTER_TEST(arguments, c_conditional_operand_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // The prepared-control-expression lookups answer from token-indexed
+    // tables; a wrong answer repeats or drops a side effect, so run it.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_prepared_control_index_path"), false);
+    String8 c_prepared_control_index_path = buster_test_temporary_path(arguments->arena, S8("buster-c-prepared-control-index"), S8(""));
+    String8 c_prepared_control_index_command_line[] = {
+        S8("-o"),
+        c_prepared_control_index_path,
+        S8("src/buster/tests/compiler/driver/fixtures/prepared_control_index.c"),
+    };
+    CompilerDriverResult c_prepared_control_index = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepared_control_index_command_line)));
+    BUSTER_TEST(arguments, c_prepared_control_index.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_prepared_control_index.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_prepared_control_index_arguments[] = {
+            c_prepared_control_index_path,
+        };
+        ProcessSpawnResult c_prepared_control_index_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepared_control_index_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true, .search_path = true,
+                             });
+        BUSTER_TEST(arguments, c_prepared_control_index_spawn.handle != 0);
+        if (c_prepared_control_index_spawn.handle)
+        {
+            ProcessWaitResult c_prepared_control_index_wait = os_process_wait_sync(arguments->arena, c_prepared_control_index_spawn);
+            BUSTER_TEST(arguments, c_prepared_control_index_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
     // A conditional assignment yields the assigned member's type.  Keep the

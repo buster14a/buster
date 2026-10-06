@@ -32,7 +32,9 @@ def fixture(root, direct=False):
                 outer_jobs=1 if direct else 4, logical_cpus=4, cpu_budget=4, cpu_time="unknown", peak_rss="unknown", trees=[], tasks=[])
     for i, (compiler, config) in enumerate((("clang", "Debug"), ("clang", "Release"), ("cl", "Debug"), ("gcc", "Debug"), ("zig", "Debug"))):
         name, row = f"tree{i}", f"row{i}"
-        coverage["expected"].append(dict(id=row, compiler=compiler, configuration=config, state="required", owner_shard="checks", sanitize=compiler == "clang", fuzz=False, unity=False))
+        coverage["expected"].append(dict(id=row, compiler=compiler, configuration=config, state="required", owner_shard="checks", sanitize=compiler == "clang", fuzz=False, unity=False,
+                                         # Policy-v1 (#2120) shape: both sanitized Clang rows run tests.
+                                         execution="runtime" if compiler == "clang" else "compile-link"))
         coverage["detected"].append(dict(id=row, compiler=compiler, path=compiler, path_hash="e" * 64, identity=compiler, version="1", target="fixture"))
         plan["trees"].append(dict(id=name, rows=[row], build_directory=f"build/{name}", compiler=compiler, compiler_path=compiler,
                                  compiler_sha256="e" * 64, compiler_identity=compiler, compiler_version="1", target="fixture", configurations=config,
@@ -592,7 +594,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
             matrix_phase_wrap(arena, configure, matrix_phase_find_tree(gen.build_directory), S8("configure"), S8(""), 0);
             trees[count].build_directory = gen.build_directory;
             trees[count].parallel_jobs = 1;
-            trees[count].runs_tests = tree.compiler == BUILD_COMPILER_CLANG;
+            trees[count].runs_tests = string_equal(coverage.plan.rows[tree.row_indices[0]].execution, S8("runtime"));
             for (u32 r = 0; r < tree.row_count; r += 1)
             {
                 MatrixCoverageRow row = coverage.plan.rows[tree.row_indices[r]];
@@ -601,11 +603,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
                 trees[count].unity_only = row.unity;
                 trees[count].unity_analysis_scheduled = row.unity && coverage.obligations.unity_analysis_scheduled;
                 combinations[combo_count++] = (MatrixTestCombination){.build_directory = gen.build_directory,
-                    .compiler = tree.compiler, .options = {.config = row.configuration, .optimize = row.optimize}, .run_tests = tree.compiler == BUILD_COMPILER_CLANG};
+                    .compiler = tree.compiler, .options = {.config = row.configuration, .optimize = row.optimize}, .run_tests = string_equal(row.execution, S8("runtime"))};
                 if (direct)
                 {
                     String8 commands[] = {S8("fixture-cmake"), S8("--build"), gen.build_directory, S8("--config"), row.configuration,
-                                          S8("--target"), tree.compiler == BUILD_COMPILER_CLANG ? S8("test_all") : S8("ide")};
+                                          S8("--target"), string_equal(row.execution, S8("runtime")) ? S8("test_all") : S8("ide")};
                     if (row.unity)
                     {
                         ProcessRun* build = run_add(arena, step_add(arena));
@@ -787,7 +789,8 @@ class NativeObserverTests(unittest.TestCase):
 
     def test_real_separate_checks_shard_serializers(self):
         for linux_fixture in (False, True):
-            for shard, count in (("sanitized-debug", 1), ("sanitized-release", 1), ("portability", 2 if linux_fixture else 3)):
+            # #2657: the build-only sanitized Debug tree belongs to portability.
+            for shard, count in (("sanitized-release", 1), ("portability", 3 if linux_fixture else 4)):
                 with self.subTest(linux=linux_fixture, shard=shard):
                     root = Path(tempfile.mkdtemp(dir=self.root))
                     env = dict(os.environ, BUSTER_MATRIX_PHASE_OUTPUT=str(root), BUSTER_PHASE_FIXTURE_DIRECT="0",
@@ -822,7 +825,10 @@ class NativeObserverTests(unittest.TestCase):
                 subprocess.run(["cmake", "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
                                 f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"], cwd=ROOT, check=True, capture_output=True, timeout=30)
                 tests = [task for task in tasks.values() if task["phase"] == "validation"]
-                self.assertEqual(len(tests), 2)
+                # #2657: grouped checks keep one runtime tree (sanitized
+                # Release); the sanitized Debug tree is build-only.
+                self.assertEqual(len(tests), 1)
+                self.assertEqual(sum(tree.get("sanitize") == 1 for tree in plan["trees"]), 2)
                 previous = None
                 for task in tests:
                     index = task["tree"].removeprefix("tree")

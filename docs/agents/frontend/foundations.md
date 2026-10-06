@@ -512,6 +512,12 @@ without facts for identical bitcode and diagnostics.
   zero, a shift count outside the promoted width) is final. An assertion
   decided at the declaration reports `static assertion failed: "<message>"`
   (GitHub #1238).
+  Immediate assertions belong to parsing; `c_lower_to_ir`'s translation-unit
+  deferred loop owns the remaining checks at every scope. Function-body walks
+  consume their declarations without evaluating or diagnosing them again.
+  `c_test_deferred_assert_diagnostic_ownership` pins one source-located
+  diagnostic per failed assertion, including nonconstant controls, nested
+  blocks and multiple failures, through both frontend SSA forms (GitHub #1783).
 - Compile-time integer arithmetic has one implementation, `ir_integer_*`
   (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
   the canonical operations, each result carrying its exact-value faults
@@ -906,7 +912,7 @@ without facts for identical bitcode and diagnostics.
   `c_ir_end_control_flow_after_call`. Inside a branching operand (`? :`, `&&`,
   `||`, a lowered branch condition) or a consumer that emits rows after the
   value -- a return, an initializer, a switch controller -- the block stays
-  open, so `return (abort(), 0)` and the optimized `BUSTER_CHECK`'s
+  open, so `return (abort(), 0)` and the optimized unsanitized `BUSTER_CHECK`'s
   `(__builtin_unreachable(), 0)` arm reach their consumer or merge. An
   expression statement ends its block with `IR_OPCODE_UNREACHABLE` after its
   own rows. `c_test_cast_and_noreturn_operands` pins the shapes with canonical

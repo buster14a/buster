@@ -712,14 +712,14 @@ class StepDeadlineTests(unittest.TestCase):
         shard_expression = re.search(r"^        shard: \$\{\{ fromJSON\((.+)\) \}\}$",
                                      test_job, re.M).group(1)
         self.assertEqual(shard_expression, dispatch_guard + " && '[\"release\", \"checks\"]' || "
-                         "'[\"release\", \"checks\", \"sanitized-debug\", \"sanitized-release\", \"portability\"]'")
+                         "'[\"release\", \"checks\", \"sanitized-release\", \"portability\"]'")
         # Evaluate the pinned expression for the event this watcher owns.
         selector = shard_expression.replace("github.event_name", "event").replace("github.ref", "ref")
         selector = selector.replace("&&", "and").replace("||", "or")
         for ref in combined_refs + ("refs/heads/gh-readonly-queue/main/pr-2440-abc",):
             with self.subTest(event="merge_group", ref=ref):
                 shards = json.loads(eval(selector, {"__builtins__": {}}, {"event": "merge_group", "ref": ref}))
-                self.assertEqual(shards, ["release", "checks", "sanitized-debug", "sanitized-release", "portability"])
+                self.assertEqual(shards, ["release", "checks", "sanitized-release", "portability"])
         lanes = re.findall(r"^          - name: (.+)\n(?:            \w+: .+\n)*?"
                            r"            os: (\w+)$", test_job, re.M)
         self.assertEqual(workflow.count("- name: " + recovery.WORKFLOW_TOOLS_STEP + "\n"), 1)

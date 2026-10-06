@@ -91,3 +91,14 @@ The output may alias an input slice. The join and duplicate convenience wrappers
 fail the process on invalid input or insufficient reserved capacity. Spelling-space
 copies skip empty spans too. String8 characters are single bytes, so joins have
 no character-size multiplication.
+
+## Library output
+
+Library code never writes to stdout; that stream belongs to the program (for
+example `ide cc -E` output). Report an unexpected failure with
+`string_print_error` (standard error). Traces and notes about expected outcomes
+(unknown CPU vendor, unhandled window events, device enumeration, successful
+creation steps) are removed or gated behind `program_flag_get(PROGRAM_FLAG_VERBOSE)`
+the way `os.c` does it; the rendering backends use `BUSTER_RENDERING_TRACE`.
+Code that runs before `program_state` exists, such as CPU model detection in
+`entry_point.c`, cannot read program flags and must stay silent.

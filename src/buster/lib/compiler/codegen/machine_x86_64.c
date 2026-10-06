@@ -17,6 +17,8 @@
 // block_entries/block_exits preserve canonical control-flow destinations.
 // MachineX64ValueUse is the hot value-use projection; MachineX64LocalUse
 // holds sparse local-promotion store and alias state during selection.
+// machine_x64_condition_form_agrees joins retained exact keys with the shared
+// condition identity; serial prewarm refuses mismatched condition bindings.
 // machine_x64_plan_call reuses selector-owned variadic shape/placement rows;
 // machine_x64_select_call consumes their active prefix before the next call.
 
@@ -10860,6 +10862,10 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_farith_sequ
 // FCMP_SET's parity repair is encoded with the exact SETNP/AND pair as the
 // primary token.  For the OR-parity variants the worker swaps those two
 // metadata tokens for SETP/OR; no byte template enters the sequence path.
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_float_comparison_conditions[] = {
+    BUSTER_X86_CONDITION_EQUAL, BUSTER_X86_CONDITION_NOT_EQUAL, BUSTER_X86_CONDITION_BELOW,
+    BUSTER_X86_CONDITION_BELOW_EQUAL, BUSTER_X86_CONDITION_ABOVE, BUSTER_X86_CONDITION_ABOVE_EQUAL,
+};
 #define MACHINE_X64_FCMP_MOVQ_TO_STEP(slot_value) MACHINE_X64_FP_MOVQ_TO_STEP(slot_value)
 #define MACHINE_X64_FCMP_MOVQ_TO_XMM1_STEP(slot_value) MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(slot_value)
 #define MACHINE_X64_FCMP_COMI_STEP(form_id, form_hash) \
@@ -10919,41 +10925,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_fcmp_alternate_tokens_valid;
 #define MACHINE_X64_SETCC_MOVZX_STEP \
     {.key = {MACHINE_X64_MOVZX8_RR_EXACT_FORM_ID, UINT64_C(0xa9d675ab86fb1641)}, .operand_count = 2, .operand_slots = {0, 0}, \
      .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX, MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX}, .operand_widths = {64, 8}}
-BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_setcc_sequence_steps[16][2] = {
-    [0] = {MACHINE_X64_SETCC_STEP(10257u, 0x31ddc1ed865a5575), MACHINE_X64_SETCC_MOVZX_STEP},
-    [1] = {MACHINE_X64_SETCC_STEP(10259u, 0x81dd033fae75c1c6), MACHINE_X64_SETCC_MOVZX_STEP},
-    [2] = {MACHINE_X64_SETCC_STEP(10261u, 0x0bc47fa18ee6a6de), MACHINE_X64_SETCC_MOVZX_STEP},
-    [3] = {MACHINE_X64_SETCC_STEP(10263u, 0x7022443cd4a81cf5), MACHINE_X64_SETCC_MOVZX_STEP},
-    [4] = {MACHINE_X64_SETCC_STEP(10265u, 0x261b81212af08017), MACHINE_X64_SETCC_MOVZX_STEP},
-    [5] = {MACHINE_X64_SETCC_STEP(10267u, 0x99647caf50cf7fff), MACHINE_X64_SETCC_MOVZX_STEP},
-    [6] = {MACHINE_X64_SETCC_STEP(10269u, 0x73419bd793371f04), MACHINE_X64_SETCC_MOVZX_STEP},
-    [7] = {MACHINE_X64_SETCC_STEP(10271u, 0x4c681fe5d1e14b1), MACHINE_X64_SETCC_MOVZX_STEP},
-    [8] = {MACHINE_X64_SETCC_STEP(10643u, 0x0f501b348d5ad3ab), MACHINE_X64_SETCC_MOVZX_STEP},
-    [9] = {MACHINE_X64_SETCC_STEP(10645u, 0xe718192d18926b3f), MACHINE_X64_SETCC_MOVZX_STEP},
-    [10] = {MACHINE_X64_SETCC_STEP(10647u, 0x65dc8e342334f3cb), MACHINE_X64_SETCC_MOVZX_STEP},
-    [11] = {MACHINE_X64_SETCC_STEP(10649u, 0xd15c6a2ed2b79fc2), MACHINE_X64_SETCC_MOVZX_STEP},
-    [12] = {MACHINE_X64_SETCC_STEP(10651u, 0xb45e8ae6fd038751), MACHINE_X64_SETCC_MOVZX_STEP},
-    [13] = {MACHINE_X64_SETCC_STEP(10653u, 0x4efeb1d47cbd56a0), MACHINE_X64_SETCC_MOVZX_STEP},
-    [14] = {MACHINE_X64_SETCC_STEP(10655u, 0x6e81bfd37e941496), MACHINE_X64_SETCC_MOVZX_STEP},
-    [15] = {MACHINE_X64_SETCC_STEP(10657u, 0xa2843c8dd1c8c547), MACHINE_X64_SETCC_MOVZX_STEP},
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_setcc_sequence_steps[BUSTER_X86_CONDITION_COUNT][2] = {
+    [BUSTER_X86_CONDITION_OVERFLOW] = {MACHINE_X64_SETCC_STEP(10257u, 0x31ddc1ed865a5575), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_NOT_OVERFLOW] = {MACHINE_X64_SETCC_STEP(10259u, 0x81dd033fae75c1c6), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_BELOW] = {MACHINE_X64_SETCC_STEP(10261u, 0x0bc47fa18ee6a6de), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_ABOVE_EQUAL] = {MACHINE_X64_SETCC_STEP(10263u, 0x7022443cd4a81cf5), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_EQUAL] = {MACHINE_X64_SETCC_STEP(10265u, 0x261b81212af08017), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_NOT_EQUAL] = {MACHINE_X64_SETCC_STEP(10267u, 0x99647caf50cf7fff), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_BELOW_EQUAL] = {MACHINE_X64_SETCC_STEP(10269u, 0x73419bd793371f04), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_ABOVE] = {MACHINE_X64_SETCC_STEP(10271u, 0x4c681fe5d1e14b1), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_SIGN] = {MACHINE_X64_SETCC_STEP(10643u, 0x0f501b348d5ad3ab), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_NOT_SIGN] = {MACHINE_X64_SETCC_STEP(10645u, 0xe718192d18926b3f), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_PARITY] = {MACHINE_X64_SETCC_STEP(10647u, 0x65dc8e342334f3cb), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_NOT_PARITY] = {MACHINE_X64_SETCC_STEP(10649u, 0xd15c6a2ed2b79fc2), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_LESS] = {MACHINE_X64_SETCC_STEP(10651u, 0xb45e8ae6fd038751), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_GREATER_EQUAL] = {MACHINE_X64_SETCC_STEP(10653u, 0x4efeb1d47cbd56a0), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_LESS_EQUAL] = {MACHINE_X64_SETCC_STEP(10655u, 0x6e81bfd37e941496), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_GREATER] = {MACHINE_X64_SETCC_STEP(10657u, 0xa2843c8dd1c8c547), MACHINE_X64_SETCC_MOVZX_STEP},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_setcc_sequence_variants[] = {
-    [0] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[0]},
-    [1] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[1]},
-    [2] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[2]},
-    [3] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[3]},
-    [4] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[4]},
-    [5] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[5]},
-    [6] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[6]},
-    [7] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[7]},
-    [8] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[8]},
-    [9] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[9]},
-    [10] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[10]},
-    [11] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[11]},
-    [12] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[12]},
-    [13] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[13]},
-    [14] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[14]},
-    [15] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[15]},
+#define BUSTER_X86_CONDITION(name, nibble, suffix, alias1, alias2, jump, set, move) \
+    [BUSTER_X86_CONDITION_##name] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[BUSTER_X86_CONDITION_##name]},
+#include <buster/lib/compiler/assembly/x86_64_conditions.inc>
+#undef BUSTER_X86_CONDITION
 };
 
 #define MACHINE_X64_JCC_STEP(form_id, form_hash) \
@@ -10962,41 +10956,29 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_setcc_seque
 #define MACHINE_X64_JMP_STEP \
     {.key = {MACHINE_X64_JMP_EXACT_FORM_ID, UINT64_C(0xab9c4b53fce14f6e)}, .operand_count = 1, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP, \
      .operand_slots = {1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO}, .operand_widths = {32}}
-BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_jcc_sequence_steps[16][2] = {
-    [0] = {MACHINE_X64_JCC_STEP(10240u, 0x663680e7ff926f87), MACHINE_X64_JMP_STEP},
-    [1] = {MACHINE_X64_JCC_STEP(10243u, 0x5b0b1a9540ee71fb), MACHINE_X64_JMP_STEP},
-    [2] = {MACHINE_X64_JCC_STEP(10245u, 0x311d2176cc680771), MACHINE_X64_JMP_STEP},
-    [3] = {MACHINE_X64_JCC_STEP(10247u, 0xb78eb0afc41232dd), MACHINE_X64_JMP_STEP},
-    [4] = {MACHINE_X64_JCC_STEP(10249u, 0x5b6e3cd6eb63b76c), MACHINE_X64_JMP_STEP},
-    [5] = {MACHINE_X64_JCC_STEP(10251u, 0x4d8e220c403f8696), MACHINE_X64_JMP_STEP},
-    [6] = {MACHINE_X64_JCC_STEP(10253u, 0xd3e93216ca69f952), MACHINE_X64_JMP_STEP},
-    [7] = {MACHINE_X64_JCC_STEP(10255u, 0x0da05f55f9ead40a), MACHINE_X64_JMP_STEP},
-    [8] = {MACHINE_X64_JCC_STEP(10627u, 0x1b3720aa4829444c), MACHINE_X64_JMP_STEP},
-    [9] = {MACHINE_X64_JCC_STEP(10629u, 0x744e31783e151c7b), MACHINE_X64_JMP_STEP},
-    [10] = {MACHINE_X64_JCC_STEP(10631u, 0xf3d3864103433402), MACHINE_X64_JMP_STEP},
-    [11] = {MACHINE_X64_JCC_STEP(10633u, 0xf6a6442e85dfa8e4), MACHINE_X64_JMP_STEP},
-    [12] = {MACHINE_X64_JCC_STEP(10635u, 0xad1a1b6b4487b442), MACHINE_X64_JMP_STEP},
-    [13] = {MACHINE_X64_JCC_STEP(10637u, 0xdc02d320fd463c30), MACHINE_X64_JMP_STEP},
-    [14] = {MACHINE_X64_JCC_STEP(10639u, 0xbbb60554e5ce4380), MACHINE_X64_JMP_STEP},
-    [15] = {MACHINE_X64_JCC_STEP(10641u, 0x6c77826ff61644d0), MACHINE_X64_JMP_STEP},
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_jcc_sequence_steps[BUSTER_X86_CONDITION_COUNT][2] = {
+    [BUSTER_X86_CONDITION_OVERFLOW] = {MACHINE_X64_JCC_STEP(10240u, 0x663680e7ff926f87), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_NOT_OVERFLOW] = {MACHINE_X64_JCC_STEP(10243u, 0x5b0b1a9540ee71fb), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_BELOW] = {MACHINE_X64_JCC_STEP(10245u, 0x311d2176cc680771), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_ABOVE_EQUAL] = {MACHINE_X64_JCC_STEP(10247u, 0xb78eb0afc41232dd), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_EQUAL] = {MACHINE_X64_JCC_STEP(10249u, 0x5b6e3cd6eb63b76c), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_NOT_EQUAL] = {MACHINE_X64_JCC_STEP(10251u, 0x4d8e220c403f8696), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_BELOW_EQUAL] = {MACHINE_X64_JCC_STEP(10253u, 0xd3e93216ca69f952), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_ABOVE] = {MACHINE_X64_JCC_STEP(10255u, 0x0da05f55f9ead40a), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_SIGN] = {MACHINE_X64_JCC_STEP(10627u, 0x1b3720aa4829444c), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_NOT_SIGN] = {MACHINE_X64_JCC_STEP(10629u, 0x744e31783e151c7b), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_PARITY] = {MACHINE_X64_JCC_STEP(10631u, 0xf3d3864103433402), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_NOT_PARITY] = {MACHINE_X64_JCC_STEP(10633u, 0xf6a6442e85dfa8e4), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_LESS] = {MACHINE_X64_JCC_STEP(10635u, 0xad1a1b6b4487b442), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_GREATER_EQUAL] = {MACHINE_X64_JCC_STEP(10637u, 0xdc02d320fd463c30), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_LESS_EQUAL] = {MACHINE_X64_JCC_STEP(10639u, 0xbbb60554e5ce4380), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_GREATER] = {MACHINE_X64_JCC_STEP(10641u, 0x6c77826ff61644d0), MACHINE_X64_JMP_STEP},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_jcc_sequence_variants[] = {
-    [0] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[0]},
-    [1] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[1]},
-    [2] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[2]},
-    [3] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[3]},
-    [4] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[4]},
-    [5] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[5]},
-    [6] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[6]},
-    [7] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[7]},
-    [8] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[8]},
-    [9] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[9]},
-    [10] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[10]},
-    [11] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[11]},
-    [12] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[12]},
-    [13] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[13]},
-    [14] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[14]},
-    [15] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[15]},
+#define BUSTER_X86_CONDITION(name, nibble, suffix, alias1, alias2, jump, set, move) \
+    [BUSTER_X86_CONDITION_##name] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[BUSTER_X86_CONDITION_##name]},
+#include <buster/lib/compiler/assembly/x86_64_conditions.inc>
+#undef BUSTER_X86_CONDITION
 };
 
 #undef MACHINE_X64_JMP_STEP
@@ -11158,8 +11140,8 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequence const machine_x64_exact_sequence_tab
     },
     [44] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 44, .variant_count = 8, .variants = machine_x64_farith_sequence_variants},
     [45] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 45, .variant_count = 12, .variants = machine_x64_fcmp_set_sequence_variants},
-    [47] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 47, .variant_count = 16, .variants = machine_x64_setcc_sequence_variants},
-    [48] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 48, .variant_count = 16, .variants = machine_x64_jcc_sequence_variants},
+    [47] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 47, .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_setcc_sequence_variants), .variants = machine_x64_setcc_sequence_variants},
+    [48] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 48, .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_jcc_sequence_variants), .variants = machine_x64_jcc_sequence_variants},
 };
 
 // DIRECT recipe index -> compact unique exact-plan identity.  Width variants
@@ -11730,6 +11712,46 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_plans(BusterX86MetadataFormKe
     }
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_x64_condition_checked_bindings;
+BUSTER_GLOBAL_LOCAL u32 machine_x64_condition_mismatched_bindings;
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_condition_form_agrees(u32 family, u32 condition, BusterX86MetadataFormKey key)
+{
+    BusterX86MetadataForm form = {0};
+    bool agrees = family < BUSTER_X86_CONDITION_FAMILY_COUNT && condition < BUSTER_X86_CONDITION_COUNT &&
+                  buster_x86_metadata_form(key.form_id, &form) && form.stable_hash == key.stable_hash;
+    if (agrees)
+    {
+        String8 expected = buster_x86_metadata_condition_mnemonic(family, condition);
+        agrees = expected.length != 0 && string_equal(expected, buster_x86_metadata_string_span(form.iclass));
+    }
+    return agrees;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_check_condition_binding(u32 family, u32 condition, BusterX86MetadataFormKey key)
+{
+    bool agrees = machine_x64_condition_form_agrees(family, condition, key);
+    machine_x64_condition_checked_bindings += 1;
+    machine_x64_condition_mismatched_bindings += !agrees;
+    return agrees;
+}
+
+#if BUSTER_INCLUDE_TESTS
+MachineX64ConditionBindingAudit machine_x64_test_condition_binding_audit(void)
+{
+    machine_x86_64_exact_prewarm();
+    return (MachineX64ConditionBindingAudit){
+        .checked_bindings = machine_x64_condition_checked_bindings,
+        .mismatched_bindings = machine_x64_condition_mismatched_bindings,
+    };
+}
+
+bool machine_x64_test_condition_form_agrees(u32 family, u32 condition, u32 form_id, u64 stable_hash)
+{
+    return machine_x64_condition_form_agrees(family, condition, (BusterX86MetadataFormKey){form_id, stable_hash});
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fcmp_alternate_tokens(void)
 {
     // FCMP_SET's OR-parity repair uses two alternate BASE forms.  Prepare
@@ -11738,7 +11760,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fcmp_alternate_tokens(void)
     machine_x64_fcmp_alternate_tokens_valid = false;
     BusterX86MetadataExactPlan setp_plan = {0};
     BusterX86MetadataExactPlan or_plan = {0};
-    bool setp_prepared = buster_x86_metadata_exact_plan_prepare((BusterX86MetadataFormKey){10647u, UINT64_C(0x65dc8e342334f3cb)}, &setp_plan);
+    BusterX86MetadataFormKey setp_key = {10647u, UINT64_C(0x65dc8e342334f3cb)};
+    bool setp_agrees = machine_x64_exact_check_condition_binding(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_PARITY, setp_key);
+    bool setp_prepared = setp_agrees && buster_x86_metadata_exact_plan_prepare(setp_key, &setp_plan);
     bool or_prepared = buster_x86_metadata_exact_plan_prepare((BusterX86MetadataFormKey){9631u, UINT64_C(0x89a3abb502bbc55a)}, &or_plan);
     machine_x64_fcmp_alternate_tokens_valid = setp_prepared && or_prepared &&
                                                buster_x86_metadata_machine_exact_token_for_plan(setp_plan, (BusterX86MetadataFeatureInput){0}, &machine_x64_fcmp_setp_token) &&
@@ -11769,11 +11793,24 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_sequence_entry(MachineX64Prep
         }
         for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
         {
-        MachineX64ExactSequenceStep const* step = variant->steps + step_index;
+            MachineX64ExactSequenceStep const* step = variant->steps + step_index;
             BusterX86MetadataExactPlan step_plan = {0};
             BusterX86MetadataMachineExactToken* token = entry->sequence_tokens +
                 variant_index * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS + step_index;
-            bool prepared_step = buster_x86_metadata_exact_plan_prepare(step->key, &step_plan);
+            bool condition_step = true;
+            if ((registry_entry->opcode == MACHINE_X64_SETCC || registry_entry->opcode == MACHINE_X64_JCC) && step_index == 0)
+            {
+                u32 family = registry_entry->opcode == MACHINE_X64_SETCC ? BUSTER_X86_CONDITION_FAMILY_SET : BUSTER_X86_CONDITION_FAMILY_JUMP;
+                condition_step = machine_x64_exact_check_condition_binding(family, variant_index, step->key);
+            }
+            else if (registry_entry->opcode == MACHINE_X64_FCMP_SET && (step_index == 3 || step_index == 4))
+            {
+                u32 condition = step_index == 3
+                                    ? machine_x64_float_comparison_conditions[variant_index % BUSTER_ARRAY_LENGTH(machine_x64_float_comparison_conditions)]
+                                    : BUSTER_X86_CONDITION_NOT_PARITY;
+                condition_step = machine_x64_exact_check_condition_binding(BUSTER_X86_CONDITION_FAMILY_SET, condition, step->key);
+            }
+            bool prepared_step = condition_step && buster_x86_metadata_exact_plan_prepare(step->key, &step_plan);
             bool identity_step = prepared_step && step_plan.form_id == step->key.form_id && step_plan.stable_hash == step->key.stable_hash;
             bool token_step = identity_step && buster_x86_metadata_machine_exact_token_for_plan(
                                                         step_plan,
@@ -11873,8 +11910,13 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
         return 0;
 
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + machine_x64_gpr_encoding_table_count;
+    // The checked projection consumes zero, one, or two register nibbles.
+    // Higher key bits cannot affect any physical operand, feature, or patch
+    // probe. Ask the metadata authority once per distinct input, not once
+    // per duplicate dense-table row. The full 256-row representation stays.
+    u32 distinct_register_keys = 1u << (4u * register_operand_count);
     bool compact = true;
-    for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    for (u32 register_key = 0; register_key < distinct_register_keys; register_key += 1)
     {
         u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
         u32 register_value_index = 0;
@@ -12007,6 +12049,17 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
             }
         }
         compact &= emitted.byte_count <= 3;
+    }
+    // Replicate only the bytes the old metadata query would write. In
+    // particular, retain each destination's unused padding if an earlier
+    // rejected staging attempt touched this table slot. Publish neither the
+    // table count nor the ready bit until every distinct query/probe passed.
+    for (u32 register_key = distinct_register_keys; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    {
+        MachineX64GprEncoding const* source = table->encodings + (register_key & (distinct_register_keys - 1u));
+        MachineX64GprEncoding* destination = table->encodings + register_key;
+        memcpy(destination->bytes, source->bytes, source->byte_count);
+        destination->byte_count = source->byte_count;
     }
     if (compact)
     {
@@ -12345,6 +12398,8 @@ void machine_x86_64_exact_prewarm(void)
     bool plan_valid[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     machine_x64_gpr_encoding_table_count = 0;
     machine_x64_variable_memory_encoding_table_count = 0;
+    machine_x64_condition_checked_bindings = 0;
+    machine_x64_condition_mismatched_bindings = 0;
     machine_x64_exact_collect_plan_keys(keys, key_found);
     machine_x64_exact_prepare_plans(keys, key_found, prepared, plan_valid);
     machine_x64_exact_prepare_fcmp_alternate_tokens();
@@ -13125,11 +13180,15 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_x87(void)
     (void)machine_x64_metadata_shape_cache_add(S8("FUCOMIP"), pair + 1, 1, features, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("FSTP"), pair, 1, features, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("FCHS"), 0, 0, features, attributes);
-    String8 comparisons[] = {S8("SETZ"), S8("SETNZ"), S8("SETB"), S8("SETBE"), S8("SETNBE"), S8("SETNB"), S8("SETP"), S8("SETNP")};
+    u8 const comparisons[] = {
+        BUSTER_X86_CONDITION_EQUAL, BUSTER_X86_CONDITION_NOT_EQUAL, BUSTER_X86_CONDITION_BELOW,
+        BUSTER_X86_CONDITION_BELOW_EQUAL, BUSTER_X86_CONDITION_ABOVE, BUSTER_X86_CONDITION_ABOVE_EQUAL,
+        BUSTER_X86_CONDITION_PARITY, BUSTER_X86_CONDITION_NOT_PARITY,
+    };
     BusterX86MetadataPhysicalOperand byte = machine_x64_exact_gpr_operand(0, 8);
     for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(comparisons); name += 1)
     {
-        (void)machine_x64_metadata_shape_cache_add(comparisons[name], &byte, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+        (void)machine_x64_metadata_shape_cache_add(buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_SET, comparisons[name]), &byte, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     }
     BusterX86MetadataPhysicalOperand truncate[] = {machine_x64_exact_gpr_operand(0, 32), machine_x64_exact_immediate_operand(0x0c00, 32)};
     (void)machine_x64_metadata_shape_cache_add(S8("OR"), truncate, 2, (BusterX86MetadataFeatureInput){0}, attributes);
@@ -13367,18 +13426,23 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_memory(void)
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_relative(void)
 {
     BusterX86MetadataPhysicalAttributes attributes = {0};
-    String8 names[] = {S8("CALL"), S8("JMP"), S8("JNS"), S8("JB"), S8("JNBE"), S8("JNZ"), S8("JZ")};
+    String8 names[] = {
+        S8("CALL"), S8("JMP"),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_NOT_SIGN),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_BELOW),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_ABOVE),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_NOT_EQUAL),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_EQUAL),
+    };
     u16 widths[] = {8, 32};
+    // Preserve the compiler's prepared shapes: bit 0 is rel8, bit 1 rel32.
+    u8 const width_masks[] = {2, 3, 1, 1, 2, 2, 2};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == BUSTER_ARRAY_LENGTH(width_masks));
     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
     {
         for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
         {
-            if (string_equal(names[name_index], S8("CALL")) && widths[width_index] != 32) continue;
-            if (string_equal(names[name_index], S8("JNS")) && widths[width_index] != 8) continue;
-            if (string_equal(names[name_index], S8("JB")) && widths[width_index] != 8) continue;
-            if (string_equal(names[name_index], S8("JNBE")) && widths[width_index] != 32) continue;
-            if (string_equal(names[name_index], S8("JNZ")) && widths[width_index] != 32) continue;
-            if (string_equal(names[name_index], S8("JZ")) && widths[width_index] != 32) continue;
+            if (!(width_masks[name_index] & (1u << width_index))) continue;
             BusterX86MetadataPhysicalOperand operand = machine_x64_exact_relative_operand(0, widths[width_index]);
             (void)machine_x64_metadata_shape_cache_add(names[name_index], &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
         }
@@ -13750,13 +13814,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_atomic_memory(MachineX64Encod
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_relative(MachineX64Encoder* encoder, String8 mnemonic, s64 displacement, u16 width,
                                                             MachineX64ExactEmitCounters* counters)
 {
-    // The metadata snapshot uses one canonical spelling per condition-code
-    // opcode.  JA/JNE are architectural aliases of JNBE/JNZ, respectively;
-    // route those spellings through the canonical metadata rows while the
-    // caller continues to express the branch semantics naturally.
-    String8 metadata_mnemonic = mnemonic;
-    if (string_equal(mnemonic, S8("JA"))) metadata_mnemonic = S8("JNBE");
-    else if (string_equal(mnemonic, S8("JNE"))) metadata_mnemonic = S8("JNZ");
+    // Syntax projection happens before the canonical-key shape cache.
+    // Branch policy remains at the caller; exact bytes remain metadata-owned.
+    String8 metadata_mnemonic = buster_x86_metadata_condition_canonical_mnemonic(mnemonic);
     BusterX86MetadataPhysicalOperand operand = machine_x64_exact_relative_operand(displacement, width);
     return machine_x64_emit_metadata_instruction(encoder, metadata_mnemonic, &operand, 1, (BusterX86MetadataFeatureInput){0},
                                                  (BusterX86MetadataPhysicalAttributes){0}, counters);
@@ -15089,6 +15149,143 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, force_disp32, false, 0, false, counters);
 }
 
+#if BUSTER_INCLUDE_TESTS
+// Both sides consume the same recipe/token authority. The reference disables
+// prepared consumers in a private entry copy, never in the published map.
+// This deliberately exercises the worker's ordinary operand projection rather
+// than copying the preparer's projection or spelling any architectural bytes.
+MachineX64GprPreparationAudit machine_x64_test_gpr_preparation(void)
+{
+    MachineX64GprPreparationAudit result = {0};
+    bool visited[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY] = {0};
+    machine_x86_64_exact_prewarm();
+    for (u32 ordinal = 0; ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map); ordinal += 1)
+    {
+        MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_map + ordinal;
+        for (u32 variant_index = 0; entry->descriptor && variant_index < entry->variant_count; variant_index += 1)
+        {
+            u8 table_plus_one = entry->gpr_encoding_tables[variant_index];
+            if (!table_plus_one || table_plus_one > machine_x64_gpr_encoding_table_count || visited[table_plus_one - 1u])
+            {
+                continue;
+            }
+            visited[table_plus_one - 1u] = true;
+            MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (table_plus_one - 1u);
+            MachineX64GprEncodingTable snapshot = *table;
+            u32 distinct_keys = 1u << (4u * table->operand_count);
+            result.tables += 1;
+            result.zero_register_tables += table->operand_count == 0;
+            result.one_register_tables += table->operand_count == 1;
+            result.two_register_tables += table->operand_count == 2;
+            result.distinct_rows += distinct_keys;
+            result.replicated_rows += 256u - distinct_keys;
+            MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, variant_index);
+            MachineX64ExactRecipe descriptor = {
+                .recipe = entry->descriptor->recipe, .key = variant.key,
+                .features = variant.features, .feature_count = variant.feature_count,
+                .operand_count = variant.operand_count, .flags = variant.flags,
+                .operand_slots = {variant.operand_slots[0], variant.operand_slots[1], variant.operand_slots[2], variant.operand_slots[3]},
+                .operand_kinds = {variant.operand_kinds[0], variant.operand_kinds[1], variant.operand_kinds[2], variant.operand_kinds[3]},
+                .operand_widths = {variant.operand_widths[0], variant.operand_widths[1], variant.operand_widths[2], variant.operand_widths[3]},
+                .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED,
+            };
+            MachineX64PreparedExactOpcode prepared = {
+                .descriptor = &descriptor, .metadata_tokens = {entry->metadata_tokens[variant_index]},
+                .gpr_encoding_tables = {table_plus_one}, .single_gpr_encoding_table = table_plus_one,
+                .variant_count = 1, .variant_valid_mask = 1, .plan_valid = true,
+            };
+            MachineX64PreparedExactOpcode reference = prepared;
+            reference.gpr_encoding_tables[0] = 0;
+            reference.single_gpr_encoding_table = 0;
+            for (u32 key = 0; key < BUSTER_ARRAY_LENGTH(table->encodings); key += 1)
+            {
+                MachineX64GprEncoding const* encoding = table->encodings + key;
+                MachineX64GprEncoding const* canonical = table->encodings + (key & (distinct_keys - 1u));
+                bool row_valid = encoding->byte_count && encoding->byte_count <= sizeof(encoding->bytes) &&
+                                 encoding->byte_count == canonical->byte_count;
+                if (row_valid)
+                {
+                    row_valid = memcmp(encoding->bytes, canonical->bytes, encoding->byte_count) == 0;
+                }
+                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT)
+                {
+                    row_valid &= encoding->byte_count <= 3 && encoding->bytes[3] == encoding->byte_count;
+                }
+                result.rows += 1;
+                result.failures += !row_valid;
+                u8 registers[4] = {0};
+                if (table->operand_count) registers[table->operand_slots[0]] = (u8)(key & 15u);
+                if (table->operand_count > 1) registers[table->operand_slots[1]] = (u8)(key >> 4);
+                // All dense rows get an independent metadata-byte comparison.
+                // The affected zero/one-register representatives additionally
+                // get patched values, rebased frames, offsets, and tight tails.
+                u32 probe_count = table->operand_count < 2 && key < distinct_keys ? 3u : 1u;
+                for (u32 probe = 0; row_valid && probe < probe_count; probe += 1)
+                {
+                    u32 offset = probe == 2 ? 129u : 0u;
+                    MachineStackPlacement placement = {.stack_slot_offsets = &offset, .valid = true};
+                    MachineInstruction instruction = {0};
+                    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction.operands); slot += 1)
+                    {
+                        instruction.operands[slot] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+                    }
+                    u32 frame_base_offset = probe == 2 && (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT) ? 4096u : 0u;
+                    u64 immediate = probe ? 0x5au : 0u;
+                    u32 payload = (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD) ? (u32)immediate : 0u;
+                    u32 tail_count = probe_count > 1 ? 5u : 1u;
+                    for (u32 tail = 0; tail < tail_count; tail += 1)
+                    {
+                        u32 available = tail == 0 ? 15u : tail == 1 ? encoding->byte_count :
+                                        tail == 2 ? (u32)encoding->byte_count - 1u : tail == 3 ? 16u : 0u;
+                        u32 start = tail ? 7u : 0u;
+                        u8 bytes[32];
+                        u8 expected[32];
+                        u8 untouched[32];
+                        memset(bytes, 0xa5, sizeof(bytes));
+                        memset(expected, 0xa5, sizeof(expected));
+                        memset(untouched, 0xa5, sizeof(untouched));
+                        MachineX64Encoder actual = {.bytes = bytes, .count = start, .capacity = start + available,
+                                                    .frame_base_offset = frame_base_offset};
+                        MachineX64Encoder oracle = {.bytes = expected, .count = start, .capacity = start + available,
+                                                    .frame_base_offset = frame_base_offset};
+                        MachineX64ExactEmitCounters actual_counts = {0};
+                        MachineX64ExactEmitCounters oracle_counts = {0};
+                        bool actual_valid = machine_x64_emit_exact_recipe(&actual, &prepared, &instruction, &placement, registers,
+                                                                          payload, immediate, true, &actual_counts);
+                        bool oracle_valid = machine_x64_emit_exact_recipe(&oracle, &reference, &instruction, &placement, registers,
+                                                                          payload, immediate, true, &oracle_counts);
+                        bool fits = available >= encoding->byte_count;
+                        bool equal = actual_valid == fits && oracle_valid == fits && actual.overflow == !fits && oracle.overflow == !fits &&
+                                     actual.count == start + (fits ? encoding->byte_count : 0u) && actual.count == oracle.count &&
+                                     actual_counts.attempts == 1 && actual_counts.successes == (u32)fits && actual_counts.fallbacks == (u32)!fits &&
+                                     memcmp(&actual_counts, &oracle_counts, sizeof(actual_counts)) == 0;
+                        if (fits)
+                        {
+                            equal &= memcmp(bytes + start, expected + start, encoding->byte_count) == 0;
+                        }
+                        else
+                        {
+                            equal &= memcmp(bytes, untouched, sizeof(bytes)) == 0 && memcmp(expected, untouched, sizeof(expected)) == 0;
+                        }
+                        equal &= memcmp(bytes, untouched, start) == 0 && memcmp(expected, untouched, start) == 0 &&
+                                 memcmp(bytes + actual.capacity, untouched + actual.capacity, sizeof(bytes) - actual.capacity) == 0 &&
+                                 memcmp(expected + oracle.capacity, untouched + oracle.capacity, sizeof(expected) - oracle.capacity) == 0;
+                        result.cases += 1;
+                        result.failures += !equal;
+                    }
+                }
+            }
+            // Repeated prewarm is read-only, including table padding/flags.
+            machine_x86_64_exact_prewarm();
+            result.failures += memcmp(table, &snapshot, sizeof(snapshot)) != 0;
+        }
+    }
+    result.valid = result.failures == 0 && result.tables == machine_x64_gpr_encoding_table_count &&
+                   result.rows == result.tables * 256u && result.distinct_rows + result.replicated_rows == result.rows;
+    return result;
+}
+#endif
+
 // Allocator copies and rematerializations are not a separate encoding
 // population.  Feed them through the same prepared recipe lane as ordinary
 // machine rows so they consume its dense register tables and patch kernels.
@@ -15179,7 +15376,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 45)
     {
         u32 condition = payload & 0xfu;
-        u32 condition_index = condition == 4 ? 0 : condition == 5 ? 1 : condition == 2 ? 2 : condition == 6 ? 3 : condition == 7 ? 4 : condition == 3 ? 5 : UINT32_MAX;
+        u32 condition_index = condition == BUSTER_X86_CONDITION_EQUAL ? 0 : condition == BUSTER_X86_CONDITION_NOT_EQUAL ? 1 :
+                                  condition == BUSTER_X86_CONDITION_BELOW ? 2 : condition == BUSTER_X86_CONDITION_BELOW_EQUAL ? 3 :
+                                  condition == BUSTER_X86_CONDITION_ABOVE ? 4 : condition == BUSTER_X86_CONDITION_ABOVE_EQUAL ? 5 : UINT32_MAX;
         variant_index = condition_index == UINT32_MAX ? UINT32_MAX : condition_index + ((payload & 0x100u) ? 6u : 0u);
     }
     else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 43)
@@ -15809,12 +16008,15 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
         BusterX86MetadataPhysicalOperand operands[] = {machine_x64_x87_operand(0), machine_x64_x87_operand(1)};
         (void)machine_x64_emit_x87(encoder, S8("FUCOMIP"), operands + 1, 1);
         (void)machine_x64_emit_x87(encoder, S8("FSTP"), operands, 1);
-        String8 names[] = {S8("SETZ"), S8("SETNZ"), S8("SETB"), S8("SETBE"), S8("SETNBE"), S8("SETNB")};
-        (void)machine_x64_emit_metadata_register(encoder, names[instruction->payload], MACHINE_X64_RAX, 8, 0);
+        u32 condition = machine_x64_float_comparison_conditions[instruction->payload];
+        String8 mnemonic = buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_SET, condition);
+        (void)machine_x64_emit_metadata_register(encoder, mnemonic, MACHINE_X64_RAX, 8, 0);
         if (instruction->payload < 4)
         {
             bool unequal = instruction->payload == 1;
-            (void)machine_x64_emit_metadata_register(encoder, unequal ? S8("SETP") : S8("SETNP"), MACHINE_X64_RCX, 8, 0);
+            u32 parity_condition = unequal ? BUSTER_X86_CONDITION_PARITY : BUSTER_X86_CONDITION_NOT_PARITY;
+            String8 parity_mnemonic = buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_SET, parity_condition);
+            (void)machine_x64_emit_metadata_register(encoder, parity_mnemonic, MACHINE_X64_RCX, 8, 0);
             (void)machine_x64_emit_metadata_registers(encoder, unequal ? S8("OR") : S8("AND"), MACHINE_X64_RAX, MACHINE_X64_RCX, 8, 0);
         }
         BusterX86MetadataPhysicalOperand extend[] = {machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 64), machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 8)};

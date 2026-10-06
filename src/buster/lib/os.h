@@ -449,8 +449,9 @@ BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor,
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL OsFileTransferResult os_file_write_checked(OsFileDescriptor* file_descriptor, ByteSlice buffer);
-// Flush is explicit: ordinary artifact writes promise completion, not crash
-// durability. Close always consumes the descriptor, including on failure.
+// Flush is explicit: ordinary artifact writes and file_publish_* / file_copy
+// publication promise completion, not crash durability, and never flush.
+// Close always consumes the descriptor, including on failure.
 BUSTER_F_DECL OsError os_file_flush(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL OsError os_file_close_checked(OsFileDescriptor* file_descriptor);
 // Legacy size convenience: UINT64_MAX denotes failure, never an empty file.
@@ -620,8 +621,14 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 // assumption. BUSTER_ASSERT is diagnostic only and disappears in optimized
 // builds. BUSTER_VALIDATE retains both its branch and defined failure in every
 // build, so resource and input failures must use it (or return an error).
+//
+// Only optimized unsanitized builds take the assumption/unevaluated forms.
+// Sanitized builds keep both diagnostics at every optimization level, so a
+// sanitized Release run reports a false invariant as "assertion failed"
+// instead of compiling it into undefined behavior. Operands still must not
+// carry required work: ordinary Release never evaluates a BUSTER_ASSERT.
 #define BUSTER_VALIDATE(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("validation failed")), 0) : 0))
-#if BUSTER_OPTIMIZE
+#if BUSTER_OPTIMIZE && !BUSTER_SANITIZE
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
 #define BUSTER_ASSERT(ok) ((void)sizeof(!!(ok)))
 #else

@@ -40,9 +40,9 @@ feature author, constructs and validates the combined candidate.
 
 Build concurrency permits up to 6 queued candidates to run speculative
 combined-head validation concurrently; it does not authorize 6 merges. Since
-#2659 each `ci.yml` group needs six macOS jobs (four after #1986), so six
-groups hold at most 36 of the 50 observed macOS runners, leaving 14 for
-pull-request and main validation. That reduced headroom is not measured; the
+#2657 each `ci.yml` group needs five macOS jobs (four after #1986, six after
+#2659), so six groups hold at most 30 of the 50 observed macOS runners,
+leaving 20 for pull-request and main validation. That headroom is not measured; the
 [runner-queue guidance](ci-runner-queue.md) still says to lower build
 concurrency if macOS starvation or cancellation waste grows. A
 later candidate may have the preceding unmerged synthetic commit as its base.
@@ -71,8 +71,10 @@ wait policy from independently checked-out main, checks that the predecessor
 did not change admission or rebinding policy, and requires the queue ref to
 retain the same group identity at admission. Its bounded 310-minute job accommodates the
 five-hour wait.
-The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
-not a `merge_group` workflow, so the queue does not schedule it.
+The self-hosted 9700X direct workload workflow is not a `merge_group` workflow.
+Its standalone workload path runs only for the owner's pull requests, and its
+compiler comparison runs after a commit lands on main (see
+[9700X compiler comparison](#9700x-compiler-comparison-2752)).
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed
@@ -214,6 +216,17 @@ This change does not explain or fix host-specific assignment delay (#1805).
 The rebinding workflow keeps #1907's in-job predecessor wait (`wait-base`) in
 `Reconstruct candidate closure ephemerally`; that remaining runner-held wait is
 tracked on #1807.
+
+## 9700X compiler comparison (#2752)
+
+The 9700X compiler comparison is not part of queue admission. It measures each
+commit after it lands on main, against its first parent, and publishes the
+report-only `9700X compiler benchmark` check on that main commit; see the
+[9700X admission guide](../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
+A brief queue-gated rollout (#2754) made every merge wait about 13 minutes for
+the single host and could not admit bot-authored catch-up pull requests; it was
+replaced by the post-merge comparison, and the reconciler no longer reads any
+benchmark setting.
 
 ## Exact identities and fail-closed evidence
 

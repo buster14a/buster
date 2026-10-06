@@ -1,27 +1,43 @@
 name: 9700X direct workload benchmark
 
-# Runs the owner's pull-request workloads directly on the 9700X runner (#2704).
+# Runs the owner's pull-request workloads directly on the 9700X runner (#2704),
+# and compares each commit that lands on main with its first parent (#2752).
 # workflow_run executes this definition from main, so a pull request cannot
-# edit the gate and the runner group stays pinned to this file at
-# refs/heads/main. It starts when 9700x-direct-request.yml completes for a
-# pull request; only requests started by davidgmbb (user 39247043) from a
-# branch of this repository, for a pull request davidgmbb authored, reach the
-# self-hosted runner. There is no manual dispatch or approval. Trusted main
-# supplies the gate and the harness; the pull request supplies only workload
-# sources under benchmarks/9700x/. The host job receives no token capability
-# or secret, and no checkout persists credentials: persist-credentials: false
+# edit the gate, and the runner group stays pinned to this one file at
+# refs/heads/main.
+#
+# Pull requests: starts when 9700x-direct-request.yml completes for a pull
+# request; only requests started by davidgmbb (user 39247043) from a branch of
+# this repository, for a pull request davidgmbb authored, reach the self-hosted
+# runner. There is no manual dispatch or approval. authorize says what the pull
+# request asked for: bench times its changed workloads, and compare-pull with
+# the hosted publish-pull compares its compiler with its merge base (#2769).
+#
+# Main compiler comparison: starts when 9700x-compiler-request.yml completes for
+# a push to main and BENCH_COMPILER_ENABLED is also true. authorize-compiler
+# re-reads the commit, its first parent and main; main is trusted code, so no
+# author gate applies. compare builds and times both compilers; the hosted
+# publish-compiler job validates the evidence as data and alone holds
+# checks: write. Merging never waits for it, and the verdict is report-only.
+#
+# Trusted main supplies the gates and harnesses. The host jobs receive no token
+# capability or secret, and no checkout persists credentials: persist-credentials: false
 on:
   workflow_run:
-    workflows: [9700X direct workload request]
+    workflows: [9700X direct workload request, 9700X compiler benchmark request]
     types: [completed]
 
 # Zero token capabilities are stricter than the repository-wide static
 # read-only policy marker retained for common workflow tooling: contents: read
 permissions: {}
 
+# Pull requests: one run per branch, a new push cancels the old one. Main: one
+# shared group that never cancels a measurement in progress; GitHub keeps only
+# the newest pending main commit, so a burst of merges measures the latest and
+# leaves the commits in between unmeasured (bounded host time, visible gaps).
 concurrency:
-  group: buster-9700x-direct-bench-${{ github.event.workflow_run.head_branch }}
-  cancel-in-progress: true
+  group: buster-9700x-direct-bench-${{ github.event.workflow_run.event == 'push' && 'main-compare' || github.event.workflow_run.head_branch }}
+  cancel-in-progress: ${{ github.event.workflow_run.event != 'push' }}
 
 jobs:
   # Fail closed unless GitHub's own records name davidgmbb, by login and
@@ -37,6 +53,12 @@ jobs:
     outputs:
       attempt: ${{ steps.verify.outputs.attempt }}
       base: ${{ steps.verify.outputs.base }}
+      pull: ${{ steps.verify.outputs.pull }}
+      workloads: ${{ steps.verify.outputs.workloads }}
+      compare: ${{ steps.verify.outputs.compare }}
+      merge_base: ${{ steps.verify.outputs.merge_base }}
+      merge_base_tree: ${{ steps.verify.outputs.merge_base_tree }}
+      head_tree: ${{ steps.verify.outputs.head_tree }}
     steps:
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -60,7 +82,7 @@ jobs:
   # attempt; a maintainer re-run must use "Re-run all jobs".
   bench:
     needs: authorize
-    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) }}
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.workloads == 'true' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -99,3 +121,251 @@ jobs:
           python3 -B trusted/tools/bench_direct/run_workloads.py \
             --candidate candidate --base "$BQ_BASE_COMMIT" --head "$BQ_HEAD_COMMIT" \
             --work "$RUNNER_TEMP/direct-bench" --summary "$GITHUB_STEP_SUMMARY"
+
+  # Pull-request compiler comparison (#2769): the owner's pull request asks for
+  # it by adding or changing benchmarks/9700x/compiler-compare.request. The
+  # same harness compares the head with its merge base; publish-pull posts the
+  # "9700X compiler benchmark (pull request)" check, which admission ignores.
+  compare-pull:
+    name: Compare the pull request compiler
+    needs: authorize
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.compare == 'true' }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 90
+    env:
+      BQ_REPOSITORY: ${{ github.repository }}
+      BQ_PULL: ${{ needs.authorize.outputs.pull }}
+      BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}
+      BQ_BASE_TREE: ${{ needs.authorize.outputs.merge_base_tree }}
+      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      BQ_HEAD_TREE: ${{ needs.authorize.outputs.head_tree }}
+      BQ_TRUSTED_REVISION: ${{ github.sha }}
+      BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+      BQ_RUN_ID: ${{ github.run_id }}
+      BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Check out the trusted harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          sparse-checkout: tools
+          persist-credentials: false
+      # Full history, so the merge base is present; file contents on demand.
+      - name: Check out the pull request
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: candidate
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Build and compare both compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for commit in "$BQ_BASE_COMMIT" "$BQ_BASE_TREE" "$BQ_HEAD_COMMIT" "$BQ_HEAD_TREE" "$BQ_TRUSTED_REVISION"; do
+            [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          done
+          [[ "$BQ_PULL" =~ ^[1-9][0-9]*$ ]]
+          [[ "$(git -C candidate rev-parse HEAD)" == "$BQ_HEAD_COMMIT" ]]
+          python3 -B trusted/tools/bench_direct/compiler_compare.py --mode pull \
+            --candidate candidate --lab trusted/tools/uarch_lab.py \
+            --work "$RUNNER_TEMP/compiler-bench/work" --evidence "$RUNNER_TEMP/compiler-bench/evidence" \
+            --summary "$GITHUB_STEP_SUMMARY" --repository "$BQ_REPOSITORY" --ref "refs/pull/$BQ_PULL/head" \
+            --pull "$BQ_PULL" --pull-head "$BQ_HEAD_COMMIT" --base "$BQ_BASE_COMMIT" --base-tree "$BQ_BASE_TREE" \
+            --head "$BQ_HEAD_COMMIT" --head-tree "$BQ_HEAD_TREE" --trusted-revision "$BQ_TRUSTED_REVISION" \
+            --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT"
+      - name: Retain the comparison evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: buster-9700x-compiler-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compiler-bench/evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  publish-pull:
+    name: Publish the pull request compiler benchmark check
+    needs: [authorize, compare-pull]
+    if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.compare == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      checks: write
+    timeout-minutes: 10
+    steps:
+      - name: Check out the trusted publisher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Validate the evidence and publish the check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_MODE: pull
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_REF: refs/pull/${{ needs.authorize.outputs.pull }}/head
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}
+          BQ_PULL: ${{ needs.authorize.outputs.pull }}
+          BQ_PULL_HEAD: ${{ github.event.workflow_run.head_sha }}
+          BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}
+          BQ_BASE_TREE: ${{ needs.authorize.outputs.merge_base_tree }}
+          BQ_HEAD_TREE: ${{ needs.authorize.outputs.head_tree }}
+          BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}
+          BQ_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: python3 -B tools/bench_direct/compiler_publish.py
+
+  # Main compiler comparison (#2752). The same attempt binding applies:
+  # compare and publish-compiler require authorize-compiler from this attempt.
+  authorize-compiler:
+    name: Authorize the main commit comparison
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    timeout-minutes: 5
+    outputs:
+      attempt: ${{ steps.verify.outputs.attempt }}
+      base: ${{ steps.verify.outputs.base }}
+      base_tree: ${{ steps.verify.outputs.base_tree }}
+      head_tree: ${{ steps.verify.outputs.head_tree }}
+      pull: ${{ steps.verify.outputs.pull }}
+      pull_head: ${{ steps.verify.outputs.pull_head }}
+    steps:
+      - name: Check out the trusted authorization rules
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Verify the request, the commit and main
+        id: verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python3 -B tools/bench_direct/authorize_compiler.py
+
+  compare:
+    name: Compare the main commit compiler
+    needs: authorize-compiler
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize-compiler.outputs.attempt == format('{0}', github.run_attempt) }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 90
+    env:
+      BQ_REPOSITORY: ${{ github.repository }}
+      BQ_PULL: ${{ needs.authorize-compiler.outputs.pull }}
+      BQ_PULL_HEAD: ${{ needs.authorize-compiler.outputs.pull_head }}
+      BQ_BASE_COMMIT: ${{ needs.authorize-compiler.outputs.base }}
+      BQ_BASE_TREE: ${{ needs.authorize-compiler.outputs.base_tree }}
+      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      BQ_HEAD_TREE: ${{ needs.authorize-compiler.outputs.head_tree }}
+      BQ_TRUSTED_REVISION: ${{ github.sha }}
+      BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+      BQ_RUN_ID: ${{ github.run_id }}
+      BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      # The harness, the lab, the build commands and the profile come from main.
+      - name: Check out the trusted harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          sparse-checkout: tools
+          persist-credentials: false
+      # The main commit with its parents: the base and, for a queue merge, the
+      # pull request head.
+      - name: Check out the main commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: candidate
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Build and compare both compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for commit in "$BQ_BASE_COMMIT" "$BQ_BASE_TREE" "$BQ_HEAD_COMMIT" "$BQ_HEAD_TREE" "$BQ_PULL_HEAD" "$BQ_TRUSTED_REVISION"; do
+            [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          done
+          [[ "$BQ_PULL" =~ ^[0-9]+$ ]]
+          [[ "$(git -C candidate rev-parse HEAD)" == "$BQ_HEAD_COMMIT" ]]
+          python3 -B trusted/tools/bench_direct/compiler_compare.py --mode main \
+            --candidate candidate --lab trusted/tools/uarch_lab.py \
+            --work "$RUNNER_TEMP/compiler-bench/work" --evidence "$RUNNER_TEMP/compiler-bench/evidence" \
+            --summary "$GITHUB_STEP_SUMMARY" --repository "$BQ_REPOSITORY" --ref refs/heads/main \
+            --pull "$BQ_PULL" --pull-head "$BQ_PULL_HEAD" --base "$BQ_BASE_COMMIT" --base-tree "$BQ_BASE_TREE" \
+            --head "$BQ_HEAD_COMMIT" --head-tree "$BQ_HEAD_TREE" --trusted-revision "$BQ_TRUSTED_REVISION" \
+            --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT"
+      # Raw samples, metadata and the receipt, also when the comparison failed.
+      - name: Retain the comparison evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: buster-9700x-compiler-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compiler-bench/evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  # Hosted and credentialed: reads the evidence as data and publishes the
+  # exact-head check. It runs after a refusal or failure as well, so a
+  # candidate is never silently unbenchmarked.
+  publish-compiler:
+    name: Publish the compiler benchmark check
+    needs: [authorize-compiler, compare]
+    if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      checks: write
+    timeout-minutes: 10
+    steps:
+      - name: Check out the trusted publisher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Validate the evidence and publish the check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_MODE: main
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_REF: refs/heads/main
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize-compiler.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize-compiler.outputs.attempt }}
+          BQ_COMPARE_RESULT: ${{ needs.compare.result }}
+          BQ_PULL: ${{ needs.authorize-compiler.outputs.pull }}
+          BQ_PULL_HEAD: ${{ needs.authorize-compiler.outputs.pull_head }}
+          BQ_BASE_COMMIT: ${{ needs.authorize-compiler.outputs.base }}
+          BQ_BASE_TREE: ${{ needs.authorize-compiler.outputs.base_tree }}
+          BQ_HEAD_TREE: ${{ needs.authorize-compiler.outputs.head_tree }}
+          BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}
+          BQ_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: python3 -B tools/bench_direct/compiler_publish.py

@@ -6308,7 +6308,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 function_got_offset = got_offset + ((u64)ELF_GOT_RESERVED_COUNT + import_count) * sizeof(u64);
     u64 got_size = ((u64)ELF_GOT_RESERVED_COUNT + import_count + function_got_count) * sizeof(u64);
     u64 dynamic_offset = align_forward(got_offset + got_size, 8);
-    u32 dynamic_count = needed_library_count + 11 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations;
+    // 12 fixed tags: DT_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, PLTGOT, PLTRELSZ,
+    // PLTREL, JMPREL, RELAENT, DT_DEBUG and the DT_NULL terminator.
+    u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations;
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
     // Both class addresses must agree with their block-relative TLS offsets.
     // Align final virtual addresses: the requested alignment may exceed the
@@ -6880,6 +6882,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     BUSTER_LINK_DYNAMIC(20, 7);
     BUSTER_LINK_DYNAMIC(23, image_base + relocation_offset);
     BUSTER_LINK_DYNAMIC(9, ELF_RELOCATION_SIZE);
+    // The loader stores its r_debug address into this slot, which is how a
+    // debugger finds the shared-library list. .dynamic sits in the writable
+    // PT_LOAD (after .got), so the store is legal.
+    BUSTER_LINK_DYNAMIC(21, 0);
     if (dynamic_data_relocation_count)
     {
         BUSTER_LINK_DYNAMIC(7, image_base + relocation_offset + plt_relocation_size);

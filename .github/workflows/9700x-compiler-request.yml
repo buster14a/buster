@@ -1,0 +1,31 @@
+name: 9700X compiler benchmark request
+
+# Every push to main completes this run, and only that completion starts the
+# compiler comparison in 9700x-direct-bench.yml from main (#2752): the pushed
+# commit against its first parent, after it landed, so merging never waits
+# for the 9700X. This job is a marker: it runs on a hosted runner, checks out
+# nothing, executes no repository content and holds no capability. The bench
+# workflow re-reads the run, the commit and main from GitHub's records.
+# Nothing is checked out; the repository-wide static policy marker is kept:
+# persist-credentials: false
+on:
+  push:
+    branches: [main]
+
+# Zero token capabilities are stricter than the repository-wide static
+# read-only policy marker retained for common workflow tooling: contents: read
+permissions: {}
+
+concurrency:
+  group: buster-9700x-compiler-request-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  request:
+    name: Record the compiler benchmark request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Record the request
+        shell: bash
+        run: echo 'A 9700X compiler comparison of this main commit was requested; see the 9700X direct workload benchmark workflow.'
