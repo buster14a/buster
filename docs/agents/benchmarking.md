@@ -83,6 +83,13 @@ captures (#2741).
   python3 -B tools/uarch_lab_test.py
   ```
 
+  The offline tests run every fake `perf`/`ide` script under the interpreter
+  that runs them (its path becomes the shebang), so a standalone Python works
+  even when `PATH` selects another. The retirement fixtures run a lone copy of
+  that interpreter as a stage-1 compiler; when the copy cannot find its
+  standard library they set `PYTHONHOME` (and the shared-library directory),
+  and skip with the probe's errors only if it still cannot start.
+
   Its `compare` mode is the A/B benchmark for a compiler change; see
   [Benchmarking a compiler change (A/B)](#benchmarking-a-compiler-change-ab).
   Both modes also write `summary.json`, the machine-readable result.
