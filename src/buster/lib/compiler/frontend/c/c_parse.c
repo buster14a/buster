@@ -84,6 +84,7 @@
 //   c_type_parse_machine_run                      steps
 //   c_parse_scalar_type_core_begin,               declarators: pointers,
 //   c_parse_pointer_chain, c_parse_array_suffixes arrays, parameters
+//   c_parse_parameter_list_names_validate        one namespace per parameter list
 //   c_parse_validate_constexpr_declaration,       constexpr, type
 //   c_parse_types_compatible                      compatibility
 //   c_parse_type_identity_prepare                 retained C identity answers
@@ -14224,6 +14225,48 @@ BUSTER_C_INTERNAL bool c_parse_parameter_list_void_valid(CParseResult* result, C
     return valid;
 }
 
+// A completed list owns one prototype/block parameter namespace. Use the
+// published outer range so nested function-pointer lists never share names;
+// release the table before this declarator resumes its type-machine step.
+BUSTER_C_INTERNAL void c_parse_parameter_list_names_validate(CTypeParseMachine* machine, CParseResult* result,
+                                                               CPreprocessResult preprocess, u32 start, u32 count)
+{
+    if (count > 1 && start <= result->parameter_count && count <= result->parameter_count - start)
+    {
+        u64 mark = machine->scratch_arena->position;
+        u64 capacity = 1;
+        while (capacity < (u64)count * 2) capacity *= 2;
+        u32* slots = arena_allocate(machine->scratch_arena, u32, capacity);
+        memset(slots, 0, sizeof(*slots) * capacity);
+        bool reported = false;
+        for (u32 index = 0; index < count && !reported; index += 1)
+        {
+            CParameter parameter = result->parameters[start + index];
+            if (!parameter.name.length) continue;
+            u64 slot = c_parse_name_hash(parameter.symbol, parameter.name) & (capacity - 1);
+            while (slots[slot])
+            {
+                CParameter previous = result->parameters[start + slots[slot] - 1];
+                bool same = parameter.symbol && previous.symbol ? parameter.symbol == previous.symbol :
+                                                                     string_equal(parameter.name, previous.name);
+                if (same)
+                {
+                    CSourceLocation location = c_preprocess_site_location(&preprocess, parameter.location);
+                    CSourceLocation prior = c_preprocess_site_location(&preprocess, previous.location);
+                    c_parse_diagnostic(result, location, C_DIAGNOSTIC_REDEFINITION,
+                        string_format(result->arena, S8("redefinition of parameter '{S8}' (previous declaration at {u32}:{u32})"),
+                                      parameter.name, prior.line, prior.column));
+                    reported = true;
+                    break;
+                }
+                slot = (slot + 1) & (capacity - 1);
+            }
+            if (!reported) slots[slot] = index + 1;
+        }
+        arena_set_position(machine->scratch_arena, mark);
+    }
+}
+
 // The outer suffix of a parenthesized declarator: `(*fp)(int)` and
 // `(*getf(int))(void)` both continue after the group's closing parenthesis,
 // with a parameter list making the declared type a function and anything else
@@ -14252,8 +14295,10 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_suffix_begin(CTypeParseFrame* 
 // of `void (*getf(int))(void)` -- so it only records its range here and hands
 // the frame on to the outer suffix; the outer list is the return type and
 // becomes a function type immediately.
-BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseFrame* frame, CParseResult* result, CPreprocessResult preprocess, u32 list_close)
+BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseMachine* machine, CTypeParseFrame* frame,
+                                                                 CParseResult* result, CPreprocessResult preprocess, u32 list_close)
 {
+    c_parse_parameter_list_names_validate(machine, result, preprocess, frame->parameter_start, frame->written_parameter_count);
     if (frame->scanning_inner_parameters)
     {
         frame->inner_parameter_start = frame->parameter_start;
@@ -14445,7 +14490,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
         frame->segment_start = frame->scan_index + 1;
         if (c_token_is_punctuator(&preprocess.tokens[frame->scan_index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
-            c_type_parse_parenthesized_list_complete(frame, result, preprocess, frame->scan_index);
+            c_type_parse_parenthesized_list_complete(machine, frame, result, preprocess, frame->scan_index);
         }
         else
         {
@@ -14491,7 +14536,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             u32 segment_count = frame->scan_index - frame->segment_start;
             if (list_end && !segment_count && !frame->written_parameter_count)
             {
-                c_type_parse_parenthesized_list_complete(frame, result, preprocess, frame->scan_index);
+                c_type_parse_parenthesized_list_complete(machine, frame, result, preprocess, frame->scan_index);
                 break;
             }
             if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[frame->segment_start], C_PUNCTUATOR_ELLIPSIS))
@@ -14531,7 +14576,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             frame->segment_start = frame->scan_index + 1;
             if (list_end)
             {
-                c_type_parse_parenthesized_list_complete(frame, result, preprocess, frame->scan_index);
+                c_type_parse_parenthesized_list_complete(machine, frame, result, preprocess, frame->scan_index);
                 break;
             }
             frame->scan_index += 1;
@@ -16874,6 +16919,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                     result->parameter_count = parameter_start;
                     return;
                 }
+                c_parse_parameter_list_names_validate(machine, result, preprocess, parameter_start, written_parameter_count);
                 declaration->parameter_start = parameter_start;
                 declaration->parameter_count = written_parameter_count;
                 declaration->type = c_parse_add_type(result, (CType){
@@ -17225,7 +17271,7 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
     };
     bool compatible = true;
     WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_CALLS, 1);
-    while (stack_count)
+    while (stack_count && compatible)
     {
         CTypePair pair = stack[--stack_count];
         WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_PAIRS, 1);
@@ -17340,12 +17386,31 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             // types have to agree -- provided the other type is not
             // variadic. This is what makes musl's
             // `long __syscall_cp_asm();` and the prototype beside it one
-            // function; the parameter types are checked at the call.
+            // function. C17 6.7.6.3p15 further requires each adjusted
+            // parameter type of the prototype to be unchanged by the default
+            // argument promotions. Enum values use their selected compatible
+            // integer kind; array/function parameters already adjust to
+            // pointers and do not promote.
             if (left_type.is_unprototyped || right_type.is_unprototyped)
             {
                 if (left_type.is_variadic || right_type.is_variadic)
                 {
                     compatible = false;
+                    break;
+                }
+                CType prototype = left_type.is_unprototyped ? right_type : left_type;
+                for (u32 parameter_index = 0; parameter_index < prototype.parameter_count; parameter_index += 1)
+                {
+                    CTypeId parameter = result->parameters[prototype.parameter_start + parameter_index].type;
+                    CTypeKind kind = c_parse_expression_value_kind(result, parameter);
+                    if (kind == C_TYPE_INVALID || kind == C_TYPE_FLOAT || c_parse_expression_promoted_kind(kind) != kind)
+                    {
+                        compatible = false;
+                        break;
+                    }
+                }
+                if (!compatible)
+                {
                     break;
                 }
                 stack[stack_count++] = (CTypePair){
@@ -17367,47 +17432,24 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             {
                 CTypeId left_parameter = result->parameters[left_type.parameter_start + parameter_index].type;
                 CTypeId right_parameter = result->parameters[right_type.parameter_start + parameter_index].type;
-                // C 6.7.6.3p7/p8: a parameter declared as an array or a
-                // function is adjusted to the corresponding pointer, so a
-                // prototype's `char **` and a definition's `char *argv[]`
-                // declare one and the same function. The declared spelling
-                // survives into the parameter type, so decay the halves that
-                // disagree here rather than rejecting them. Qualifiers are
-                // ignored only at the top level, which is why the decayed
-                // pointee pair keeps them.
+                // C17 6.7.6.3p7/p8/p15: adjust both parameter spellings
+                // before comparing, including two arrays with different
+                // documentary outer bounds. Only the adjusted pointer's
+                // top qualifiers disappear; its pointee retains qualifiers
+                // and every inner array bound.
                 CTypeKind left_parameter_kind =
                     left_parameter.value < result->type_count ? result->types[left_parameter.value].kind : C_TYPE_INVALID;
                 CTypeKind right_parameter_kind =
                     right_parameter.value < result->type_count ? result->types[right_parameter.value].kind : C_TYPE_INVALID;
-                if (left_parameter_kind == C_TYPE_ARRAY && right_parameter_kind == C_TYPE_POINTER)
+                bool left_adjusted = left_parameter_kind == C_TYPE_ARRAY || left_parameter_kind == C_TYPE_FUNCTION;
+                bool right_adjusted = right_parameter_kind == C_TYPE_ARRAY || right_parameter_kind == C_TYPE_FUNCTION;
+                if ((left_adjusted || right_adjusted) &&
+                    (left_adjusted || left_parameter_kind == C_TYPE_POINTER) &&
+                    (right_adjusted || right_parameter_kind == C_TYPE_POINTER))
                 {
                     stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_POINTER && right_parameter_kind == C_TYPE_ARRAY)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_FUNCTION && right_parameter_kind == C_TYPE_POINTER)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = left_parameter,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_POINTER && right_parameter_kind == C_TYPE_FUNCTION)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = right_parameter,
+                        .left = left_parameter_kind == C_TYPE_FUNCTION ? left_parameter : result->types[left_parameter.value].element_type,
+                        .right = right_parameter_kind == C_TYPE_FUNCTION ? right_parameter : result->types[right_parameter.value].element_type,
                     };
                     continue;
                 }
@@ -19279,6 +19321,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
     }
     close -= 1;
     u32 parameter_start = result->parameter_count;
+    result->parameter_count += c_parse_parameter_list_reserved_count(preprocess, open, end);
     u32 parameter_count = 0;
     bool variadic = false;
     bool valid = true;
@@ -19307,11 +19350,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                 valid = c_parse_parameter_segment(machine, result, preprocess, (CDeclaration){0}, segment_start, index);
                 if (valid)
                 {
+                    CParameter parameter = result->parameters[result->parameter_count - 1];
                     bool sentinel = false;
-                    valid = c_parse_parameter_list_void_valid(result, preprocess, result->parameters[result->parameter_count - 1],
+                    valid = c_parse_parameter_list_void_valid(result, preprocess, parameter,
                                                                index == close && !parameter_count, segment_start, &sentinel);
+                    result->parameters[parameter_start + parameter_count] = parameter;
                     parameter_count += !sentinel;
-                    result->parameter_count -= sentinel;
+                    result->parameter_count -= 1;
                 }
             }
             else
@@ -19342,6 +19387,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
         result->parameter_count = parameter_start;
         return C_TYPE_ID_INVALID;
     }
+    c_parse_parameter_list_names_validate(machine, result, preprocess, parameter_start, parameter_count);
     *index_out = close + 1;
     return c_parse_add_type(result, (CType){
                                                .element_type = C_TYPE_ID_INVALID,
@@ -27049,12 +27095,12 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
         : UINT32_MAX;
     bool braced_body = header_close < function_end && header_close + 1 < function_end &&
                        c_token_is_punctuator(&preprocess.tokens[header_close + 1], C_PUNCTUATOR_LEFT_BRACE);
-    if (!braced_body)
+    if (switch_end == UINT32_MAX)
     {
         c_parse_lowering_constraint_consider(diagnostic, S8("unsupported C function-body statement or expression near 'switch'"),
                                              switch_index, switch_index);
     }
-    else if (switch_end != UINT32_MAX)
+    else
     {
         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, switch_index);
         u64 controlling_mark = machine->scratch_arena->position;
@@ -27105,7 +27151,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                 CToken token = preprocess.tokens[index];
                 brace_depth += c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE);
                 brace_depth -= brace_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
-                if (brace_depth > 1 && !value_count && !has_default && c_token_in_well_known_set(preprocess.spelling_base, token,
+                if (brace_depth > (braced_body ? 1u : 0u) && !value_count && !has_default && c_token_in_well_known_set(preprocess.spelling_base, token,
                         C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(DEFAULT)))
                 {
                     c_parse_lowering_constraint_consider(diagnostic, S8("case label inside a block precedes every case of its switch"), index, index);

@@ -345,6 +345,55 @@ markers, checks structured diagnostic parity and refused programs, and
 independently validates accepted canonical IR. Local declaration controls
 avoid the separately tracked repeated-linkage restriction (#1562).
 
+`c_parse_types_compatible_walk` applies two additional C17 compatibility
+requirements: a prototype paired with a pre-C23 unspecified parameter list
+must use parameter types unchanged by default argument promotions, and both
+parameter spellings undergo array/function adjustment. Documentary outer
+array bounds and parameter-only qualifiers therefore disappear from
+compatibility; inner bounds and pointee qualifiers remain. Promotion checks
+read existing parameter rows and resolve an enum's compatible integer kind;
+the shared pair stack compares adjusted pointees without creating types or
+evaluating removed outer bounds. C23's empty-list constructor is unchanged.
+
+`c_test_function_parameter_compatibility` uses 56 fixed source cases over
+C17/GNU17/C23/GNU23, six desktop target layouts and both frontend forms
+(2,688 configurations). It preserves the existing C23 empty-list rule and
+checks semantic-only diagnostics, diagnostic parity, failed program
+nonpublication and independent canonical validation of accepted sources.
+The cases include original float/char/short/Bool promotion conflicts, both
+declaration orders, promoted scalar/enum/pointer controls, typedefs and
+definitions, fixed/VLA/static array bounds, function parameters and nested
+qualifier/inner-bound refusals. GNU type-compatibility queries retain fixed
+answers independent of the compatibility implementation. Two further fixed
+negative declarations pair an incompatible nested callback or inner array
+bound with an otherwise compatible aggregate sibling. They require a failed
+comparison to remain failed through the existing pair-stack walk; the loop
+stops at the first incompatible pair, so later siblings cannot restore a
+successful verdict.
+
+`c_test_function_parameter_compatibility_runtime` keeps a literal 1,299-byte
+source with fixed results for promoted scalars and adjusted array/callback
+parameters. Desktop native execution uses GNU17/GNU23 × four allocators ×
+two frontend forms (16 profiles). Linux additionally requires GCC and Clang
+at both dialects and O0/O2 (eight build/run controls), and separately compiles
+each original float/char/short/Bool conflict in C17/GNU17 (16 required
+refusals). Both reference commands disable only `-Wstrict-prototypes`: the
+legal pre-C23 empty declarations are deprecated, and Clang otherwise upgrades
+that warning under `-pedantic-errors`. Actual conflicting-type errors remain
+required, including a captured `conflicting` diagnostic for every refusal.
+Original source bytes are read back before launch. Every child
+owns its process group and has a thirty-second deadline; bounded captured
+diagnostics fail on truncation/overflow. Cleanup/retained-reservation/lost-
+ownership failures stop later child admission. Temporary executables and
+sources are deleted before their arena lifetime ends. These are registered
+requirements, not execution results for this checkpoint.
+
+The pre-C23 requirements are C17 6.5.2.2p6 and 6.7.6.3p7–8,p15; the
+same promotion/adjustment text is present in the public
+[WG14 N1256](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf)
+6.7.5.3p15. This work does not alter call-site promotions, declaration
+construction, live enum publication or target ABI policy.
+
 `c_test_attribute_call_roles` checks GNU attribute-name/function collisions
 through semantic-only validation, both canonical frontend forms and the
 native driver. Attribute heads designate attributes; calls inside argument
@@ -426,6 +475,55 @@ allocators and both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
+
+## Fixed scalar register-to-stack regression
+
+`compiler_driver_test_scalar_argument_boundaries` extends the existing driver
+harness with first-party, separate caller/callee translation units under
+`src/buster/tests/compiler/driver/fixtures/scalar_boundary_*.c`.
+It checks each argument position, exactly representable floating values, twenty
+volatile counter updates, and three pointer writes. Both mixed compiler
+directions run with an eligible GNU-compatible configured reference compiler at
+O0 and O2, without
+LTO, across NONE/MIR_STACK/FAST/QUALITY and both frontend SSA forms.
+The reference/reference control must return zero; a deliberately wrong final
+pointer expectation must return exactly 73. A signal, timeout or launch failure
+does not satisfy that negative control.
+
+The fixtures assert each selected target's scalar size and alignment (int/float
+4, long long/double/pointer 8); they never infer layout from the executing host
+or compare padding. GP arities 3–9, FP arities 3–5 and 7–9, interleaved arguments,
+and pointers after 4/6/8 integers bracket these independent contracts:
+
+| Fixed-prototype target | Register and overflow contract |
+| --- | --- |
+| SysV x86-64 LP64 | Independent six GP and eight SSE arguments; exhausted classes use eightbyte stack slots while the other bank remains available. |
+| Windows x64 | Four shared argument positions choose GP or FP registers; later arguments use the stack after four eightbyte home slots. |
+| AArch64 Linux/Windows | Independent eight GP and eight FP arguments; stacked scalar arguments occupy eightbyte slots. |
+| Darwin AArch64 | The same bank limits, with naturally sized named stack arguments: adjacent spilled ints occupy four bytes each before subsequent eightbyte alignment. |
+
+Expectations come from the ABI documents below, independent of Buster's
+classifier. The 13-argument `abi_boundary_packed_stack` case puts adjacent
+four-byte ints before an eight-byte integer after GP exhaustion; its FP argument
+uses an available FP register on SysV/AAPCS64 and a positional stack slot on
+Win64. The name describes stack packing, not a packed C record.
+
+| Inspected contract | Exact provenance and license |
+| --- | --- |
+| [SysV ABI 1.0, Parameter Passing](https://github.com/susematz/x86-64-ABI/blob/a0f552021583de8dc3d264cce337aeb99a16723b/x86-64-ABI/low-level-sys-info.tex) | ABI editor Michael Matz's source mirror at `a0f552021583de8dc3d264cce337aeb99a16723b` (2019-02-28). License unspecified in inspected source/root; official GitLab retrieval unavailable, so this is not claimed to be its current head. |
+| [AAPCS64 2025Q4, rules C.1/C.5–C.6/C.9/C.13–C.17](https://github.com/ARM-software/abi-aa/blob/daa7a94ca55973736c0e434a67a6e4bbcd35d7fa/aapcs64/aapcs64.rst) | `daa7a94ca55973736c0e434a67a6e4bbcd35d7fa`; issue date 2026-01-23. [CC-BY-SA-4.0 plus patent grant](https://github.com/ARM-software/abi-aa/blob/daa7a94ca55973736c0e434a67a6e4bbcd35d7fa/aapcs64/LICENSE). |
+| [Microsoft x64](https://github.com/MicrosoftDocs/cpp-docs/blob/f2355df9f7136d8a2097193fc507882a7caeb5f5/docs/build/x64-calling-convention.md) and [Windows ARM64](https://github.com/MicrosoftDocs/cpp-docs/blob/f2355df9f7136d8a2097193fc507882a7caeb5f5/docs/build/arm64-windows-abi-conventions.md) | `f2355df9f7136d8a2097193fc507882a7caeb5f5`; documentation CC-BY-4.0, code examples MIT. No example code copied. |
+| [Apple ARM64 deviations](https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms) | Official documentation consulted 2026-10-02 through its official JSON representation. No public revision exposed; copyright Apple, all rights reserved. |
+
+Native execution only occurs for the target matching the desktop runner.
+Six-target object generation and nonempty named text-symbol inspection are
+separate structural checks, not execution or proof of register placement.
+Unexecuted native platforms and MSVC-configured reference execution remain
+pending; Apple x86-64 is best-effort only. Mobile apps do not package these
+desktop component fixtures and report this slice pending without reading them.
+The slice does not cover variadic calls, aggregates, vectors or LLVM export.
+Its first-party fixtures import no external source or dependencies; Buster's
+first-party license remains unselected per `LICENSES/README.md`.
 
 ## Resolved non-returning call effects (#1350)
 

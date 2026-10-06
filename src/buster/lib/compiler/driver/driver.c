@@ -2130,14 +2130,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")) || string_equal(argument, S8("-fPIE")) ||
             string_equal(argument, S8("-fpie")))
         {
+            invocation.position_independent_level = string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fPIE")) ? 2 : 1;
             invocation.position_independent = true;
             position_independent_code_option = argument;
             position_independent_executable_model = string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie"));
+            invocation.position_independent_executable = position_independent_executable_model;
             continue;
         }
         if (string_equal(argument, S8("-fno-pic")) || (string_equal(argument, S8("-fno-pie")) && position_independent_executable_model))
         {
+            invocation.position_independent_level = 0;
             invocation.position_independent = false;
+            invocation.position_independent_executable = false;
             position_independent_code_option = (String8){0};
             position_independent_executable_model = false;
             continue;
@@ -2231,7 +2235,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.image_kind != NATIVE_IMAGE_EXECUTABLE &&
         invocation.action == COMPILER_DRIVER_ACTION_LINK)
     {
-        invocation.position_independent = true;
+        if (!invocation.position_independent_level)
+        {
+            invocation.position_independent_level = 2;
+        }
+        invocation.position_independent = invocation.position_independent_level != 0;
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.plain_char_policy_explicit)
     {
@@ -4369,6 +4377,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .position_independent_level = invocation.position_independent_level,
+                                                    .position_independent_executable = invocation.position_independent_executable,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
@@ -4458,6 +4468,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .position_independent_level = invocation.position_independent_level,
+                                                    .position_independent_executable = invocation.position_independent_executable,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
