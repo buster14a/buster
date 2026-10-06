@@ -8703,38 +8703,50 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             u64 stored = 0;
                             object_read_u64(bytes, entry, &stored);
                             u64 function_offset = 0;
-                            if (external)
+                            // A rejected reference must never be used as an index:
+                            // r_symbolnum is attacker-controlled (zero underflows the
+                            // section lookup; an oversized value walks past symbol_map).
+                            if (read_ok && external)
                             {
                                 if (source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX)
                                 {
                                     read_ok = false;
                                 }
-                                ObjectSymbol* symbol = &result.symbols[symbol_map[source_symbol]];
-                                if (symbol->section != OBJECT_SECTION_TEXT || stored > UINT64_MAX - symbol->value)
+                                else
                                 {
-                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                                    read_ok = false;
+                                    ObjectSymbol* symbol = &result.symbols[symbol_map[source_symbol]];
+                                    if (symbol->section != OBJECT_SECTION_TEXT || stored > UINT64_MAX - symbol->value)
+                                    {
+                                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                        read_ok = false;
+                                    }
+                                    function_offset = symbol->value + stored;
                                 }
-                                function_offset = symbol->value + stored;
                             }
-                            else
+                            else if (read_ok)
                             {
                                 if (!source_symbol || source_symbol > mach_section_count)
                                 {
                                     read_ok = false;
                                 }
-                                u32 referenced_section = source_symbol - 1;
-                                if (section_kinds[referenced_section] != OBJECT_SECTION_TEXT || stored < section_addresses[referenced_section])
+                                else
                                 {
-                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                                    read_ok = false;
+                                    u32 referenced_section = source_symbol - 1;
+                                    if (section_kinds[referenced_section] != OBJECT_SECTION_TEXT || stored < section_addresses[referenced_section])
+                                    {
+                                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                        read_ok = false;
+                                    }
+                                    else
+                                    {
+                                        u64 local_offset = stored - section_addresses[referenced_section];
+                                        if (local_offset > UINT64_MAX - section_bases[referenced_section])
+                                        {
+                                            read_ok = false;
+                                        }
+                                        function_offset = section_bases[referenced_section] + local_offset;
+                                    }
                                 }
-                                u64 local_offset = stored - section_addresses[referenced_section];
-                                if (local_offset > UINT64_MAX - section_bases[referenced_section])
-                                {
-                                    read_ok = false;
-                                }
-                                function_offset = section_bases[referenced_section] + local_offset;
                             }
                             if (function_offset > UINT32_MAX || function_offset > result.sections[OBJECT_SECTION_TEXT].data.length ||
                                 function_size > result.sections[OBJECT_SECTION_TEXT].data.length - function_offset ||

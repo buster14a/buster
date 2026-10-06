@@ -7758,6 +7758,40 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, compact_x64_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
             }
         }
+        // r_symbolnum is attacker-controlled: zero (local) underflowed the
+        // section lookup and an oversized external index walked off
+        // symbol_map; each must be a clean refusal.
+        u32 compact_raw_offset = 0;
+        u32 compact_relocation_offset = 0;
+        u32 compact_relocation_count = 0;
+        if (BUSTER_REQUIRE(arguments, object_test_mach_section_offsets(compact_x64_artifact.bytes, OBJECT_SECTION_READ_ONLY_DATA, &compact_raw_offset,
+                                                                       &compact_relocation_offset, &compact_relocation_count) &&
+                                          compact_relocation_count == 1))
+        {
+            u32 compact_bad_information[] = {
+                (3u << 25),                       // local, r_symbolnum 0
+                (3u << 25) | 0x00ffffffu,         // local, past the section count
+                (3u << 25) | (1u << 27),          // external, symbol 0 is not a valid text reference here
+                (3u << 25) | (1u << 27) | 1000u,  // external, past symbol_count
+                (3u << 25) | (1u << 27) | 0x00ffffffu,
+            };
+            for (u32 bad_index = 0; bad_index < BUSTER_ARRAY_LENGTH(compact_bad_information); bad_index += 1)
+            {
+                TemporalArena compact_scope = arena_begin_temporal(arguments->arena);
+                ByteSlice compact_mutation = {
+                    .pointer = arena_allocate(arguments->arena, u8, compact_x64_artifact.bytes.length),
+                    .length = compact_x64_artifact.bytes.length,
+                };
+                memcpy(compact_mutation.pointer, compact_x64_artifact.bytes.pointer, compact_x64_artifact.bytes.length);
+                object_test_write_u32(compact_mutation, (u64)compact_relocation_offset + 4, compact_bad_information[bad_index]);
+                ObjectFile compact_bad = object_read(arguments->arena, compact_mutation, compact_x64_object.target);
+                if (bad_index != 2)
+                {
+                    BUSTER_TEST(arguments, compact_bad.error != OBJECT_ERROR_NONE);
+                }
+                arena_set_position(arguments->arena, compact_scope.position);
+            }
+        }
     }
 
     u8 compact_a64_entry[32] = {0};
