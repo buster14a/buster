@@ -18,6 +18,7 @@ BUSTER_GLOBAL_LOCAL u32 raster_native_failures;
 BUSTER_GLOBAL_LOCAL u32 raster_native_campaign;
 BUSTER_GLOBAL_LOCAL u32 raster_native_cycles;
 BUSTER_GLOBAL_LOCAL u32 raster_native_encodings;
+BUSTER_GLOBAL_LOCAL u32 raster_native_server_resets;
 
 #if BUSTER_UNITY_BUILD
 #include <buster/lib/arena.c>
@@ -910,6 +911,17 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
     raster_native_cycles += windowing != 0;
     if (windowing)
     {
+        xcb_intern_atom_reply_t* generation = xcb_intern_atom_reply(windowing->connection,
+            xcb_intern_atom(windowing->connection, 1, 28, "BusterNativeServerGeneration"), 0);
+        bool retained = generation && generation->atom != XCB_ATOM_NONE;
+        raster_native_server_resets += !retained;
+        free(generation);
+        generation = xcb_intern_atom_reply(windowing->connection,
+            xcb_intern_atom(windowing->connection, 0, 28, "BusterNativeServerGeneration"), 0);
+        raster_native_check(generation && generation->atom != XCB_ATOM_NONE, "server generation marker installed");
+        free(generation);
+        printf("XSERVER_GENERATION_V1 campaign=%u cycle=%u retained=%u generations=%u\n",
+               (unsigned)raster_native_campaign, (unsigned)cycle, (unsigned)retained, (unsigned)raster_native_server_resets);
         WmWindowHandle* window = wm_window_create(windowing, (WmWindowCreate){
             .name = S8("Buster raster native validation"),
             .size = {.width = 32, .height = 24},
@@ -1008,6 +1020,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
 
 int main(int argc, char* argv[])
 {
+    BUSTER_UNUSED(setvbuf(stdout, 0, _IONBF, 0));
     os_state.page_size = os_get_page_size();
     os_state.allocation_granularity = os_state.page_size;
     os_state.large_page_size = BUSTER_MB(2);
@@ -1015,7 +1028,7 @@ int main(int argc, char* argv[])
     thread_context_select(context);
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32), .initial_size = BUSTER_MB(32), .flags = {.no_pool = true}});
     program_state->arena = arena;
-    bool failure_mode = argc == 2 && strcmp(argv[1], "--no-display") == 0;
+    bool failure_mode = argc >= 2 && strcmp(argv[1], "--no-display") == 0;
     if (failure_mode)
     {
         WmHandle* windowing = wm_initialize();
@@ -1025,6 +1038,16 @@ int main(int argc, char* argv[])
             wm_deinitialize(windowing);
         }
         wm_deinitialize(0);
+        if (argc == 3 && strcmp(argv[2], "--allocation-isolation-probe") == 0)
+        {
+            raster_native_window_arena_failure();
+            Arena* first = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64), .flags = {.no_pool = true}});
+            Arena* second = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64), .flags = {.no_pool = true}});
+            printf("ALLOCATION_ISOLATION_V1 first=%u second=%u\n", (unsigned)(first != 0), (unsigned)(second != 0));
+            raster_native_check(first != 0 && second != 0, "native admission refusal cannot contaminate later allocation");
+            if (first) { arena_destroy(first, 1); }
+            if (second) { arena_destroy(second, 1); }
+        }
     }
     else
     {

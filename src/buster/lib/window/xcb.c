@@ -128,7 +128,13 @@ BUSTER_GLOBAL_LOCAL void wm_x11_window_update_event_mask(WmWindowHandle* window)
     if (window && window->owner && window->owner->connection && window->handle)
     {
         u32 event_mask = wm_x11_window_event_mask(window->owner);
-        xcb_change_window_attributes(window->owner->connection, window->handle, XCB_CW_EVENT_MASK, &event_mask);
+        xcb_void_cookie_t cookie = xcb_change_window_attributes(window->owner->connection, window->handle, XCB_CW_EVENT_MASK, &event_mask);
+#if BUSTER_INCLUDE_TESTS
+        string_print_error(S8("XIM_SUBSCRIPTION_V1 sequence={u32} mask={u32:x} forward={u32:x} synchronous={u32:x}\n"),
+                           cookie.sequence, event_mask, window->owner->xim_forward_event_mask, window->owner->xim_synchronous_event_mask);
+#else
+        BUSTER_UNUSED(cookie);
+#endif
     }
 }
 
