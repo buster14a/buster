@@ -117,6 +117,8 @@
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
+//   c_ir_statement_end, c_ir_statement_end_find   memoized statement extents
+//                                                 for controlled bodies
 //   c_ir_lower_body_advance                       the statement walker
 //   c_ir_constant_initializer_*, c_ir_infer_*     static initializer bytes,
 //                                                 relocations, and array-bound
@@ -3093,6 +3095,14 @@ struct CIntegerIrBuilder
     CIrGroupFactsEntry* group_facts_stack;
     bool group_facts_exact;
     bool group_facts_built;
+    // One past each body `if` statement's whole else-chain, plus one, indexed
+    // by the offset of its `if` token; 0 is unmeasured. c_ir_statement_end
+    // owns it, files every `if` its chain walk completes, and clears the array
+    // the first time it is asked (statement_ends_cleared), so a body without a
+    // nested or chained `if` never touches it. Without it every `else if` and
+    // every brace-less nested `if` re-walked the rest of its chain.
+    u32* statement_ends_plus_one;
+    bool statement_ends_cleared;
     CIrSignature* signatures;
     IrTypeId* c_type_ir_map;
     IrTypeId* scalar_types;
@@ -3881,7 +3891,9 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
                 return match;
             }
         }
-        return c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
+        u32 scanned = c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
+        IR_CONSTRUCTION_RECORD(C_DELIMITER_FALLBACK_TOKENS, (scanned == UINT32_MAX ? end : scanned + 1) - open);
+        return scanned;
     }
     if (open >= builder->body_token_start)
     {
@@ -3896,7 +3908,9 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
             }
         }
     }
-    return c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
+    u32 scanned = c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
+    IR_CONSTRUCTION_RECORD(C_DELIMITER_FALLBACK_TOKENS, (scanned == UINT32_MAX ? end : scanned + 1) - open);
+    return scanned;
 }
 
 // The only punctuators the preparation prepasses' deferral scan reacts to,
@@ -38151,8 +38165,10 @@ struct CIrStatementSpan
     bool valid;
 };
 
-BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
+    CPreprocessResult preprocess = builder->preprocess;
+    IR_CONSTRUCTION_RECORD(C_STATEMENT_EXTENT_SPANS, 1);
     CIrStatementSpan span = {
         .end = UINT32_MAX,
         .if_start = UINT32_MAX,
@@ -38172,7 +38188,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CPreprocessResult preproc
         CToken token = preprocess.tokens[cursor];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
-            u32 close = c_ir_matching_delimiter(preprocess, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+            u32 close = c_ir_matching_delimiter_cached(builder, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
             span.end = close == UINT32_MAX ? UINT32_MAX : close + 1;
             span.valid = close != UINT32_MAX;
             measured = true;
@@ -38206,7 +38222,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CPreprocessResult preproc
             continue;
         }
         u32 header_close =
-            c_ir_matching_delimiter(preprocess, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            c_ir_matching_delimiter_cached(builder, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         if (header_close == UINT32_MAX)
         {
             measured = true;
@@ -38288,10 +38304,48 @@ BUSTER_C_INTERNAL u32 c_ir_statement_do_tail_end(CPreprocessResult preprocess, u
     return result;
 }
 
+// The memoized extent of the `if` statement whose keyword is `if_start`, as
+// filed by c_ir_statement_end_file, or UINT32_MAX when it is unmeasured or
+// does not fit before `end`. Only an extent that ended strictly before the
+// bound it was measured against is filed: the walk then saw the token past it
+// and found no `else`, and every token it read lies before that extent, so the
+// same walk under any bound at or past it measures the same statement. A
+// shorter bound refuses the entry and walks, which keeps such a query's
+// answer exactly what the walk alone would give.
+BUSTER_C_INTERNAL u32 c_ir_statement_end_find(CIntegerIrBuilder* builder, u32 if_start, u32 end)
+{
+    u32 result = UINT32_MAX;
+    if (builder->statement_ends_cleared && if_start >= builder->body_token_start && if_start - builder->body_token_start < builder->body_token_count)
+    {
+        u32 stored = builder->statement_ends_plus_one[if_start - builder->body_token_start] - 1;
+        result = stored <= end ? stored : UINT32_MAX;
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_ir_statement_end_file(CIntegerIrBuilder* builder, u32 if_start, u32 if_end, u32 end)
+{
+    if (builder->statement_ends_plus_one && if_end < end && if_start >= builder->body_token_start &&
+        if_start - builder->body_token_start < builder->body_token_count)
+    {
+        if (!builder->statement_ends_cleared)
+        {
+            memset(builder->statement_ends_plus_one, 0, sizeof(u32) * (u64)builder->body_token_count);
+            builder->statement_ends_cleared = true;
+        }
+        builder->statement_ends_plus_one[if_start - builder->body_token_start] = if_end + 1;
+    }
+}
+
 // One past the whole statement at `start`. Only `if` needs a stack: its extent
 // is its else-chain's, and each arm is a statement in its own right, so the
-// arms are walked with explicit frames rather than by recursing.
-BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end)
+// arms are walked with explicit frames rather than by recursing. Every `if`
+// the walk completes is filed (c_ir_statement_end_file), and an `if` already
+// filed is not walked again, so lowering an `else if` chain or a brace-less
+// nest of `if`s, which asks for each link's extent in turn, walks each link
+// once in total instead of once per enclosing link.
+BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     typedef struct CIfEndFrame CIfEndFrame;
     struct CIfEndFrame
@@ -38301,11 +38355,17 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CPreprocessResult preproc
         u32 pending_do;
         u8 phase;
     };
+    CPreprocessResult preprocess = builder->preprocess;
     u32 completed = UINT32_MAX;
-    CIrStatementSpan span = start < end ? c_ir_statement_span(preprocess, start, end) : (CIrStatementSpan){.end = UINT32_MAX, .if_start = UINT32_MAX};
+    CIrStatementSpan span = start < end ? c_ir_statement_span(builder, start, end) : (CIrStatementSpan){.end = UINT32_MAX, .if_start = UINT32_MAX};
+    u32 known_if_end = span.valid && span.if_start != UINT32_MAX ? c_ir_statement_end_find(builder, span.if_start, end) : UINT32_MAX;
     if (span.valid && span.if_start == UINT32_MAX)
     {
         completed = c_ir_statement_do_tail_end(preprocess, span.end, end, span.pending_do);
+    }
+    else if (known_if_end != UINT32_MAX)
+    {
+        completed = c_ir_statement_do_tail_end(preprocess, known_if_end, end, span.pending_do);
     }
     else if (span.valid)
     {
@@ -38320,11 +38380,12 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CPreprocessResult preproc
         {
             CIfEndFrame* frame = &frames[frame_count - 1];
             u32 child_start = UINT32_MAX;
+            u32 if_end = UINT32_MAX;
             if (frame->phase == 0)
             {
                 u32 condition_close =
                     frame->start + 1 < end && c_token_is_punctuator(&preprocess.tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
-                        ? c_ir_matching_delimiter(preprocess, frame->start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                        ? c_ir_matching_delimiter_cached(builder, frame->start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
                         : UINT32_MAX;
                 failed = condition_close == UINT32_MAX;
                 child_start = failed ? UINT32_MAX : condition_close + 1;
@@ -38342,18 +38403,17 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CPreprocessResult preproc
                 }
                 else
                 {
-                    completed = c_ir_statement_do_tail_end(preprocess, after, end, frame->pending_do);
-                    failed = completed == UINT32_MAX;
-                    frame_count -= 1;
-                    if (frame_count && !failed)
-                    {
-                        frames[frame_count - 1].child_end = completed;
-                    }
+                    if_end = after;
                 }
             }
             else
             {
-                completed = c_ir_statement_do_tail_end(preprocess, frame->child_end, end, frame->pending_do);
+                if_end = frame->child_end;
+            }
+            if (if_end != UINT32_MAX)
+            {
+                c_ir_statement_end_file(builder, frame->start, if_end, end);
+                completed = c_ir_statement_do_tail_end(preprocess, if_end, end, frame->pending_do);
                 failed = completed == UINT32_MAX;
                 frame_count -= 1;
                 if (frame_count && !failed)
@@ -38365,12 +38425,13 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CPreprocessResult preproc
             {
                 continue;
             }
-            CIrStatementSpan child = c_ir_statement_span(preprocess, child_start, end);
+            CIrStatementSpan child = c_ir_statement_span(builder, child_start, end);
+            u32 child_if_end = child.valid && child.if_start != UINT32_MAX ? c_ir_statement_end_find(builder, child.if_start, end) : UINT32_MAX;
             if (!child.valid)
             {
                 failed = true;
             }
-            else if (child.if_start != UINT32_MAX)
+            else if (child.if_start != UINT32_MAX && child_if_end == UINT32_MAX)
             {
                 frames[frame_count++] = (CIfEndFrame){
                     .start = child.if_start,
@@ -38379,7 +38440,7 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CPreprocessResult preproc
             }
             else
             {
-                u32 child_end = c_ir_statement_do_tail_end(preprocess, child.end, end, child.pending_do);
+                u32 child_end = c_ir_statement_do_tail_end(preprocess, child.if_start != UINT32_MAX ? child_if_end : child.end, end, child.pending_do);
                 failed = child_end == UINT32_MAX || child_end <= child_start;
                 frame->child_end = child_end;
             }
@@ -38390,9 +38451,10 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CPreprocessResult preproc
     return completed;
 }
 
-BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, u32* content_start, u32* content_end,
+BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u32* content_start, u32* content_end,
                                                     u32* after)
 {
+    CPreprocessResult preprocess = builder->preprocess;
     bool result = false;
     // Labels prefixing the substatement are part of it, so the extent is
     // measured from the statement they label while the range still opens
@@ -38400,7 +38462,7 @@ BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CPreprocessResul
     u32 statement = start < end ? c_ir_statement_labels_end(preprocess, start, end) : end;
     if (statement < end && c_token_is_punctuator(&preprocess.tokens[statement], C_PUNCTUATOR_LEFT_BRACE))
     {
-        u32 close = c_ir_matching_delimiter(preprocess, statement, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+        u32 close = c_ir_matching_delimiter_cached(builder, statement, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
         if (close != UINT32_MAX)
         {
             // An unlabelled compound statement hands its interior straight to
@@ -38414,7 +38476,7 @@ BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CPreprocessResul
     }
     else if (statement < end)
     {
-        u32 statement_end = c_ir_statement_end(arena, preprocess, statement, end);
+        u32 statement_end = c_ir_statement_end(arena, builder, statement, end);
         if (statement_end != UINT32_MAX)
         {
             *content_start = start;
@@ -38430,7 +38492,7 @@ BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CPreprocessResul
 BUSTER_C_INTERNAL bool c_ir_builder_controlled_body_range(CIntegerIrBuilder* builder, u32 start, u32 end, u32* content_start, u32* content_end, u32* after)
 {
     TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-    bool result = c_ir_controlled_body_range(temporary.arena, builder->preprocess, start, end, content_start, content_end, after);
+    bool result = c_ir_controlled_body_range(temporary.arena, builder, start, end, content_start, content_end, after);
     scratch_end(temporary);
     return result;
 }
@@ -55928,7 +55990,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                           BUSTER_ALIGN_OF(u32)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), body_array_capacity, BUSTER_ALIGN_OF(u8)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrGroupFactsEntry), prepared_control_expression_capacity + 1,
-                                          BUSTER_ALIGN_OF(CIrGroupFactsEntry));
+                                          BUSTER_ALIGN_OF(CIrGroupFactsEntry)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32));
         if (scratch_fits && lowering_capacity <= UINT32_MAX && local_capacity <= UINT32_MAX && local_slot_capacity <= UINT32_MAX &&
             prepared_call_capacity <= UINT32_MAX && prepared_control_expression_capacity <= UINT32_MAX && lower_frame_capacity <= UINT32_MAX &&
             !function_reservation_limit)
@@ -56088,6 +56151,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                  prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
         builder.group_facts = arena_allocate(lowering_temporary.arena, u8, body_array_capacity);
         builder.group_facts_stack = arena_allocate(lowering_temporary.arena, CIrGroupFactsEntry, prepared_control_expression_capacity + 1);
+        builder.statement_ends_plus_one = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
         memset(builder.prepared_control_open_slots, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);

@@ -38055,6 +38055,84 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
     return result;
 }
 
+// Lowering asks for the extent of every controlled substatement, and an `if`
+// extends over its whole else-chain. A long `else if` chain and a brace-less
+// nest of `if`s used to re-walk the rest of the chain for every link, and a
+// nest of braced `if`s re-scanned each block for its closing brace: all three
+// were quadratic in the length (#2805). The counters bound the extent work
+// linearly and run in the allocation diagnostic build; every build still
+// lowers, validates and checks the shape.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlled_body_extents_linear(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        C_TEST_EXTENT_ELSE_IF_CHAIN,
+        C_TEST_EXTENT_IF_NEST,
+        C_TEST_EXTENT_BRACED_IF_NEST,
+        C_TEST_EXTENT_SHAPE_COUNT,
+    };
+    // The braced nest opens one block scope per link, and semantic analysis
+    // (not lowering) still pays per enclosing scope there, so it stays short.
+    u32 lengths[C_TEST_EXTENT_SHAPE_COUNT] = {8192, 8192, 2048};
+    for (u32 shape = 0; shape < C_TEST_EXTENT_SHAPE_COUNT; shape += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 length_count = lengths[shape];
+        u64 capacity = (u64)length_count * 32 + 256;
+        char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        c_test_append_source(bytes, capacity, &length, S8("int tall(int i, int u, int c){int x = 0;"));
+        for (u32 link = 0; link < length_count; link += 1)
+        {
+            String8 piece = shape == C_TEST_EXTENT_ELSE_IF_CHAIN ? (link ? S8(" else if (c) x = i;") : S8("if (c) x = i;"))
+                            : shape == C_TEST_EXTENT_IF_NEST     ? S8("if (c) ")
+                                                                 : S8("if (c) { x += i; ");
+            c_test_append_source(bytes, capacity, &length, piece);
+        }
+        c_test_append_source(bytes, capacity, &length,
+                             shape == C_TEST_EXTENT_ELSE_IF_CHAIN ? S8(" else x = u;") : shape == C_TEST_EXTENT_IF_NEST ? S8("x = i;") : S8(""));
+        for (u32 link = 0; shape == C_TEST_EXTENT_BRACED_IF_NEST && link < length_count; link += 1)
+        {
+            c_test_append_source(bytes, capacity, &length, S8("}"));
+        }
+        c_test_append_source(bytes, capacity, &length, S8(" return x + i + u + c;}"));
+        BUSTER_TEST(arguments, length < capacity);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters before = ir_construction_counters();
+#endif
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("controlled-body-extents.c"), tokens, parse, target_native);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters after = ir_construction_counters();
+        u64 spans = after.values[IR_CONSTRUCTION_C_STATEMENT_EXTENT_SPANS] - before.values[IR_CONSTRUCTION_C_STATEMENT_EXTENT_SPANS];
+        u64 fallback_tokens =
+            after.values[IR_CONSTRUCTION_C_DELIMITER_FALLBACK_TOKENS] - before.values[IR_CONSTRUCTION_C_DELIMITER_FALLBACK_TOKENS];
+        BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+        // A walked link measures its arms once and every later question about
+        // it is a memo hit: a few spans per link, never one per later link.
+        BUSTER_TEST(arguments, spans <= (u64)length_count * 4 + 16);
+        // Every brace, parenthesis and bracket of a well-formed body answers
+        // from the delimiter index, so nothing rescans a block per link.
+        BUSTER_TEST(arguments, fallback_tokens <= tokens.token_count);
+#endif
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrModule* module = lowered.program->modules;
+            IrFunction* function = c_test_find_ir_function(module, S8("tall"));
+            BUSTER_TEST(arguments, function != 0);
+            // Every link is its own branch, so the shape survives as blocks.
+            BUSTER_TEST(arguments, function && function->block_count > length_count);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A conditional nested in every false arm opens each join before the deeper
 // one it reads, so every block-order simplification sweep removed only the
 // deepest remaining parameter: quadratic in the nesting depth (#2801). The
@@ -44074,6 +44152,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_constexpr_integer_types);
     C_TEST_FIXTURE(arguments, c_test_constexpr_integer_types_runtime);
     C_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
+    C_TEST_FIXTURE(arguments, c_test_controlled_body_extents_linear);
     C_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
     C_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     C_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
