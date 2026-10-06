@@ -3923,10 +3923,9 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
 BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuilder* builder, CIrLabel* labels, u32 label_count, u32 start, u32 end)
 {
     bool ok = true;
-    CParseCandidates counting = c_parse_candidates(&builder->parse, builder->preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS,
-                                                   C_PARSE_POPULATION_NONE, start);
     u32 open_count = 0;
-    for (u32 index = c_parse_candidates_next(&counting, start, end); index < end; index = c_parse_candidates_next(&counting, index + 1, end))
+    for (u32 index = c_parse_statement_expression_next(&builder->parse, builder->preprocess, start, end); index < end;
+         index = c_parse_statement_expression_next(&builder->parse, builder->preprocess, index + 1, end))
     {
         open_count += 1;
     }
@@ -3943,13 +3942,11 @@ BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuil
             u32* opens = arena_allocate(builder->scratch_arena, u32, open_count * 2);
             u32* closes = opens + open_count;
             u32 depth = 0;
-            CParseCandidates sweep = c_parse_candidates(&builder->parse, builder->preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS,
-                                                        C_PARSE_POPULATION_NONE, start);
-            u32 next = c_parse_candidates_next(&sweep, start, end);
+            u32 next = c_parse_statement_expression_next(&builder->parse, builder->preprocess, start, end);
             for (u32 label = 0; label < label_count; label += 1)
             {
                 u32 position = labels[label].token_index;
-                for (; next < position; next = c_parse_candidates_next(&sweep, next + 1, end))
+                for (; next < position; next = c_parse_statement_expression_next(&builder->parse, builder->preprocess, next + 1, end))
                 {
                     if (next > 0 && c_token_is_punctuator(&builder->preprocess.tokens[next], C_PUNCTUATOR_LEFT_BRACE) &&
                         c_token_is_punctuator(&builder->preprocess.tokens[next - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))

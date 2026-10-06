@@ -1045,6 +1045,15 @@ BUSTER_C_INTERNAL u32 c_parse_candidates_next(CParseCandidates* candidates, u32 
     return result;
 }
 
+// The first statement-expression candidate in [from, end), or end, for c_gen.c,
+// which cannot see CParseCandidates. Each call is one lower-bound search of the
+// recorded positions; without a position index every token is a candidate.
+BUSTER_C_SHARED u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end)
+{
+    CParseCandidates candidates = c_parse_candidates(parse, preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS, C_PARSE_POPULATION_NONE, from);
+    return c_parse_candidates_next(&candidates, from, end);
+}
+
 #if BUSTER_INCLUDE_TESTS
 // Every from puts each identifier-then-'(' pair at every lane of the 64-token
 // step, and every end cuts the tail at every lane, including between a pair's
