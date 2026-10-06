@@ -868,12 +868,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             with self.subTest(path=path.name):
                 text = path.read_text()
-                # The owner-gated 9700X workflow (#2704) is the one reviewed
-                # use: it must run main's definition so a pull request cannot
-                # edit its gate. tools/bench_service/workflow_policy_test.py
-                # pins that workflow line for line.
-                if path.name != "9700x-direct-bench.yml":
-                    self.assertNotIn("pull_request_target", text)
+                self.assertNotIn("pull_request_target", text)
                 self.assertIn("contents: read", text)
                 self.assertIn("persist-credentials: false", text)
                 self.assertIn("concurrency:", text)
