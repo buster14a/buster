@@ -243,7 +243,15 @@
   entry completion. Each fixed-size direct stderr write carries PID, app
   monotonic/wall microseconds, process CPU microseconds and separate clock/query
   statuses; nonzero statuses make the corresponding measurement unavailable.
-  This path needs no arena or thread context. `BUSTER_IOS_LAUNCH_OBSERVATION`
+  This path needs no arena or thread context. Right after the `main` record,
+  `BUSTER_IOS_PROCESS_V1` reports the kernel's process start wall time
+  (`start_wall_us`, from `sysctl` `KERN_PROC_PID`) and `start_status`. Host
+  launch to `start_wall_us` is simulator spawn scheduling. `start_wall_us` to
+  the `main` wall time is loader and static-initialization work.
+  `ios/test_ci.sh` launches Release before Debug by default (checked by
+  `ios/hosted_signing_budget_test.py`), so the first
+  launch on a freshly booted device does not consume the Debug budget (#2819).
+  `BUSTER_IOS_LAUNCH_OBSERVATION`
   records the host's first polled console, app trace and fixture receipt using
   the existing Bash launch clock. Poll observations include scheduling and
   scanning delay and are not native timestamps; missing events stay absent.
@@ -742,6 +750,12 @@ program/verifier body remains live through its dependent checks. The runner's
 work-indexed parallel records lie below module marks, and parallel output has
 its own arena. The temporary-root pathname lives in a separate run-owned arena;
 compiler-global metadata and persistent lane contexts keep their existing owners.
+
+A fixture that compiles and runs an executable on every loop iteration names it
+with `buster_test_temporary_unique_path`, which appends a process-wide serial to
+`buster_test_temporary_path`. Windows may refuse to overwrite an image that has
+just run (`ERROR_ACCESS_DENIED`; #2089, #2836), so no iteration may rewrite a
+path an earlier one launched.
 
 `test_arena_self_test` runs as a fail-closed harness check without changing
 registered assertion/module counts. It covers nested and empty scopes, retained

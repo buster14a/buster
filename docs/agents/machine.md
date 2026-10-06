@@ -1044,3 +1044,15 @@ Native selectors accept any valid canonical entry block. They emit that block
 first, remap expanded MIR block ranges and CFG edges, and capture arguments in
 the actual entry. The canonical-entry regression retains all block rotations,
 re-publishes the CFG after mutation, and checks every allocator spelling.
+
+## System V MEMORY variadic records
+
+The registered SysV padding fixture (`compiler_driver_test_sysv_padding_eightbytes`)
+also reads non-f80 MEMORY-class structs/unions (17-byte, packed 9-byte and
+16-aligned 32-byte records) with `va_arg`. It observes that the overflow cursor
+advances by the size rounded to eight (after sixteen-byte alignment where
+required), that GP/FP save-slot counters are untouched, that `va_copy` advances
+independently, and that every payload byte arrives, including a read after GP
+exhaustion, in both compiler directions and every allocator/frontend
+combination. The retired direct emitter had no such path; current `none`
+selects MIR-stack.
