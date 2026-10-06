@@ -2791,6 +2791,10 @@ typedef enum CIrGroupFact
     C_IR_GROUP_FACT_TOP_COMMA = 4,       // c_ir_has_top_level_comma
     C_IR_GROUP_FACT_ANY_ASSIGNMENT = 8,  // c_ir_has_assignment_anywhere
     C_IR_GROUP_FACT_ANY_CONTROL = 16,    // c_ir_has_control_operator_anywhere
+    // Some group strictly inside passes every token test
+    // c_ir_prepare_control_expressions_step makes before it prepares a
+    // group; without it, that prepass may hop over the interior.
+    C_IR_GROUP_FACT_PREPARABLE_INSIDE = 32,
 } CIrGroupFact;
 
 // One open group of the classifying pass: the group's token, the facts seen so
@@ -18737,52 +18741,36 @@ BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
 
 BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
+    bool result = false;
     // An assignment after a top-level `?` belongs to one of the
     // conditional operator's arms, not to the surrounding expression.  The
     // expression parser splits comma groups before asking this predicate, so
     // retaining the tail bit until the end is sufficient (a later arm cannot
     // become a root assignment of the whole conditional).
     bool conditional_tail = false;
-    for (u32 index = start; index < end; index += 1)
+    // Groups are hopped over whole: none of their tokens is a root token, and
+    // a nested call's argument asks this of the rest of the nesting.
+    for (u32 index = start; index < end && !result; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
         {
-            parentheses += 1;
+            index = end;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        else if (scan == C_IR_GROUP_SCAN_NOT_OPEN)
         {
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-        {
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
-        {
-            conditional_tail = true;
-        }
-        else if (!conditional_tail && !parentheses && !brackets && !braces && c_ir_assignment_operator(token))
-        {
-            return true;
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+            {
+                conditional_tail = true;
+            }
+            else
+            {
+                result = !conditional_tail && c_ir_assignment_operator(token);
+            }
         }
     }
-    return false;
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_has_assignment_anywhere(CIntegerIrBuilder* builder, u32 start, u32 end)
@@ -18972,8 +18960,27 @@ BUSTER_C_INTERNAL void c_ir_group_facts_build(CIntegerIrBuilder* builder)
             if (stack_count > 1)
             {
                 builder->group_facts[top->open_index - builder->body_token_start] = (u8)top->facts;
+                // The same tests the control-expression prepass puts to a
+                // group it reaches, short of the ones that only ever turn a
+                // group away (a prepared record, an enclosing lowering range,
+                // a deferred or unevaluated operand).
+                bool preparable;
+                if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET)
+                {
+                    preparable = token_index != top->open_index + 1 &&
+                                 (top->facts & (C_IR_GROUP_FACT_ROOT_CONTROL | C_IR_GROUP_FACT_ROOT_ASSIGNMENT)) != 0;
+                }
+                else
+                {
+                    bool call = top->open_index > builder->body_token_start &&
+                                builder->preprocess.tokens[top->open_index - 1].kind == C_TOKEN_IDENTIFIER;
+                    preparable = !call && ((top->facts & (C_IR_GROUP_FACT_ROOT_CONTROL | C_IR_GROUP_FACT_ROOT_ASSIGNMENT)) != 0 ||
+                                           ((top->facts & C_IR_GROUP_FACT_TOP_COMMA) != 0 &&
+                                            (top->facts & (C_IR_GROUP_FACT_ANY_ASSIGNMENT | C_IR_GROUP_FACT_ANY_CONTROL)) != 0));
+                }
                 stack_count -= 1;
                 stack[stack_count - 1].facts |= top->facts & (C_IR_GROUP_FACT_ANY_ASSIGNMENT | C_IR_GROUP_FACT_ANY_CONTROL);
+                stack[stack_count - 1].facts |= preparable || (top->facts & C_IR_GROUP_FACT_PREPARABLE_INSIDE) ? C_IR_GROUP_FACT_PREPARABLE_INSIDE : 0;
             }
         }
         else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
@@ -19057,6 +19064,25 @@ BUSTER_C_INTERNAL bool c_ir_group_fact(CIntegerIrBuilder* builder, u32 open, u32
         }
     }
     return answer;
+}
+
+// Whether c_ir_prepare_control_expressions_step could prepare any group inside
+// the call argument list (open, close). A long list reads the classifying
+// pass; a short one, or one the pass cannot answer, says it could, which only
+// costs the prepass a walk bounded by C_IR_GROUP_FACT_SCAN_LIMIT.
+BUSTER_C_INTERNAL bool c_ir_group_may_hold_preparable(CIntegerIrBuilder* builder, u32 open, u32 close)
+{
+    bool result = true;
+    if (builder->group_facts_exact && close - open > C_IR_GROUP_FACT_SCAN_LIMIT && open >= builder->body_token_start &&
+        open - builder->body_token_start < builder->body_token_count)
+    {
+        if (!builder->group_facts_built)
+        {
+            c_ir_group_facts_build(builder);
+        }
+        result = (builder->group_facts[open - builder->body_token_start] & C_IR_GROUP_FACT_PREPARABLE_INSIDE) != 0;
+    }
+    return result;
 }
 
 // An operand of sizeof or _Alignof is not prepared by either prepass. Its
@@ -19182,6 +19208,17 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         }
         if (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
         {
+            // A call's arguments are walked for groups to prepare. When none
+            // inside could be prepared, the walk would do nothing but fold
+            // the tokens into the lazy scan, and the group's close leaves that
+            // scan as the skip below leaves it. Each argument of a nested
+            // call `f(g(h(...)))` runs this prepass again over its own range,
+            // so walking it every time made the nesting quadratic.
+            if (!c_ir_group_may_hold_preparable(builder, index, close))
+            {
+                frame->as.prepare_control.index = close + 1;
+                c_ir_lazy_operand_scan_skip_group(&frame->as.prepare_control.lazy);
+            }
             continue;
         }
         if (brackets && (close == index + 1 || (!c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ROOT_CONTROL) &&
@@ -19397,43 +19434,34 @@ BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPrepar
     return true;
 }
 
+// The first top-level comma of [index, end), or end. Groups are hopped over
+// whole, so splitting the arguments of `f(g(h(...)))` at every level of the
+// nesting stays linear in the arguments' top-level tokens.
+BUSTER_C_INTERNAL u32 c_ir_call_argument_separator(CIntegerIrBuilder* builder, u32 index, u32 end)
+{
+    u32 separator = end;
+    for (; index < end && separator == end; index += 1)
+    {
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+        {
+            index = end;
+        }
+        else if (scan == C_IR_GROUP_SCAN_NOT_OPEN && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_COMMA))
+        {
+            separator = index;
+        }
+    }
+    return separator;
+}
+
 BUSTER_C_INTERNAL u32 c_ir_call_argument_count(CIntegerIrBuilder* builder, CIrPreparedCall* call)
 {
     u32 count = call->open_index + 1 < call->close_index ? 1 : 0;
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
-    for (u32 index = call->open_index + 1; index < call->close_index; index += 1)
+    for (u32 index = c_ir_call_argument_separator(builder, call->open_index + 1, call->close_index); index < call->close_index;
+         index = c_ir_call_argument_separator(builder, index + 1, call->close_index))
     {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            parentheses += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-        {
-            parentheses -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            brackets += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-        {
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-        {
-            count += 1;
-        }
+        count += 1;
     }
 
     return count;
@@ -22679,43 +22707,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             while (argument_index < argument_end)
             {
-                u32 separator = argument_index;
-                u32 parentheses = 0;
-                u32 brackets = 0;
-                u32 braces = 0;
-                while (separator < argument_end)
-                {
-                    CToken current = builder->preprocess.tokens[separator];
-                    if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        parentheses += 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                    {
-                        parentheses -= 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                    {
-                        brackets += 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-                    {
-                        brackets -= 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        braces += 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-                    {
-                        braces -= 1;
-                    }
-                    else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                    {
-                        break;
-                    }
-                    separator += 1;
-                }
+                u32 separator = c_ir_call_argument_separator(builder, argument_index, argument_end);
                 if (separator == argument_index)
                 {
                     return false;
@@ -22756,43 +22748,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             u32 predicted_argument_index = selected->open_index + 1;
             while (predicted_argument_index < selected->close_index)
             {
-                u32 separator = predicted_argument_index;
-                u32 parentheses = 0;
-                u32 brackets = 0;
-                u32 braces = 0;
-                while (separator < selected->close_index)
-                {
-                    CToken current = builder->preprocess.tokens[separator];
-                    if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        parentheses += 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                    {
-                        parentheses -= 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                    {
-                        brackets += 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-                    {
-                        brackets -= 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        braces += 1;
-                    }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-                    {
-                        braces -= 1;
-                    }
-                    else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                    {
-                        break;
-                    }
-                    separator += 1;
-                }
+                u32 separator = c_ir_call_argument_separator(builder, predicted_argument_index, selected->close_index);
                 if (separator == predicted_argument_index || predicted_argument_count >= argument_capacity)
                 {
                     scratch_end(call_argument_temporary);
@@ -23161,43 +23117,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         }
         while (index < argument_end)
         {
-            u32 separator = index;
-            u32 parentheses = 0;
-            u32 brackets = 0;
-            u32 braces = 0;
-            while (separator < argument_end)
-            {
-                CToken current = builder->preprocess.tokens[separator];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    brackets += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-                {
-                    brackets -= 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
-                {
-                    braces += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-                {
-                    braces -= 1;
-                }
-                else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                {
-                    break;
-                }
-                separator += 1;
-            }
+            u32 separator = c_ir_call_argument_separator(builder, index, argument_end);
             if (separator == index)
             {
                 builder->failure_token_index = separator < argument_end ? separator : selected->open_index;
@@ -35805,49 +35725,34 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         }
         frame->as.expression.start = start;
         frame->as.expression.end = end;
+        // Both root scans below hop over groups whole: no token inside one is
+        // a root token, and every argument of a nested call is lowered by
+        // this step again, so stepping through the rest of the nesting made
+        // `f(g(h(...)))` quadratic.
         u32 last_comma = UINT32_MAX;
-        u32 comma_parentheses = 0;
-        u32 comma_brackets = 0;
-        u32 comma_braces = 0;
         u32 comma_conditionals = 0;
         for (u32 index = start; index < end; index += 1)
         {
             CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+            if (scan == C_IR_GROUP_SCAN_UNCLOSED)
             {
-                comma_parentheses += 1;
+                index = end;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && comma_parentheses)
+            else if (scan == C_IR_GROUP_SCAN_NOT_OPEN)
             {
-                comma_parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                comma_brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && comma_brackets)
-            {
-                comma_brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                comma_braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && comma_braces)
-            {
-                comma_braces -= 1;
-            }
-            else if (!comma_parentheses && !comma_brackets && !comma_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
-            {
-                comma_conditionals += 1;
-            }
-            else if (!comma_parentheses && !comma_brackets && !comma_braces && comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
-            {
-                comma_conditionals -= 1;
-            }
-            else if (!comma_parentheses && !comma_brackets && !comma_braces && !comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-            {
-                last_comma = index;
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+                {
+                    comma_conditionals += 1;
+                }
+                else if (comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+                {
+                    comma_conditionals -= 1;
+                }
+                else if (!comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+                {
+                    last_comma = index;
+                }
             }
         }
         if (last_comma != UINT32_MAX)
@@ -35871,47 +35776,27 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             continue;
         }
         u32 assignment = end;
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
         bool conditional_tail = false;
         CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
-        for (u32 index = start; index < end; index += 1)
+        for (u32 index = start; index < end && assignment == end; index += 1)
         {
             CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+            if (scan == C_IR_GROUP_SCAN_UNCLOSED)
             {
-                parentheses += 1;
+                index = end;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+            else if (scan == C_IR_GROUP_SCAN_NOT_OPEN)
             {
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-            {
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
-            {
-                conditional_tail = true;
-            }
-            else if (!conditional_tail && !parentheses && !brackets && !braces &&
-                     (c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_ir_compound_assignment_operator(token, &assignment_operation)))
-            {
-                assignment = index;
-                break;
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+                {
+                    conditional_tail = true;
+                }
+                else if (!conditional_tail &&
+                         (c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_ir_compound_assignment_operator(token, &assignment_operation)))
+                {
+                    assignment = index;
+                }
             }
         }
         if (assignment < end && assignment != start && assignment + 1 < end)
