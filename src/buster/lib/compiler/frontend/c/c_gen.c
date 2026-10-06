@@ -2162,6 +2162,8 @@ struct CIrLabel
     String8 name;
     u32 token_index;
     IrBlockId block;
+    u32 statement_expression_open;
+    u32 statement_expression_close;
 };
 
 typedef struct CIrConstantOperator CIrConstantOperator;
@@ -3911,6 +3913,73 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
     u32 scanned = c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
     IR_CONSTRUCTION_RECORD(C_DELIMITER_FALLBACK_TOKENS, (scanned == UINT32_MAX ? end : scanned + 1) - open);
     return scanned;
+}
+
+// Records, for each label of a body in token order, the innermost GNU
+// statement expression that contains it (UINT32_MAX when none does). A goto may
+// not enter a statement expression, so a label is visible to a goto exactly when
+// its recorded range is empty or contains the goto: one sweep here makes every
+// later check O(1). The stack holds the still-open statement expressions.
+BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuilder* builder, CIrLabel* labels, u32 label_count, u32 start, u32 end)
+{
+    bool ok = true;
+    CParseCandidates counting = c_parse_candidates(&builder->parse, builder->preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS,
+                                                   C_PARSE_POPULATION_NONE, start);
+    u32 open_count = 0;
+    for (u32 index = c_parse_candidates_next(&counting, start, end); index < end; index = c_parse_candidates_next(&counting, index + 1, end))
+    {
+        open_count += 1;
+    }
+    for (u32 label = 0; label < label_count; label += 1)
+    {
+        labels[label].statement_expression_open = UINT32_MAX;
+        labels[label].statement_expression_close = UINT32_MAX;
+    }
+    if (open_count && label_count)
+    {
+        ok = c_ir_lower_scratch_reservation(builder, sizeof(u32), (u64)open_count * 2, BUSTER_ALIGN_OF(u32));
+        if (ok)
+        {
+            u32* opens = arena_allocate(builder->scratch_arena, u32, open_count * 2);
+            u32* closes = opens + open_count;
+            u32 depth = 0;
+            CParseCandidates sweep = c_parse_candidates(&builder->parse, builder->preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS,
+                                                        C_PARSE_POPULATION_NONE, start);
+            u32 next = c_parse_candidates_next(&sweep, start, end);
+            for (u32 label = 0; label < label_count; label += 1)
+            {
+                u32 position = labels[label].token_index;
+                for (; next < position; next = c_parse_candidates_next(&sweep, next + 1, end))
+                {
+                    if (next > 0 && c_token_is_punctuator(&builder->preprocess.tokens[next], C_PUNCTUATOR_LEFT_BRACE) &&
+                        c_token_is_punctuator(&builder->preprocess.tokens[next - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        while (depth && closes[depth - 1] < next)
+                        {
+                            depth -= 1;
+                        }
+                        u32 close = c_ir_matching_delimiter_cached(builder, next, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+                        if (close != UINT32_MAX && depth < open_count)
+                        {
+                            opens[depth] = next;
+                            closes[depth] = close;
+                            depth += 1;
+                        }
+                    }
+                }
+                while (depth && closes[depth - 1] < position)
+                {
+                    depth -= 1;
+                }
+                if (depth)
+                {
+                    labels[label].statement_expression_open = opens[depth - 1];
+                    labels[label].statement_expression_close = closes[depth - 1];
+                }
+            }
+        }
+    }
+    return ok;
 }
 
 // The only punctuators the preparation prepasses' deferral scan reacts to,
@@ -41386,6 +41455,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
             .block = block,
         };
     }
+    if (!c_ir_label_statement_expression_enclosures(builder, state->labels, state->label_count, declaration.body_start, body_end))
+    {
+        return false;
+    }
     if (!builder->labels)
     {
         builder->labels = state->labels;
@@ -42913,7 +42986,22 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     builder->failure_message = S8("malformed goto statement");
                     return false;
                 }
-                CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
+                String8 goto_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+                CIrLabel* label = c_ir_label_find(labels, label_count, goto_name);
+                // Labels have function scope: a goto inside a GNU statement
+                // expression may leave it for a label of the enclosing function
+                // or of an enclosing statement expression.
+                if (!label && statement_expression_mode)
+                {
+                    label = c_ir_label_find(builder->labels, builder->label_count, goto_name);
+                }
+                if (label && label->statement_expression_open != UINT32_MAX &&
+                    (index < label->statement_expression_open || index > label->statement_expression_close))
+                {
+                    builder->failure_message = string_format(builder->arena, S8("cannot jump into a statement expression: label '{S8}'"), goto_name);
+                    builder->failure_token_index = index + 1;
+                    return false;
+                }
                 CScopeId label_scope = c_parse_scope_for_token(
                     &builder->parse,
                     builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope

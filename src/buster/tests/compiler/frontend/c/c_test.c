@@ -28649,6 +28649,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_value(Uni
     return result;
 }
 
+// Labels have function scope, so a goto inside a GNU statement expression may
+// leave it for a label of the enclosing function; a goto from outside into the
+// statement expression stays rejected, as in GCC and Clang.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_goto_out(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("int statement_expression_goto_out(int x)\n"
+                                               "{\n"
+                                               "    int r = 0;\n"
+                                               "    r = ({ int t = x * 2; if (t > 10) goto out; t + 1; });\n"
+                                               "    return r;\n"
+                                               "out:\n"
+                                               "    return -1;\n"
+                                               "}\n"
+                                               "int statement_expression_goto_middle(int x)\n"
+                                               "{\n"
+                                               "    int r = ({ int a = 1; ({ if (x) goto middle; a = 5; }); a += 2; middle: a + 10; });\n"
+                                               "    return r;\n"
+                                               "}\n"
+                                               "int statement_expression_goto_out_nested(int x)\n"
+                                               "{\n"
+                                               "    int r = ({ int v = ({ if (x) goto done; 1; }); v + 2; });\n"
+                                               "    return r;\n"
+                                               "done:\n"
+                                               "    return 9;\n"
+                                               "}\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("statement-expression-goto-out.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    TemporalArena into_temporary = scratch_begin(0, 0);
+    CPreprocessResult into_tokens = c_preprocess(into_temporary.arena,
+                                                 S8("int statement_expression_goto_in(int x)\n"
+                                                    "{\n"
+                                                    "    goto in;\n"
+                                                    "    int r = ({ int t = 1; in: t + x; });\n"
+                                                    "    return r;\n"
+                                                    "}\n"),
+                                                 (CPreprocessOptions){0});
+    CParseResult into_parse = c_parse(into_temporary.arena, into_tokens);
+    CIRLowerResult into_ir = c_lower_to_ir(into_temporary.arena, S8("statement-expression-goto-in.c"), into_tokens, into_parse, target_native);
+    BUSTER_TEST(arguments, into_ir.diagnostic_count != 0 || into_parse.diagnostic_count != 0);
+    scratch_end(into_temporary);
+    TemporalArena sibling_temporary = scratch_begin(0, 0);
+    CPreprocessResult sibling_tokens = c_preprocess(sibling_temporary.arena,
+                                                    S8("int statement_expression_goto_sibling(int x)\n"
+                                                       "{\n"
+                                                       "    int a = ({ if (x) goto in; 1; });\n"
+                                                       "    int b = ({ in: 2; });\n"
+                                                       "    return a + b;\n"
+                                                       "}\n"),
+                                                    (CPreprocessOptions){0});
+    CParseResult sibling_parse = c_parse(sibling_temporary.arena, sibling_tokens);
+    CIRLowerResult sibling_ir = c_lower_to_ir(sibling_temporary.arena, S8("statement-expression-goto-sibling.c"), sibling_tokens, sibling_parse,
+                                              target_native);
+    BUSTER_TEST(arguments, sibling_ir.diagnostic_count == 1);
+    if (sibling_ir.diagnostic_count == 1)
+    {
+        BUSTER_STRING_TEST(arguments, sibling_ir.diagnostics[0].message,
+                           S8("in function 'statement_expression_goto_sibling': cannot jump into a statement expression: label 'in'"));
+    }
+    scratch_end(sibling_temporary);
+    return result;
+}
+
 // A declaration inside a value-producing GNU statement expression is visible
 // to the statements that follow it in the same body -- the shape the construct
 // exists for, as in `({ typeof(a) _a = (a); typeof(b) _b = (b); _a > _b ? _a : _b; })`.
@@ -44555,6 +44630,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_control_value);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
+    C_TEST_FIXTURE(arguments, c_test_statement_expression_goto_out);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);
     C_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
     C_TEST_FIXTURE(arguments, c_test_static_compound_literal);
