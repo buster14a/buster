@@ -9868,6 +9868,133 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_compiler_runtime(Uni
         scratch_end(temporary);
     }
 #endif
+#if BUSTER_LINK_LIBC && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
+    {
+        // Binary16 <-> binary32/binary64 conversions lower inline on every
+        // target, so a program that converts links with no compiler-runtime
+        // provider. The program checks every half value and the neighbours of
+        // every rounding tie against an independent integer reference.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 native_parts[] = {
+            S8(
+            "typedef unsigned long long U64;\n"
+            "static unsigned short ref_half(U64 bits, int ebits, int fbits)\n{\n"
+            "    U64 frac = bits & ((1ull << fbits) - 1);\n"
+            "    int exp = (int)((bits >> fbits) & ((1 << ebits) - 1));\n"
+            "    unsigned sign = (unsigned)(bits >> (fbits + ebits)) << 15;\n"
+            "    if (exp == (1 << ebits) - 1) return sign | 0x7c00 | (frac ? (0x200 | (unsigned)(frac >> (fbits - 10)) & 0x3ff) : 0);\n"
+            "    U64 m = frac | (exp ? 1ull << fbits : 0);\n"
+            "    int e = (exp ? exp : 1) - ((1 << (ebits - 1)) - 1);\n"
+            "    int ulp = e >= -14 ? e - 10 : -24;\n"
+            "    int shift = ulp - (e - fbits);\n"
+            "    U64 q = 0;\n"
+            "    if (shift < 64)\n    {\n"
+            "        q = m >> shift;\n"
+            "        U64 rem = m & ((1ull << shift) - 1), half = 1ull << (shift - 1);\n"
+            "        if (rem > half || (rem == half && (q & 1))) q += 1;\n"
+            "    }\n"
+            "    unsigned out = e >= -14 ? (unsigned)(((e + 14) << 10) + q) : (unsigned)q;\n"
+            "    return sign | (out >= 0x7c00 ? 0x7c00 : out);\n}\n"
+            "static double ref_value(unsigned short h)\n{\n"
+            "    int e = (h >> 10) & 31, m = h & 1023;\n"
+            "    double v = e ? (double)(1024 + m) : (double)m, scale = 1.0;\n"
+            "    int steps = (e ? e : 1) - 25;\n"
+            "    for (; steps > 0; steps -= 1) scale *= 2.0;\n"
+            "    for (; steps < 0; steps += 1) scale *= 0.5;\n"
+            "    return (h & 0x8000 ? -1.0 : 1.0) * v * scale;\n}\n"
+            "static unsigned fbits(float f) { unsigned b; __builtin_memcpy(&b, &f, 4); return b; }\n"
+            "static U64 dbits(double d) { U64 b; __builtin_memcpy(&b, &d, 8); return b; }\n"
+            "static float from_bits32(unsigned b) { float f; __builtin_memcpy(&f, &b, 4); return f; }\n"
+            "static double from_bits64(U64 b) { double d; __builtin_memcpy(&d, &b, 8); return d; }\n"
+            "__attribute__((noinline)) _Float16 half_from_float(float x) { return (_Float16)x; }\n"
+            "__attribute__((noinline)) _Float16 half_from_double(double x) { return (_Float16)x; }\n"
+            "__attribute__((noinline)) float float_from_half(_Float16 x) { return x; }\n"
+            "__attribute__((noinline)) double double_from_half(_Float16 x) { return x; }\n"
+            "static unsigned short half_bits(_Float16 h) { unsigned short b; __builtin_memcpy(&b, &h, 2); return b; }\n"
+            "static _Float16 half_from_bits(unsigned short b) { _Float16 h; __builtin_memcpy(&h, &b, 2); return h; }\n"
+            ),
+            S8(
+            "int main(void)\n{\n"
+            "    int failures = 0;\n"
+            "    volatile double d = 1.5; _Float16 h = (_Float16)d;\n"
+            "    volatile float f = 2.5f; _Float16 g = f;\n"
+            "    failures += (double)h != 1.5 || (float)g != 2.5f;\n"
+            "    for (unsigned i = 0; i < 65536; i += 1)\n    {\n"
+            "        _Float16 half = half_from_bits((unsigned short)i);\n"
+            "        unsigned short e = (i >> 10) & 31;\n"
+            "        float wide = float_from_half(half);\n"
+            "        double wider = double_from_half(half);\n"
+            "        if (e == 31 && (i & 1023))\n        {\n"
+            "            failures += fbits(wide) != ((i & 0x8000) << 16 | 0x7fc00000u | (i & 1023) << 13);\n"
+            "            failures += dbits(wider) != ((U64)(i & 0x8000) << 48 | 0x7ff8000000000000ull | (U64)(i & 1023) << 42);\n"
+            "        }\n"
+            "        else if (e == 31)\n        {\n"
+            "            failures += fbits(wide) != ((i & 0x8000) << 16 | 0x7f800000u);\n"
+            "            failures += dbits(wider) != ((U64)(i & 0x8000) << 48 | 0x7ff0000000000000ull);\n"
+            "        }\n"
+            "        else\n        {\n"
+            "            failures += fbits(wide) != fbits((float)ref_value((unsigned short)i));\n"
+            "            failures += dbits(wider) != dbits(ref_value((unsigned short)i));\n"
+            "        }\n"
+            "    }\n"
+            "    for (unsigned i = 0; i < 0x7c00; i += 1)\n    {\n"
+            "        double midpoint = (ref_value((unsigned short)i) + ref_value((unsigned short)(i + 1))) / 2.0;\n"
+            "        for (unsigned sign = 0; sign < 2; sign += 1)\n        {\n"
+            "            for (int delta = -2; delta <= 2; delta += 1)\n            {\n"
+            "                unsigned x = fbits((float)midpoint) + (unsigned)delta; x |= sign ? 0x80000000u : 0;\n"
+            "                U64 y = dbits(midpoint) + (U64)(long long)delta; y |= sign ? 0x8000000000000000ull : 0;\n"
+            "                failures += half_bits(half_from_float(from_bits32(x))) != ref_half(x, 8, 23);\n"
+            "                failures += half_bits(half_from_double(from_bits64(y))) != ref_half(y, 11, 52);\n"
+            "            }\n"
+            "            U64 trap = (dbits(midpoint) + 1) | (sign ? 0x8000000000000000ull : 0);\n"
+            "            failures += half_bits(half_from_double(from_bits64(trap))) != ref_half(trap, 11, 52);\n"
+            "        }\n"
+            "    }\n"
+            "    unsigned floats[] = {0, 0x7f800000u, 0x7fc00000u, 0x7f800001u, 0x7fa00000u, 0x7fffffffu, 0x33000000u, 0x33000001u, 0x477ff000u, 0x477fefffu, 0x7f7fffffu, 1};\n"
+            "    for (unsigned i = 0; i < 12; i += 1)\n    {\n"
+            "        for (unsigned sign = 0; sign < 2; sign += 1)\n        {\n"
+            "            unsigned x = floats[i] | (sign ? 0x80000000u : 0);\n"
+            "            failures += half_bits(half_from_float(from_bits32(x))) != ref_half(x, 8, 23);\n"
+            "            U64 y = (U64)x << 32 | (x & 0x7fffffffu) * 0x9e3779b1u;\n"
+            "            failures += half_bits(half_from_double(from_bits64(y))) != ref_half(y, 11, 52);\n"
+            "        }\n"
+            "    }\n"
+            "    U64 state = 88172645463325252ull;\n"
+            "    for (unsigned i = 0; i < 400000; i += 1)\n    {\n"
+            "        state ^= state << 13; state ^= state >> 7; state ^= state << 17;\n"
+            "        unsigned x = (unsigned)state;\n"
+            "        if (i & 1) x = (x & 0x807fffffu) | ((0x30u + ((x >> 23) & 31)) << 23);\n"
+            "        U64 y = state * 0x9e3779b97f4a7c15ull;\n"
+            "        if (i & 2) y = (y & 0x800fffffffffffffull) | ((U64)(0x3e0 + ((y >> 52) & 63)) << 52);\n"
+            "        failures += half_bits(half_from_float(from_bits32(x))) != ref_half(x, 8, 23);\n"
+            "        failures += half_bits(half_from_double(from_bits64(y))) != ref_half(y, 11, 52);\n"
+            "    }\n"
+            "    return failures != 0;\n}\n")};
+        String8 native_source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_parts), false);
+        String8 input = buster_test_temporary_path(arena, S8("buster-half-inline"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(native_source)));
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"),
+            S8("-fregister-allocator=quality")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            String8 output = buster_test_temporary_path(arena, S8("buster-half-inline-run"), S8(".elf"));
+            String8 command[] = {S8("-g0"), modes[mode], S8("-fverify-codegen"), input, S8("-o"), output};
+            CompilerDriverInvocation native = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            native.reject_machine_fallback = mode != 0;
+            CompilerDriverResult linked = compiler_driver_execute_invocation(arena, native);
+            BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, output));
+#if BUSTER_CPU_ARCH_X86_64
+                BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, S8("libgcc_s.so.1")) == 0);
+#endif
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
     return result;
 }
 
