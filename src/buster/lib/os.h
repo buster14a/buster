@@ -419,6 +419,12 @@ BUSTER_F_DECL bool os_directory_delete(String8 path);
 // with OS_FILE_KIND_MISSING; otherwise the result carries identity stats.
 BUSTER_F_DECL FileStats os_file_replacement_target_stats(String8 path);
 
+// Metadata-only identity probe that follows every link, including a final one.
+// It opens no file data (a FIFO cannot block; read-only files are fine) and
+// needs no write access. A missing target is valid with OS_FILE_KIND_MISSING;
+// otherwise the result carries device/index identity and the followed kind.
+BUSTER_F_DECL FileStats os_path_followed_stats(String8 path);
+
 typedef struct OsFileStagingResult OsFileStagingResult;
 struct OsFileStagingResult
 {

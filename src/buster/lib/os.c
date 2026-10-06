@@ -2652,6 +2652,99 @@ FileStats os_file_replacement_target_stats(String8 path)
     return result;
 }
 
+FileStats os_path_followed_stats(String8 path)
+{
+    FileStats result = {0};
+    if (!path.pointer || !path.length)
+    {
+        result.error = os_file_invalid_error();
+    }
+    else
+    {
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            result.error = os_temporary_arena_error();
+        }
+#if defined(__linux__) || defined(__APPLE__)
+        String8Z path_z = {0};
+        if (!result.error.v && !string8z_copy_arena(scratch.arena, path, &path_z))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else if (!result.error.v)
+        {
+            // stat opens nothing, so a FIFO cannot block and a read-only file is fine.
+            struct stat information;
+            int status;
+            do
+            {
+                status = stat((char*)path_z.pointer, &information);
+            } while (status < 0 && errno == EINTR);
+            if (status == 0)
+            {
+                result.valid = true;
+                result.device = (u64)information.st_dev;
+                result.index = (u64)information.st_ino;
+                result.permissions = (u32)(information.st_mode & 0777);
+                result.kind = S_ISREG(information.st_mode)   ? OS_FILE_KIND_REGULAR
+                              : S_ISDIR(information.st_mode) ? OS_FILE_KIND_DIRECTORY
+                              : (S_ISCHR(information.st_mode) || S_ISFIFO(information.st_mode)) ? OS_FILE_KIND_STREAM
+                                                                                                : OS_FILE_KIND_OTHER;
+            }
+            else
+            {
+                OsError error = os_get_last_error();
+                if (error.v == (u32)ENOENT)
+                {
+                    result.valid = true;
+                    result.kind = OS_FILE_KIND_MISSING;
+                }
+                else
+                {
+                    result.error = error;
+                }
+            }
+        }
+#elif defined(_WIN32)
+        String16Z path_w = {0};
+        if (!result.error.v && !string16z_from_string8_arena(scratch.arena, path, &path_w))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else if (!result.error.v)
+        {
+            // Attribute-only access; no reparse flag, so links are followed.
+            HANDLE handle = CreateFileW(path_w.pointer, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
+                                        FILE_FLAG_BACKUP_SEMANTICS, 0);
+            if (handle != INVALID_HANDLE_VALUE)
+            {
+                OsFileDescriptor* file = (OsFileDescriptor*)handle;
+                result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+                OsError close_error = os_file_close_checked(file);
+                if (result.valid && close_error.v)
+                {
+                    result = (FileStats){.error = close_error};
+                }
+            }
+            else
+            {
+                OsError error = os_get_last_error();
+                result.valid = error.v == (u32)ERROR_FILE_NOT_FOUND || error.v == (u32)ERROR_PATH_NOT_FOUND;
+                if (!result.valid)
+                {
+                    result.error = error;
+                }
+            }
+        }
+#else
+        result.error = os_file_invalid_error();
+#endif
+        os_temporary_arena_end(scratch);
+    }
+    return result;
+}
+
 // Collisions come only from leftovers of an earlier process with the same id
 // or from foreign files, so a short bounded search suffices.
 #define OS_FILE_STAGING_ATTEMPTS 64

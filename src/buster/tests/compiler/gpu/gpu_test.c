@@ -1425,6 +1425,86 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(native_input));
     }
 
+    // The output must not overwrite an input under any alias: the check
+    // compares file identity, not spelling, and survives staging retargeting.
+    // Not permission based, so it also holds when run as root.
+#if BUSTER_LINUX || BUSTER_MACOS
+    {
+        u8 good_data[] = {0x03, 0x02, 0x23, 0x07, 0, 0, 0, 0};
+        u8 other_data[] = {0x03, 0x02, 0x23, 0x07, 1, 1, 1, 1};
+        ByteSlice good = (ByteSlice)BUSTER_ARRAY_TO_SLICE(good_data);
+        ByteSlice other = (ByteSlice)BUSTER_ARRAY_TO_SLICE(other_data);
+        String8 directory = buster_test_temporary_path(arena, S8("gpu-alias-directory"), S8(".d"));
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+        BUSTER_TEST(arguments, os_make_directory_attempt(directory));
+        u64 name_begin = directory.length;
+        while (name_begin && directory.pointer[name_begin - 1] != '/')
+        {
+            name_begin -= 1;
+        }
+        String8 directory_name = string_slice(directory, name_begin, directory.length);
+        String8 input = string_format_z(arena, S8("{S8}/input.spv"), directory);
+        String8 alias_file = string_format_z(arena, S8("{S8}/alias.spv"), directory);
+        String8 distinct = string_format_z(arena, S8("{S8}/distinct.spv"), directory);
+        BUSTER_TEST(arguments, file_write(input, good));
+        String8 inputs[] = {input};
+        GpuPipelineOptions options = gpu_test_options(inputs, 1, gpu_test_target(S8("spirv64")), GPU_PIPELINE_ACTION_LINK);
+        options.temporary_directory = (String8){0};
+
+        String8 spellings[] = {
+            input,
+            string_format_z(arena, S8("{S8}/./input.spv"), directory),
+            string_format_z(arena, S8("{S8}/../{S8}/input.spv"), directory, directory_name),
+            string_format_z(arena, S8("{S8}//input.spv"), directory),
+            alias_file,
+            alias_file,
+        };
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(spellings); form += 1)
+        {
+            // Forms 4 and 5 are a symbolic link and a hard link to the input.
+            BUSTER_TEST(arguments, os_file_delete(alias_file));
+            if (form == 4)
+            {
+                BUSTER_TEST(arguments, symlink((const char*)input.pointer, (const char*)alias_file.pointer) == 0);
+            }
+            else if (form == 5)
+            {
+                BUSTER_TEST(arguments, link((const char*)input.pointer, (const char*)alias_file.pointer) == 0);
+            }
+            options.output_path = spellings[form];
+            GpuPipelineResult refused = gpu_pipeline_execute(arena, options);
+            BUSTER_TEST_RAW(arguments, !refused.published && refused.error == GPU_PIPELINE_ERROR_INVALID_INPUT, spellings[form]);
+            BUSTER_TEST(arguments, refused.process_result == PROCESS_RESULT_FAILED && !refused.artifact.bytes.length);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("must not overwrite an input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, input, good));
+            BUSTER_TEST(arguments, gpu_test_path_has_kind(input, OS_FILE_KIND_REGULAR));
+        }
+        BUSTER_TEST(arguments, os_file_delete(alias_file));
+
+        // Direct identity probe: a missing output is matched by its resolved
+        // parent directory and final name, and a distinct name is not.
+        {
+            BUSTER_TEST(arguments, os_file_delete(distinct));
+            String8 missing_alias = string_format_z(arena, S8("{S8}/../{S8}/missing.spv"), directory, directory_name);
+            String8 missing_inputs[] = {string_format_z(arena, S8("{S8}/missing.spv"), directory)};
+            BUSTER_TEST(arguments, gpu_output_alias_status(missing_alias, missing_inputs, 1) == GPU_ALIAS_INPUT);
+            BUSTER_TEST(arguments, gpu_output_alias_status(distinct, missing_inputs, 1) == GPU_ALIAS_NONE);
+        }
+
+        // Controls: a distinct absent and a distinct existing output publish.
+        options.output_path = distinct;
+        for (u32 existing = 0; existing < 2; existing += 1)
+        {
+            BUSTER_TEST(arguments, existing ? file_write(distinct, other) : os_file_delete(distinct));
+            GpuPipelineResult published = gpu_pipeline_execute(arena, options);
+            BUSTER_TEST_RAW(arguments, published.published && published.error == GPU_PIPELINE_ERROR_NONE, published.diagnostic);
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, distinct, good));
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, input, good));
+        }
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+    }
+#endif
+
     // Fault only the final owned-workspace deletion, after real COPY,
     // validation and atomic publication. No external tool is required.
     {
