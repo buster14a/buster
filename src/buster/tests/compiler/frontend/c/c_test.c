@@ -3044,6 +3044,140 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArgu
     return result;
 }
 
+// Width constraints belong to semantic analysis even when the record is
+// never used. Expected values follow the declared target type, not layout
+// success, and the same structured error must stop both lowering forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_constraints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+        u32 line;
+        u32 column;
+        bool valid;
+        bool invalid_on_windows;
+        bool dependent_diagnostics;
+    } cases[] = {
+        {S8("struct S { int x : 40; };\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 40; } g;\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 20 + 20; } g;\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { unsigned char c : 9; } g;\n"), S8("width of bit-field 'c' (9 bits) exceeds the width of its type (8 bits)"), 1, 26, false, false, false},
+        {S8("struct S { _Bool b : 2; } g;\n"), S8("width of bit-field 'b' (2 bits) exceeds the width of its type (1 bits)"), 1, 18, false, false, false},
+        {S8("struct S { int x : -1; } g;\n"), S8("bit-field 'x' has negative width (-1)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 40; };\nint main(void) { struct S s = {0}; return s.x; }\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 0; } g;\n"), S8("named bit-field 'x' has zero width"), 1, 16, false, false, false},
+        {S8("struct S { int : 40; };\n"), S8("width of unnamed bit-field (40 bits) exceeds the width of its type (32 bits)"), 1, 18, false, false, false},
+        {S8("struct S { int : -1; };\n"), S8("unnamed bit-field has negative width (-1)"), 1, 18, false, false, false},
+        {S8("struct S { _Bool : 2; };\n"), S8("width of unnamed bit-field (2 bits) exceeds the width of its type (1 bits)"), 1, 20, false, false, false},
+        {S8("struct S { int x : -1LL; };\n"), S8("bit-field 'x' has negative width (-1)"), 1, 16, false, false, false},
+        {S8("struct S { int x : (int)0x80000000; };\n"), S8("bit-field 'x' has negative width (-2147483648)"), 1, 16, false, false, false},
+        {S8("struct S { int x : (signed char)200; };\n"), S8("bit-field 'x' has negative width (-56)"), 1, 16, false, false, false},
+        {S8("struct S { int x : (unsigned __int128)1 << 64; };\n"), S8("width of bit-field 'x' (1 * 2^64 + 0 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : -((__int128)1 << 64); };\n"), S8("bit-field 'x' has negative width (-(1 * 2^64 + 0))"), 1, 16, false, false, false},
+        {S8("struct S { unsigned __int128 x : 129; };\n"), S8("width of bit-field 'x' (129 bits) exceeds the width of its type (128 bits)"), 1, 30, false, false, false},
+        {S8("struct S { int x : -1U; };\n"), S8("width of bit-field 'x' (4294967295 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 1.0; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
+        {S8("struct S { int : 1.0; };\n"), S8("bit-field width is not an integer constant expression"), 1, 18, false, false, false},
+        {S8("struct S { int x : 1 +; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
+        {S8("int n; struct S { int x : n; };\n"), S8("bit-field width is not an integer constant expression"), 1, 23, false, false, false},
+        {S8("struct S { int a : 3 junk; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
+        {S8("struct S { int a : 3 junk; }; int n = sizeof(struct S);\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, true},
+        {S8("typedef int T; struct S { T x : 33; };\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 29, false, false, false},
+        {S8("struct S { typeof(int) x : 33; };\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 24, false, false, false},
+        {S8("enum E : unsigned char { A = 0 }; struct S { const enum E x : 9; };\n"), S8("width of bit-field 'x' (9 bits) exceeds the width of its type (8 bits)"), 1, 59, false, false, false},
+        {S8("enum E { A = 0 }; struct S { enum E x : 33; };\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 37, false, false, false},
+        {S8("enum { W = 3 };\nvoid f(void) { enum { W = 40 }; struct S { unsigned x : W; }; }\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 2, 53, false, false, false},
+        {S8("enum { W = 3 };\nvoid f(void) { enum { W = -1 }; struct S { int x : W; }; }\n"), S8("bit-field 'x' has negative width (-1)"), 2, 48, false, false, false},
+        {S8("struct S { long long x : 40; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { unsigned char c : 8; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { _Bool b : 1; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { int x : 32; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { int : 0; unsigned x : 3; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { unsigned long long x : 64; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("typedef int T; struct S { const T x : 32; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { typeof(int) x : sizeof(int) * 8; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("enum E : unsigned char { A = 0 }; struct S { const enum E x : 8; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("enum E { A = 1ULL << 40 }; struct S { enum E x : 40; } g;\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 46, true, true, false},
+        {S8("enum { W = 40 };\nint f(void) { enum { W = 20 }; struct S { unsigned x : W; }; struct S s = {0}; return s.x; }\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { unsigned x : (unsigned char)261; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { long x : 33; } g;\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 17, true, true, false},
+    };
+    for (u32 target_index = 0; target_index < 4; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index & 2 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_LINUX;
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    bool valid = cases[case_index].valid &&
+                                 !(cases[case_index].invalid_on_windows && target.os == OPERATING_SYSTEM_WINDOWS);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target),
+                        .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, valid ? semantic.diagnostic_count == 0 :
+                        cases[case_index].dependent_diagnostics ? semantic.diagnostic_count >= 1 : semantic.diagnostic_count == 1,
+                        cases[case_index].source);
+                    u32 width_reports = 0;
+                    for (u32 diagnostic_index = 0; diagnostic_index < semantic.diagnostic_count; diagnostic_index += 1)
+                    {
+                        CDiagnostic diagnostic = semantic.diagnostics[diagnostic_index];
+                        if (diagnostic.kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH)
+                        {
+                            width_reports += 1;
+                            BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
+                            BUSTER_TEST_RAW(arguments, string_equal(diagnostic.message, cases[case_index].message),
+                                string_format(temporary.arena, S8("bit-field constraint source={S8} expected={S8} actual={S8}"),
+                                              cases[case_index].source, cases[case_index].message, diagnostic.message));
+                            BUSTER_TEST_RAW(arguments, diagnostic.location.line == cases[case_index].line &&
+                                                       diagnostic.location.column == cases[case_index].column, cases[case_index].source);
+                        }
+                        BUSTER_TEST(arguments, string_first_sequence(diagnostic.message, S8("cannot resolve definition")) == BUSTER_STRING_NO_MATCH &&
+                                               string_first_sequence(diagnostic.message, S8("invalid alignment")) == BUSTER_STRING_NO_MATCH &&
+                                               string_first_sequence(diagnostic.message, S8("kind=codegen.invalid-ir")) == BUSTER_STRING_NO_MATCH);
+                    }
+                    BUSTER_TEST_RAW(arguments, width_reports == (valid ? 0u : 1u), cases[case_index].source);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bit-field-width-constraints.c"), tokens, syntax,
+                        target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic semantic_row = semantic.diagnostics[diagnostic];
+                        CDiagnostic lowering_row = lowered.diagnostics[diagnostic];
+                        BUSTER_TEST(arguments, semantic_row.kind == lowering_row.kind && semantic_row.severity == lowering_row.severity &&
+                                               semantic_row.location.line == lowering_row.location.line &&
+                                               semantic_row.location.column == lowering_row.location.column);
+                        BUSTER_STRING_TEST(arguments, semantic_row.message, lowering_row.message);
+                    }
+                    if (valid)
+                    {
+                        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count && lowered.canonical_ir_certified))
+                        {
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                        }
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3354,6 +3488,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unnamed_parameter_definitions(UnitTest
                     }
                     c_test_scratch_end(temporary);
                 }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// A statement expression that begins with a nested statement expression only
+// splits that nested one off as a leading statement when a `;` follows it.
+// Otherwise the nested value is an operand of what follows, and lowering the
+// rest as a separate statement silently dropped it: `({ ({ ...; 1; }) + 2; })`
+// read 2, and `?:` or a second nested operand failed to lower (#2859).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_statement_expression_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "static int identity(int value) { return value; }\n"
+        "int main(int argc, char** argv) {\n"
+        "    (void)argv;\n"
+        "    int x = argc;\n"
+        "    int failure = 0;\n"
+        "    failure += ({ ({ if (x) x = 5; 1; }) + 2; }) != 3;\n"
+        "    failure += ({ ({ 1; }) + 2; }) != 3;\n"
+        "    failure += ({ ({ if (x) x = 2; 4; }) * ({ if (x) x = 3; 5; }); }) != 20;\n"
+        "    failure += ({ ({ ({ if (x) x = 1; 1; }) + 1; }) + 1; }) != 3;\n"
+        "    failure += ({ identity(({ int y = 0; for (int i = 0; i < 3; i++) y += i; y; })); }) != 3;\n"
+        "    failure += ({ ({ if (x) x = 7; 0; }) ? 10 : 20; }) != 20;\n"
+        "    failure += ({ if (({ if (x) x = 7; 0; })) x = 10; else x = 20; x; }) != 20;\n"
+        "    failure += ({ ({ x = 3; }); ({ if (x) x = 1; 6; }) - x; }) != 5;\n"
+        "    failure += ({ ({ x = 1; }); x + 40; }) != 41;\n"
+        "    return failure;\n"
+        "}\n");
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("nested-statement-expression-operands"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("nested-statement-expression-operands-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form],
+                                     S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("nested statement expression operands {S8} {S8}: {S8}"),
+                                  modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("nested statement expression operands runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -9695,6 +9897,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(Unit
                         ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
                         BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
                             string_format(temporary.arena, S8("cast/noreturn operands runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// The runtime check below is the only reader of this program; it is compiled
+// only where the check runs, so other targets do not see an unused constant.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+// A cast to a variadic function-pointer type in a local initializer (#2840):
+// the `...` closing its parameter list is not a GNU range designator, in a
+// scalar, a compound literal, or beside a real static range designator.
+BUSTER_GLOBAL_LOCAL String8 const c_test_variadic_function_pointer_cast_program = S8_INITIALIZER(
+    "static int first(int a, ...) { return a; }\n"
+    "struct Holder { int (*call)(int, ...); int values[2]; };\n"
+    "static int (*file_scope)(int, ...) = (int (*)(int, ...))first;\n"
+    "int main(void)\n"
+    "{\n"
+    "    void *opaque = 0;\n"
+    "    long zero = (long)(int (*)(int, ...))0;\n"
+    "    int (*null_call)(int, ...) = (int (*)(int, ...))0;\n"
+    "    int (*from_void)(int, ...) = (int (*)(int, ...))opaque;\n"
+    "    struct Holder holder = (struct Holder){ .call = (int (*)(int, ...))first, .values = { 1, 2 } };\n"
+    "    static int ranged[4] = { [0 ... 2] = 5 };\n"
+    "    return zero != 0 || null_call || from_void || file_scope != first || holder.call(7) != 7 || holder.values[1] != 2 ||\n"
+    "           ranged[2] != 5 || ranged[3] != 0;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("variadic-function-pointer-cast"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_variadic_function_pointer_cast_program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("variadic-function-pointer-cast-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("variadic function-pointer cast {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("variadic function-pointer cast runtime {S8} {S8}: status={u32} timed_out={u32}"),
                                 modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
@@ -29043,6 +29312,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             " failed |= !chain_triple(); failed |= !chain_middle_empty(); failed |= !chain_all_empty(); failed |= !chain_argument_triple();\n"
             " return failed;\n"
             "}\n"),
+        // #2844: a _Generic selection or __builtin_choose_expr is a primary
+        // expression, so a postfix call applies to the designator it picks.
+        S8(
+            "static int factory_calls, invoke_calls, arg_calls;\n"
+            "typedef int (*Unary)(int);\n"
+            "static int twice(int value) { invoke_calls += 1; return value * 2; }\n"
+            "static double half(double value) { invoke_calls += 1; return value / 2; }\n"
+            "static int sum(int left, int right) { invoke_calls += 1; return left + right; }\n"
+            "static Unary tget(void) { factory_calls += 1; return twice; }\n"
+            "static int arg(int value) { arg_calls += 1; return value; }\n"
+            "#define RESET() factory_calls = 0; invoke_calls = 0; arg_calls = 0\n"
+            "int generic_call(void) { RESET(); int value = _Generic((3), int: twice, double: half)(3); return value == 6 && invoke_calls == 1; }\n"
+            "int generic_double(void) { RESET(); double value = _Generic(1.0, int: twice, double: half)(9.0); return value == 4.5 && invoke_calls == 1; }\n"
+            "int generic_arguments(void) { RESET(); int value = _Generic(1L, long: sum, default: twice)(arg(1), 2); return value == 3 && invoke_calls == 1 && arg_calls == 1; }\n"
+            "int generic_factory(void) { RESET(); int value = _Generic(1, int: tget(), default: tget)(5); return value == 10 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int generic_nested(void) { RESET(); int value = twice(_Generic(1, int: twice)(arg(2))); return value == 8 && invoke_calls == 2 && arg_calls == 1; }\n"
+            "int generic_lazy(int enabled) { RESET(); int value = enabled && _Generic(1, int: twice)(4); return value == enabled && invoke_calls == enabled; }\n"
+            "int choose_call(void) { RESET(); int value = __builtin_choose_expr(1, twice, sum)(7); return value == 14 && invoke_calls == 1; }\n"
+            "int main(void) {\n"
+            " int failed = 0;\n"
+            " failed |= !generic_call(); failed |= !generic_double(); failed |= !generic_arguments(); failed |= !generic_factory();\n"
+            " failed |= !generic_nested(); failed |= !generic_lazy(0); failed |= !generic_lazy(1); failed |= !choose_call();\n"
+            " return failed;\n"
+            "}\n"),
     };
     typedef struct CTestCallResultExpected CTestCallResultExpected;
     struct CTestCallResultExpected
@@ -29067,6 +29360,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         {1, S8("chain_middle_empty"), 3},
         {1, S8("chain_all_empty"), 3},
         {1, S8("chain_argument_triple"), 3},
+        {2, S8("generic_call"), 1},
+        {2, S8("generic_double"), 1},
+        {2, S8("generic_arguments"), 2},
+        {2, S8("generic_factory"), 2},
+        {2, S8("generic_nested"), 3},
+        {2, S8("generic_lazy"), 1},
+        {2, S8("choose_call"), 1},
     };
     for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
     {
@@ -45295,6 +45595,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_bfloat16_type);
     C_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
+    C_TEST_FIXTURE(arguments, c_test_bit_field_width_constraints);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
     C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
     C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
@@ -45357,6 +45658,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
     C_TEST_FIXTURE(arguments, c_test_enum_runtime);
     C_TEST_FIXTURE(arguments, c_test_unnamed_parameter_definitions);
+    C_TEST_FIXTURE(arguments, c_test_nested_statement_expression_operands);
     C_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
     C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
     C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);
@@ -45572,6 +45874,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_validation_candidates);
     C_TEST_FIXTURE(arguments, c_test_variable_member_types);
     C_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
+    C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast_runtime);
     C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
     C_TEST_FIXTURE(arguments, c_test_vla_row_places);
     C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
