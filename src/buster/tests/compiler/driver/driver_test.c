@@ -864,6 +864,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_pack_state(Un
     String8 object_path = buster_test_temporary_path(arguments->arena, S8("pack-state"), S8(".o"));
     String8 header = S8("#pragma pack(push, 1)\nstruct P { char c; int i; };\n#pragma pack(pop)\n"
                         "struct Q { char c; int i; };\n#pragma pack(2)\n");
+    // Include the header by its file name: it sits next to the source, and the
+    // temporary path is relative on Windows, where a quoted include of the
+    // whole path would resolve against the source's directory instead.
+    String8 header_name = header_path;
+    for (u64 i = 0; i < header_path.length; i += 1)
+    {
+        if (header_path.pointer[i] == '/' || header_path.pointer[i] == '\\')
+        {
+            header_name = string_slice(header_path, i + 1, header_path.length);
+        }
+    }
     String8 source = string_format(arguments->arena,
                                    S8("#include \"{S8}\"\n"
                                       "struct R {{ char c; int i; }};\n"
@@ -871,7 +882,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_pack_state(Un
                                       "_Static_assert(sizeof(struct Q) == 8, \"Q\");\n"
                                       "_Static_assert(sizeof(struct R) == 6, \"R\");\n"
                                       "int main(void) {{ return 0; }}\n"),
-                                   header_path);
+                                   header_name);
     ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                    .use_process_environment = 1, .search_path = 1};
     bool written = file_write(header_path, BUSTER_SLICE_TO_BYTE_SLICE(header)) && file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
