@@ -103,7 +103,8 @@ class SampleTests(unittest.TestCase):
         event, observation_path = self.partitioned(item, 4)
         observation = qualification.phases.read(observation_path)
         inventory_path = observation_path.parent / "inventory.log"
-        inventory_bytes = inventory_path.read_bytes().replace(b"compiler_driver_tests", b"c_frontend_tests")
+        inventory_bytes = inventory_path.read_bytes().replace(b"compiler_driver_tests", b"c_frontend_tests").replace(
+            b"module=fixture ", b"module=compiler_driver_tests ")
         inventory_path.write_bytes(inventory_bytes)
         observation["inventory_sha256"] = hashlib.sha256(inventory_bytes).hexdigest()
         observation_path.write_text(json.dumps(observation) + "\n")
@@ -129,7 +130,11 @@ class SampleTests(unittest.TestCase):
         self.assertEqual(manifest["mode"], "groups")
         self.assertEqual(manifest["test_workers"], 4)
         self.assertEqual(len(result["census"]), 2)
-        mismatched_inventory = inventory_path.read_bytes().replace(b"c_frontend_tests", b"compiler_driver_tests")
+        mismatched_inventory = inventory_path.read_bytes().replace(
+            b"module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=primary",
+            b"module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=rest").replace(
+            b"module=compiler_driver_tests table_audit=0 enabled=1 selected=0 group=rest",
+            b"module=compiler_driver_tests table_audit=0 enabled=1 selected=0 group=primary")
         inventory_path.write_bytes(mismatched_inventory)
         observation["inventory_sha256"] = hashlib.sha256(mismatched_inventory).hexdigest()
         observation_path.write_text(json.dumps(observation) + "\n")
