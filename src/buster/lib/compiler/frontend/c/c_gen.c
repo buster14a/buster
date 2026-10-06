@@ -43426,6 +43426,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         bool braced = c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
                                       c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
                                       c_ir_matching_delimiter_cached(builder, value_start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
+                        bool empty_scalar = false;
                         IrType* initializer_type = ir_type_from_id(&builder->program->types, local_type);
                         bool aggregate = initializer_type && (initializer_type->kind == IR_TYPE_ARRAY || initializer_type->kind == IR_TYPE_VECTOR ||
                                                               initializer_type->kind == IR_TYPE_STRUCT || initializer_type->kind == IR_TYPE_UNION);
@@ -43448,20 +43449,25 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                             {
                                 scalar_end -= 1;
                             }
-                            if (scalar_end <= value_start + 1)
-                            {
-                                return false;
-                            }
+                            empty_scalar = scalar_end <= value_start + 1;
                             child.as.expression.start = value_start + 1;
                             child.as.expression.end = scalar_end;
                         }
-                        state->child_local = local;
-                        state->child_name = name;
-                        state->child_source = c_ir_token_source_range(builder, assign);
-                        c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
-                                              C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER, child);
-                        state->task_count = task_count;
-                        return false;
+                        if (empty_scalar)
+                        {
+                            // C23 6.7.10 empty initializer: `T x = {};` zero-initializes a scalar.
+                            value = c_ir_emit_zero_value(builder, local_type, assign);
+                        }
+                        else
+                        {
+                            state->child_local = local;
+                            state->child_name = name;
+                            state->child_source = c_ir_token_source_range(builder, assign);
+                            c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                                                  C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER, child);
+                            state->task_count = task_count;
+                            return false;
+                        }
                     }
                     if (value.value == IR_ID_UNDERLYING_INVALID ||
                         !c_ir_emit_store(builder, local, value, c_ir_token_source_range(builder, assign)))
@@ -52580,12 +52586,9 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
                 builder->failure_message = S8("invalid initializer separator");
                 return false;
             }
-            if (c_preprocess_dialect_is_c23(preprocess.dialect))
-            {
-                global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
-                return true;
-            }
-            return false;
+            // C23 6.7.10 empty initializer; a GNU extension in earlier dialects.
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+            return true;
         }
         if (c_initializer_has_top_level_comma(preprocess.tokens, start, end))
         {

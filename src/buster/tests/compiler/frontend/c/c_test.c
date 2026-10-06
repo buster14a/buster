@@ -3283,6 +3283,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
     return result;
 }
 
+// The empty initializer `= {}` zero-initializes a scalar object of any
+// storage duration; it is C23 6.7.10 and a GNU extension before C23 (#2848).
+// Each automatic object is redeclared per iteration with a dirtied value so a
+// missing store is observable.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_empty_scalar_initializer_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu17"), S8("-std=c23")};
+    String8 source_text = S8(
+        "struct empty_scalar_s { int a; long b; };\n"
+        "static int file_int = {};\n"
+        "static double file_double = {};\n"
+        "static int *file_pointer = {};\n"
+        "int global_int = {};\n"
+        "int main(void)\n"
+        "{\n"
+        "    int closed = {0};\n"
+        "    if (closed || file_int || file_double != 0 || file_pointer || global_int) return 1;\n"
+        "    for (int round = 0; round < 3; round += 1)\n"
+        "    {\n"
+        "        int z = {};\n"
+        "        double d = {};\n"
+        "        int *p = {};\n"
+        "        _Bool b = {};\n"
+        "        char c = {};\n"
+        "        long l = {};\n"
+        "        static int s = {};\n"
+        "        struct empty_scalar_s agg = {};\n"
+        "        int arr[3] = {};\n"
+        "        if (z || d != 0 || p || b || c || l || (round == 0 && s) || agg.a || agg.b || arr[0] || arr[1] || arr[2]) return 2 + round;\n"
+        "        z = 5; d = 2.5; p = &z; b = 1; c = 7; l = 9; s = 11; agg.a = 3; agg.b = 4; arr[0] = arr[1] = arr[2] = 6;\n"
+        "    }\n"
+        "    int sum = {};\n"
+        "    return sum;\n"
+        "}\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("empty-scalar-initializer"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("empty-scalar-initializer-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
+                        form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("empty scalar initializer {S8} {S8} form={u32}: {S8}"),
+                                      dialects[dialect], modes[mode], form, compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("empty scalar initializer runtime {S8} {S8} form={u32}: status={u32} timed_out={u32}"),
+                                    dialects[dialect], modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A definition may omit a parameter's name (C23 N3007; GCC and Clang accept it
 // before C23 and diagnose only under -pedantic). The unnamed parameter binds
 // nothing but still occupies its ABI slot, so every named parameter around it
@@ -44583,6 +44664,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
+    C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
