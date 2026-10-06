@@ -1,8 +1,10 @@
 // Slider component regressions owned by ui_slider_tests. The fixture helpers
-// below cover horizontal-arrow ownership and completed-click coordinates;
+// below cover horizontal-arrow ownership, completed-click coordinates, text-edit
+// selection state and checkbox activation parity;
 // ui_slider_component_test.c runs this module against the real UI front doors.
 #include <buster/tests/ui_slider_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/string.h>
 #include <buster/lib/ui_builder.h>
 #include <buster/tests/ui_test_internal.h>
 
@@ -337,12 +339,224 @@ BUSTER_GLOBAL_LOCAL void ui_test_slider_preserves_editor_arrows(UnitTestArgument
     result->test_count += result_local.test_count;
 }
 
+BUSTER_GLOBAL_LOCAL void ui_test_text_edit_destructive_shift_case(UnitTestArguments* arguments, UnitTestResult* output, WmKey key, bool shift, bool split,
+                                                                  const char8* initial, u64 initial_cursor, u64 initial_mark, const char8* expected,
+                                                                  u64 expected_cursor)
+{
+    UnitTestResult result_local = {0};
+#define result result_local
+    UI_State* state = ui_state_allocate(0, 0);
+    char8 memory[16] = {0};
+    u64 initial_length = strlen(initial);
+    memcpy(memory, initial, initial_length);
+    String8 value = {.pointer = memory, .length = initial_length};
+    UI_TextEditState edit = {0};
+    ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+    UI_TextEditResult built = ui_text_edit(&edit, S8("Destructive##text"), &value, BUSTER_ARRAY_LENGTH(memory));
+    ui_build_end();
+    float2 center = ui_test_box_center(built.widget.box);
+    UI_EventList events = ui_test_single_event(arguments->arena, UI_EventKind_Press, WM_KEY_MOUSE_LEFT, center, float2_make(0, 0), S8(""));
+    ui_test_frame(state, arguments->arena, events, 0.016);
+    ui_text_edit(&edit, S8("Destructive##text"), &value, BUSTER_ARRAY_LENGTH(memory));
+    ui_build_end();
+    edit.cursor = initial_cursor;
+    edit.mark = initial_mark;
+
+    u8 modifiers = shift ? (u8)(1u << WM_MODIFIER_SHIFT) : 0;
+    UI_Event press = {.kind = UI_EventKind_Press, .key = key, .modifiers = modifiers, .pos = center};
+    UI_Event text = {.kind = UI_EventKind_Text, .string = S8("X"), .pos = center};
+    events = (UI_EventList){0};
+    ui_event_list_push(arguments->arena, &events, &press);
+    if (!split)
+    {
+        ui_event_list_push(arguments->arena, &events, &text);
+    }
+    ui_test_frame(state, arguments->arena, events, 0.016);
+    UI_TextEditResult deleted = ui_text_edit(&edit, S8("Destructive##text"), &value, BUSTER_ARRAY_LENGTH(memory));
+    ui_build_end();
+    if (split)
+    {
+        BUSTER_TEST(arguments, deleted.mark == deleted.cursor && deleted.mark <= deleted.value.length && !edit.selecting);
+        events = (UI_EventList){0};
+        ui_event_list_push(arguments->arena, &events, &text);
+        ui_test_frame(state, arguments->arena, events, 0.016);
+        deleted = ui_text_edit(&edit, S8("Destructive##text"), &value, BUSTER_ARRAY_LENGTH(memory));
+        ui_build_end();
+    }
+    BUSTER_STRING_TEST(arguments, value, string_from_pointer_length(expected, strlen(expected)));
+    BUSTER_TEST(arguments, deleted.changed && deleted.cursor == expected_cursor && deleted.mark == expected_cursor && !edit.selecting &&
+                               deleted.mark <= value.length && state->events.count == 0);
+    ui_state_deinitialize(state);
+#undef result
+    output->succeeded_test_count += result_local.succeeded_test_count;
+    output->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_text_edit_destructive_shift(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    for (u32 split = 0; split < 2; split += 1)
+    {
+        for (u32 shift = 0; shift < 2; shift += 1)
+        {
+            // Unselected deletion at the end, interior and start, plus both selection directions and multibyte text.
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "abc", 3, 3, "abX", 3);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "abc", 1, 1, "Xbc", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "abc", 0, 0, "Xbc", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "abc", 2, 2, "abX", 3);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "abc", 0, 3, "X", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "abc", 3, 0, "X", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "abc", 0, 3, "X", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "abc", 3, 0, "X", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "a\xc3\xa9", 3, 3, "aX", 2);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "\xc3\xa9z", 0, 0, "Xz", 1);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_slider_keyboard_activation_ignores_pointer(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    UnitTestResult result_local = {0};
+#define result result_local
+    WmKey activation_keys[] = {WM_KEY_RETURN, WM_KEY_SPACE};
+    f32 mouse_x[] = {0.0f, 70.0f, 170.0f};
+    for (u64 key_index = 0; key_index < BUSTER_ARRAY_LENGTH(activation_keys); key_index += 1)
+    {
+        for (u64 mouse_index = 0; mouse_index < BUSTER_ARRAY_LENGTH(mouse_x); mouse_index += 1)
+        {
+            for (u32 reverse = 0; reverse < 2; reverse += 1)
+            {
+                UI_State* state = ui_state_allocate(0, 0);
+                UI_WidgetResult slider;
+                UI_Signal neighbor;
+                ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+                ui_test_slider_pair(0.5f, 0, false, &slider, &neighbor);
+                ui_build_end();
+                UI_Key slider_key = slider.box->key;
+                UI_EventList events = ui_test_key_event(arguments->arena, UI_EventKind_Press, WM_KEY_TAB, 0, float2_make(0, 0), S8(""));
+                ui_test_frame(state, arguments->arena, events, 0.016);
+                ui_test_slider_pair(0.5f, 0, false, &slider, &neighbor);
+                ui_build_end();
+                BUSTER_TEST(arguments, ui_key_match(state->focus_active_key, slider_key));
+
+                // The pointer only moves; no button is pressed or released.
+                events = (UI_EventList){0};
+                UI_Event move = {.kind = UI_EventKind_MouseMove, .pos = float2_make(mouse_x[mouse_index], 35)};
+                UI_Event activation = {.kind = UI_EventKind_Press, .key = activation_keys[key_index]};
+                ui_event_list_push(arguments->arena, &events, &move);
+                ui_event_list_push(arguments->arena, &events, &activation);
+                ui_test_frame(state, arguments->arena, events, 0.016);
+                ui_test_slider_pair(0.5f, 0, !!reverse, &slider, &neighbor);
+                ui_build_end();
+                BUSTER_TEST(arguments, ui_clicked(slider.signal));
+                BUSTER_TEST(arguments, slider.value_f32 == 0.5f && !slider.changed);
+                BUSTER_TEST(arguments, float2_element(state->mouse, AXIS2_X) == mouse_x[mouse_index]);
+                ui_state_deinitialize(state);
+            }
+        }
+    }
+#undef result
+    result->succeeded_test_count += result_local.succeeded_test_count;
+    result->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL UI_WidgetResult ui_test_positioned_checkbox(bool checked)
+{
+    ui_set_next_fixed_x(20.0f);
+    ui_set_next_fixed_y(20.0f);
+    ui_set_next_fixed_width(100.0f);
+    ui_set_next_fixed_height(30.0f);
+    ui_set_next_flags(UI_BoxFlag_Floating);
+    return ui_checkbox(S8("parity_checkbox"), checked);
+}
+
+// Appends one accepted activation: a Return press/release pair, or a left
+// click inside the checkbox.
+BUSTER_GLOBAL_LOCAL void ui_test_checkbox_push_activation(UnitTestArguments* arguments, UI_EventList* events, bool mouse)
+{
+    if (mouse)
+    {
+        UI_Event press = {.kind = UI_EventKind_Press, .key = WM_KEY_MOUSE_LEFT, .pos = float2_make(70, 35)};
+        UI_Event release = press;
+        release.kind = UI_EventKind_Release;
+        ui_event_list_push(arguments->arena, events, &press);
+        ui_event_list_push(arguments->arena, events, &release);
+    }
+    else
+    {
+        UI_Event press = {.kind = UI_EventKind_Press, .key = WM_KEY_RETURN};
+        UI_Event release = press;
+        release.kind = UI_EventKind_Release;
+        ui_event_list_push(arguments->arena, events, &press);
+        ui_event_list_push(arguments->arena, events, &release);
+    }
+}
+
+// mode 0: Return pairs, 1: mouse clicks, 2: alternating Return and mouse.
+BUSTER_GLOBAL_LOCAL void ui_test_checkbox_parity_case(UnitTestArguments* arguments, UnitTestResult* output, u32 mode, u32 count, bool initial, bool split)
+{
+    UnitTestResult result_local = {0};
+#define result result_local
+    UI_State* state = ui_state_allocate(0, 0);
+    ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+    UI_WidgetResult checkbox = ui_test_positioned_checkbox(initial);
+    ui_build_end();
+    UI_Key key = checkbox.box->key;
+    UI_EventList events = ui_test_key_event(arguments->arena, UI_EventKind_Press, WM_KEY_TAB, 0, float2_make(0, 0), S8(""));
+    ui_test_frame(state, arguments->arena, events, 0.016);
+    checkbox = ui_test_positioned_checkbox(initial);
+    ui_build_end();
+    BUSTER_TEST(arguments, ui_key_match(state->focus_active_key, key) && !checkbox.changed);
+
+    bool value = initial;
+    u32 frame_count = split ? count : (count ? 1u : 0u);
+    u32 next = 0;
+    for (u32 frame = 0; frame < frame_count; frame += 1)
+    {
+        events = (UI_EventList){0};
+        u32 in_frame = split ? 1u : count;
+        for (u32 index = 0; index < in_frame; index += 1)
+        {
+            ui_test_checkbox_push_activation(arguments, &events, mode == 1 || (mode == 2 && (next & 1u)));
+            next += 1;
+        }
+        ui_test_frame(state, arguments->arena, events, 0.016);
+        checkbox = ui_test_positioned_checkbox(value);
+        ui_build_end();
+        bool expected = value ^ !!(in_frame & 1u);
+        BUSTER_TEST(arguments, checkbox.value == expected && checkbox.changed == !!(in_frame & 1u));
+        value = checkbox.value;
+    }
+    BUSTER_TEST(arguments, value == (initial ^ !!(count & 1u)) && ui_key_match(state->focus_active_key, key));
+    ui_state_deinitialize(state);
+#undef result
+    output->succeeded_test_count += result_local.succeeded_test_count;
+    output->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_checkbox_activation_parity(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    for (u32 mode = 0; mode < 3; mode += 1)
+    {
+        for (u32 count = 0; count <= 4; count += 1)
+        {
+            for (u32 initial = 0; initial < 2; initial += 1)
+            {
+                ui_test_checkbox_parity_case(arguments, result, mode, count, !!initial, false);
+                ui_test_checkbox_parity_case(arguments, result, mode, count, !!initial, true);
+            }
+        }
+    }
+}
+
 UnitTestResult ui_slider_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     ui_test_slider_keyboard_ownership(arguments, &result);
     ui_test_slider_release_chronology(arguments, &result);
+    ui_test_slider_keyboard_activation_ignores_pointer(arguments, &result);
     ui_test_slider_preserves_editor_arrows(arguments, &result);
+    ui_test_text_edit_destructive_shift(arguments, &result);
+    ui_test_checkbox_activation_parity(arguments, &result);
     return result;
 }
 #endif

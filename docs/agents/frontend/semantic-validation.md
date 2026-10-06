@@ -191,6 +191,15 @@ slot, and root snapshots and rollbacks are passed by pointer. A rollback that
 does not continue into a successful parse is masked by its root's rollback, so
 `c_test_type_parse_snapshot_rows` checks row independence directly.
 
+GNU `__attribute__((fallthrough));` and its `__fallthrough__` alias
+are null statements, including in C99/GNU11/C17. Leading attribute lists
+are skipped by the lowering body walker; `c_parse_validate_gnu_fallthrough`
+therefore checks the empty statement and zero-argument constraint (allowing
+an empty parenthesized parameter list) before lowering can erase the attribute prefix. Other attributes retain their own
+handling. Embedded driver regressions cover both spellings, dialects, both
+frontend forms and all four allocators, with syntax/object diagnostic
+equivalence for a missing semicolon or attribute arguments.
+
 A modification destination is typed from its whole operand.
 `c_parse_assignment_identifier_is_operand` is the one rule both assignment
 scans in `c_parse_validate_const_assignments` use for when the identifier in

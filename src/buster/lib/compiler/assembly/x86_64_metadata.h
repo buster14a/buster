@@ -1301,9 +1301,10 @@ BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact(BusterX
 // source-level operand projection is performed, and the durable key appears
 // exactly once in the input object.
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_query(BusterX86MetadataExactQuery query);
-// Prepare one durable key into immutable exact state.  Call this only from
-// the serial prewarm phase after buster_x86_metadata_prewarm(); duplicate
-// preparation of the same key is idempotent.  No heap or callback is used.
+// Prepare one durable key into immutable exact state. New keys require the
+// serial prewarm phase after buster_x86_metadata_prewarm(). Repeating an
+// already prepared key is an immutable lookup, safe on active lanes or while
+// the persistent gang is parked. No heap or callback is used.
 BUSTER_F_DECL bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key,
                                                            BusterX86MetadataExactPlan* result);
 // Resolve a durable key to an immutable exact plan prepared during the

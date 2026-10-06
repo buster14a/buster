@@ -17,6 +17,8 @@ from unittest import mock
 import ci_matrix_phases as phases
 
 ROOT = Path(__file__).resolve().parents[1]
+# Full CMake configure allowance shared with build_configuration_test.py (#2199).
+ADMISSION_CONFIGURE_TIMEOUT_SECONDS = 90
 
 
 def write(root, name, data):
@@ -822,8 +824,31 @@ class NativeObserverTests(unittest.TestCase):
                 manifest = root / "matrix.cmake"
                 self.assertIn("BUSTER_SUPERBUILD_TEST_ADMISSION", manifest.read_text())
                 graph = root / "graph"
-                subprocess.run(["cmake", "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
-                                f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"], cwd=ROOT, check=True, capture_output=True, timeout=30)
+                cmake = shutil.which("cmake")
+                ninja = shutil.which("ninja")
+                self.assertIsNotNone(cmake, "admission graph requires CMake")
+                self.assertIsNotNone(ninja, "admission graph requires Ninja")
+                # Configure and query the same Ninja; avoid unrelated tool discovery.
+                command = [cmake, "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
+                           f"-DCMAKE_MAKE_PROGRAM={Path(ninja).as_posix()}",
+                           f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"]
+                # The existing native deadline owner terminates/reaps the process
+                # tree before publishing status, including CMake's Ninja children.
+                observed = [str(self.driver), "matrix_phase_run", str(root), "admission-configure", "1",
+                            str(ADMISSION_CONFIGURE_TIMEOUT_SECONDS), "--", *command]
+                configured = subprocess.run(observed, cwd=ROOT, capture_output=True, text=True,
+                                            timeout=ADMISSION_CONFIGURE_TIMEOUT_SECONDS + 10)
+                record = phases.read(next(root.glob("admission-configure.*.end.json")))
+                diagnostic = dict(admission=admission, command=command, deadline_seconds=ADMISSION_CONFIGURE_TIMEOUT_SECONDS,
+                                  state=record["state"], spawned=record["spawned"], timed_out=record["timed_out"],
+                                  result=record["result"], platform_status=record["platform_status"],
+                                  termination_requested=record["termination_requested"], forcibly_terminated=record["forcibly_terminated"],
+                                  elapsed_us=record["end_us"] - record["child_start_us"],
+                                  stdout=configured.stdout, stderr=configured.stderr)
+                print("MATRIX_ADMISSION_CONFIGURE " + json.dumps(diagnostic, sort_keys=True), flush=True)
+                self.assertEqual(configured.returncode, 0, json.dumps(diagnostic, sort_keys=True))
+                self.assertEqual(record["state"], "success", json.dumps(diagnostic, sort_keys=True))
+                self.assertEqual(record["timed_out"], 0)
                 tests = [task for task in tasks.values() if task["phase"] == "validation"]
                 # #2657: grouped checks keep one runtime tree (sanitized
                 # Release); the sanitized Debug tree is build-only.
@@ -833,7 +858,7 @@ class NativeObserverTests(unittest.TestCase):
                 for task in tests:
                     index = task["tree"].removeprefix("tree")
                     target = "buster_test_" + index
-                    query = subprocess.check_output(["ninja", "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
+                    query = subprocess.check_output([ninja, "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
                     names = {line.strip() for line in query.splitlines()}
                     self.assertEqual("buster_compile" in names, admission == "all-builds")
                     if previous:

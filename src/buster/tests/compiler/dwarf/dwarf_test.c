@@ -1097,6 +1097,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 4,
                 .alignment = 4,
                 .bit_width = 32,
+                .is_float = true,
             },
             {
                 .name = S8("f64"),
@@ -1104,6 +1105,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 8,
                 .alignment = 8,
                 .bit_width = 64,
+                .is_float = true,
             },
             {
                 .name = S8("f80"),
@@ -1111,6 +1113,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 16,
                 .alignment = 16,
                 .bit_width = 80,
+                .is_float = true,
             },
             {
                 .name = S8("float"),
@@ -1118,6 +1121,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 4,
                 .alignment = 4,
                 .bit_width = 32,
+                .is_float = true,
             },
             {
                 .name = S8("double"),
@@ -1125,6 +1129,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 8,
                 .alignment = 8,
                 .bit_width = 64,
+                .is_float = true,
             },
             {
                 .name = S8("long double"),
@@ -1132,6 +1137,23 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 16,
                 .alignment = 16,
                 .bit_width = 80,
+                .is_float = true,
+            },
+            {
+                .name = S8("_Float16"),
+                .kind = DEBUG_TYPE_BASE,
+                .size = 2,
+                .alignment = 2,
+                .bit_width = 16,
+                .is_float = true,
+            },
+            {
+                // Spelled like a float but structurally an integer (#2737).
+                .name = S8("float_count"),
+                .kind = DEBUG_TYPE_BASE,
+                .size = 4,
+                .alignment = 4,
+                .bit_width = 32,
             },
         };
         DebugModel dwarf_float_model = {
@@ -1195,6 +1217,10 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
             cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &float_die);
             cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &double_die);
             cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 26, &long_double_die);
+            DwarfTestBaseDie half_die = {0};
+            DwarfTestBaseDie spelled_float_die = {0};
+            cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &half_die);
+            cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &spelled_float_die);
             BUSTER_TEST(arguments, cu_decoded);
             BUSTER_TEST(arguments, f32_die.byte_size == 4 && f32_die.bit_size == 0 && !f32_die.has_bit_size && f32_die.encoding == 0x04);
             BUSTER_TEST(arguments, f64_die.byte_size == 8 && f64_die.bit_size == 0 && !f64_die.has_bit_size && f64_die.encoding == 0x04);
@@ -1202,6 +1228,9 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, float_die.byte_size == 4 && float_die.bit_size == 0 && !float_die.has_bit_size && float_die.encoding == 0x04);
             BUSTER_TEST(arguments, double_die.byte_size == 8 && double_die.bit_size == 0 && !double_die.has_bit_size && double_die.encoding == 0x04);
             BUSTER_TEST(arguments, long_double_die.byte_size == 16 && long_double_die.bit_size == 80 && long_double_die.has_bit_size && long_double_die.encoding == 0x04);
+            // DW_ATE_float is 0x04 and DW_ATE_unsigned 0x07 (DWARF 5, table 7.11).
+            BUSTER_TEST(arguments, half_die.byte_size == 2 && half_die.encoding == 0x04);
+            BUSTER_TEST(arguments, spelled_float_die.byte_size == 4 && spelled_float_die.encoding == 0x07);
         }
 
         DebugType dwarf_narrow_float_types[] = {
@@ -1253,6 +1282,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
             .size = 16,
             .alignment = 16,
             .bit_width = 160,
+            .is_float = true,
         };
         DebugModel dwarf_inconsistent_model = dwarf_narrow_float_model;
         dwarf_inconsistent_model.types = &dwarf_inconsistent_float;

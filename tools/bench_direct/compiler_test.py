@@ -276,9 +276,33 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual((self.repo / "compiler.txt").read_text(), "base compiler\n")
         self.assertTrue((evidence / "lab" / "summary.json").is_file())
         self.assertFalse((evidence / "lab" / "reference.exe").exists())
-        self.assertEqual(compiler_publish.decide(dict(result["identity"]), True, "success", result,
-                                                 json.loads((evidence / "lab" / "summary.json").read_text()), "")[0],
-                         "success")
+        self.assertEqual(result["coverage"], {"first_parent": self.base, "range": "1"})
+        expected = dict(result["identity"], first_parent=self.base, range="1")
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "")[0], "success")
+        # The host's range must equal the authorized one.
+        self.assertEqual(compiler_publish.decide(dict(expected, range="2"), True, "success", result, summary, "")[0],
+                         "failure")
+
+    def test_range_baseline_on_the_first_parent_chain(self) -> None:
+        # A burst left head unmeasured: the next main commit is compared with base, two first-parent commits back.
+        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
+                                                capture_output=True, text=True).stdout.strip()
+        (self.repo / "compiler.txt").write_text("later compiler\n")
+        git("commit", "-qam", "later")
+        later, later_tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+        code, result, _ = self.run_harness(later, head=later, pull="0", **{"pull-head": later, "head-tree": later_tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["coverage"], {"first_parent": self.head, "range": "2"})
+        self.assertEqual(result["binaries"]["baseline"]["revision"], self.base)
+        # A pull request side commit is an ancestor but not on the first-parent chain.
+        pull_tree = git("rev-parse", self.pull_head + "^{tree}")
+        git("checkout", "-q", "--detach", later)
+        code, result, _ = self.run_harness(later, head=later, pull="0", base=self.pull_head,
+                                           **{"pull-head": later, "head-tree": later_tree, "base-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("not on the first-parent chain", " ".join(result["reasons"]))
+        self.assertNotIn("coverage", result)
 
     def test_pull_mode_compares_head_with_its_merge_base(self) -> None:
         # The pull request head (second parent) against the base it branched from.
