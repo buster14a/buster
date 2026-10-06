@@ -89,7 +89,19 @@ MACOS_RUNNER_JOBS = tuple(name for name in SPLIT_COMBINATION_PLATFORMS + NATIVE 
 DEFERRED_SUFFIX = " (deferred for draft PR)"
 DEFERRAL_STEP = "Defer macOS runner lane for draft pull request"
 MAIN_REUSE_JOB = "Main CI reuse decision"
-INACTIVE_LINT_JOBS = ("Ordinary lint (inactive)", "Queue lint preflight (inactive)")
+# GitHub leaves job-level names unexpanded when their root job is skipped.
+# Pin the exact observed expression spelling; never accept arbitrary expressions.
+ORDINARY_INACTIVE_LINT_NAMES = (
+    "Ordinary lint (inactive)",
+    "github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)'",
+    "${{ github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)' }}",
+)
+QUEUE_INACTIVE_LINT_NAMES = (
+    "Queue lint preflight (inactive)",
+    "github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)'",
+    "${{ github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)' }}",
+)
+INACTIVE_LINT_JOBS = ORDINARY_INACTIVE_LINT_NAMES + QUEUE_INACTIVE_LINT_NAMES
 # Same exact-head provenance contract as .github/scripts/recover-ci.py and
 # the trusted merge_queue_admission publisher. Names alone authorize nothing.
 RECONCILED_CHECK_MARKERS = {
@@ -726,12 +738,12 @@ def separate_inactive_lint(jobs, event):
     Historical workflows without an inactive branch remain readable.
     """
     inactive = [job for job in jobs if job.get("name") in INACTIVE_LINT_JOBS]
-    expected = INACTIVE_LINT_JOBS[0] if event == "merge_group" else INACTIVE_LINT_JOBS[1]
+    expected = ORDINARY_INACTIVE_LINT_NAMES if event == "merge_group" else QUEUE_INACTIVE_LINT_NAMES
     errors = []
     if len(inactive) > 1:
         errors.append("inactive lint branch is duplicated or ambiguous")
     for job in inactive:
-        if (job.get("name") != expected or job.get("status") != "completed" or
+        if (job.get("name") not in expected or job.get("status") != "completed" or
                 job.get("conclusion") != "skipped"):
             errors.append("inactive lint branch has an invalid event or result")
     return [job for job in jobs if job.get("name") not in INACTIVE_LINT_JOBS], errors

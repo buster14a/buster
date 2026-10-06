@@ -33,6 +33,13 @@ class InactiveLintTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(jobs, [active])
             self.assertEqual(jobs[0]["conclusion"], "failure")
+            aliases = (github_ci_time.ORDINARY_INACTIVE_LINT_NAMES if event == "merge_group"
+                       else github_ci_time.QUEUE_INACTIVE_LINT_NAMES)
+            for spelling in aliases:
+                observed = dict(inactive, name=spelling)
+                jobs, errors = github_ci_time.separate_reuse_job(
+                    [active, observed], 1, 1, "a" * 40, event=event)
+                self.assertEqual((jobs, errors), ([active], []))
             for field, values in (
                     ("conclusion", ("success", "failure", "cancelled", None)),
                     ("status", ("in_progress", "queued", None)),
