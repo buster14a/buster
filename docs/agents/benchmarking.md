@@ -29,13 +29,10 @@ sensitivity. Matching paths does not eliminate source-induced layout sensitivity
 keep conclusions scoped to the measured binaries and workloads. See the
 [matched-build #791 audit](../performance-audits/2026-09-20T050606Z.md).
 For dedicated 9700X calibration, retain a same-root rebuild control and a
-cross-root control beside the immutable-binary A/A capture. The
-[`zen5_build_control.py`](../../tools/zen5_build_control.py) reader checks their
-predeclared, fixed-count records and summarizes build, path, order and drift
-effects. Its schema and execution boundary are in the
-[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls).
-These offline checks cannot authenticate the capture or prove that the family
-was frozen before sampling; the admitted service receipt must bind both facts.
+cross-root control beside the immutable-binary A/A capture; the
+[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls)
+describes them. No repository tool currently produces or analyzes these
+captures (#2741).
 
 - **`./build.sh bench_throughput`** provides deterministic startup, scaling,
   symbol, CFG, backend and frozen-source self-host workloads with raw paired
@@ -431,40 +428,21 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   escape for method testing. `--skip-build` reuses the existing Release binary
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
-- **The dedicated Ryzen 7 9700X is no longer a general GitHub Actions
-  executor.** `.github/workflows/zen5-audit.yml` is retired. Two GitHub
-  workflows are admitted to the restricted `buster-9700x-service-dispatch`
-  runner group. `.github/workflows/9700x-direct-bench.yml` compiles and times
-  the owner's own pull-request workloads from `benchmarks/9700x/` without the
-  service; its numbers are diagnostic and unsealed (see
-  `benchmarks/9700x/README.md`). `.github/workflows/9700x-service-dispatch.yml`
-  selects that group
-  and `[self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`, does not check out
-  repository content, and invokes only the operator-installed fixed gateway.
-  Its `recipe` input chooses from a reviewed allowlist
-  (`validate-buster-v1`, `zen5-calibration-v1`) and refuses anything else;
-  the installed service still serves only its compiled registry, which today
-  serves the one-pair `validate-buster-v1` smoke recipe and the
-  `zen5-calibration-v1` (#426) A/A calibration capture (one revision named
-  twice; see `tools/bench_service/README.md`). A service installed before
-  this registry refuses zen5 until the operator reinstalls service, broker and
-  gate together from protected main. The smoke recipe is
-  not the former stage-1 diagnostic, an A/A qualification, or a performance
-  verdict, and the calibration capture never authorizes A/B. The result wait
-  is the broker's `RuntimeMaxSec` plus a finalization allowance and is capped
-  by the job timeout; see
-  [`tools/bench_service/deploy/VALIDATE_BUSTER_V1.md`](../../tools/bench_service/deploy/VALIDATE_BUSTER_V1.md).
-  Only dispatches by `davidgmbb` (user 39247043) reach the runner, without a
-  manual approval step: a per-attempt `authorize` job and the `submit` job
-  condition skip every other requester and re-run.
-  Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
-  ruleset, main-only environment without a required reviewer, workflow gate,
-  host authorization, installed identities, and clean queue are
-  verified as described in
-  [`tools/bench_service/deploy/GITHUB_ADMISSION.md`](../../tools/bench_service/deploy/GITHUB_ADMISSION.md).
-  `native-retirement-performance-v1` remains blocked. Use the local trusted
+- **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
+  The queued benchmark service, its dispatch workflow and the earlier
+  `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
+  admitted to the restricted runner group is
+  `.github/workflows/9700x-direct-bench.yml`: it compiles and times the
+  owner's own pull-request workloads from `benchmarks/9700x/` and reports
+  diagnostic, unsealed process latency; see
+  [`benchmarks/9700x/README.md`](../../benchmarks/9700x/README.md) and its
+  [admission guide](../../benchmarks/9700x/ADMISSION.md). There is currently
+  no sanctioned compiler A/A or A/B path on that host:
+  `native-retirement-performance-v1` remains blocked, and the
+  `zen5-calibration-v1` producer and its `zen5_*` analysis tools are removed
+  (#2741; tag `bench-service-final` retains them). Use the local trusted
   capture methods above for ad-hoc profiling. Historical audit notes retain
-  `zen5-audit.yml` only as provenance for runs made before its retirement.
+  the removed workflows and service job numbers only as provenance.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
   the CI critical path, so it is the configuration most worth profiling. Record
   it exactly like any other build; there is no sanitizer-specific obstacle:

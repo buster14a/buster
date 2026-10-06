@@ -560,6 +560,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
 #endif
     }
 
+#if !BUSTER_WINDOWS
+    // A descriptor from os_file_open_checked must be close-on-exec from creation. Spawn
+    // sanitizes inherited descriptors by enumeration or a child-side close-from, and neither
+    // is atomic with a concurrent open, so the flag is the contract that closes the window.
+    String8 cloexec_path = buster_test_temporary_path(arena, S8("spawn-cloexec"), S8(".bin"));
+    OsFileOpenResult cloexec_open = os_file_open_checked(cloexec_path, (OpenFlags){.read = 1, .write = 1, .create = 1, .truncate = 1},
+                                                          (OpenPermissions){.read = 1, .write = 1});
+    BUSTER_TEST(arguments, cloexec_open.file != 0 && !cloexec_open.error.v);
+    if (cloexec_open.file)
+    {
+        int cloexec_descriptor = generic_fd_to_posix(cloexec_open.file);
+        int cloexec_flags = fcntl(cloexec_descriptor, F_GETFD);
+        BUSTER_TEST(arguments, cloexec_flags >= 0 && (cloexec_flags & FD_CLOEXEC) != 0);
+
+        String8 cloexec_value = string_format(arena, S8("{u64}"), (u64)cloexec_descriptor);
+        String8 cloexec_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_PROBE_VALUE")};
+        String8 cloexec_values[] = {S8("descriptor"), cloexec_value};
+        ProcessSpawnResult cloexec_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(cloexec_keys),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(cloexec_values), (ProcessSpawnOptions){0});
+        ProcessWaitResult cloexec_wait = os_process_spawn_test_wait(arena, cloexec_spawn);
+        BUSTER_TEST(arguments, cloexec_spawn.failure == PROCESS_SPAWN_FAILURE_NONE && cloexec_wait.result == PROCESS_RESULT_SUCCESS);
+        BUSTER_TEST(arguments, !os_file_close_checked(cloexec_open.file).v);
+        BUSTER_TEST(arguments, !os_file_delete_checked(cloexec_path).v);
+    }
+#endif
+
     for (u32 mask = 0; mask < ((u32)1 << STANDARD_STREAM_COUNT); mask += 1)
     {
         String8 mask_value = string_format(arena, S8("{u32}"), mask);

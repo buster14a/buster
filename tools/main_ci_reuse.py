@@ -76,10 +76,10 @@ DESKTOP = tuple((f"{name} {shard}", f"desktop-{os_name}-{arch}-{shard}",
                               if name in github_ci_time.SPLIT_CHECK_PLATFORMS
                               else github_ci_time.COMBINATION_SHARDS))
 DESKTOP_NAMES = frozenset(row[0] for row in DESKTOP)
-ANALYZER_STEPS = ("Bootstrap candidate and select reference build driver",
+ANALYZER_STEPS = ("Bootstrap and identify candidate build driver",
                   "Exercise analyzer failure and coverage controls",
                   "Configure the authoritative split-source database",
-                  "Compare reference analysis and aggregate all module shards")
+                  "Analyze candidate and aggregate all module shards")
 ANALYZER_RECEIPT_STEPS = ("Report reused analyzer validation",
                          "Retain analyzer inventory, results and measurements")
 SOURCE_COVERAGE = REUSED + DESKTOP + (("Clang analyzer shards", "clang-analyzer", ANALYZER_STEPS[-1]),)

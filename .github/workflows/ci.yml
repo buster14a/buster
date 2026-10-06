@@ -22,6 +22,8 @@ on:
         required: false
         default: false
         type: boolean
+      # Retired by #2683: the analyzer bootstrap rejects true. The frozen
+      # workflow-policy test still pins this declaration verbatim.
       analyzer_comparison:
         description: Run an explicit reference/candidate Clang analyzer comparison
         required: false
@@ -77,6 +79,7 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 tests/action_pins_test.py
+          python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
           python3 -B tools/ci_checks_qualification_test.py -v
@@ -1306,87 +1309,28 @@ jobs:
           BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_CI_RUNNER: ubuntu-26.04
         run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-analyzer/job-environment.json"
-      - name: Bootstrap candidate and select reference build driver
+      - name: Bootstrap and identify candidate build driver
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
-          BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
-          EVENT_NAME: ${{ github.event_name }}
-          COMPARISON_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.analyzer_comparison && 'true' || 'false' }}
+          COMPARISON_REQUESTED: ${{ inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
+          # The frozen workflow-policy test still pins this dispatch input; it
+          # may only refuse the retired reference comparison (#2683).
+          if [[ "$COMPARISON_REQUESTED" != false ]]; then
+            echo '::error::The reference/candidate analyzer comparison was removed by #2683; dispatch without analyzer_comparison.'
+            exit 1
+          fi
           mkdir -p build "$RUNNER_TEMP/buster-analyzer"
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
-          reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
-          candidate_depfile="$RUNNER_TEMP/buster-analyzer/candidate-driver.d"
-          reference_depfile="$RUNNER_TEMP/buster-analyzer/reference-driver.d"
-          candidate_manifest="$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
-          reference_manifest="$RUNNER_TEMP/buster-analyzer/reference-driver-provenance.json"
-          selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
-          reference_root="$RUNNER_TEMP/buster-analyzer/reference-tree"
           printf '%s\n' "$candidate_revision" | tee "$RUNNER_TEMP/buster-analyzer/revision.txt"
-          printf '%s\n' "$reference_revision" > "$RUNNER_TEMP/buster-analyzer/baseline-revision.txt"
           clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
-          rm -f "$candidate_depfile" "$reference_depfile" build/analyzer-baseline
-          rm -rf "$reference_root"
-          bootstrap_arguments=(bootstrap)
-          if [[ "$EVENT_NAME" == merge_group ]]; then
-            bootstrap_arguments+=(--bind-context)
-          fi
-          python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
+          python3 tools/analyzer_reference.py bootstrap \
             --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
-            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
-            --output "$candidate_manifest"
-
-          reference_materialized="$(python3 tools/analyzer_reference.py materialization \
-            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
-            --requested "$COMPARISON_REQUESTED" \
-            --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision" \
-            --candidate-manifest "$candidate_manifest")"
-          if [[ "$reference_materialized" == true ]]; then
-            mkdir -p "$reference_root"
-            trap 'rm -rf "$reference_root"' EXIT
-            git archive --format=tar "$reference_revision" | tar -xf - -C "$reference_root"
-            if find "$reference_root" -type l -print -quit | grep -q .; then
-              echo '::error::Historical analyzer reference contains a symlink.'
-              exit 1
-            fi
-            python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
-              --driver "$GITHUB_WORKSPACE/build/analyzer-baseline" \
-              --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
-              --root "$reference_root" --depfile "$reference_depfile" \
-              --output "$reference_manifest"
-          else
-            cp "$candidate_manifest" "$reference_manifest"
-          fi
-          python3 tools/analyzer_reference.py select \
-            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
-            --requested "$COMPARISON_REQUESTED" \
-            --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision" \
-            --candidate-manifest "$candidate_manifest" \
-            --reference-manifest "$reference_manifest" \
-            --output "$selection_path"
-          selection="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field selection)"
-          reason="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field reason)"
-          if [[ "$selection" == skip ]]; then
-            rm -f build/analyzer-baseline
-          fi
-          {
-            printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection"
-            printf 'ANALYZER_COMPARISON_REASON=%s\n' "$reason"
-            printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\n' "$reference_materialized"
-          } >> "$GITHUB_ENV"
-          {
-            printf '## Clang analyzer comparison selection\n\n'
-            printf '| Event | Candidate | Reference | Selection | Reason |\n| --- | --- | --- | --- | --- |\n'
-            printf '| %s | %s | %s | %s | %s |\n' "$EVENT_NAME" "$candidate_revision" "$reference_revision" "$selection" "$reason"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$reference_materialized" == true ]]; then
-            trap - EXIT
-          fi
+            --root "$GITHUB_WORKSPACE" --depfile "$RUNNER_TEMP/buster-analyzer/candidate-driver.d" \
+            --output "$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
       - name: Exercise analyzer failure and coverage controls
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1404,115 +1348,33 @@ jobs:
           if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
             python3 tools/ci_checks_tools.py --tool ninja --cmake-cache build/analyzer-tree/CMakeCache.txt --output "$RUNNER_TEMP/buster-analyzer/selected-ninja.json"
           fi
-      - name: Compare reference analysis and aggregate all module shards
+      - name: Analyze candidate and aggregate all module shards
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
-        env:
-          BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
-          EVENT_NAME: ${{ github.event_name }}
-          COMPARISON_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
-          reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
           candidate_depfile="$RUNNER_TEMP/buster-analyzer/candidate-driver.d"
-          reference_depfile="$RUNNER_TEMP/buster-analyzer/reference-driver.d"
           candidate_manifest="$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
-          reference_manifest="$RUNNER_TEMP/buster-analyzer/reference-driver-provenance.json"
-          selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
-          reference_root="$RUNNER_TEMP/buster-analyzer/reference-tree"
-          expected_directory="$(mktemp -d "$RUNNER_TEMP/buster-analyzer/.comparison-expected.XXXXXX")"
-          trap 'rm -rf "$expected_directory" "$reference_root"' EXIT
-          for evidence in "$candidate_depfile" "$candidate_manifest" "$reference_manifest" "$selection_path"; do
+          expected_directory="$(mktemp -d "$RUNNER_TEMP/buster-analyzer/.candidate-expected.XXXXXX")"
+          trap 'rm -rf "$expected_directory"' EXIT
+          for evidence in "$candidate_depfile" "$candidate_manifest"; do
             if [[ ! -f "$evidence" || -L "$evidence" ]]; then
-              echo '::error::Missing analyzer comparison provenance evidence.'
+              echo '::error::Missing or unsafe candidate analyzer provenance evidence.'
               exit 1
             fi
           done
-          candidate_arguments=(manifest)
-          reference_arguments=(manifest)
-          if [[ "$EVENT_NAME" == merge_group ]]; then
-            candidate_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-driver")
-            reference_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-baseline")
-          fi
-          python3 tools/analyzer_reference.py "${candidate_arguments[@]}" \
+          python3 tools/analyzer_reference.py manifest \
+            --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$expected_directory/candidate.json"
-          expected_materialized="$(python3 tools/analyzer_reference.py materialization \
-            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
-            --requested "$COMPARISON_REQUESTED" \
-            --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision" \
-            --candidate-manifest "$expected_directory/candidate.json")"
-          if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
-            echo '::error::Analyzer reference materialization evidence is missing or stale.'
+          if ! cmp -s "$expected_directory/candidate.json" "$candidate_manifest"; then
+            echo '::error::Candidate analyzer provenance is stale or inconsistent.'
             exit 1
           fi
-          if [[ "$expected_materialized" == true ]]; then
-            if [[ ! -d "$reference_root" || -L "$reference_root" || \
-                  ! -f "$reference_depfile" || -L "$reference_depfile" ]]; then
-              echo '::error::Historical analyzer reference evidence is missing or unsafe.'
-              exit 1
-            fi
-            python3 tools/analyzer_reference.py "${reference_arguments[@]}" \
-              --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
-              --root "$reference_root" --depfile "$reference_depfile" \
-              --output "$expected_directory/reference.json"
-          else
-            if [[ -e "$reference_root" || -L "$reference_root" || \
-                  -e "$reference_depfile" || -L "$reference_depfile" ]]; then
-              echo '::error::Same-revision skip retained unexpected historical reference state.'
-              exit 1
-            fi
-            cp "$expected_directory/candidate.json" "$expected_directory/reference.json"
-          fi
-          if ! cmp -s "$expected_directory/candidate.json" "$candidate_manifest" || \
-             ! cmp -s "$expected_directory/reference.json" "$reference_manifest"; then
-            echo '::error::Missing, malformed, stale or inconsistent analyzer provenance evidence.'
-            exit 1
-          fi
-          python3 tools/analyzer_reference.py select \
-            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
-            --requested "$COMPARISON_REQUESTED" \
-            --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision" \
-            --candidate-manifest "$expected_directory/candidate.json" \
-            --reference-manifest "$expected_directory/reference.json" \
-            --output "$expected_directory/selection.txt"
-          if ! cmp -s "$expected_directory/selection.txt" "$selection_path"; then
-            echo '::error::Missing, malformed, stale or inconsistent analyzer comparison selection evidence.'
-            exit 1
-          fi
-          selection="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field selection)"
-          reason="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field reason)"
-          if [[ "${ANALYZER_COMPARISON_SELECTION-}" != "$selection" || \
-                "${ANALYZER_COMPARISON_REASON-}" != "$reason" ]]; then
-            echo '::error::Analyzer comparison selection exports do not match retained evidence.'
-            exit 1
-          fi
-          rm -rf "$expected_directory" "$reference_root"
-          trap - EXIT
-          case "$selection" in
-            compare)
-              if [[ ! -f build/analyzer-baseline || -L build/analyzer-baseline || ! -x build/analyzer-baseline ]]; then
-                echo '::error::Analyzer comparison requires a regular, non-symlink executable baseline driver.'
-                exit 1
-              fi
-              build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" --baseline-driver build/analyzer-baseline 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
-              ;;
-            skip)
-              if [[ -e build/analyzer-baseline || -L build/analyzer-baseline ]]; then
-                echo '::error::Analyzer skip requires the baseline driver path to be absent.'
-                exit 1
-              fi
-              build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
-              ;;
-            *)
-              echo '::error::Missing or invalid analyzer comparison selection.'
-              exit 1
-              ;;
-          esac
+          echo 'ANALYZER_POLICY candidate-only-v1: one full analysis, no reference pass'
+          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
       - name: Report reused analyzer validation
         if: ${{ !cancelled() && needs.reuse.outputs.reuse == 'true' }}

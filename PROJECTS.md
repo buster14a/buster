@@ -32,7 +32,7 @@ An entry establishes where to look, not a blanket support or test-pass claim.
 | Area ID | Component | Existing source | Contract and consumers |
 |---|---|---|---|
 | `build-test` | Build driver, tests, CI and developer tooling | [build.c](build.c), [CMakeLists.txt](CMakeLists.txt), [tests](tests/), [tools](tools/), [.github](.github/) | [Build](docs/agents/build.md), [tests/CI](docs/agents/testing.md), and [research lifecycle](docs/agents/research.md). Repository development and validation. |
-| `bench-service` | Queued benchmark execution service | [Service sources](tools/bench_service/) | [User guide](tools/bench_service/USING.md), [service contract](tools/bench_service/README.md) and [same-host installation](tools/bench_service/deploy/SAME_HOST_MCP.md). A service implementation is not proof of installation, host qualification or performance acceptance. |
+| `bench-direct` | Owner pull-request workloads timed on the 9700X runner | [Workloads](benchmarks/9700x/), [harness](tools/bench_direct/) | [Workload contract](benchmarks/9700x/README.md) and [admission](benchmarks/9700x/ADMISSION.md). Diagnostic process latency without containment or sealed results; not a compiler comparison. |
 | `repository` | Repository-wide documentation and coordination | [Agent entry point](AGENTS.md) and [documentation](docs/) | [Project/feature tracking](docs/project-tracking.md). Cross-cutting work without a more specific owning area. |
 
 ## Experiments and preservation
