@@ -3448,7 +3448,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
 BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilder* builder, IrTypeId true_type, IrTypeId false_type, u32 true_start,
                                                                   u32 true_end, u32 false_start, u32 false_end);
 BUSTER_C_INTERNAL bool c_ir_range_is_null_pointer_constant_attempt(CIntegerIrBuilder* builder, IrTypeId type, u32 start, u32 end);
-BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out);
+BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool runtime_tail, u64* offset_out,
+                                                      IrTypeId* tail_element_out);
 
 BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame right)
 {
@@ -3466,7 +3467,7 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
         case C_IR_QUERY_FRAME_OPERAND_TYPE:
         case C_IR_QUERY_FRAME_VLA_C_TYPE:
         case C_IR_QUERY_FRAME_TYPE_PREDICTION:
-        case C_IR_QUERY_FRAME_OFFSETOF: return left.start == right.start && left.end == right.end;
+        case C_IR_QUERY_FRAME_OFFSETOF: return left.start == right.start && left.end == right.end && left.flag == right.flag;
         case C_IR_QUERY_FRAME_COMPOUND_ELEMENT_COUNT: return left.start == right.start && left.end == right.end;
         case C_IR_QUERY_FRAME_COMPOUND_TYPE:
             return left.start == right.start && left.end == right.end && left.third == right.third && left.fourth == right.fourth;
@@ -3603,7 +3604,9 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             frame->flag = c_ir_range_is_null_pointer_constant_attempt(builder, frame->first_type, frame->start, frame->end);
             frame->success = true;
             break;
-        case C_IR_QUERY_FRAME_OFFSETOF: frame->success = c_ir_constant_offsetof_attempt(builder, frame->start, frame->end, &frame->integer); break;
+        case C_IR_QUERY_FRAME_OFFSETOF:
+            frame->success = c_ir_constant_offsetof_attempt(builder, frame->start, frame->end, frame->flag, &frame->integer, &frame->result_type);
+            break;
         }
         if (machine->has_request)
         {
@@ -3801,6 +3804,21 @@ BUSTER_C_INTERNAL bool c_ir_offsetof_evaluate(CIntegerIrBuilder* builder, u32 st
     if (success)
     {
         *offset_out = result.integer;
+    }
+    return success;
+}
+
+// The constant prefix and element type of `offsetof(T, designator[index])`
+// whose final index is a runtime expression.
+BUSTER_C_INTERNAL bool c_ir_offsetof_runtime_tail(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out, IrTypeId* element_out)
+{
+    CIrQueryFrame result = {0};
+    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_OFFSETOF, .flag = true},
+                                      &result) && result.success;
+    if (success)
+    {
+        *offset_out = result.integer;
+        *element_out = result.result_type;
     }
     return success;
 }
@@ -15569,6 +15587,7 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_IDENTIFIER_PLACE,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_OFFSETOF_INDEX,
 } CIrLowerFrameStage;
 
 typedef struct CIrNestedInitializerCursor CIrNestedInitializerCursor;
@@ -31666,6 +31685,47 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         }
         return;
     }
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_OFFSETOF_INDEX)
+    {
+        // The saved stack ends with the constant prefix offset. Scale the
+        // converted index by the element size and add it in size_t.
+        values = state->values;
+        operations = state->operations;
+        operation_sources = state->operation_sources;
+        operation_cast_types = state->operation_cast_types;
+        value_count = state->value_count;
+        operation_count = state->operation_count;
+        index = state->index;
+        IrValueId subscript = machine->child_result.success ? machine->child_result.value : IR_VALUE_ID_INVALID;
+        IrType* subscript_type = subscript.value < builder->function->value_count
+            ? ir_type_from_id(&builder->program->types, builder->function->values[subscript.value].canonical_type) : 0;
+        IrType* element = ir_type_from_id(&builder->program->types, state->pending_type);
+        IrValueId result = IR_VALUE_ID_INVALID;
+        if (value_count && element && subscript_type && (subscript_type->kind == IR_TYPE_INTEGER || subscript_type->kind == IR_TYPE_BOOLEAN))
+        {
+            IrSourceRange source = state->pending_source;
+            IrValueId converted = c_ir_emit_cast(builder, subscript, builder->size_type, source);
+            IrValueId size = c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->size_type);
+            IrValueId scaled = converted.value != IR_ID_UNDERLYING_INVALID && size.value != IR_ID_UNDERLYING_INVALID
+                ? c_ir_emit_binary_value(builder, converted, size, builder->size_type, IR_BINARY_INTEGER_MULTIPLY, source) : IR_VALUE_ID_INVALID;
+            result = scaled.value != IR_ID_UNDERLYING_INVALID
+                ? c_ir_emit_binary_value(builder, values[value_count - 1], scaled, builder->size_type, IR_BINARY_INTEGER_ADD, source)
+                : IR_VALUE_ID_INVALID;
+        }
+        if (result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            if (!builder->failure_message.length)
+            {
+                builder->failure_message = S8("invalid __builtin_offsetof array index");
+            }
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        values[value_count - 1] = result;
+        expect_operand = false;
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        goto c_ir_expression_core_loop;
+    }
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT ||
         frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA)
     {
@@ -32067,13 +32127,49 @@ c_ir_expression_core_loop:
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             u64 offset = 0;
-            if (close >= end || !c_ir_offsetof_evaluate(builder, index + 2, close, &offset))
+            bool constant = close < end && c_ir_offsetof_evaluate(builder, index + 2, close, &offset);
+            u32 tail_open = UINT32_MAX;
+            for (u32 bracket = index + 2; !constant && close < end && bracket < close; bracket += 1)
+            {
+                if (c_token_is_punctuator(&builder->preprocess.tokens[bracket], C_PUNCTUATOR_LEFT_BRACKET) &&
+                    c_ir_matching_delimiter_cached(builder, bracket, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET) == close - 1)
+                {
+                    tail_open = bracket;
+                }
+            }
+            // Only a subscript that is not a constant expression takes the
+            // runtime route; constant refusals (negative, real, overflowing
+            // indices) stay refused in every context.
+            CIrConstantValue tail_constant = {0};
+            bool tail_runtime = !constant && tail_open != UINT32_MAX && tail_open + 1 < close - 1 &&
+                                !(c_ir_constant_evaluate(builder, tail_open + 1, close - 1, &tail_constant) &&
+                                  tail_constant.kind != C_IR_CONSTANT_UNKNOWN);
+            IrTypeId tail_element = IR_TYPE_ID_INVALID;
+            if (!constant && (!tail_runtime || !c_ir_offsetof_runtime_tail(builder, index + 2, close, &offset, &tail_element)))
             {
                 builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
             values[value_count++] = c_ir_emit_integer_value_typed(builder, offset, false, token, builder->size_type);
+            if (!constant)
+            {
+                // GNU C and Clang evaluate a final runtime subscript. Lower
+                // it as a child expression; the resume adds index * size.
+                c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
+                                          close + 1, false);
+                state->pending_type = tail_element;
+                state->pending_source = source;
+                frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_OFFSETOF_INDEX;
+                if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                        .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                        .as.expression = {.start = tail_open + 1, .end = close - 1},
+                                                    }))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                }
+                return;
+            }
             expect_operand = false;
             index = close;
             continue;
@@ -51698,8 +51794,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder
            c_ir_constant_complex_initializer_store_float(builder, element, converted.imaginary, bytes + target->fields[1].offset);
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
+// A runtime tail leaves a final `[index]` unevaluated: GNU C and Clang
+// accept `offsetof(T, array[n])`, which lowers to the returned prefix
+// offset plus n times the size of the returned element type.
+BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool runtime_tail, u64* offset_out,
+                                                      IrTypeId* tail_element_out)
 {
+    IrTypeId tail_element = IR_TYPE_ID_INVALID;
     bool valid = start < end;
     u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(builder->preprocess.target).pointer.bit_width).low;
     u32 comma = end;
@@ -51755,6 +51856,14 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
             IrType* array = ir_type_from_id(&builder->program->types, type_id);
             IrTypeId element_id = array && array->kind == IR_TYPE_ARRAY ? array->element_type : IR_TYPE_ID_INVALID;
+            if (runtime_tail && close + 1 == end)
+            {
+                IrType* tail = ir_type_from_id(&builder->program->types, element_id);
+                valid = tail && tail->layout.resolved;
+                tail_element = element_id;
+                index = end;
+                break;
+            }
             CIrConstantValue subscript = {0};
             valid = close < end && element_id.value != IR_ID_UNDERLYING_INVALID &&
                     c_ir_query_constant(builder, index + 1, close, &subscript) && subscript.kind == C_IR_CONSTANT_INTEGER;
@@ -51788,9 +51897,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
             index += 1;
         }
     }
+    valid = valid && (!runtime_tail || tail_element.value != IR_ID_UNDERLYING_INVALID);
     if (valid)
     {
         *offset_out = offset;
+        *tail_element_out = tail_element;
     }
     return valid;
 }
