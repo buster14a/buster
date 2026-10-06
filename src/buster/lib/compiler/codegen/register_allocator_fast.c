@@ -425,12 +425,12 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_owner_match_mask(u32 const* owner, u64 acti
         dense &= UINT64_C(0x0001000100010001);
         if (dense)
         {
-            Simd512 needle = simd512_splat_word(value);
+            Simd512 needle = simd512_splat_u32(value);
             for (; dense; dense &= dense - 1u)
             {
                 u32 base = machine_fast_first_set(dense);
                 Simd512 owners = simd512_load(owner + base);
-                matches |= (u64)simd512_equal_word(owners, needle) << base;
+                matches |= (u64)simd512_equal_u32(owners, needle) << base;
                 active &= ~(UINT64_C(0xffff) << base);
             }
         }

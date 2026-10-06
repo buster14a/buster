@@ -107,8 +107,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShap
         // range are masked off the load and read as C_TOKEN_INVALID, which no
         // punctuator shape can equal, so the tail needs no separate trim.
         Simd512 window = simd512_load_masked(shapes + base, mask64_prefix(window_tokens));
-        Mask64 opens = simd512_equal_byte(window, open_lanes);
-        Mask64 closes = simd512_equal_byte(window, close_lanes);
+        Mask64 opens = simd512_equal_u8(window, open_lanes);
+        Mask64 closes = simd512_equal_u8(window, close_lanes);
         u32 close_count = mask64_count(closes);
         if (depth > close_count)
         {
@@ -1419,8 +1419,8 @@ typedef enum CIrSimdArgument
     C_IR_SIMD_ARGUMENT_ADDRESS,
     C_IR_SIMD_ARGUMENT_MASK,
     C_IR_SIMD_ARGUMENT_VECTOR,
-    C_IR_SIMD_ARGUMENT_BYTE,
-    C_IR_SIMD_ARGUMENT_WORD,
+    C_IR_SIMD_ARGUMENT_U8,
+    C_IR_SIMD_ARGUMENT_U32,
     C_IR_SIMD_ARGUMENT_IMMEDIATE,
 } CIrSimdArgument;
 

@@ -347,25 +347,26 @@ typedef enum IrVectorSemantics
 // operation and checked by `ir_validate`.
 typedef enum IrSimdOperation
 {
-    IR_SIMD_LOAD,               // (pointer) -> vector
-    IR_SIMD_LOAD_MASKED,        // (pointer, mask) -> vector, lanes outside the mask zeroed
-    IR_SIMD_STORE,              // (pointer, vector)
-    IR_SIMD_STORE_MASKED,       // (pointer, mask, vector), lanes outside the mask untouched
-    IR_SIMD_SPLAT_BYTE,         // (byte) -> vector
-    IR_SIMD_COMPARE_EQUAL_BYTE, // (vector, vector) -> mask
-    IR_SIMD_COMPARE_LESS_BYTE,  // (vector, vector) -> mask, unsigned
-    IR_SIMD_SIGN_MASK_BYTE,     // (vector) -> mask of the per-byte high bits
-    IR_SIMD_TEST_MASK_BYTE,     // (vector, vector) -> mask where the byte-wise AND is non-zero
-    IR_SIMD_PERMUTE2_BYTE,      // (mask, low, indices, high) -> vector, zeroed outside the mask
-    IR_SIMD_COMPRESS_BYTE,      // (mask, vector) -> vector, selected bytes packed down
-    IR_SIMD_COMPRESS_STORE_BYTE,// (pointer, mask, vector), writes only the selected bytes
-    IR_SIMD_WIDEN_BYTE_TO_WORD, // (vector, quarter) -> vector of 16 zero-extended u32 lanes
-    IR_SIMD_SHIFT_LEFT_WORD,    // (vector, count) -> vector, per u32 lane
-    IR_SIMD_TERNARY_WORD,       // (vector, vector, vector, table) -> vector, per-bit truth table
-    IR_SIMD_COMPARE_EQUAL_WORD, // (vector, vector) -> mask of the 16 u32 lanes in the low bits
-    IR_SIMD_SPLAT_WORD,         // (u32) -> vector holding that value in all 16 u32 lanes
-    IR_SIMD_COMPARE_LESS_WORD,  // (vector, vector) -> mask of the 16 u32 lanes, unsigned
-    IR_SIMD_COMPRESS_WORD,      // (mask, vector) -> vector, selected u32 lanes packed down
+    IR_SIMD_LOAD,              // (pointer) -> vector
+    IR_SIMD_LOAD_MASKED,       // (pointer, mask) -> vector, lanes outside the mask zeroed
+    IR_SIMD_STORE,             // (pointer, vector)
+    IR_SIMD_STORE_MASKED,      // (pointer, mask, vector), lanes outside the mask untouched
+    IR_SIMD_SPLAT_U8,          // (byte) -> vector
+    IR_SIMD_COMPARE_EQUAL_U8,  // (vector, vector) -> mask
+    IR_SIMD_COMPARE_LESS_U8,   // (vector, vector) -> mask, unsigned
+    IR_SIMD_SIGN_MASK_U8,      // (vector) -> mask of the per-byte high bits
+    IR_SIMD_TEST_MASK_U8,      // (vector, vector) -> mask where the byte-wise AND is non-zero
+    IR_SIMD_PERMUTE2_U8,       // (mask, low, indices, high) -> vector, zeroed outside the mask
+    IR_SIMD_COMPRESS_U8,       // (mask, vector) -> vector, selected bytes packed down
+    IR_SIMD_COMPRESS_STORE_U8, // (pointer, mask, vector), writes only the selected bytes
+    IR_SIMD_WIDEN_U8_TO_U32,   // (vector, quarter) -> vector of 16 zero-extended u32 lanes
+    IR_SIMD_SHIFT_LEFT_U32,    // (vector, count) -> vector, per u32 lane
+    IR_SIMD_TERNARY_U32,       // (vector, vector, vector, table) -> vector, per-bit truth table
+    IR_SIMD_COMPARE_EQUAL_U32, // (vector, vector) -> mask of the 16 u32 lanes in the low bits
+    IR_SIMD_SPLAT_U32,         // (u32) -> vector holding that value in all 16 u32 lanes
+    IR_SIMD_COMPARE_LESS_U32,  // (vector, vector) -> mask of the 16 u32 lanes, unsigned
+    IR_SIMD_COMPRESS_U32,      // (mask, vector) -> vector, selected u32 lanes packed down
+    IR_SIMD_PERMUTE2_U32,      // (mask, low, indices, high) -> vector, u32 lanes zeroed outside the mask
     IR_SIMD_COUNT,
 } IrSimdOperation;
 

@@ -724,12 +724,12 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
                 u32 window_tokens = (u32)BUSTER_MIN(UINT64_C(64), tile_tokens - window);
                 Mask64 window_mask = window_tokens == 64 ? UINT64_MAX : (Mask64)(((Mask64)1 << window_tokens) - 1);
                 Simd512 shape_lanes = simd512_load_masked(token_shapes + window_base, window_mask);
-                Mask64 identifiers = simd512_equal_byte(shape_lanes, identifier_shape);
-                Mask64 open_parentheses = simd512_equal_byte(shape_lanes, open_parenthesis);
-                Mask64 open_braces = simd512_equal_byte(shape_lanes, open_brace);
-                Mask64 opens = mask64_or(mask64_or(open_parentheses, simd512_equal_byte(shape_lanes, open_bracket)), open_braces);
-                Mask64 closes = mask64_or(mask64_or(simd512_equal_byte(shape_lanes, close_parenthesis), simd512_equal_byte(shape_lanes, close_bracket)),
-                                          simd512_equal_byte(shape_lanes, close_brace));
+                Mask64 identifiers = simd512_equal_u8(shape_lanes, identifier_shape);
+                Mask64 open_parentheses = simd512_equal_u8(shape_lanes, open_parenthesis);
+                Mask64 open_braces = simd512_equal_u8(shape_lanes, open_brace);
+                Mask64 opens = mask64_or(mask64_or(open_parentheses, simd512_equal_u8(shape_lanes, open_bracket)), open_braces);
+                Mask64 closes = mask64_or(mask64_or(simd512_equal_u8(shape_lanes, close_parenthesis), simd512_equal_u8(shape_lanes, close_bracket)),
+                                          simd512_equal_u8(shape_lanes, close_brace));
                 // The label rule is a mask, not a per-identifier lookahead: the
                 // successor shapes are the same sidecar bytes read one token
                 // along, so lane 63 sees the next window's first token instead
@@ -738,12 +738,12 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
                 u64 successor_tokens = preprocess.token_count - (window_base + 1);
                 Mask64 successor_mask = successor_tokens >= 64 ? UINT64_MAX : (Mask64)(((Mask64)1 << successor_tokens) - 1);
                 Simd512 successor_lanes = simd512_load_masked(token_shapes + window_base + 1, successor_mask);
-                Mask64 labels = mask64_and(identifiers, simd512_equal_byte(successor_lanes, colon_shape));
+                Mask64 labels = mask64_and(identifiers, simd512_equal_u8(successor_lanes, colon_shape));
                 // The validation pairs come out of the same two shape vectors:
                 // identifier then '{', '&&' then identifier, and '(' then '{'.
-                Mask64 brace_identifiers = mask64_and(identifiers, simd512_equal_byte(successor_lanes, open_brace));
+                Mask64 brace_identifiers = mask64_and(identifiers, simd512_equal_u8(successor_lanes, open_brace));
                 Mask64 label_addresses =
-                    mask64_and(simd512_equal_byte(shape_lanes, ampersand_ampersand), simd512_equal_byte(successor_lanes, identifier_shape));
+                    mask64_and(simd512_equal_u8(shape_lanes, ampersand_ampersand), simd512_equal_u8(successor_lanes, identifier_shape));
                 Mask64 statement_expressions = mask64_and(open_braces, mask64_or(mask64_shift_left(open_parentheses, 1), previous_parenthesis_carry));
                 previous_parenthesis_carry = mask64_shift_right(open_parentheses, 63);
                 for (Mask64 remaining = identifiers; remaining; remaining &= remaining - 1)
@@ -991,8 +991,8 @@ BUSTER_C_INTERNAL u32 c_parse_next_call_shape(CTokenShape const* shapes, u32 fro
     {
         // Lane i is token base + i, whose successor base + i + 1 must stay below end.
         Mask64 lanes = mask64_prefix(BUSTER_MIN(64u, end - 1 - base));
-        Mask64 calls = mask64_and(simd512_equal_byte(simd512_load_masked(shapes + base, lanes), identifier_shape),
-                                  simd512_equal_byte(simd512_load_masked(shapes + base + 1, lanes), open_parenthesis));
+        Mask64 calls = mask64_and(simd512_equal_u8(simd512_load_masked(shapes + base, lanes), identifier_shape),
+                                  simd512_equal_u8(simd512_load_masked(shapes + base + 1, lanes), open_parenthesis));
         if (calls)
         {
             result = base + mask64_first_set(calls);
@@ -22636,7 +22636,7 @@ BUSTER_C_SHARED CNumberFacts const* c_number_facts_build(Arena* arena, CPreproce
             Mask64 numbers = 0;
             if (shapes)
             {
-                numbers = simd512_equal_byte(simd512_load_masked(shapes + base, mask64_prefix(token_count - base)), number_shape);
+                numbers = simd512_equal_u8(simd512_load_masked(shapes + base, mask64_prefix(token_count - base)), number_shape);
                 // The rows decide: a lane the sidecar marks is kept only when
                 // its row is a number too, so a view whose shapes do not match
                 // its rows loses facts (its consumers then convert) but can
@@ -23859,8 +23859,8 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 Simd512 chunk0 = simd512_load(rows);
                 Simd512 chunk1 = simd512_load(rows + 64);
                 Simd512 chunk2 = simd512_load(rows + 128);
-                Simd512 symbol_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_LOW_LANES, chunk0, symbol_low_indices, chunk1),
-                                                  simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_HIGH_LANES, chunk1, symbol_high_indices, chunk2));
+                Simd512 symbol_group = simd512_or(simd512_permute2_u8(C_PARSE_CENSUS_SYMBOL_LOW_LANES, chunk0, symbol_low_indices, chunk1),
+                                                  simd512_permute2_u8(C_PARSE_CENSUS_SYMBOL_HIGH_LANES, chunk1, symbol_high_indices, chunk2));
                 simd512_store_masked(symbol_bytes + projected, C_PARSE_CENSUS_GROUP_LANES, symbol_group);
                 projected += C_PARSE_CENSUS_GROUP_TOKENS;
             }
@@ -23883,16 +23883,16 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 u32 window_tokens = BUSTER_MIN(64, tile_tokens - window);
                 Mask64 window_mask = mask64_prefix(window_tokens);
                 Simd512 shape_lanes = simd512_load_masked(token_shapes + tile_base + window, window_mask);
-                Mask64 identifiers = simd512_equal_byte(shape_lanes, identifier_shape);
-                Mask64 semicolons = simd512_equal_byte(shape_lanes, semicolon);
-                Mask64 commas = simd512_equal_byte(shape_lanes, comma);
-                Mask64 open_parentheses = simd512_equal_byte(shape_lanes, open_parenthesis);
-                Mask64 open_brackets = simd512_equal_byte(shape_lanes, open_bracket);
-                Mask64 open_braces = simd512_equal_byte(shape_lanes, open_brace);
-                Mask64 close_braces = simd512_equal_byte(shape_lanes, close_brace);
+                Mask64 identifiers = simd512_equal_u8(shape_lanes, identifier_shape);
+                Mask64 semicolons = simd512_equal_u8(shape_lanes, semicolon);
+                Mask64 commas = simd512_equal_u8(shape_lanes, comma);
+                Mask64 open_parentheses = simd512_equal_u8(shape_lanes, open_parenthesis);
+                Mask64 open_brackets = simd512_equal_u8(shape_lanes, open_bracket);
+                Mask64 open_braces = simd512_equal_u8(shape_lanes, open_brace);
+                Mask64 close_braces = simd512_equal_u8(shape_lanes, close_brace);
                 Mask64 opens = mask64_or(mask64_or(open_parentheses, open_brackets), open_braces);
                 Mask64 closes =
-                    mask64_or(mask64_or(simd512_equal_byte(shape_lanes, close_parenthesis), simd512_equal_byte(shape_lanes, close_bracket)), close_braces);
+                    mask64_or(mask64_or(simd512_equal_u8(shape_lanes, close_parenthesis), simd512_equal_u8(shape_lanes, close_bracket)), close_braces);
                 census->identifier_count += mask64_count(identifiers);
                 census->semicolon_count += mask64_count(semicolons);
                 census->comma_count += mask64_count(commas);
@@ -23905,18 +23905,18 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 // candidates in a million identifiers, each then answered by the
                 // predicate the reference calls.
                 Simd512 symbol_lanes = simd512_load(symbol_bytes + window);
-                Mask64 uninterned = simd512_equal_byte(symbol_lanes, uninterned_symbol);
-                Mask64 for_candidates = mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol), uninterned));
+                Mask64 uninterned = simd512_equal_u8(symbol_lanes, uninterned_symbol);
+                Mask64 for_candidates = mask64_and(identifiers, mask64_or(simd512_equal_u8(symbol_lanes, for_symbol), uninterned));
                 // A window is exactly one bitmap word, so the candidate mask
                 // is the word: the tile stride and the window stride are both
                 // multiples of 64, and the tail window's mask already carries
                 // the prefix that bounds the stream.
                 declaration_range_words[(tile_base + window) >> 6] = mask64_and(
                     identifiers,
-                    mask64_or(mask64_or(uninterned, simd512_equal_byte(symbol_lanes, overloadable_symbol)),
-                              mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),
-                                        mask64_or(simd512_equal_byte(symbol_lanes, thread_local_c23_symbol),
-                                                  simd512_equal_byte(symbol_lanes, static_symbol)))));
+                    mask64_or(mask64_or(uninterned, simd512_equal_u8(symbol_lanes, overloadable_symbol)),
+                              mask64_or(mask64_or(simd512_equal_u8(symbol_lanes, thread_local_symbol), simd512_equal_u8(symbol_lanes, thread_gnu_symbol)),
+                                        mask64_or(simd512_equal_u8(symbol_lanes, thread_local_c23_symbol),
+                                                  simd512_equal_u8(symbol_lanes, static_symbol)))));
                 for (Mask64 remaining = for_candidates; remaining; remaining &= remaining - 1)
                 {
                     u32 lane = mask64_first_set(remaining);
