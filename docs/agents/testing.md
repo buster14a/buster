@@ -789,6 +789,42 @@ have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
 classes, scale mismatches and malformed sites; `link_tests` derives patched
 addresses from static/dynamic section tables and imported-data copy slots.
 
+## Wasm canonical index signedness
+
+`compiler_driver_test_wasm_index_signedness` emits a direct canonical module for
+each pointer width before any C control. Thirty-two exported address functions
+cover signed/unsigned 8/16/32/64-bit INDEX operands, pointer/array bases and
+one/four-byte strides. Two additional signed-i32 LOAD exports exercise -2 through
+2 from an interior address within one five-element linear-memory region. Every
+row passes the shared commit and canonical validation gates before emission.
+
+Wasm emission normalizes each INDEX operand to its declared integer width and
+signedness before converting to the address width. Memory64 uses signed extension
+for signed i32 carriers and unsigned extension for unsigned carriers; Wasm32
+retains i64-to-i32 wrapping before the unchanged element-stride arithmetic.
+
+Each original direct module receives 534 independent engine comparisons:
+512 fixed carrier samples, 12 separately pinned address literals and ten LOAD
+results. BigInt signed/unsigned interpretation and address-width arithmetic
+provide the oracle; it does not encode Wasm instructions or call the emitter.
+Dirty carrier bits and unsigned high-bit values remain mathematical address
+returns with no memory access. The LOAD oracle initializes and checks the
+five-element region independently.
+
+A small C source uses one static five-element array. Its pointer starts at
+element two, so -2/-1/0/1/2 accesses remain inside that array; an array-subscript
+neighbor is a positive control. Both frontend forms and both pointer widths
+receive ten engine comparisons each. The fixture logs actual canonical INDEX
+operand widths and signedness as `WASM_C_INDEX`/`WASM_C_INDEX_ROW`, including each
+function's nonconstant operand definition; a frontend-prewidened i64 operand
+does not establish coverage of signed i32 or narrow direct canonical operands.
+
+The six original compiler modules retain repeated-emission equality, SHA-256
+identity, file readbacks before/after the engine, and the existing 30/60-second
+Node deadlines. Success requires normal zero exit, empty stderr and the exact
+fixed terminal marker. The source and oracle are embedded in the registered
+fixture; frozen support inputs and oracle/shim files remain unchanged.
+
 ## Wasm function-address capability
 
 `compiler_driver_test_wasm_function_addresses` constructs and validates canonical

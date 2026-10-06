@@ -315,6 +315,33 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   whose `long double` is not this format. Current native admission follows the
   MIR selectors and shared canonical-IR ABI classification; `none` selects
   MIR-stack and does not restore those retired direct-emitter paths.
+- **GNU x86 inline-assembly unions `am` on outputs and `dN` on inputs select
+  their existing fixed-register member.** `=am`, `+am`, `=&am` and `+&am`
+  carry A/RAX, preserving ties, early clobbers and exactly-once output-place
+  evaluation; `dN` carries D/RDX for both constants and runtime values. The
+  shared selector is used by lowering and its semantic-only validation mirror.
+  This bounded vocabulary does not plan alternatives across conflicts: an
+  otherwise legal memory member of `am`, or immediate member of `dN`, still
+  cannot rescue a conflicting fixed register. Those combinations retain the
+  existing conflict diagnostic. Neither union is admitted on AArch64.
+  Numeric x86 clobber `0` denotes AX/RAX rather than operand zero; lowering
+  canonicalizes it to `rax` before publishing IR, so register exclusion,
+  operand conflicts, literal-register checks and duplicate `0`/`rax` rejection
+  use the existing clobber machinery. Lowering and semantic-only validation
+  both reject duplicate normalized names, including ordinary `rax`/`rax`
+  lists in unused static definitions. Other numeric clobbers remain refused.
+  `inb` and `outb` use the shared assembler's checked AL/DX forms; their port
+  fixture is compile-only because execution requires OS privileges. GNU
+  operand-width modifiers such as `%w1` retain their existing refusal; the
+  fixture supplies the port operand's width through its `unsigned short` type.
+  `c_test_inline_assembly_constraint_unions` checks both frontend forms,
+  semantic-only validation, normalized IR, malformed neighbours and the
+  deliberately unsupported register-conflict cases described above.
+  `machine_test_inline_assembly_constraint_unions` checks exact port bytes
+  `EC`/`EE`, all four allocators and both PIC/frontend forms on three x86 OS
+  layouts; the registered driver fixture executes the nonprivileged union and
+  numeric-clobber cases on matching desktop hosts. These registrations do not
+  constitute a validation result.
 - **A module-level `__asm__` block emits into the module's text through
   `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
   directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives
@@ -367,3 +394,46 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
 - The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
   instruction shapes must be diagnosed; never silently fall back to a native
   backend.
+
+## x87 integer unary domain
+
+The registered `c_test_x87_integer_unary_initializers` fixture keeps #1294's
+integer-domain obligations separate from real negation. Thirty-three original
+standard expressions cover unsigned 32/64-bit wrap, grouping and nested signs,
+unsigned high bits, integer positive zero, real negative zero, and float/double
+rounding before a later unary operation. Six Microsoft ui8/ui16 extension
+spellings separately require promotion to signed int before unary negation.
+One canonical-only unsuffixed-u64 magnitude row protects Buster's existing
+signed-128 literal-selection policy; it is not a portable reference-compiler
+conformance assertion.
+
+Each expression initializes five original objects: scalar global, one-element
+array, record member, function-local static scalar and static array. GNU17/GNU23
+and both frontend forms on Linux/macOS x86-64 must certify canonical IR and
+match independently pinned binary80 images, including six zero padding bytes.
+Zero storage is accepted only when all sixteen expected bytes are zero. These
+x87 expectations are never applied to binary128 or Windows runtime layouts.
+
+`c_test_x87_integer_unary_runtime` reads only the first ten value bytes through
+volatile unsigned-char accesses, ignoring ABI padding. Each original standard
+or extension source runs in four allocator modes, both frontend forms and
+O0/O2 on native x86-64 Linux/macOS; every row executes all five observations.
+On hosted Linux, mandatory GCC and Clang GNU17/GNU2x O0/O2 controls use the same
+standard source and fixed images. Only Clang with `-fms-extensions` observes the
+separate ui8/ui16 source. Compiler/process errors and 30-second timeouts are
+failures; expected values never adapt to reference output. Existing frozen
+long-double inputs, rounding/special/refusal fixtures and support policy remain
+unchanged.
+
+The bounded folder retains one promoted unsigned-width byte alongside an
+integer's exact x87 encoding. Both direct and grouped unary signs share the
+same integer-domain operation: unsigned 32/64-bit negation wraps before real
+conversion, narrow unsigned literals promote to signed int, and integer zero
+remains positive. Real negation continues to flip the format's sign bit,
+including zero. Every successful real conversion clears the integer fact,
+including zero/special values and exact long-double widening; failures do not
+commit a partial conversion. A nonzero unsigned width beyond 64 declines
+negation rather than substituting a u64 wrap. The existing signed-128 selection
+for parsed u64 magnitudes is preserved. Integer binary operations still refuse
+and the existing depth limit is unchanged; no new recursion, pass, allocation
+or dependency is introduced.
