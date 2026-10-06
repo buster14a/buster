@@ -28724,6 +28724,121 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_goto_out(UnitTest
     return result;
 }
 
+// A parenthesised block that opens a statement-expression body is peeled off
+// as a leading statement only when it is a complete expression statement. As
+// an operand (`({ ({ if (x) x = 5; 1; }) + 2; })`) the lowering used to treat
+// the tokens after its `)` as the body's tail, so the `+ 2` replaced the whole
+// value and the inner `1` was lost (#2859). The fixture runs every case under
+// each register allocator and both frontend forms; main returns the 1-based
+// index of the first case whose value differs from the one GCC and Clang give.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_nested_operand_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("statement-expression-operand"), S8(".c"));
+    String8 source_text = S8(
+        "static int sink(int a, int b) { return a * 10 + b; }\n"
+        "static int id(int a) { return a; }\n"
+        "static int c0(int x) { return ({ ({ if (x) x = 5; 1; }) + 2; }); }\n"
+        "static int c1(int x) { return ({ 2 + ({ if (x) x = 5; 1; }); }); }\n"
+        "static int c2(int x) { return ({ ({ if (x) x = 5; 1; }) * 7; }); }\n"
+        "static int c3(int x) { return ({ ({ if (x) x = 5; 4; }) - 1; }); }\n"
+        "static int c4(int x) { return ({ ({ 4; }) - 1; }); }\n"
+        "static int c5(int x) { return ({ ({ int y = x; y; }) + 2; }); }\n"
+        "static int c6(int x) { return ({ sink(({ if (x) x = 5; 1; }), 2); }); }\n"
+        "static int c7(int x) { return ({ sink(2, ({ if (x) x = 5; 1; })); }); }\n"
+        "static int c8(int x) { return ({ ({ if (x) x = 5; 1; }) ? 8 : 9; }); }\n"
+        "static int c9(int x) { return ({ ({ if (x) x = 5; 0; }) ? 8 : 9; }); }\n"
+        "static int c10(int x) { return ({ ({ ({ if (x) x = 5; 1; }) + 2; }) + 4; }); }\n"
+        "static int c11(int x) { return ({ ({ ({ if (x) x = 5; 1; }) + 2; }); }); }\n"
+        "static int c12(int x) { return ({ ({ while (x < 3) x++; x; }) + 2; }); }\n"
+        "static int c13(int x) { return ({ ({ switch (x) { case 1: x = 10; break; default: x = 20; } x; }) + 1; }); }\n"
+        "static int c14(int x) { return ({ ({ if (x) x = 5; 1; }); ({ if (x) x = 6; 2; }) + 3; }); }\n"
+        "static int c15(int x) { return ({ int a = ({ if (x) x = 5; 1; }) + 2; a; }); }\n"
+        "static int c16(int x) { return ({ id(({ if (x) x = 5; 1; })) + 2; }); }\n"
+        "static int c17(int x) { return ({ ({ if (x) x = 5; 1; }) + ({ if (x) x = 7; 2; }); }); }\n"
+        "static int c18(int x) { return ({ ({ if (x) x = 5; 1; }) + 2 + x; }); }\n"
+        "static int c19(int x) { return ({ ({ if (x) x = 5; 1; }) && ({ if (x) x = 7; 2; }); }); }\n"
+        "static int c20(int x) { return ({ ({ if (x) x = 5; 1; }); 2; }); }\n"
+        "static int c21(int x) { return ({ ({ 1; }) + 2; }); }\n"
+        "static int c22(int x) { return ({ ({ ({ 1; }) + 2; }) * 3; }); }\n"
+        "static int c23(int x) { return ({ (({ if (x) x = 5; 1; })) + 2; }); }\n"
+        "static int c24(int x) { return ({ ({ if (x) x = 5; 1; }), 2; }); }\n"
+        "static int c25(int x) { return ({ -({ if (x) x = 5; 1; }) + 2; }); }\n"
+        "static int c26(int x) { return ({ ({ if (x) x = 5; 1; }) << 2; }); }\n"
+        "static int c27(int x) { return ({ ({ if (x) x = 5; 1; }) == 1; }); }\n"
+        "int main(void)\n"
+        "{\n"
+        "  if (c0(1) != 3) return 1;\n"
+        "  if (c1(1) != 3) return 2;\n"
+        "  if (c2(1) != 7) return 3;\n"
+        "  if (c3(1) != 3) return 4;\n"
+        "  if (c4(1) != 3) return 5;\n"
+        "  if (c5(1) != 3) return 6;\n"
+        "  if (c6(1) != 12) return 7;\n"
+        "  if (c7(1) != 21) return 8;\n"
+        "  if (c8(1) != 8) return 9;\n"
+        "  if (c9(1) != 9) return 10;\n"
+        "  if (c10(1) != 7) return 11;\n"
+        "  if (c11(1) != 3) return 12;\n"
+        "  if (c12(1) != 5) return 13;\n"
+        "  if (c13(1) != 11) return 14;\n"
+        "  if (c14(1) != 5) return 15;\n"
+        "  if (c15(1) != 3) return 16;\n"
+        "  if (c16(1) != 3) return 17;\n"
+        "  if (c17(1) != 3) return 18;\n"
+        "  if (c18(1) != 8) return 19;\n"
+        "  if (c19(1) != 1) return 20;\n"
+        "  if (c20(1) != 2) return 21;\n"
+        "  if (c21(1) != 3) return 22;\n"
+        "  if (c22(1) != 9) return 23;\n"
+        "  if (c23(1) != 3) return 24;\n"
+        "  if (c24(1) != 2) return 25;\n"
+        "  if (c25(1) != 1) return 26;\n"
+        "  if (c26(1) != 4) return 27;\n"
+        "  if (c27(1) != 1) return 28;\n"
+        "  return 0;\n"
+        "}\n");
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("statement-expression-operand-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("statement expression operand {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("statement expression operand runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A declaration inside a value-producing GNU statement expression is visible
 // to the statements that follow it in the same body -- the shape the construct
 // exists for, as in `({ typeof(a) _a = (a); typeof(b) _b = (b); _a > _b ? _a : _b; })`.
@@ -44632,6 +44747,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_goto_out);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);
+    C_TEST_FIXTURE(arguments, c_test_statement_expression_nested_operand_runtime);
     C_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
     C_TEST_FIXTURE(arguments, c_test_static_compound_literal);
     C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);

@@ -17360,11 +17360,15 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
         {
             break;
         }
+        // Only a complete expression statement `({ ... });` may be peeled off
+        // as a leading statement. Without the semicolon the parenthesized
+        // block is an operand of a larger expression (`({ ... }) + 2`).
         u32 tail_start = nested_close + 2;
-        if (tail_start < close && c_token_is_punctuator(&builder->preprocess.tokens[tail_start], C_PUNCTUATOR_SEMICOLON))
+        if (tail_start >= close || !c_token_is_punctuator(&builder->preprocess.tokens[tail_start], C_PUNCTUATOR_SEMICOLON))
         {
-            tail_start += 1;
+            break;
         }
+        tail_start += 1;
         if (tail_start >= close)
         {
             break;
