@@ -38050,6 +38050,9 @@ BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
           index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
           c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_CASE) ||
           c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
+          // `enum : long { ... };` opens an enum with a fixed underlying type; a tag keyword is never a label.
+          c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[index],
+                                    C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM)) ||
           !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON)))
     {
         // Peel any attribute sequence prefixing the label, so the three

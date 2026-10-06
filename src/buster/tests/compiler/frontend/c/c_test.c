@@ -3283,6 +3283,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
     return result;
 }
 
+// A block-scope enum with a fixed underlying type and no tag, `enum : long
+// { E1 = 1 };`, is a declaration with no declarator. The statement walker
+// read its `enum :` as a label and then found no declared identifier (#2849).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_fixed_enum_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu17"), S8("-std=c23")};
+    String8 source_text = S8(
+        "int outer_name = 7;\n"
+        "enum : long { file_value = 100 };\n"
+        "int main(void)\n"
+        "{\n"
+        "    enum : long { E1 = 1 };\n"
+        "    enum T : short { A = 2 };\n"
+        "    enum : unsigned char { B = 200 } v = B;\n"
+        "    enum T t = A;\n"
+        "    if ((int)E1 != 1 || t != 2 || v != 200 || sizeof(v) != 1 || sizeof(enum T) != 2) return 1;\n"
+        "    {\n"
+        "        enum : long { E1 = 10, inner = 20 };\n"
+        "        if ((int)E1 != 10 || (int)inner != 20) return 2;\n"
+        "        {\n"
+        "            enum : short { inner = 30 };\n"
+        "            if (inner != 30) return 3;\n"
+        "        }\n"
+        "        if ((int)inner != 20) return 4;\n"
+        "    }\n"
+        "    if ((int)E1 != 1 || (long)file_value != 100) return 5;\n"
+        "    {\n"
+        "        enum : long { outer_name = 3 };\n"
+        "        if ((int)outer_name != 3) return 6;\n"
+        "    }\n"
+        "    if (outer_name != 7) return 7;\n"
+        "    return 0;\n"
+        "}\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("block-scope-fixed-enum"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("block-scope-fixed-enum-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
+                        form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("block scope fixed enum {S8} {S8} form={u32}: {S8}"),
+                                      dialects[dialect], modes[mode], form, compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("block scope fixed enum runtime {S8} {S8} form={u32}: status={u32} timed_out={u32}"),
+                                    dialects[dialect], modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // The empty initializer `= {}` zero-initializes a scalar object of any
 // storage duration; it is C23 6.7.10 and a GNU extension before C23 (#2848).
 // Each automatic object is redeclared per iteration with a dirtied value so a
@@ -44609,6 +44689,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
+    C_TEST_FIXTURE(arguments, c_test_block_scope_fixed_enum_runtime);
     C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
     C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     C_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
