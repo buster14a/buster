@@ -71,6 +71,8 @@
 //                                                 non-constant assertion prints
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
+//   c_parse_initializer_slot_table                a walk's per-record slot
+//                                                 numbering, built once
 //   c_parse_add_type, c_parse_tag_lookup,         type interning and
 //   c_parse_primitive_type                        construction, attributes
 //   c_parse_definition_scan_start                 definition-token index
@@ -722,12 +724,12 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
                 u32 window_tokens = (u32)BUSTER_MIN(UINT64_C(64), tile_tokens - window);
                 Mask64 window_mask = window_tokens == 64 ? UINT64_MAX : (Mask64)(((Mask64)1 << window_tokens) - 1);
                 Simd512 shape_lanes = simd512_load_masked(token_shapes + window_base, window_mask);
-                Mask64 identifiers = simd512_equal_byte(shape_lanes, identifier_shape);
-                Mask64 open_parentheses = simd512_equal_byte(shape_lanes, open_parenthesis);
-                Mask64 open_braces = simd512_equal_byte(shape_lanes, open_brace);
-                Mask64 opens = mask64_or(mask64_or(open_parentheses, simd512_equal_byte(shape_lanes, open_bracket)), open_braces);
-                Mask64 closes = mask64_or(mask64_or(simd512_equal_byte(shape_lanes, close_parenthesis), simd512_equal_byte(shape_lanes, close_bracket)),
-                                          simd512_equal_byte(shape_lanes, close_brace));
+                Mask64 identifiers = simd512_equal_u8(shape_lanes, identifier_shape);
+                Mask64 open_parentheses = simd512_equal_u8(shape_lanes, open_parenthesis);
+                Mask64 open_braces = simd512_equal_u8(shape_lanes, open_brace);
+                Mask64 opens = mask64_or(mask64_or(open_parentheses, simd512_equal_u8(shape_lanes, open_bracket)), open_braces);
+                Mask64 closes = mask64_or(mask64_or(simd512_equal_u8(shape_lanes, close_parenthesis), simd512_equal_u8(shape_lanes, close_bracket)),
+                                          simd512_equal_u8(shape_lanes, close_brace));
                 // The label rule is a mask, not a per-identifier lookahead: the
                 // successor shapes are the same sidecar bytes read one token
                 // along, so lane 63 sees the next window's first token instead
@@ -736,12 +738,12 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
                 u64 successor_tokens = preprocess.token_count - (window_base + 1);
                 Mask64 successor_mask = successor_tokens >= 64 ? UINT64_MAX : (Mask64)(((Mask64)1 << successor_tokens) - 1);
                 Simd512 successor_lanes = simd512_load_masked(token_shapes + window_base + 1, successor_mask);
-                Mask64 labels = mask64_and(identifiers, simd512_equal_byte(successor_lanes, colon_shape));
+                Mask64 labels = mask64_and(identifiers, simd512_equal_u8(successor_lanes, colon_shape));
                 // The validation pairs come out of the same two shape vectors:
                 // identifier then '{', '&&' then identifier, and '(' then '{'.
-                Mask64 brace_identifiers = mask64_and(identifiers, simd512_equal_byte(successor_lanes, open_brace));
+                Mask64 brace_identifiers = mask64_and(identifiers, simd512_equal_u8(successor_lanes, open_brace));
                 Mask64 label_addresses =
-                    mask64_and(simd512_equal_byte(shape_lanes, ampersand_ampersand), simd512_equal_byte(successor_lanes, identifier_shape));
+                    mask64_and(simd512_equal_u8(shape_lanes, ampersand_ampersand), simd512_equal_u8(successor_lanes, identifier_shape));
                 Mask64 statement_expressions = mask64_and(open_braces, mask64_or(mask64_shift_left(open_parentheses, 1), previous_parenthesis_carry));
                 previous_parenthesis_carry = mask64_shift_right(open_parentheses, 63);
                 for (Mask64 remaining = identifiers; remaining; remaining &= remaining - 1)
@@ -989,8 +991,8 @@ BUSTER_C_INTERNAL u32 c_parse_next_call_shape(CTokenShape const* shapes, u32 fro
     {
         // Lane i is token base + i, whose successor base + i + 1 must stay below end.
         Mask64 lanes = mask64_prefix(BUSTER_MIN(64u, end - 1 - base));
-        Mask64 calls = mask64_and(simd512_equal_byte(simd512_load_masked(shapes + base, lanes), identifier_shape),
-                                  simd512_equal_byte(simd512_load_masked(shapes + base + 1, lanes), open_parenthesis));
+        Mask64 calls = mask64_and(simd512_equal_u8(simd512_load_masked(shapes + base, lanes), identifier_shape),
+                                  simd512_equal_u8(simd512_load_masked(shapes + base + 1, lanes), open_parenthesis));
         if (calls)
         {
             result = base + mask64_first_set(calls);
@@ -8593,59 +8595,249 @@ BUSTER_C_INTERNAL bool c_parse_initializer_member_is_slot(CMember* member)
     return member && !(member->is_bit_field && !member->name.length);
 }
 
-BUSTER_C_INTERNAL u32 c_parse_initializer_member_count(CParseResult* result, CType* type)
+#if BUSTER_INCLUDE_TESTS
+// Member rows the initializer slot helpers below have read on this thread:
+// the reference walks and every table build.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_initializer_slot_member_visits;
+
+void c_test_initializer_slot_member_visits(u64* visits)
 {
-    if (!result || !type || (type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION))
-    {
-        return 0;
-    }
+    *visits = c_parse_initializer_slot_member_visits;
+}
+#define C_PARSE_INITIALIZER_SLOT_VISITS(amount) (c_parse_initializer_slot_member_visits += (u64)(amount))
+#else
+#define C_PARSE_INITIALIZER_SLOT_VISITS(amount) ((void)0)
+#endif
+
+// The slot numbering of an aggregate initializer: a struct's members are its
+// slots in declaration order except an unnamed bit-field, which no element
+// can reach (C11 6.7.9p9), and a union is one slot -- its first initializable
+// member -- or none. The three `_walk` functions are the definition, answered
+// by a pass over the record's members. An inference walk asks the count, the
+// slot of a designated member and the member at a positional slot once per
+// element, so it answers them from CParseInitializerSlotTable, the same
+// numbering built once per record the walk reaches; a walk over N designated
+// members of one record then reads its N rows once instead of N times.
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_count_walk(CParseResult* result, CType* type)
+{
     u32 count = 0;
-    for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+    if (result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION))
     {
-        count += c_parse_initializer_member_is_slot(result->members + type->member_start + field_index);
+        C_PARSE_INITIALIZER_SLOT_VISITS(type->member_count);
+        for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+        {
+            count += c_parse_initializer_member_is_slot(result->members + type->member_start + field_index);
+        }
+        count = type->kind == C_TYPE_UNION ? (count != 0) : count;
     }
-    return type->kind == C_TYPE_UNION ? (count != 0) : count;
+    return count;
 }
 
-BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot(CParseResult* result, CType* type, u32 field_index)
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot_walk(CParseResult* result, CType* type, u32 field_index)
 {
-    if (!result || !type || field_index >= type->member_count ||
-        !c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
+    u32 slot = UINT32_MAX;
+    if (result && type && field_index < type->member_count &&
+        c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
     {
-        return UINT32_MAX;
-    }
-    if (type->kind == C_TYPE_UNION)
-    {
-        return 0;
-    }
-    u32 slot = 0;
-    for (u32 index = 0; index < field_index; index += 1)
-    {
-        slot += c_parse_initializer_member_is_slot(result->members + type->member_start + index);
+        slot = 0;
+        if (type->kind != C_TYPE_UNION)
+        {
+            C_PARSE_INITIALIZER_SLOT_VISITS(field_index);
+            for (u32 index = 0; index < field_index; index += 1)
+            {
+                slot += c_parse_initializer_member_is_slot(result->members + type->member_start + index);
+            }
+        }
     }
     return slot;
 }
 
-BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseResult* result, CType* type, u32 slot)
+BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at_walk(CParseResult* result, CType* type, u32 slot)
 {
+    CMember* found = 0;
     if (result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION))
     {
         u32 current = 0;
-        for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+        for (u32 field_index = 0; !found && field_index < type->member_count; field_index += 1)
         {
+            C_PARSE_INITIALIZER_SLOT_VISITS(1);
             CMember* member = result->members + type->member_start + field_index;
-            if (!c_parse_initializer_member_is_slot(member))
+            if (c_parse_initializer_member_is_slot(member))
             {
-                continue;
-            }
-            if (current++ == slot || type->kind == C_TYPE_UNION)
-            {
-                return member;
+                found = current == slot || type->kind == C_TYPE_UNION ? member : 0;
+                current += 1;
             }
         }
     }
+    return found;
+}
 
-    return 0;
+// One record's slot numbering. `member_slots` is indexed by member (the slot,
+// UINT32_MAX for an unnamed bit-field; every initializable member of a union
+// is slot 0) and `slot_members` by slot (the member index). The record's
+// member run is kept so a table is used only for the run it was built from.
+typedef struct CParseInitializerSlotTable CParseInitializerSlotTable;
+struct CParseInitializerSlotTable
+{
+    u32* member_slots;
+    u32* slot_members;
+    u32 type_plus_one;
+    u32 member_start;
+    u32 member_count;
+    u32 slot_count;
+};
+
+// The tables one inference walk has built, open-addressed by type id in its
+// temporary arena. A walk reaches few records, and a table per type-table row
+// would cost every initializer a clear proportional to the whole unit.
+typedef struct CParseInitializerSlotCache CParseInitializerSlotCache;
+struct CParseInitializerSlotCache
+{
+    Arena* arena;
+    CParseInitializerSlotTable* tables;
+    u32 capacity;
+    u32 count;
+};
+
+#define C_PARSE_INITIALIZER_SLOT_CACHE_INITIAL_CAPACITY 16u
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_slot_cache_find(CParseInitializerSlotCache* cache, u32 type_plus_one)
+{
+    u32 mask = cache->capacity - 1;
+    u32 index = (type_plus_one * 0x9E3779B1u) & mask;
+    while (cache->tables[index].type_plus_one && cache->tables[index].type_plus_one != type_plus_one)
+    {
+        index = (index + 1) & mask;
+    }
+    return index;
+}
+
+BUSTER_C_INTERNAL void c_parse_initializer_slot_cache_grow(CParseInitializerSlotCache* cache)
+{
+    CParseInitializerSlotTable* old_tables = cache->tables;
+    u32 old_capacity = cache->capacity;
+    cache->capacity = old_capacity ? old_capacity * 2 : C_PARSE_INITIALIZER_SLOT_CACHE_INITIAL_CAPACITY;
+    cache->tables = arena_allocate(cache->arena, CParseInitializerSlotTable, cache->capacity);
+    memset(cache->tables, 0, sizeof(*cache->tables) * cache->capacity);
+    for (u32 index = 0; index < old_capacity; index += 1)
+    {
+        if (old_tables[index].type_plus_one)
+        {
+            cache->tables[c_parse_initializer_slot_cache_find(cache, old_tables[index].type_plus_one)] = old_tables[index];
+        }
+    }
+}
+
+BUSTER_C_INTERNAL void c_parse_initializer_slot_table_build(CParseInitializerSlotCache* cache, CParseResult* result, CType* type,
+                                                              CParseInitializerSlotTable* table)
+{
+    u32 row_capacity = type->member_count ? type->member_count : 1;
+    table->member_slots = arena_allocate(cache->arena, u32, row_capacity);
+    table->slot_members = arena_allocate(cache->arena, u32, row_capacity);
+    table->member_start = type->member_start;
+    table->member_count = type->member_count;
+    C_PARSE_INITIALIZER_SLOT_VISITS(type->member_count);
+    u32 slot_count = 0;
+    for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+    {
+        u32 slot = UINT32_MAX;
+        if (c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
+        {
+            slot = type->kind == C_TYPE_UNION ? 0 : slot_count;
+            // A union's later members share slot 0 and add no row.
+            if (slot == slot_count)
+            {
+                table->slot_members[slot_count] = field_index;
+                slot_count += 1;
+            }
+        }
+        table->member_slots[field_index] = slot;
+    }
+    table->slot_count = slot_count;
+#if !BUSTER_OPTIMIZE
+    // The count is the one answer checked against its walk here: the walks
+    // for the other two are linear per question, and checking every slot
+    // would make building a wide record's table quadratic again.
+    if (c_parse_initializer_member_count_walk(result, type) != slot_count)
+    {
+        os_fail_message(S8("initializer slot table disagrees with the member walk"));
+    }
+#endif
+}
+
+// The table of a struct or union, built on the walk's first question about
+// it. Null without a cache (the callers outside an inference walk) and for
+// every other kind or a type outside the table; those take the walks.
+BUSTER_C_INTERNAL CParseInitializerSlotTable* c_parse_initializer_slot_table(CParseInitializerSlotCache* cache, CParseResult* result, CType* type)
+{
+    CParseInitializerSlotTable* table = 0;
+    if (cache && result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION) && type >= result->types &&
+        type < result->types + result->type_count)
+    {
+        if ((cache->count + 1) * 2 > cache->capacity)
+        {
+            c_parse_initializer_slot_cache_grow(cache);
+        }
+        u32 type_plus_one = (u32)(type - result->types) + 1;
+        table = cache->tables + c_parse_initializer_slot_cache_find(cache, type_plus_one);
+        if (!table->type_plus_one)
+        {
+            table->type_plus_one = type_plus_one;
+            cache->count += 1;
+            c_parse_initializer_slot_table_build(cache, result, type, table);
+        }
+        else if (table->member_start != type->member_start || table->member_count != type->member_count)
+        {
+            c_parse_initializer_slot_table_build(cache, result, type, table);
+        }
+    }
+    return table;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_count(CParseInitializerSlotCache* cache, CParseResult* result, CType* type)
+{
+    u32 count;
+    CParseInitializerSlotTable* table = c_parse_initializer_slot_table(cache, result, type);
+    if (table)
+    {
+        count = table->slot_count;
+    }
+    else
+    {
+        count = c_parse_initializer_member_count_walk(result, type);
+    }
+    return count;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot(CParseInitializerSlotCache* cache, CParseResult* result, CType* type, u32 field_index)
+{
+    u32 slot;
+    CParseInitializerSlotTable* table = c_parse_initializer_slot_table(cache, result, type);
+    if (table)
+    {
+        slot = field_index < table->member_count ? table->member_slots[field_index] : UINT32_MAX;
+    }
+    else
+    {
+        slot = c_parse_initializer_member_slot_walk(result, type, field_index);
+    }
+    return slot;
+}
+
+BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseInitializerSlotCache* cache, CParseResult* result, CType* type, u32 slot)
+{
+    CMember* member;
+    CParseInitializerSlotTable* table = c_parse_initializer_slot_table(cache, result, type);
+    if (table)
+    {
+        u32 row = type->kind == C_TYPE_UNION ? 0 : slot;
+        member = row < table->slot_count ? result->members + type->member_start + table->slot_members[row] : 0;
+    }
+    else
+    {
+        member = c_parse_initializer_member_at_walk(result, type, slot);
+    }
+    return member;
 }
 
 // The search keeps its queue in the machine's promoted_member_work, and a
@@ -8763,7 +8955,8 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
                                                                   CScopeId scope, u32 start, u32 end);
 
 BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                         CScopeId scope, CParseInitializerInferenceFrame* frame, u64* slots_out)
+                                                         CScopeId scope, CParseInitializerSlotCache* slot_cache,
+                                                         CParseInitializerInferenceFrame* frame, u64* slots_out)
 {
     if (frame->root)
     {
@@ -8812,7 +9005,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine
         }
         if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
         {
-            *slots_out = c_parse_initializer_member_count(result, type);
+            *slots_out = c_parse_initializer_member_count(slot_cache, result, type);
             return true;
         }
     }
@@ -8962,7 +9155,8 @@ BUSTER_C_INTERNAL bool c_parse_initializer_promoted_continuations(CTypeParseMach
 }
 
 BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                         CScopeId scope, CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
+                                                         CScopeId scope, CParseInitializerSlotCache* slot_cache,
+                                                         CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
                                                          CParseInitializerContinuation* continuation_work, u32 continuation_capacity,
                                                          CParseInitializerInferenceDesignator* designator, CParseInitializerDiagnostic* diagnostic)
 {
@@ -9019,7 +9213,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                     .type = current,
                 };
                 u64 slots = 0;
-                if (!c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, &nested, &slots))
+                if (!c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, slot_cache, &nested, &slots))
                 {
                     return false;
                 }
@@ -9075,7 +9269,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             current = member_type;
             if (first)
             {
-                u32 member_slot = c_parse_initializer_member_slot(result, type, field_index);
+                u32 member_slot = c_parse_initializer_member_slot(slot_cache, result, type, field_index);
                 if (member_slot == UINT32_MAX)
                 {
                     return false;
@@ -9099,7 +9293,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             }
             else
             {
-                u32 member_slot = c_parse_initializer_member_slot(result, type, field_index);
+                u32 member_slot = c_parse_initializer_member_slot(slot_cache, result, type, field_index);
                 if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1 || designator->continuation_count >= continuation_capacity)
                 {
                     return false;
@@ -9148,7 +9342,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
     else
     {
         u64 slots = frame->slots;
-        if ((!frame->slots_known && !c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, frame, &slots)) || frame->next_index >= slots ||
+        if ((!frame->slots_known && !c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, slot_cache, frame, &slots)) || frame->next_index >= slots ||
             frame->type.value >= result->type_count)
         {
             return false;
@@ -9160,7 +9354,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
         }
         else
         {
-            CMember* member = c_parse_initializer_member_at(result, type, (u32)frame->next_index);
+            CMember* member = c_parse_initializer_member_at(slot_cache, result, type, (u32)frame->next_index);
             if (!member)
             {
                 return false;
@@ -9355,6 +9549,9 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     u32 capacity = (u32)(span + 2);
     CParseInitializerInferenceFrame* frames = arena_allocate(temporary_arena, CParseInitializerInferenceFrame, capacity);
     CParseInitializerContinuation* continuation_work = arena_allocate(temporary_arena, CParseInitializerContinuation, (u32)(span + 1));
+    CParseInitializerSlotCache slot_cache = {
+        .arena = temporary_arena,
+    };
     u32 frame_count = 1;
     frames[0] = (CParseInitializerInferenceFrame){
         .type = aggregate_type,
@@ -9407,7 +9604,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         }
         if (!frame->slots_known)
         {
-            frame->slots_known = c_parse_initializer_type_slots(machine, result_arena, preprocess, result, scope, frame, &frame->slots);
+            frame->slots_known = c_parse_initializer_type_slots(machine, result_arena, preprocess, result, scope, &slot_cache, frame, &frame->slots);
             if (!frame->slots_known)
             {
                 return false;
@@ -9469,8 +9666,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             return c_parse_initializer_fail(diagnostic, S8("initializer has more elements than the aggregate can hold"), frame->cursor, frame->type);
         }
         CParseInitializerInferenceDesignator designator = {0};
-        if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, frame, frame->cursor, frame->limit, continuation_work,
-                                             (u32)(span + 1), &designator, diagnostic) ||
+        if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, &slot_cache, frame, frame->cursor, frame->limit,
+                                             continuation_work, (u32)(span + 1), &designator, diagnostic) ||
             designator.selected_end == UINT64_MAX)
         {
             return false;
@@ -22501,7 +22698,7 @@ BUSTER_C_SHARED CNumberFacts const* c_number_facts_build(Arena* arena, CPreproce
             Mask64 numbers = 0;
             if (shapes)
             {
-                numbers = simd512_equal_byte(simd512_load_masked(shapes + base, mask64_prefix(token_count - base)), number_shape);
+                numbers = simd512_equal_u8(simd512_load_masked(shapes + base, mask64_prefix(token_count - base)), number_shape);
                 // The rows decide: a lane the sidecar marks is kept only when
                 // its row is a number too, so a view whose shapes do not match
                 // its rows loses facts (its consumers then convert) but can
@@ -23724,8 +23921,8 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 Simd512 chunk0 = simd512_load(rows);
                 Simd512 chunk1 = simd512_load(rows + 64);
                 Simd512 chunk2 = simd512_load(rows + 128);
-                Simd512 symbol_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_LOW_LANES, chunk0, symbol_low_indices, chunk1),
-                                                  simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_HIGH_LANES, chunk1, symbol_high_indices, chunk2));
+                Simd512 symbol_group = simd512_or(simd512_permute2_u8(C_PARSE_CENSUS_SYMBOL_LOW_LANES, chunk0, symbol_low_indices, chunk1),
+                                                  simd512_permute2_u8(C_PARSE_CENSUS_SYMBOL_HIGH_LANES, chunk1, symbol_high_indices, chunk2));
                 simd512_store_masked(symbol_bytes + projected, C_PARSE_CENSUS_GROUP_LANES, symbol_group);
                 projected += C_PARSE_CENSUS_GROUP_TOKENS;
             }
@@ -23748,16 +23945,16 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 u32 window_tokens = BUSTER_MIN(64, tile_tokens - window);
                 Mask64 window_mask = mask64_prefix(window_tokens);
                 Simd512 shape_lanes = simd512_load_masked(token_shapes + tile_base + window, window_mask);
-                Mask64 identifiers = simd512_equal_byte(shape_lanes, identifier_shape);
-                Mask64 semicolons = simd512_equal_byte(shape_lanes, semicolon);
-                Mask64 commas = simd512_equal_byte(shape_lanes, comma);
-                Mask64 open_parentheses = simd512_equal_byte(shape_lanes, open_parenthesis);
-                Mask64 open_brackets = simd512_equal_byte(shape_lanes, open_bracket);
-                Mask64 open_braces = simd512_equal_byte(shape_lanes, open_brace);
-                Mask64 close_braces = simd512_equal_byte(shape_lanes, close_brace);
+                Mask64 identifiers = simd512_equal_u8(shape_lanes, identifier_shape);
+                Mask64 semicolons = simd512_equal_u8(shape_lanes, semicolon);
+                Mask64 commas = simd512_equal_u8(shape_lanes, comma);
+                Mask64 open_parentheses = simd512_equal_u8(shape_lanes, open_parenthesis);
+                Mask64 open_brackets = simd512_equal_u8(shape_lanes, open_bracket);
+                Mask64 open_braces = simd512_equal_u8(shape_lanes, open_brace);
+                Mask64 close_braces = simd512_equal_u8(shape_lanes, close_brace);
                 Mask64 opens = mask64_or(mask64_or(open_parentheses, open_brackets), open_braces);
                 Mask64 closes =
-                    mask64_or(mask64_or(simd512_equal_byte(shape_lanes, close_parenthesis), simd512_equal_byte(shape_lanes, close_bracket)), close_braces);
+                    mask64_or(mask64_or(simd512_equal_u8(shape_lanes, close_parenthesis), simd512_equal_u8(shape_lanes, close_bracket)), close_braces);
                 census->identifier_count += mask64_count(identifiers);
                 census->semicolon_count += mask64_count(semicolons);
                 census->comma_count += mask64_count(commas);
@@ -23770,18 +23967,18 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 // candidates in a million identifiers, each then answered by the
                 // predicate the reference calls.
                 Simd512 symbol_lanes = simd512_load(symbol_bytes + window);
-                Mask64 uninterned = simd512_equal_byte(symbol_lanes, uninterned_symbol);
-                Mask64 for_candidates = mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol), uninterned));
+                Mask64 uninterned = simd512_equal_u8(symbol_lanes, uninterned_symbol);
+                Mask64 for_candidates = mask64_and(identifiers, mask64_or(simd512_equal_u8(symbol_lanes, for_symbol), uninterned));
                 // A window is exactly one bitmap word, so the candidate mask
                 // is the word: the tile stride and the window stride are both
                 // multiples of 64, and the tail window's mask already carries
                 // the prefix that bounds the stream.
                 declaration_range_words[(tile_base + window) >> 6] = mask64_and(
                     identifiers,
-                    mask64_or(mask64_or(uninterned, simd512_equal_byte(symbol_lanes, overloadable_symbol)),
-                              mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),
-                                        mask64_or(simd512_equal_byte(symbol_lanes, thread_local_c23_symbol),
-                                                  simd512_equal_byte(symbol_lanes, static_symbol)))));
+                    mask64_or(mask64_or(uninterned, simd512_equal_u8(symbol_lanes, overloadable_symbol)),
+                              mask64_or(mask64_or(simd512_equal_u8(symbol_lanes, thread_local_symbol), simd512_equal_u8(symbol_lanes, thread_gnu_symbol)),
+                                        mask64_or(simd512_equal_u8(symbol_lanes, thread_local_c23_symbol),
+                                                  simd512_equal_u8(symbol_lanes, static_symbol)))));
                 for (Mask64 remaining = for_candidates; remaining; remaining &= remaining - 1)
                 {
                     u32 lane = mask64_first_set(remaining);
@@ -26902,7 +27099,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
                 CParseInitializerInferenceFrame array = {.type = type};
                 u64 count = 0;
                 bool valid_string = c_ir_count_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, string_start, string_end, result->string_literals, &decoded);
-                if (!valid_string || (c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, &array, &count) &&
+                if (!valid_string || (c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, 0, &array, &count) &&
                     decoded.element_count > count))
                 {
                     diagnostic = (CParseInitializerDiagnostic){
@@ -27027,6 +27224,8 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
     return bad;
 }
 
+BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 index);
+
 BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTypeParseMachine* machine, CParseResult* result,
                                                                               CPreprocessResult preprocess, CScopeId scope,
                                                                               CTypeId destination, u32 start, u32 end, bool constexpr_value)
@@ -27054,6 +27253,13 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
             cursor += 1;
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
+        // A label address, as in the GNU difference `&&b - &&a`, is an
+        // address constant like `&object`: IR lowering decides it.
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                 (c_parse_label_address_prefix_proven(&preprocess, start, cursor) ||
+                  (cursor > start && c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                   c_parse_label_address_cast_at(result, preprocess, scope, start, cursor))))
+            numeric = false;
         else if (token.kind == C_TOKEN_IDENTIFIER && (!c_parse_declaration_keyword_at(result, preprocess, cursor) ||
                  string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) ||
                  c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))))
@@ -27347,7 +27553,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
                                                           : (CParseConstant){0};
                     CParseInitializerInferenceFrame frame = {.type = current};
                     u64 count = 0;
-                    bool bound = c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, &frame, &count);
+                    bool bound = c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, 0, &frame, &count);
                     if (!bound || !subscript.valid || subscript.is_float || subscript.integer > count)
                         diagnostic.message = S8("a subscript after a compound literal in a static initializer must be a constant index within the literal");
                     current = value.element_type;
@@ -28961,6 +29167,44 @@ BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPrep
     return label;
 }
 
+// Whether the `&&` at `index`, already proven a label address, is the minuend
+// of a GNU label difference `&&b - &&a`: closing parentheses, a binary minus,
+// then only parentheses, casts' type words and pointer stars before another
+// proven label address. The difference is an integer, not a label value, so
+// the result is the index just past the subtrahend's label name, or zero.
+BUSTER_C_INTERNAL u32 c_parse_label_difference_end(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 index, u32 end)
+{
+    u32 cursor = index + 2;
+    while (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        cursor += 1;
+    }
+    u32 difference_end = 0;
+    if (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_MINUS))
+    {
+        bool scanning = true;
+        for (cursor += 1; scanning && cursor + 1 < end; cursor += 1)
+        {
+            CToken token = preprocess.tokens[cursor];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND))
+            {
+                scanning = false;
+                bool label = preprocess.tokens[cursor + 1].kind == C_TOKEN_IDENTIFIER &&
+                             (c_parse_label_address_prefix_proven(&preprocess, start, cursor) ||
+                              (cursor > start && c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                               c_parse_label_address_cast_at(result, preprocess, scope, start, cursor)));
+                difference_end = label ? cursor + 2 : 0;
+            }
+            else
+            {
+                scanning = token.kind == C_TOKEN_IDENTIFIER || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                           c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_STAR);
+            }
+        }
+    }
+    return difference_end;
+}
+
 // Source label facts are compact entity flags. Aggregate storage keeps the
 // union of its possible labels; canonical control-flow validation still owns
 // the exact target edges and subobject provenance of generated branches.
@@ -28976,6 +29220,12 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
             label = c_parse_label_address_prefix_proven(&preprocess, start, index) ||
                     (index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
                      c_parse_label_address_cast_at(result, preprocess, scope, start, index));
+            u32 difference_end = label ? c_parse_label_difference_end(result, preprocess, scope, start, index, end) : 0;
+            if (difference_end)
+            {
+                label = false;
+                index = difference_end - 1;
+            }
         }
         else if (token.kind == C_TOKEN_IDENTIFIER)
         {

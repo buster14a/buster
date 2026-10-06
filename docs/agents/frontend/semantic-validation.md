@@ -276,6 +276,20 @@ conjunction operator shares the spelling; a body with a goto label and
 `&&` is that operator's operand, not a cast. `c_test_label_values_gate` pins
 the gate through the private seam beside the unchanged diagnostics.
 
+A GNU label difference `&&b - &&a`, each operand optionally cast to an integer
+or byte-pointer type, is an integer: `c_parse_label_difference_end` stops the
+walk from marking its value or storage as label-carrying, and
+`c_parse_validate_static_scalar` leaves a proven `&&label` to IR lowering as it
+does `&object`. In a static object of the defining function,
+`c_ir_label_difference_expression` folds it into an `IrGlobalLabelDifference`
+beside the zero byte image (`c_ir_label_difference_record`), and native code
+generation writes the block distance once the function is placed
+(`codegen_resolve_label_differences`). LLVM bitcode, WebAssembly and eBPF
+refuse such a global; automatic objects, range designators, bit-fields and
+widths other than 1, 2, 4 or 8 bytes stay diagnostics.
+`c_test_static_label_differences` checks every stored value against the
+labels' code offsets on both native targets and every allocator.
+
 ## Reservation failure contract
 
 Required preprocessing spelling/token/shape/phase and semantic machine/phase
