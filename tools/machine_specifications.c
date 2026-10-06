@@ -260,6 +260,9 @@ static void initialize(MsReport *r)
     for (size_t i = 0; i < r->count; ++i)
     {
         r->fields[i].key = keys[i];
+    }
+    for (size_t i = 0; i < r->count; ++i)
+    {
         missing(r, keys[i], "unknown", "not exposed by this OS, unsupported or probe failed");
     }
     const char *env[][2] =

@@ -16,6 +16,9 @@ inputs:
   source-repository:
     description: Repository just checked out
     default: buster14a/buster
+  retention-directory:
+    description: Existing artifact directory to receive only the safe JSON records
+    required: false
 outputs:
   directory:
     description: Machine-readable evidence directory
@@ -87,3 +90,31 @@ runs:
         if ($LASTEXITCODE) { exit $LASTEXITCODE }
         & (Join-Path $directory 'reporter.exe') --source $sourceSha.Trim() $env:MS_SOURCE_REPOSITORY (Join-Path $directory 'sources.jsonl')
         if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    - name: Retain safe machine records (Unix)
+      if: ${{ runner.os != 'Windows' && inputs.mode == 'retain' }}
+      shell: bash
+      env:
+        MS_RETENTION_DIRECTORY: ${{ inputs.retention-directory }}
+      run: |
+        set -euo pipefail
+        if [[ -f "$RUNNER_TEMP/buster-machine-specifications/report.json" ]]; then
+          mkdir -p "$MS_RETENTION_DIRECTORY/machine-specifications"
+          cp "$RUNNER_TEMP/buster-machine-specifications/report.json" "$MS_RETENTION_DIRECTORY/machine-specifications/"
+          if [[ -f "$RUNNER_TEMP/buster-machine-specifications/sources.jsonl" ]]; then
+            cp "$RUNNER_TEMP/buster-machine-specifications/sources.jsonl" "$MS_RETENTION_DIRECTORY/machine-specifications/"
+          fi
+        fi
+    - name: Retain safe machine records (Windows)
+      if: ${{ runner.os == 'Windows' && inputs.mode == 'retain' }}
+      shell: pwsh
+      env:
+        MS_RETENTION_DIRECTORY: ${{ inputs.retention-directory }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $source = Join-Path $env:RUNNER_TEMP 'buster-machine-specifications'
+        if (Test-Path (Join-Path $source 'report.json')) {
+          $destination = Join-Path $env:MS_RETENTION_DIRECTORY 'machine-specifications'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Copy-Item (Join-Path $source 'report.json') $destination
+          if (Test-Path (Join-Path $source 'sources.jsonl')) { Copy-Item (Join-Path $source 'sources.jsonl') $destination }
+        }
