@@ -553,6 +553,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_flat_call_arguments(UnitTestA
     return result;
 }
 
+// Every argument of a nested call is lowered again over its own range, so the
+// root scans and the control-expression prepass have to hop over the rest of
+// the nesting rather than walk it. The prepass may only hop over an argument
+// list holding nothing it could prepare: the parenthesized assignment at the
+// bottom of this nesting still has to be prepared, and the store behind `&&`
+// must stay conditional.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_call_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depth = 4096;
+    String8 prefix = S8("static int g; static int id(int x){ return x; }\nint f(int a){ int b = 0; int s = ");
+    String8 open = S8("id(");
+    String8 bottom = S8("id(1) + id(2) + id(3) + id(4) + id(5) + id(6) + id(7) + (b = a + 1) + (a > 9 && (g = 5))");
+    String8 close = S8(")");
+    String8 suffix = S8(";\nreturn s + b + g; }\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 source_capacity = prefix.length + (u64)depth * (open.length + close.length) + bottom.length + suffix.length;
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+    for (u32 index = 0; index < depth; index += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, open);
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, bottom);
+    for (u32 index = 0; index < depth; index += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, close);
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                 S8("nested-call-arguments.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+    {
+        BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
+        IrFunction* function = c_test_find_ir_function(&lowered.program->modules[0], S8("f"));
+        if (BUSTER_REQUIRE(arguments, function != 0))
+        {
+            u32 call_count = 0;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                call_count += function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+            }
+            BUSTER_TEST(arguments, call_count == depth + 7);
+            // `g = 5` runs only when `a > 9`, so it needs a block of its own.
+            BUSTER_TEST(arguments, function->block_count > 1);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 c_test_translate_source_scalar(String8 source, char8* translated)
 {
     u64 input = 0;
@@ -43022,6 +43078,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
     BUSTER_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
+    BUSTER_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
