@@ -1,3 +1,4 @@
+#include <stdlib.h>
 // Driver integration tests: compiler_driver_tests registers argument parsing,
 // artifact, link, runtime, and cross-mode checks. compiler_driver_test_output_paths
 // owns stdout/output placement and publication refusal coverage.
@@ -24603,14 +24604,36 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         assembly_output_path,
         S8("tests/basic_c_compile.c"),
     };
+    if (getenv("BUSTER_ISSUE_2753_FORCE_FAILURE") != NULL)
+    {
+        assembly_file_command_line[3] = S8("tests/issue-2753-deliberately-missing.c");
+    }
     CompilerDriverResult assembly_file = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_file_command_line)));
-    if (BUSTER_REQUIRE(arguments, assembly_file.error == COMPILER_DRIVER_ERROR_NONE))
+    if (getenv("BUSTER_ISSUE_2753_BASELINE") != NULL)
     {
+        BUSTER_TEST(arguments, assembly_file.error == COMPILER_DRIVER_ERROR_NONE);
         ByteSlice assembly_file_bytes = file_read(arguments->arena, assembly_output_path, (FileReadOptions){0});
-        if (BUSTER_REQUIRE(arguments, assembly_file_bytes.length != 0 && assembly_file_bytes.length == assembly_file.output.length))
+        BUSTER_TEST(arguments, assembly_file_bytes.length == assembly_file.output.length);
+        if (assembly_file_bytes.length == assembly_file.output.length)
         {
             BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
+        }
+    }
+    else
+    {
+        if (BUSTER_REQUIRE(arguments, assembly_file.error == COMPILER_DRIVER_ERROR_NONE))
+        {
+            ByteSlice assembly_file_bytes = file_read(arguments->arena, assembly_output_path, (FileReadOptions){0});
+            if (getenv("BUSTER_ISSUE_2753_EMPTY") != NULL)
+            {
+                assembly_file_bytes = (ByteSlice){0};
+                assembly_file.output = (String8){0};
+            }
+            if (BUSTER_REQUIRE(arguments, assembly_file_bytes.length != 0 && assembly_file_bytes.length == assembly_file.output.length))
+            {
+                BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
+            }
         }
     }
     buster_test_arena_end(arguments, driver_fixture, true);
