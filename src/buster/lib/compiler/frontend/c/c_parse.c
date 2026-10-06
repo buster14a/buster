@@ -8753,64 +8753,166 @@ struct CParseInitializerInferenceDesignator
     bool has_designator;
 };
 
-BUSTER_C_INTERNAL bool c_parse_initializer_member_is_slot(CMember* member)
+BUSTER_C_INTERNAL bool c_parse_initializer_member_is_slot(CMember const* member)
 {
     return member && !(member->is_bit_field && !member->name.length);
 }
 
-BUSTER_C_INTERNAL u32 c_parse_initializer_member_count(CParseResult* result, CType* type)
+#if BUSTER_INCLUDE_TESTS
+// Member rows the slot queries examined (a scan counts every row it reads, a
+// table answer one), and slot tables built.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_member_slot_counts[2];
+
+void c_test_member_slot_counts(u64* visits, u64* builds)
 {
-    if (!result || !type || (type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION))
+    *visits = c_parse_member_slot_counts[0];
+    *builds = c_parse_member_slot_counts[1];
+}
+#define C_PARSE_MEMBER_SLOT_VISIT(count) (c_parse_member_slot_counts[0] += (count))
+#else
+#define C_PARSE_MEMBER_SLOT_VISIT(count) ((void)0)
+#endif
+
+// The built slot table of `type`, or null when the caller must scan: no table
+// storage, a narrow record, or member rows outside the result.
+BUSTER_C_INTERNAL CMemberSlotEntry const* c_parse_initializer_slot_table(CParseResult* result, CTypeId id, CType const* type)
+{
+    CMemberSlotEntry const* built = 0;
+    CMemberLookup* lookup = result->member_lookup;
+    if (lookup && type->member_count >= C_MEMBER_SLOT_TABLE_MIN_MEMBERS && result->arena && id.value < result->type_count &&
+        (u64)type->member_start + type->member_count <= result->member_count)
     {
-        return 0;
+        if (id.value >= lookup->slot_capacity)
+        {
+            u32 capacity = BUSTER_MAX(result->type_capacity, id.value + 1);
+            CMemberSlotEntry* entries = arena_allocate_zeroed(result->arena, CMemberSlotEntry, capacity);
+            if (lookup->slot_entries)
+            {
+                memcpy(entries, lookup->slot_entries, sizeof(*entries) * lookup->slot_capacity);
+            }
+            lookup->slot_entries = entries;
+            lookup->slot_capacity = capacity;
+        }
+        CMemberSlotEntry* entry = lookup->slot_entries + id.value;
+        if (!entry->built || entry->generation != lookup->generation || entry->member_start != type->member_start ||
+            entry->member_count != type->member_count)
+        {
+            CMember const* members = result->members + type->member_start;
+            u32 count = type->member_count;
+            *entry = (CMemberSlotEntry){
+                .slot_of = arena_allocate(result->arena, u32, count),
+                .member_of = arena_allocate(result->arena, u32, count),
+                .member_start = type->member_start,
+                .member_count = count,
+                .generation = lookup->generation,
+                .built = true,
+            };
+            for (u32 index = 0; index < count; index += 1)
+            {
+                bool slot = c_parse_initializer_member_is_slot(members + index);
+                entry->slot_of[index] = slot ? entry->slot_count : UINT32_MAX;
+                if (slot)
+                {
+                    entry->member_of[entry->slot_count++] = index;
+                }
+            }
+#if BUSTER_INCLUDE_TESTS
+            c_parse_member_slot_counts[1] += 1;
+#endif
+        }
+        built = entry;
     }
-    u32 count = 0;
-    for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
-    {
-        count += c_parse_initializer_member_is_slot(result->members + type->member_start + field_index);
-    }
-    return type->kind == C_TYPE_UNION ? (count != 0) : count;
+    return built;
 }
 
-BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot(CParseResult* result, CType* type, u32 field_index)
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_count(CParseResult* result, CTypeId id)
 {
-    if (!result || !type || field_index >= type->member_count ||
-        !c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
+    u32 count = 0;
+    CType* type = result && id.value < result->type_count ? result->types + id.value : 0;
+    if (type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION))
     {
-        return UINT32_MAX;
+        CMemberSlotEntry const* table = c_parse_initializer_slot_table(result, id, type);
+        if (table)
+        {
+            count = table->slot_count;
+            C_PARSE_MEMBER_SLOT_VISIT(1);
+        }
+        else
+        {
+            for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+            {
+                count += c_parse_initializer_member_is_slot(result->members + type->member_start + field_index);
+            }
+            C_PARSE_MEMBER_SLOT_VISIT(type->member_count);
+        }
+        count = type->kind == C_TYPE_UNION ? (count != 0) : count;
     }
-    if (type->kind == C_TYPE_UNION)
+    return count;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot(CParseResult* result, CTypeId id, u32 field_index)
+{
+    u32 slot = UINT32_MAX;
+    CType* type = result && id.value < result->type_count ? result->types + id.value : 0;
+    if (type && field_index < type->member_count && c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
     {
-        return 0;
-    }
-    u32 slot = 0;
-    for (u32 index = 0; index < field_index; index += 1)
-    {
-        slot += c_parse_initializer_member_is_slot(result->members + type->member_start + index);
+        CMemberSlotEntry const* table = c_parse_initializer_slot_table(result, id, type);
+        if (type->kind == C_TYPE_UNION)
+        {
+            slot = 0;
+        }
+        else if (table)
+        {
+            slot = table->slot_of[field_index];
+            C_PARSE_MEMBER_SLOT_VISIT(1);
+        }
+        else
+        {
+            slot = 0;
+            for (u32 index = 0; index < field_index; index += 1)
+            {
+                slot += c_parse_initializer_member_is_slot(result->members + type->member_start + index);
+            }
+            C_PARSE_MEMBER_SLOT_VISIT(field_index);
+        }
     }
     return slot;
 }
 
-BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseResult* result, CType* type, u32 slot)
+BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseResult* result, CTypeId id, u32 slot)
 {
-    if (result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION))
+    CMember* found = 0;
+    CType* type = result && id.value < result->type_count ? result->types + id.value : 0;
+    if (type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION))
     {
-        u32 current = 0;
-        for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+        CMemberSlotEntry const* table = c_parse_initializer_slot_table(result, id, type);
+        if (table)
         {
-            CMember* member = result->members + type->member_start + field_index;
-            if (!c_parse_initializer_member_is_slot(member))
+            // A union answers its first slot member for every slot.
+            u32 row = type->kind == C_TYPE_UNION ? 0 : slot;
+            if (row < table->slot_count)
             {
-                continue;
+                found = result->members + type->member_start + table->member_of[row];
             }
-            if (current++ == slot || type->kind == C_TYPE_UNION)
+            C_PARSE_MEMBER_SLOT_VISIT(1);
+        }
+        else
+        {
+            u32 current = 0;
+            u32 examined = 0;
+            for (u32 field_index = 0; !found && field_index < type->member_count; field_index += 1)
             {
-                return member;
+                CMember* member = result->members + type->member_start + field_index;
+                examined += 1;
+                if (c_parse_initializer_member_is_slot(member) && (current++ == slot || type->kind == C_TYPE_UNION))
+                {
+                    found = member;
+                }
             }
+            C_PARSE_MEMBER_SLOT_VISIT(examined);
         }
     }
-
-    return 0;
+    return found;
 }
 
 BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, CParseResult* result, CTypeId root, u32 symbol, String8 name, CTypeId* type_out,
@@ -8970,7 +9072,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine
         }
         if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
         {
-            *slots_out = c_parse_initializer_member_count(result, type);
+            *slots_out = c_parse_initializer_member_count(result, frame->type);
             return true;
         }
     }
@@ -9185,7 +9287,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             current = member_type;
             if (first)
             {
-                u32 member_slot = c_parse_initializer_member_slot(result, type, field_index);
+                u32 member_slot = c_parse_initializer_member_slot(result, container_id, field_index);
                 if (member_slot == UINT32_MAX)
                 {
                     return false;
@@ -9209,7 +9311,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             }
             else
             {
-                u32 member_slot = c_parse_initializer_member_slot(result, type, field_index);
+                u32 member_slot = c_parse_initializer_member_slot(result, container_id, field_index);
                 if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1 || designator->continuation_count >= continuation_capacity)
                 {
                     return false;
@@ -9265,7 +9367,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
         }
         else
         {
-            CMember* member = c_parse_initializer_member_at(result, type, (u32)frame->next_index);
+            CMember* member = c_parse_initializer_member_at(result, frame->type, (u32)frame->next_index);
             if (!member)
             {
                 return false;

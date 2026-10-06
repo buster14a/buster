@@ -71,6 +71,10 @@ BUSTER_F_DECL CTestMemberAlignmentQuery c_test_member_alignment_query(Arena* scr
 // it built for wide aggregates.
 BUSTER_F_DECL void c_test_member_lookup_counts(u64* visits, u64* builds);
 
+// Member rows the initializer slot queries examined on this thread, and the slot
+// tables they built for wide aggregates.
+BUSTER_F_DECL void c_test_member_slot_counts(u64* visits, u64* builds);
+
 // Promoted-member searches on this thread, and how many needed a per-type table.
 BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 

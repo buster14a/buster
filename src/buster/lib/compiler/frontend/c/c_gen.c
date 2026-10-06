@@ -45686,6 +45686,10 @@ BUSTER_C_INTERNAL CIrInitializerSlot c_ir_initializer_slot_from_field(IrType* ty
     };
 }
 
+// Records up to this wide are checked against the walkers slot by slot; wider
+// ones in one pass, since each walker call is itself a pass over the fields.
+#define C_IR_INITIALIZER_SLOT_FULL_CHECK_FIELDS 64u
+
 BUSTER_C_INTERNAL CIrInitializerSlotTable* c_ir_initializer_slot_table_build(CIrInitializerSlotCache* cache, IrType* type)
 {
     u32 row_capacity = type->field_count ? type->field_count : 1;
@@ -45717,17 +45721,49 @@ BUSTER_C_INTERNAL CIrInitializerSlotTable* c_ir_initializer_slot_table_build(CIr
     // build, so the report is spelled out for the Release tree that carries
     // the tests.
     bool agrees = c_ir_constant_initializer_slot_count_walk(type) == slot_count;
-    for (u32 slot = 0; slot < slot_count; slot += 1)
+    if (type->field_count <= C_IR_INITIALIZER_SLOT_FULL_CHECK_FIELDS)
     {
-        IrField* field = c_ir_constant_initializer_field_at_walk(type, slot);
-        CIrInitializerSlot row = table->slots[slot];
-        agrees &= field != 0 && field == type->fields + row.field_index && field->type.value == row.type.value && field->offset == row.offset &&
-                  field->bit_offset == row.bit_offset && field->bit_width == row.bit_width && field->access_size == row.access_size &&
-                  field->is_bit_field == row.is_bit_field;
+        for (u32 slot = 0; slot < slot_count; slot += 1)
+        {
+            IrField* field = c_ir_constant_initializer_field_at_walk(type, slot);
+            CIrInitializerSlot row = table->slots[slot];
+            agrees &= field != 0 && field == type->fields + row.field_index && field->type.value == row.type.value && field->offset == row.offset &&
+                      field->bit_offset == row.bit_offset && field->bit_width == row.bit_width && field->access_size == row.access_size &&
+                      field->is_bit_field == row.is_bit_field;
+        }
+        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+        {
+            agrees &= c_ir_constant_initializer_field_slot_walk(type, field_index) == table->field_slots[field_index];
+        }
     }
-    for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+    else
     {
-        agrees &= c_ir_constant_initializer_field_slot_walk(type, field_index) == table->field_slots[field_index];
+        // The walkers cost a pass per slot, so a wide record is checked by one
+        // pass that counts the slots as it goes: each initializable field must
+        // be the row its slot names, and a union's members all share slot 0.
+        u32 running = 0;
+        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+        {
+            IrField* field = type->fields + field_index;
+            u32 slot = table->field_slots[field_index];
+            if (field->is_bit_field && !field->name.length)
+            {
+                agrees &= slot == UINT32_MAX;
+            }
+            else if (type->kind == IR_TYPE_UNION)
+            {
+                agrees &= slot == 0 && (running != 0 || table->slots[0].field_index == field_index);
+                running = 1;
+            }
+            else
+            {
+                CIrInitializerSlot row = table->slots[slot < slot_count ? slot : 0];
+                agrees &= slot == running && slot < slot_count && row.field_index == field_index && field->type.value == row.type.value &&
+                          field->offset == row.offset && field->bit_offset == row.bit_offset && field->bit_width == row.bit_width &&
+                          field->access_size == row.access_size && field->is_bit_field == row.is_bit_field;
+                running += 1;
+            }
+        }
     }
     if (!agrees)
     {

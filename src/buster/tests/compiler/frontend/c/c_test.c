@@ -6194,6 +6194,179 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_member_lookup_semantics(UnitTestA
     return result;
 }
 
+// #2861: numbering the slots of a wide record costs work proportional to the
+// elements, not to the record's width. One translation unit per size holds a
+// struct of `count` members initialized by `count` designators (`designated`)
+// or by `count` positional values; the parser's slot-query row visits are
+// counted, not timed. Quadrupling the width must roughly quadruple them (a
+// count of the rows before each element multiplies them by sixteen).
+BUSTER_GLOBAL_LOCAL void c_test_initializer_slot_visits(UnitTestArguments* arguments, u32 count, bool designated, bool* compiled, u64* visits_out, u64* builds_out)
+{
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 capacity = BUSTER_MB(2);
+    char8* source = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(source, capacity, &length, S8("struct S {"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" int m{u32};"), index));
+    }
+    c_test_append_source(source, capacity, &length, S8(" };\nstatic struct S s = {"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length,
+                             designated ? string_format(temporary.arena, S8(".m{u32} = {u32},"), index, index)
+                                        : string_format(temporary.arena, S8("{u32},"), index));
+    }
+    c_test_append_source(source, capacity, &length, S8("};\n"));
+    u64 visits_before = 0;
+    u64 builds_before = 0;
+    c_test_member_slot_counts(&visits_before, &builds_before);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){source, length}, (CPreprocessOptions){
+        .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23,
+    });
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_analyze(temporary.arena, S8("initializer-slot-linear.c"), preprocess, syntax, target_native);
+    *compiled = !preprocess.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count && lowered.canonical_ir_certified;
+    u64 visits = 0;
+    u64 builds = 0;
+    c_test_member_slot_counts(&visits, &builds);
+    c_test_scratch_end(temporary);
+    *visits_out = visits - visits_before;
+    *builds_out = builds - builds_before;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_slot_linear_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SMALL = 1024, LARGE = 4096 };
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        bool compiled_small = false;
+        bool compiled_large = false;
+        u64 small = 0;
+        u64 large = 0;
+        u64 small_builds = 0;
+        u64 large_builds = 0;
+        c_test_initializer_slot_visits(arguments, SMALL, shape == 0, &compiled_small, &small, &small_builds);
+        c_test_initializer_slot_visits(arguments, LARGE, shape == 0, &compiled_large, &large, &large_builds);
+        String8 detail = string_format(arguments->arena, S8("shape={u32} small={u64}/{u64} large={u64}/{u64}"), shape, small, small_builds, large, large_builds);
+        BUSTER_TEST_RAW(arguments, compiled_small && compiled_large, detail);
+        // Each element asks a few slot questions; one table is built per
+        // record the parse sees, never one per element.
+        BUSTER_TEST_RAW(arguments, small != 0 && small < 16 * SMALL && large < 16 * LARGE, detail);
+        BUSTER_TEST_RAW(arguments, large < small * 6, detail);
+        BUSTER_TEST_RAW(arguments, small_builds != 0 && small_builds < 16 && large_builds < 16, detail);
+    }
+    return result;
+}
+
+// Slot numbering on records wide enough for the slot table: unnamed
+// bit-fields own no slot, anonymous struct and union members are slots of
+// their own that promoted designators and brace elision reach, positional
+// values continue after a designator, and a union is one slot. The static
+// assertions fix the layout; the globals' bytes fix where each value landed.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_initializer_slot_semantics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena,
+        S8("#include <stddef.h>\n"
+           "struct W { int a0; int a1; int a2; int a3; int a4; int a5; int a6; int a7; int a8; int a9; int a10; int a11;"
+           " int : 32; int b;"
+           " struct { int x; union { int u; float f; }; };"
+           " int c0; int c1; int c2; int c3;"
+           " struct { struct { int deep; }; int e; }; };\n"
+           "union U { int u0; int u1; int u2; int u3; int u4; int u5; int u6; int u7; int u8; int u9; int u10; int u11; int u12; int u13; int u14; int u15; int u16; };\n"
+           "_Static_assert(offsetof(struct W, a3) == 12 && offsetof(struct W, b) == 52, \"b\");\n"
+           "_Static_assert(offsetof(struct W, x) == 56 && offsetof(struct W, u) == 60, \"anon\");\n"
+           "_Static_assert(offsetof(struct W, c0) == 64 && offsetof(struct W, deep) == 80 && offsetof(struct W, e) == 84 && sizeof(struct W) == 88, \"tail\");\n"
+           "struct W designated = {.a3 = 3, 4, .b = 5, .x = 6, .u = 7, .c2 = 8, 9, .deep = 10, .e = 11};\n"
+           "struct W positional = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};\n"
+           "struct W nested[2] = {[1] = {.a11 = 1, .u = 2, .c0 = 3}, [0] = {4}};\n"
+           "union U designated_union = {.u7 = 5};\n"
+           "union U positional_union = {9};\n"),
+        (CPreprocessOptions){
+            .target = target_native,
+            .data_layout = target_data_layout(target_native),
+            .dialect = C_PREPROCESS_DIALECT_GNU23,
+        });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("wide-initializer-slots.c"), preprocess, parse, target_native);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (lowered.program)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        // Offsets (in ints) and values each global must hold; every other
+        // int of the global is zero.
+        u32 designated_offsets[] = {3, 4, 13, 14, 15, 18, 19, 20, 21};
+        u32 designated_values[] = {3, 4, 5, 6, 7, 8, 9, 10, 11};
+        u32 positional_offsets[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21};
+        u32 positional_values[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};
+        u32 nested_offsets[] = {22 + 11, 22 + 15, 22 + 16, 0};
+        u32 nested_values[] = {1, 2, 3, 4};
+        u32 designated_union_offsets[] = {0};
+        u32 designated_union_values[] = {5};
+        u32 positional_union_offsets[] = {0};
+        u32 positional_union_values[] = {9};
+        struct
+        {
+            String8 name;
+            u32 int_count;
+            u32* offsets;
+            u32* values;
+            u32 count;
+        } expectations[] = {
+            {S8("designated"), 22, designated_offsets, designated_values, BUSTER_ARRAY_LENGTH(designated_offsets)},
+            {S8("positional"), 22, positional_offsets, positional_values, BUSTER_ARRAY_LENGTH(positional_offsets)},
+            {S8("nested"), 44, nested_offsets, nested_values, BUSTER_ARRAY_LENGTH(nested_offsets)},
+            {S8("designated_union"), 1, designated_union_offsets, designated_union_values, 1},
+            {S8("positional_union"), 1, positional_union_offsets, positional_union_values, 1},
+        };
+        for (u32 expectation = 0; expectation < BUSTER_ARRAY_LENGTH(expectations); expectation += 1)
+        {
+            IrGlobal* found = 0;
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, module->globals[global_index].symbol);
+                if (symbol && string_equal(symbol->name, expectations[expectation].name))
+                {
+                    found = module->globals + global_index;
+                }
+            }
+            BUSTER_TEST(arguments, found != 0);
+            if (found)
+            {
+                u32 int_count = expectations[expectation].int_count;
+                BUSTER_TEST(arguments, found->bytes.length == int_count * sizeof(u32) && found->bytes.pointer != 0);
+                if (found->bytes.pointer && found->bytes.length == int_count * sizeof(u32))
+                {
+                    for (u32 index = 0; index < int_count; index += 1)
+                    {
+                        u32 expected = 0;
+                        for (u32 item = 0; item < expectations[expectation].count; item += 1)
+                        {
+                            if (expectations[expectation].offsets[item] == index)
+                            {
+                                expected = expectations[expectation].values[item];
+                            }
+                        }
+                        u32 value = 0;
+                        memcpy(&value, found->bytes.pointer + index * sizeof(value), sizeof(value));
+                        BUSTER_TEST_RAW(arguments, value == expected,
+                                        string_format(arguments->arena, S8("global={S8} int={u32} value={u32} expected={u32}"),
+                                                      expectations[expectation].name, index, value, expected));
+                    }
+                }
+            }
+        }
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Exercise the production search directly with unrelated types already in the
 // program. A fresh, separate arena makes its dirty high-water mark observable
 // even after the helper correctly rewinds every success and failure path.
@@ -45780,6 +45953,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_member_lookup_linear_work);
+    C_TEST_FIXTURE(arguments, c_test_initializer_slot_linear_work);
+    C_TEST_FIXTURE(arguments, c_test_wide_initializer_slot_semantics);
     C_TEST_FIXTURE(arguments, c_test_member_search_scratch);
     C_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
     C_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);

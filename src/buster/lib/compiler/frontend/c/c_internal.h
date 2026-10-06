@@ -1271,11 +1271,35 @@ struct CMemberIndexEntry
     CMemberIndexState state;
 };
 
+// Initializer slot numbering of one aggregate's direct members, for
+// c_parse_initializer_member_slot / _member_at / _member_count: a member is a
+// slot unless it is an unnamed bit-field. `slot_of` maps a member offset to its
+// slot (UINT32_MAX for none), `member_of` a slot to its member offset, so a
+// designated or positional initializer element reaches its member in O(1)
+// instead of counting the rows before it (#2861). Built for a record of at
+// least C_MEMBER_SLOT_TABLE_MIN_MEMBERS members and validated like the name
+// index by (generation, member_start, member_count).
+#define C_MEMBER_SLOT_TABLE_MIN_MEMBERS 16u
+
+typedef struct CMemberSlotEntry CMemberSlotEntry;
+struct CMemberSlotEntry
+{
+    u32* slot_of;
+    u32* member_of;
+    u32 slot_count;
+    u32 member_start;
+    u32 member_count;
+    u32 generation;
+    bool built;
+};
+
 struct CMemberLookup
 {
     // Indexed by type id; grown on demand, zero-filled.
     CMemberIndexEntry* entries;
     u32 capacity;
+    CMemberSlotEntry* slot_entries;
+    u32 slot_capacity;
     // Bumped by c_type_parse_rollback, which restores member rows and type
     // records by value behind the entries' back.
     u32 generation;
