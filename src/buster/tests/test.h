@@ -85,7 +85,10 @@ struct UnitTestArguments
     TestWatchSlot* watch_slot;
     bool memory_report;
     bool fixture_timing_report;
-    u8 reserved[6];
+    // Harness self-tests set this only around an expected failed assertion;
+    // diagnostics and assertion accounting still run normally.
+    bool suppress_debugger_break;
+    u8 reserved[5];
 #endif
 };
 
@@ -152,6 +155,10 @@ BUSTER_F_DECL void buster_test_error_arguments(UnitTestArguments* arguments, u32
 BUSTER_F_DECL bool buster_test_require_arguments(UnitTestArguments* arguments, UnitTestResult* result, bool success, u32 line, String8 function,
                                                  String8 file_path, String8 expression);
 BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix);
+// Like buster_test_temporary_path, but every call returns a fresh path. Use it
+// for an image a loop compiles and runs per iteration: Windows may refuse to
+// replace an executable that just ran (ERROR_ACCESS_DENIED; #2089, #2836).
+BUSTER_F_DECL String8 buster_test_temporary_unique_path(Arena* arena, String8 name, String8 suffix);
 // Limits test-internal parallel work to a validated positive matrix quota.
 BUSTER_F_DECL u64 buster_test_worker_count(u64 requested);
 

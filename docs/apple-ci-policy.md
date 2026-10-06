@@ -25,6 +25,12 @@ native jobs, two mobile jobs, lint, UEFI, analyzer and `CI complete`. Its Apple
 runner demand is **four jobs instead of eight** on ready PRs, merge groups,
 main/tag pushes and default manual runs. Draft deferral remains available for
 the four retained Apple jobs; reruns execute those jobs on Apple Silicon.
+Since #2659 the macOS AArch64 lane has independent owners instead of grouped
+`checks`. #2657 then moved sanitized Debug into build-only `portability`
+coverage and removed the separate full-runtime `sanitized-debug` jobs, so
+macOS AArch64 has `release`, `sanitized-release` and `portability` owners,
+Buster CI has 25 jobs and its Apple runner demand is **five jobs** per full
+run; draft deferral covers all five.
 The strict retirement workflow has five native hosts instead of six.
 
 All active GitHub workflows and their matrices are covered by the workflow

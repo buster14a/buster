@@ -58,27 +58,28 @@ inventory follows; operand positions start at zero. A mask is a C-visible
 | `LOAD_MASKED` | Read active bytes; zero inactive bytes without accessing them | Operand 1, `predicate<64>` |
 | `STORE` | Write exactly 64 unaligned bytes | None |
 | `STORE_MASKED` | Write active bytes only | Operand 1, `predicate<64>` |
-| `SPLAT_BYTE` | Repeat one byte in 64 lanes | None |
-| `COMPARE_EQUAL_BYTE` | Pack byte equality results into bits | Result, `predicate<64>` |
-| `COMPARE_LESS_BYTE` | Pack unsigned byte less-than results | Result, `predicate<64>` |
-| `SIGN_MASK_BYTE` | Pack each byte's high bit | Result, `predicate<64>` |
-| `TEST_MASK_BYTE` | Pack byte-wise AND-nonzero results | Result, `predicate<64>` |
-| `PERMUTE2_BYTE` | Select from concatenated low/high vectors using low seven index bits; zero inactive lanes | Operand 0, `predicate<64>` |
-| `COMPRESS_BYTE` | Pack active bytes in original order; zero the tail | Operand 0, `predicate<64>` |
-| `COMPRESS_STORE_BYTE` | Write only packed active bytes in original order | Operand 1, `predicate<64>` |
-| `WIDEN_BYTE_TO_WORD` | Zero-extend one selected 16-byte quarter into sixteen u32 lanes; immediate 0–3 | None |
-| `SHIFT_LEFT_WORD` | Shift each u32 lane left; immediate 0–31 | None |
-| `TERNARY_WORD` | Apply the eight-bit three-input truth table independently to each bit | None |
-| `COMPARE_EQUAL_WORD` | Pack sixteen u32 equality results; clear upper 48 bits | Result, `predicate<16>` |
-| `SPLAT_WORD` | Repeat one u32 in sixteen lanes | None |
-| `COMPARE_LESS_WORD` | Pack sixteen unsigned u32 less-than results; clear upper 48 bits | Result, `predicate<16>` |
-| `COMPRESS_WORD` | Pack selected u32 lanes in original order; zero tail; ignore mask bits 16–63 | Operand 0, `predicate<16>` |
+| `SPLAT_U8` | Repeat one byte in 64 lanes | None |
+| `COMPARE_EQUAL_U8` | Pack byte equality results into bits | Result, `predicate<64>` |
+| `COMPARE_LESS_U8` | Pack unsigned byte less-than results | Result, `predicate<64>` |
+| `SIGN_MASK_U8` | Pack each byte's high bit | Result, `predicate<64>` |
+| `TEST_MASK_U8` | Pack byte-wise AND-nonzero results | Result, `predicate<64>` |
+| `PERMUTE2_U8` | Select from concatenated low/high vectors using low seven index bits; zero inactive lanes | Operand 0, `predicate<64>` |
+| `COMPRESS_U8` | Pack active bytes in original order; zero the tail | Operand 0, `predicate<64>` |
+| `COMPRESS_STORE_U8` | Write only packed active bytes in original order | Operand 1, `predicate<64>` |
+| `WIDEN_U8_TO_U32` | Zero-extend one selected 16-byte quarter into sixteen u32 lanes; immediate 0–3 | None |
+| `SHIFT_LEFT_U32` | Shift each u32 lane left; immediate 0–31 | None |
+| `TERNARY_U32` | Apply the eight-bit three-input truth table independently to each bit | None |
+| `COMPARE_EQUAL_U32` | Pack sixteen u32 equality results; clear upper 48 bits | Result, `predicate<16>` |
+| `SPLAT_U32` | Repeat one u32 in sixteen lanes | None |
+| `COMPARE_LESS_U32` | Pack sixteen unsigned u32 less-than results; clear upper 48 bits | Result, `predicate<16>` |
+| `COMPRESS_U32` | Pack selected u32 lanes in original order; zero tail; ignore mask bits 16–63 | Operand 0, `predicate<16>` |
+| `PERMUTE2_U32` | Select u32 lanes from concatenated low/high vectors using low five index bits; zero inactive lanes; ignore mask bits 16–63 | Operand 0, `predicate<16>` |
 
 The current exact lowering requires x86-64 AVX512F and AVX512BW for the whole
-vocabulary, including its 64-byte frame transfers. `PERMUTE2_BYTE` additionally
-requires AVX512VBMI; `COMPRESS_BYTE` and `COMPRESS_STORE_BYTE` additionally
-require AVX512VBMI2. `COMPRESS_WORD` does not require VBMI2. Unknown operation
-numbers always fail the shared gate. Feature bits on another architecture
+vocabulary, including its 64-byte frame transfers. `PERMUTE2_U8` additionally
+requires AVX512VBMI; `COMPRESS_U8` and `COMPRESS_STORE_U8` additionally
+require AVX512VBMI2. `COMPRESS_U32` does not require VBMI2, and `PERMUTE2_U32`
+does not require VBMI. Unknown operation numbers always fail the shared gate. Feature bits on another architecture
 cannot make an x86 intrinsic supported.
 
 An exact intrinsic must lower through its specified target form. Supporting
@@ -117,8 +118,8 @@ The lowering boundaries are explicit:
   back at these boundaries. Predicate widths may change only through an
   explicit lane-preserving conversion; high bits cannot become stale lanes.
 
-The direct x86 emitter uses `KMOVQ` at its frame/integer boundaries and fixed
-scratch `k1` for predicates. MIR may preserve these values in the separate
+The archived direct x86 emitter used `KMOVQ` at its frame/integer boundaries and fixed
+scratch `k1` for predicates. MIR preserves these values in the separate
 mask register class; allocatable k1–k7 lifetime management is the work of
 [#37](https://github.com/buster14a/buster/issues/37). C masks and their ABI remain
 integers under either allocation strategy. `k0` is not an active writemask.
@@ -127,8 +128,8 @@ integers under either allocation strategy. `k0` is not an active writemask.
 
 | Backend | Generic vector values | Exact x86-512 operations | Internal predicates |
 |---|---|---|---|
-| x86-64 native | Native forms where supported, otherwise correct lane/frame expansion | Shared feature gate, exact forms, structured refusal on missing support | Hardware k bank; direct emitter uses k1/frame bridges; mask allocation is separate from C integer allocation |
-| AArch64 native | NEON where supported, otherwise scalar MIR or direct scalar lanes | Refused, including when stray x86 feature bits are present | No SVE predicate lowering is currently implemented; future predicates can use explicit per-lane Boolean vectors or normalized packed integer bits, never masquerade as NEON C comparison results |
+| x86-64 native | Native forms where supported, otherwise correct lane/frame expansion | Shared feature gate, exact forms, structured refusal on missing support | Hardware k bank; mask allocation is separate from C integer allocation |
+| AArch64 native | NEON where supported, otherwise scalar MIR lanes | Refused, including when stray x86 feature bits are present | No SVE predicate lowering is currently implemented; future predicates can use explicit per-lane Boolean vectors or normalized packed integer bits, never masquerade as NEON C comparison results |
 | Wasm64 | Current backend rejects unsupported vector values/operations explicitly | Refused | No predicate bank; future lowering must use explicit lane Booleans or normalized low-N-bit integer representation |
 | eBPF | Current backend rejects unsupported vector values/operations explicitly | Refused | No predicate bank; any future supported lowering uses normalized packed integer bits or explicit scalar lane Booleans |
 | LLVM bitcode | Emit supported LLVM vector operations; LLVM performs subsequent target legalization | Refused until exact intrinsic emission exists, even with an x86 triple | Future predicate lowering uses `<N x i1>`; integer bridges require explicit bit packing/unpacking and zero high bits |
@@ -151,7 +152,7 @@ All sixteen combinations of F/BW/VBMI/VBMI2 are checked for every operation
 on every architecture. Invalid enum values must remain unsupported.
 
 The existing `basic_c_simd.c` execution fixture covers exact lane behavior,
-including zeroed upper word-comparison bits and ignored high word-mask bits.
+including zeroed upper u32-comparison bits and ignored high u32-mask bits.
 `basic_c_simd_translate.c` exercises the production header's explicit fallback
 instead of compiling the test body away. The native vector fixtures cover
 all-ones comparison lanes and scalar legalization independently of exact SIMD.

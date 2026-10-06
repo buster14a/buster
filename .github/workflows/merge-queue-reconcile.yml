@@ -18,6 +18,8 @@ on:
       - API migration policy
       - Native retirement rebinding
     types: [completed]
+    # Filter upstream runs before creating skipped workflow entries (#2462).
+    branches: ['gh-readonly-queue/main/**']
   push:
     branches: [main]
   schedule:
