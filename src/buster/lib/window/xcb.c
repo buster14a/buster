@@ -1914,7 +1914,7 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
         if (event_type == 0)
         {
             xcb_generic_error_t* error = (xcb_generic_error_t*)event;
-            string_print_error(S8("XCB error: code {u8}, major {u8}, minor {u16}\n"), error->error_code, error->major_code, error->minor_code);
+            string_print_error(S8("XCB error: code {u8}, major {u8}, minor {u16}, sequence {u32}, value {u32:x}\n"), error->error_code, error->major_code, error->minor_code, error->full_sequence, error->resource_id);
             free(event);
             continue;
         }
@@ -4370,7 +4370,8 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     int screen_id = 0;
     xcb_connection_t* connection = xcb_connect(0, &screen_id);
     BUSTER_LSAN_ENABLE();
-    if (connection && !xcb_connection_has_error(connection))
+    int connection_error = connection ? xcb_connection_has_error(connection) : -1;
+    if (connection && !connection_error)
     {
         const xcb_setup_t* setup = xcb_get_setup(connection);
         if (setup)
@@ -4413,9 +4414,13 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     {
         result = &windowing_handle;
     }
-    else if (connection)
+    else
     {
-        xcb_disconnect(connection);
+        string_print_error(S8("WM_INITIALIZE_V1 stage=native-connection-or-setup connection_error={s32}\n"), (s32)connection_error);
+        if (connection)
+        {
+            xcb_disconnect(connection);
+        }
     }
     return result;
 }

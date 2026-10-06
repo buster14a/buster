@@ -86,7 +86,20 @@ jobs:
       - name: Headless pixel, orientation and admission tests
         run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster'
       - name: Actual XCB pixel readback and native lifecycle
-        run: xvfb-run -a -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster_native
+        env:
+          BUSTER_NATIVE_CAMPAIGN_REPETITIONS: '16'
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-raster-evidence"
+          set -o pipefail
+          xvfb-run -a -e "$RUNNER_TEMP/native-raster-evidence/xvfb-native.stderr" -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster_native 2>&1 | tee "$RUNNER_TEMP/native-raster-evidence/native.log"
+      - name: Preserve native failure evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-evidence-${{ matrix.cc }}-${{ matrix.config }}-${{ matrix.sanitize }}
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/native-raster-evidence/
       - name: Headless application state and ownership
         run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_image_browser_state'
       - name: Actual image-browser loading, rendering, navigation and shutdown

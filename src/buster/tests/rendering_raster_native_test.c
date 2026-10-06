@@ -15,6 +15,9 @@ BUSTER_GLOBAL_LOCAL ProgramState raster_native_program;
 BUSTER_V_IMPL ProgramState* program_state = &raster_native_program;
 BUSTER_GLOBAL_LOCAL u32 raster_native_assertions;
 BUSTER_GLOBAL_LOCAL u32 raster_native_failures;
+BUSTER_GLOBAL_LOCAL u32 raster_native_campaign;
+BUSTER_GLOBAL_LOCAL u32 raster_native_cycles;
+BUSTER_GLOBAL_LOCAL u32 raster_native_encodings;
 
 #if BUSTER_UNITY_BUILD
 #include <buster/lib/arena.c>
@@ -719,6 +722,8 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     int screen_id = 0;
     provider.connection = xcb_connect(0, &screen_id);
     bool ready = provider.connection && !xcb_connection_has_error(provider.connection);
+    char const* stage = "provider-connection";
+    u32 passes = 0;
     char name[80] = {0};
     char modifiers[88] = {0};
     int named = snprintf(name, sizeof(name), "buster-native-xim-%ld-%u", (long)getpid(), (unsigned)mode);
@@ -742,6 +747,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     String8 expected = mode == 0 ? unicode : compound_expected;
     if (ready)
     {
+        stage = "provider-window";
         xcb_screen_iterator_t screens = xcb_setup_roots_iterator(xcb_get_setup(provider.connection));
         for (int index = 0; index < screen_id && screens.rem; index += 1)
         {
@@ -759,6 +765,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     }
     if (ready)
     {
+        stage = "provider-create";
         u32 style = XCB_IM_PreeditNothing | XCB_IM_StatusNothing;
         xcb_im_styles_t styles = {1, &style};
         char* encoding_name = mode == 0 ? "UTF8_STRING" : "COMPOUND_TEXT";
@@ -769,21 +776,25 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
         if (ready)
         {
             xcb_im_set_use_sync_mode(provider.server, false);
+            stage = "provider-open";
             opened = xcb_im_open_im(provider.server);
             ready = opened;
         }
         if (ready)
         {
+            stage = "environment-select";
             environment_changed = setenv("XMODIFIERS", modifiers, 1) == 0;
             ready = environment_changed;
         }
     }
     if (ready)
     {
+        stage = "client-wm-xim";
         windowing = wm_initialize();
         ready = windowing && windowing->xim;
         if (ready)
         {
+            stage = "client-window";
             window = wm_window_create(windowing, (WmWindowCreate){.name = S8("Buster native XIM provider gate"),
                 .size = {.width = 16, .height = 16}, .disable_file_drop = true});
             ready = window != 0;
@@ -795,18 +806,27 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     }
     u64 start = raster_native_xim_now_ms();
     ready = ready && start <= UINT64_MAX - 5000;
-    for (u32 pass = 0; ready && !(provider.input_context && window->ic && windowing->xim_open) && pass < 2048; pass += 1)
+    for (; ready && !(provider.input_context && window->ic && windowing->xim_open) && passes < 2048; passes += 1)
     {
+        stage = "handshake-deadline";
         ready = raster_native_xim_now_ms() < start + 5000;
         if (ready)
         {
             arena_reset_to_start(arena);
             WmEventList events;
+            stage = "handshake-transport";
             ready = raster_native_xim_pump(arena, windowing, &provider, &events);
         }
     }
+    printf("XIM_HANDSHAKE_V1 campaign=%u encoding=%s stage=%s passes=%u elapsed_ms=%llu provider_error=%d client_error=%d client_open=%u client_ic=%u created=%u\n",
+           (unsigned)raster_native_campaign, mode == 0 ? "utf8" : "compound", ready ? "final-context-encoding" : stage,
+           (unsigned)passes, (unsigned long long)(raster_native_xim_now_ms() - start),
+           provider.connection ? xcb_connection_has_error(provider.connection) : -1,
+           windowing && windowing->connection ? xcb_connection_has_error(windowing->connection) : -1,
+           windowing ? (unsigned)windowing->xim_open : 0, window ? (unsigned)window->ic : 0, (unsigned)provider.created);
     ready = ready && provider.input_context && provider.created == 1 && window->ic && windowing->xim_open &&
             xcb_xim_get_encoding(windowing->xim) == (mode == 0 ? XCB_XIM_UTF8_STRING : XCB_XIM_COMPOUND_TEXT);
+    raster_native_encodings += ready;
     raster_native_check(ready, "real XIM provider handshakes and both nonzero input contexts negotiate the intended encoding");
     if (ready)
     {
@@ -884,8 +904,10 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
 
 BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
 {
+    printf("WM_LIFECYCLE_V1 campaign=%u cycle=%u status=started\n", (unsigned)raster_native_campaign, (unsigned)cycle);
     WmHandle* windowing = wm_initialize();
     raster_native_check(windowing != 0, "real wm initialization");
+    raster_native_cycles += windowing != 0;
     if (windowing)
     {
         WmWindowHandle* window = wm_window_create(windowing, (WmWindowCreate){
@@ -1006,13 +1028,30 @@ int main(int argc, char* argv[])
     }
     else
     {
-        raster_native_window_arena_failure();
-        for (u32 cycle = 0; cycle < 3; cycle += 1)
+        char const* repetition_text = getenv("BUSTER_NATIVE_CAMPAIGN_REPETITIONS");
+        u32 repetitions = 1;
+        if (repetition_text)
         {
-            raster_native_cycle(arena, cycle);
+            char* end = 0;
+            unsigned long parsed = strtoul(repetition_text, &end, 10);
+            bool valid = end && !*end && parsed >= 1 && parsed <= 64;
+            raster_native_check(valid, "native campaign repetition bound");
+            repetitions = valid ? (u32)parsed : 1;
         }
-        raster_native_xim_provider(arena, 0);
-        raster_native_xim_provider(arena, 1);
+        for (raster_native_campaign = 0; raster_native_campaign < repetitions; raster_native_campaign += 1)
+        {
+            raster_native_window_arena_failure();
+            for (u32 cycle = 0; cycle < 3; cycle += 1)
+            {
+                raster_native_cycle(arena, cycle);
+            }
+            raster_native_xim_provider(arena, 0);
+            raster_native_xim_provider(arena, 1);
+        }
+        printf("NATIVE_CASES_V1 cycles=%u/%u encodings=%u/%u\n", (unsigned)raster_native_cycles,
+               (unsigned)(3 * repetitions), (unsigned)raster_native_encodings, (unsigned)(2 * repetitions));
+        raster_native_check(raster_native_cycles == 3 * repetitions && raster_native_encodings == 2 * repetitions,
+                            "all declared lifecycle and real encoding cases executed");
     }
     printf("rendering_raster_native_tests: %u/%u assertions passed; mode=%s\n",
            (unsigned)(raster_native_assertions - raster_native_failures), (unsigned)raster_native_assertions,
