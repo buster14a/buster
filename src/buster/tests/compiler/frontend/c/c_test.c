@@ -20,9 +20,16 @@
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8("static int id(int x){return x;} int main(void){return id(7);}");
+    String8 parts[66];
+    parts[0] = S8("static int id(int x){return x;} int main(void){int x=0;");
+    for (u32 index = 1; index <= 64; index += 1)
+    {
+        parts[index] = S8("x += 1;");
+    }
+    parts[65] = S8("return id(x);}");
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
     CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
-    u32 counts[] = {4, 2, 1};
+    u32 counts[] = {4, 2, 2};
     String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
     for (u32 form = 0; form < 2; form += 1)
     {
@@ -36,6 +43,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
                 CPreprocessResult preprocess;
                 CAnalysisResult analysis;
                 CIRLowerResult lowered;
+                c_test_lowering_initial_reservation(phase == 2 && ordinal == 2 ? BUSTER_KB(64) : 0);
                 c_test_fail_frontend_reservation(phases[phase], ordinal);
                 preprocess = c_preprocess(temporary.arena, source, options);
                 CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
@@ -44,8 +52,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
                                                      (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 bool pending = c_test_frontend_reservation_pending();
                 c_test_fail_frontend_reservation(phases[phase], 0);
+                c_test_lowering_initial_reservation(0);
                 BUSTER_TEST(arguments, !pending);
-                BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified && lowered.diagnostic_count == 1);
                 if (BUSTER_REQUIRE(arguments, lowered.diagnostics && lowered.diagnostic_count != 0))
                 {
                     BUSTER_TEST(arguments, lowered.diagnostics[0].message.length != 0);
@@ -76,6 +85,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
                 {
                     BUSTER_TEST(arguments, recovered_ir.program->modules[0].function_count == 2);
                     BUSTER_TEST(arguments, ir_validate_canonical_module(recovered_ir.program, recovered_ir.program->modules).error == IR_VALIDATION_NONE);
+                    if (phase == 2 && ordinal == 2)
+                    {
+                        CAnalysisResult model = c_analyze_semantics_only(temporary.arena, recovered, recovered_syntax);
+                        if (BUSTER_REQUIRE(arguments, model.analysis_complete && !model.diagnostic_count && model.declaration_count != 0))
+                        {
+                            CDeclaration large = model.declarations[0];
+                            large.token_count = 1000000;
+                            model.declarations = &large;
+                            model.declaration_count = 1;
+                            c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_LOWERING, 1);
+                            CIRLowerResult query = c_lower_to_ir_with_options(temporary.arena, options.source_path, recovered, model, target_native,
+                                                                             (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                            bool query_pending = c_test_frontend_reservation_pending();
+                            c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_LOWERING, 0);
+                            BUSTER_TEST(arguments, !query_pending && !query.program && !query.canonical_ir_certified);
+                            if (BUSTER_REQUIRE(arguments, query.diagnostics && query.diagnostic_count == 1))
+                            {
+                                BUSTER_TEST(arguments, string_first_sequence(query.diagnostics[0].message, S8("C IR lowering query arena")) != BUSTER_STRING_NO_MATCH);
+                            }
+                        }
+                    }
                 }
                 if (recovered.recovery)
                 {
@@ -23367,6 +23397,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
         BUSTER_TEST(arguments, model_temporary.arena != message_temporary.arena);
         u64 model_position = model_temporary.arena->position;
         u64 message_position = message_temporary.arena->position;
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 1);
+        CDiagnostic refused_reservation = c_test_check_named_call_arities(message_temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
+        bool reserve_pending = c_test_frontend_reservation_pending();
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 0);
+        BUSTER_TEST(arguments, !reserve_pending);
+        BUSTER_STRING_TEST(arguments, refused_reservation.message, S8("could not reserve the C semantic analysis GNU attribute-role arena"));
         for (u32 repetition = 0; repetition < 16; repetition += 1)
         {
             CDiagnostic checked = c_test_check_named_call_arities(message_temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
@@ -37948,7 +37984,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_diagnostic_storage(UnitTestArgu
         CIRLowerResult analysis = c_analyze(temporary.arena, S8("syntax-storage.c"), tokens, syntax, target_native);
         BUSTER_TEST(arguments, analysis.diagnostic_count == 0);
         CParserResult empty = c_parse_ast(temporary.arena, (CPreprocessResult){0});
-        BUSTER_TEST(arguments, empty.diagnostics == 0 && empty.diagnostic_count == 0 && empty.diagnostic_capacity == 0);
+        if (BUSTER_REQUIRE(arguments, empty.diagnostics != 0 && empty.diagnostic_count == 1 && empty.diagnostic_capacity == 1))
+        {
+            BUSTER_TEST(arguments, empty.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_TEST(arguments, empty.diagnostics[0].message.length != 0);
+        }
         CParserResult no_arena = c_parse_ast(0, tokens);
         BUSTER_TEST(arguments, no_arena.diagnostics == 0 && no_arena.diagnostic_count == 0 && no_arena.diagnostic_capacity == 0);
         scratch_end(temporary);

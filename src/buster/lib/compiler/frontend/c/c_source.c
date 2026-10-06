@@ -10493,6 +10493,7 @@ u64 c_test_preprocess_references_range(CPreprocessResult const* result, void con
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CFrontendReservationPhase c_test_reservation_phase;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_test_reservation_ordinal;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_lowering_reservation;
 
 void c_test_fail_frontend_reservation(CFrontendReservationPhase phase, u32 ordinal)
 {
@@ -10504,11 +10505,22 @@ bool c_test_frontend_reservation_pending(void)
 {
     return c_test_reservation_ordinal != 0;
 }
+
+void c_test_lowering_initial_reservation(u64 size)
+{
+    c_test_lowering_reservation = size;
+}
 #endif
 
 Arena* c_frontend_arena_create(ArenaCreation creation, CFrontendReservationPhase phase)
 {
 #if BUSTER_INCLUDE_TESTS
+    if (phase == C_FRONTEND_RESERVATION_LOWERING && !creation.reserved_size && c_test_lowering_reservation)
+    {
+        creation.reserved_size = c_test_lowering_reservation;
+        creation.initial_size = BUSTER_MIN(c_test_lowering_reservation, BUSTER_KB(256));
+        creation.flags.no_pool = 1;
+    }
     if (c_test_reservation_ordinal && c_test_reservation_phase == phase)
     {
         c_test_reservation_ordinal -= 1;

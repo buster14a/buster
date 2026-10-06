@@ -241,8 +241,11 @@ disables pool reuse for that attempt. Both SSA forms cover all four
 preprocessing, two analysis and one ordinary lowering reservations, failed
 result publication and successful next-call recovery. Driver coverage includes
 syntax-only for phases it actually executes. Oversized query/function growth
-uses the same reservation boundary and reports the requested bytes; the
-existing scratch-limit regressions continue covering checked plan refusal.
+uses the same reservation boundary and reports the requested bytes. A private
+tests-only initial function budget forces real growth with a small valid input;
+a synthetic query extent refuses its mapping before any oversized source walk.
+The attribute-role regression also forces its deep semantic spill reservation
+and checks recovery. Existing scratch-limit regressions cover checked plan refusal.
 The lexer diagnostic arena remains an optional optimization with a tested
 result-arena fallback; failure there retains the original lexical diagnostics.
 

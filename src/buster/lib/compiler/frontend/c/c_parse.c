@@ -3987,7 +3987,7 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
                     u32 capacity = BUSTER_MIN(after - first, doubled);
                     if (!attribute_arena && capacity > attribute_group_count)
                     {
-                        attribute_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+                        attribute_arena = c_frontend_arena_create((ArenaCreation){.flags = {.no_pool = 1}}, C_FRONTEND_RESERVATION_ANALYSIS);
                     }
                     if (attribute_arena && capacity > attribute_group_count)
                     {
@@ -3998,7 +3998,7 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
                     }
                     else
                     {
-                        result.message = S8("could not allocate GNU attribute-role frames");
+                        result.message = S8("could not reserve the C semantic analysis GNU attribute-role arena");
                         result.token_index = index;
                     }
                 }

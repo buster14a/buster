@@ -22980,11 +22980,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
     Arena* arena = temporary.arena;
     String8 input = buster_test_temporary_path(arena, S8("buster-reservation-failure"), S8(".c"));
     String8 output = buster_test_temporary_path(arena, S8("buster-reservation-failure"), S8(".o"));
-    String8 source = S8("int main(void){return 7;}");
+    String8 parts[66];
+    parts[0] = S8("int main(void){int x=0;");
+    for (u32 index = 1; index <= 64; index += 1)
+    {
+        parts[index] = S8("x += 1;");
+    }
+    parts[65] = S8("return x;}");
+    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
-        u32 counts[] = {4, 2, 1};
+        u32 counts[] = {4, 2, 2};
         String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
         String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
@@ -23001,10 +23008,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
                     {
                         String8 command[] = {S8("-g0"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output, input};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        c_test_lowering_initial_reservation(phase == 2 && ordinal == 2 ? BUSTER_KB(64) : 0);
                         c_test_fail_frontend_reservation(phases[phase], ordinal);
                         CompilerDriverResult failed = compiler_driver_execute_invocation(arena, invocation);
                         bool pending = c_test_frontend_reservation_pending();
                         c_test_fail_frontend_reservation(phases[phase], 0);
+                        c_test_lowering_initial_reservation(0);
                         BUSTER_TEST(arguments, !pending);
                         BUSTER_TEST(arguments, failed.error == (phase == 0 ? COMPILER_DRIVER_ERROR_TOKENIZE : COMPILER_DRIVER_ERROR_ANALYSIS));
                         BUSTER_TEST(arguments, failed.diagnostic.length != 0 && failed.diagnostic_count != 0);

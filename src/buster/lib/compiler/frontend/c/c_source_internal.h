@@ -18,6 +18,8 @@ BUSTER_F_DECL Arena* c_frontend_arena_create(ArenaCreation creation, CFrontendRe
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL void c_test_fail_frontend_reservation(CFrontendReservationPhase phase, u32 ordinal);
 BUSTER_F_DECL bool c_test_frontend_reservation_pending(void);
+// Shrink only the ordinary function arena so a small fixture reaches growth.
+BUSTER_F_DECL void c_test_lowering_initial_reservation(u64 size);
 #endif
 
 // Translation keeps offsets and checkpoint counts in u32. Reserve one byte
