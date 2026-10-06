@@ -3438,6 +3438,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_empty_scalar_initializer_runtime(UnitT
             }
         }
     }
+    // A separator with no initializer before it is not the empty initializer.
+    String8 separator_text = S8("int main(void) { int z = {,}; return z; }\n");
+    String8 separator_source = buster_test_temporary_path(arguments->arena, S8("empty-scalar-separator"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(separator_source, BUSTER_SLICE_TO_BYTE_SLICE(separator_text))))
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 output = buster_test_temporary_path(temporary.arena, S8("empty-scalar-separator"), S8(".o"));
+        String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-c"), S8("-o"), output, separator_source};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+        BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE);
+        c_test_scratch_end(temporary);
+    }
 #else
     BUSTER_UNUSED(arguments);
 #endif

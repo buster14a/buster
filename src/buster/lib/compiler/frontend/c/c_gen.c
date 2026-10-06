@@ -43448,11 +43448,17 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         else if (braced)
                         {
                             u32 scalar_end = end - 1;
+                            // Only `{}` itself is the empty initializer; `{,}` is a separator
+                            // with no initializer before it and stays rejected.
+                            empty_scalar = scalar_end == value_start + 1;
                             if (scalar_end > value_start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[scalar_end - 1], C_PUNCTUATOR_COMMA))
                             {
                                 scalar_end -= 1;
                             }
-                            empty_scalar = scalar_end <= value_start + 1;
+                            if (!empty_scalar && scalar_end <= value_start + 1)
+                            {
+                                return false;
+                            }
                             child.as.expression.start = value_start + 1;
                             child.as.expression.end = scalar_end;
                         }
