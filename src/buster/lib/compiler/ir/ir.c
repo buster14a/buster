@@ -3092,7 +3092,11 @@ BUSTER_GLOBAL_LOCAL bool ir_label_parameter_provenance_values_valid(IrFunction* 
                     IrLabelProvenancePath* source_path = source.label_paths + path_index;
                     u32 group = ir_label_path_group_find(&groups, source_path->offset, source_path->size, false);
                     bool found = false;
-                    for (u32 destination_path_index = groups.groups[group].first_result; !found && destination_path_index != IR_LABEL_GROUP_NONE;
+                    // Result rows are destination paths, so a chain index is
+                    // always below label_path_count; the bound also keeps the
+                    // walk away from a null path array.
+                    for (u32 destination_path_index = groups.groups[group].first_result;
+                         !found && destination->label_paths && destination_path_index < destination->label_path_count;
                          destination_path_index = destination_next[destination_path_index])
                     {
                         IrLabelProvenancePath* destination_path = destination->label_paths + destination_path_index;
