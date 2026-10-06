@@ -1103,20 +1103,38 @@ BUSTER_GLOBAL_LOCAL void raster_native_connection_loss(Arena* arena)
         raster_native_check(window != 0, "connection-loss control owns a real native resource");
         if (window)
         {
-            xcb_generic_error_t* error = xcb_request_check(raster_native_fixture_connection,
-                xcb_kill_client_checked(raster_native_fixture_connection, window->handle));
-            raster_native_check(!error, "independent fixture closes exactly its test client");
-            free(error);
-            // The checked KillClient completed before this request; its victim
-            // cannot supply a reply. Observe transport refusal before cleanup.
-            xcb_get_input_focus_reply_t* reply = xcb_get_input_focus_reply(windowing->connection,
-                xcb_get_input_focus(windowing->connection), 0);
-            raster_native_check(!reply && xcb_connection_has_error(windowing->connection) != 0,
-                                "killed native connection reports transport loss");
-            free(reply);
-            WmEventList events = {0};
-            raster_native_check(!wm_poll_events_bounded(arena, windowing, 32, &events) && !events.first && !events.count,
-                                "bounded polling rejects a lost connection without publishing events");
+            // A flush on the victim connection does not order requests on the
+            // independent fixture connection. Read back this resource before
+            // asking that connection to close its owner.
+            xcb_generic_error_t* admission_error = 0;
+            xcb_get_window_attributes_reply_t* attributes = xcb_get_window_attributes_reply(windowing->connection,
+                xcb_get_window_attributes(windowing->connection, window->handle), &admission_error);
+            bool admitted = attributes && !admission_error && !xcb_connection_has_error(windowing->connection);
+            raster_native_check(admitted, "connection-loss control admits its resource before independent closure");
+            free(attributes);
+            free(admission_error);
+            if (admitted)
+            {
+                xcb_generic_error_t* error = xcb_request_check(raster_native_fixture_connection,
+                    xcb_kill_client_checked(raster_native_fixture_connection, window->handle));
+                if (error)
+                {
+                    printf("CONNECTION_LOSS_V1 stage=kill-client code=%u major=%u sequence=%u bad_value=%u\n",
+                           error->error_code, error->major_code, error->full_sequence, error->resource_id);
+                }
+                raster_native_check(!error, "independent fixture closes exactly its test client");
+                free(error);
+                // The checked KillClient completed before this request; its victim
+                // cannot supply a reply. Observe transport refusal before cleanup.
+                xcb_get_input_focus_reply_t* reply = xcb_get_input_focus_reply(windowing->connection,
+                    xcb_get_input_focus(windowing->connection), 0);
+                raster_native_check(!reply && xcb_connection_has_error(windowing->connection) != 0,
+                                    "killed native connection reports transport loss");
+                free(reply);
+                WmEventList events = {0};
+                raster_native_check(!wm_poll_events_bounded(arena, windowing, 32, &events) && !events.first && !events.count,
+                                    "bounded polling rejects a lost connection without publishing events");
+            }
         }
         wm_deinitialize(windowing);
         wm_deinitialize(windowing);
