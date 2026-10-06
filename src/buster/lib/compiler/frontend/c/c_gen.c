@@ -22736,65 +22736,78 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             remaining -= 1;
             continue;
         }
-        TemporalArena call_argument_temporary = arena_begin_temporal(builder->temporary_arena);
-        u32 argument_capacity = selected->close_index - selected->open_index;
-        u32* argument_starts = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
-        u32* argument_ends = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
+        // Splitting the argument list and resolving the callee depend only on
+        // the call's tokens, so they run on the first entry alone. Each
+        // argument re-entry resumes from the declaration, callee and
+        // signature saved in the call state below; redoing the split there
+        // made an N-argument call cost N^2 token visits.
         u32 predicted_argument_count = 0;
-        u32 predicted_argument_index = selected->open_index + 1;
-        while (predicted_argument_index < selected->close_index)
+        u32 declaration_index;
+        if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT)
         {
-            u32 separator = predicted_argument_index;
-            u32 parentheses = 0;
-            u32 brackets = 0;
-            u32 braces = 0;
-            while (separator < selected->close_index)
-            {
-                CToken current = builder->preprocess.tokens[separator];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    brackets += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-                {
-                    brackets -= 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
-                {
-                    braces += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-                {
-                    braces -= 1;
-                }
-                else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                {
-                    break;
-                }
-                separator += 1;
-            }
-            if (separator == predicted_argument_index || predicted_argument_count >= argument_capacity)
-            {
-                scratch_end(call_argument_temporary);
-                return false;
-            }
-            argument_starts[predicted_argument_count] = predicted_argument_index;
-            argument_ends[predicted_argument_count++] = separator;
-            predicted_argument_index = separator + 1;
+            declaration_index = frame->as.prepared_call.state->declaration_index;
         }
-        u32 declaration_index =
-            selected->indirect ? UINT32_MAX
-                               : c_ir_find_function_for_call(builder, token.symbol, c_token_spelling(builder->preprocess.spelling_base, token),
-                                                             argument_starts, argument_ends, predicted_argument_count);
-        scratch_end(call_argument_temporary);
+        else
+        {
+            TemporalArena call_argument_temporary = arena_begin_temporal(builder->temporary_arena);
+            u32 argument_capacity = selected->close_index - selected->open_index;
+            u32* argument_starts = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
+            u32* argument_ends = arena_allocate(builder->temporary_arena, u32, argument_capacity ? argument_capacity : 1);
+            u32 predicted_argument_index = selected->open_index + 1;
+            while (predicted_argument_index < selected->close_index)
+            {
+                u32 separator = predicted_argument_index;
+                u32 parentheses = 0;
+                u32 brackets = 0;
+                u32 braces = 0;
+                while (separator < selected->close_index)
+                {
+                    CToken current = builder->preprocess.tokens[separator];
+                    if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        parentheses += 1;
+                    }
+                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+                    {
+                        parentheses -= 1;
+                    }
+                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+                    {
+                        brackets += 1;
+                    }
+                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+                    {
+                        brackets -= 1;
+                    }
+                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
+                    {
+                        braces += 1;
+                    }
+                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACE) && braces)
+                    {
+                        braces -= 1;
+                    }
+                    else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
+                    {
+                        break;
+                    }
+                    separator += 1;
+                }
+                if (separator == predicted_argument_index || predicted_argument_count >= argument_capacity)
+                {
+                    scratch_end(call_argument_temporary);
+                    return false;
+                }
+                argument_starts[predicted_argument_count] = predicted_argument_index;
+                argument_ends[predicted_argument_count++] = separator;
+                predicted_argument_index = separator + 1;
+            }
+            declaration_index =
+                selected->indirect ? UINT32_MAX
+                                   : c_ir_find_function_for_call(builder, token.symbol, c_token_spelling(builder->preprocess.spelling_base, token),
+                                                                 argument_starts, argument_ends, predicted_argument_count);
+            scratch_end(call_argument_temporary);
+        }
         IrValueId indirect_callee = IR_VALUE_ID_INVALID;
         CIrSignature signature = {0};
         if (selected->indirect)
@@ -23048,7 +23061,6 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         }
         else
         {
-            declaration_index = frame->as.prepared_call.state->declaration_index;
             indirect_callee = frame->as.prepared_call.state->indirect_callee;
             signature = frame->as.prepared_call.state->signature;
         }
