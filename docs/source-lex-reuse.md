@@ -79,10 +79,14 @@ is still alive.
 ## Input and dependency model
 
 Let `L(B)` be the deterministic translated source, pristine token/shape
-rows, source checkpoints/pages and metrics from raw bytes `B`.
+rows, source checkpoints/pages and metrics from raw bytes `B` under the
+lexical settings that change them: phase-one trigraph replacement and the
+dialect's identifier UCN policy. Both are part of `B` for keying, so the
+same bytes under another trigraph or dialect setting miss.
 The cache substitutes an owned copy of `L(B)` only after **full exact byte
-equality** with its immutable retained key. The fixed-size table searches
-length/bytes directly: neither hashes nor filesystem metadata admit hits.
+equality** with its immutable retained key and equal settings. The fixed-size
+table searches length/bytes directly: neither hashes nor filesystem metadata
+admit hits.
 
 Each enabled lookup first checks the ordinary raw-size and shared 32-bit
 spelling-space limits, then takes one owned raw snapshot. Lookup, cold lexing
@@ -102,11 +106,12 @@ each compilation:
 | Ordered quote/system include paths, source directory, sysroot and include_next origin | Fresh resolution at each directive/query. No positive or negative resolution is cached. |
 | Previously missing file becomes present, nearer file shadows an old match, deletion or alias change | Fresh open/search and descriptor identity capture; then the selected bytes may reuse lexical work. |
 | Conditional compilation and __has_include / target capability queries | Fresh evaluation, including false branches and query dependencies. |
-| Target, CPU/features, data layout, ABI options, plain char, dialect, optimization/PIC/debug/allocator options | Fresh target macros, semantics, canonical preparation/validation and backend. Raw lexing takes none of these inputs. |
+| Target, CPU/features, data layout, ABI options, plain char, optimization/PIC/debug/allocator options | Fresh target macros, semantics, canonical preparation/validation and backend. Raw lexing takes none of these inputs. |
+| Dialect and already-preprocessed input | Raw lexing takes the trigraph setting and the dialect's UCN identifier policy, so both key each entry beside the bytes; dialect macros and semantics stay fresh. |
 | pragma once/import/guards, pack, push_macro/pop_macro and _Pragma | Fresh identity tables and ordered effects. A lexical hit does not suppress execution. |
 | __FILE__, __LINE__, logical #line paths, include depth and other supported contextual operations | Fresh frame/source-map association and macro expansion. No source path or TU-local identifier is retained in the template. |
 | Context-sensitive semantic builtins and function names | Fresh semantic analysis/lowering. Unsupported builtins retain ordinary diagnostics. |
-| Time and filesystem inputs | Baseline __DATE__/__TIME__ explicitly use fixed epoch strings; command overrides run freshly. __TIMESTAMP__/__COUNTER__ are not newly implemented. If actual clock/environment inputs are added, evaluation stays above this boundary and replay must capture them identically. |
+| Time and filesystem inputs | Baseline __DATE__/__TIME__ explicitly use fixed epoch strings; command overrides run freshly. __TIMESTAMP__ uses the same fixed epoch; __COUNTER__, __BASE_FILE__ and __INCLUDE_LEVEL__ expand freshly per translation unit. If actual clock/environment inputs are added, evaluation stays above this boundary and replay must capture them identically. |
 | Compiler implementation/schema | Process-local only; a new compiler process starts empty. There is no serialized format or cross-binary artifact admission. |
 
 Lexical diagnostics bypass insertion and run fresh. Oversize entries, exhausted
@@ -120,7 +125,8 @@ decision is needed.
 
 ## Soundness argument
 
-1. Lexing's semantic inputs are the captured bytes. Its host SIMD and scalar
+1. Lexing's semantic inputs are the captured bytes plus the trigraph and
+   dialect settings, all of which key the entry. Its host SIMD and scalar
    paths already have an independent equivalence contract.
 2. Exact raw equality admits only the same `L(B)`. No path, timestamp,
    fingerprint or symbol-ID shortcut weakens equality.
@@ -150,7 +156,8 @@ field is waived as nondeterministic; only cache-work counters differ.
 Sequences exercise macros and repeated unguarded headers, command-operation
 order, conditional/query changes, missing-to-present and search-shadowing
 files, reordered include paths and include_next, pragmas, physical/logical
-source locations, target/ABI differences, CRLF/splices, malformed edits and
+source locations, target/ABI differences, trigraph/dialect lexical settings,
+CRLF/splices, malformed edits and
 recovery, bounded eviction/bypass, and destruction while results remain alive.
 Tests must prove hits occur while current diagnostics/artifacts still agree;
 a cache silently disabled for every step cannot pass the reuse assertions.

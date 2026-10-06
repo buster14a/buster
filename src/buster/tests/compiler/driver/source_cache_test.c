@@ -157,6 +157,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult source_cache_test_preprocess_lifetime(UnitTes
     }
     return result;
 }
+
+// Identical raw bytes lexed under another trigraph or dialect setting must miss:
+// phase-one replacement and identifier UCN policy change the template.
+BUSTER_GLOBAL_LOCAL UnitTestResult source_cache_test_lexical_key(UnitTestArguments* arguments, Arena* arena, String8 input)
+{
+    UnitTestResult result = {0};
+    CSourceCache* cache = c_source_cache_create(arena, BUSTER_MB(4));
+    if (BUSTER_REQUIRE(arguments, cache != 0))
+    {
+        String8 trigraph_source = S8("\?\?=define VALUE 3\nint cache_value(void) { return VALUE; }\n");
+        String8 ucn_source = S8("int caf\\u00e9 = 1;\n");
+        struct { String8 source; CPreprocessDialect dialect; bool already_preprocessed; bool hit; } steps[] = {
+            {trigraph_source, C_PREPROCESS_DIALECT_GNU17, false, false},
+            {trigraph_source, C_PREPROCESS_DIALECT_C17, false, false},
+            {trigraph_source, C_PREPROCESS_DIALECT_C17, true, false},
+            {trigraph_source, C_PREPROCESS_DIALECT_C17, false, true},
+            {trigraph_source, C_PREPROCESS_DIALECT_GNU17, false, true},
+            {ucn_source, C_PREPROCESS_DIALECT_GNU17, false, false},
+            {ucn_source, C_PREPROCESS_DIALECT_GNU89, false, false},
+            {ucn_source, C_PREPROCESS_DIALECT_GNU17, false, true},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(steps); index += 1)
+        {
+            CPreprocessOptions options = {
+                .source_path = input,
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = steps[index].dialect,
+                .already_preprocessed = steps[index].already_preprocessed,
+                .source_cache = cache,
+            };
+            CSourceCacheStats before = c_source_cache_stats(cache);
+            CPreprocessResult cached = c_preprocess(arena, steps[index].source, options);
+            CSourceCacheStats after = c_source_cache_stats(cache);
+            BUSTER_TEST(arguments, (after.hits > before.hits) == steps[index].hit);
+            options.source_cache = 0;
+            CPreprocessResult fresh = c_preprocess(arena, steps[index].source, options);
+            BUSTER_TEST(arguments, cached.error_count == fresh.error_count && cached.warning_count == fresh.warning_count);
+            if (BUSTER_REQUIRE(arguments, cached.token_count == fresh.token_count && (!fresh.token_count || (cached.tokens && fresh.tokens))))
+            {
+                for (u64 token_index = 0; token_index < fresh.token_count; token_index += 1)
+                {
+                    CToken a = cached.tokens[token_index];
+                    CToken b = fresh.tokens[token_index];
+                    BUSTER_TEST(arguments, a.kind == b.kind && a.punctuator == b.punctuator);
+                    BUSTER_STRING_TEST(arguments, c_token_spelling(cached.spelling_base, a), c_token_spelling(fresh.spelling_base, b));
+                }
+            }
+        }
+        c_source_cache_destroy(cache);
+    }
+    return result;
+}
 #endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_source_cache_replay(UnitTestArguments* arguments)
@@ -248,10 +301,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_source_cache_replay(Unit
                     {S8("int cache_value = 3 \x60 4;\n"), false},
                     {S8("int cache_value\nint other;\n"), false},
                     {S8("#warning retained-warning\nint cache_value(void) { return missing; }\n"), false},
-                    {S8("int cache_value(void) { return __COUNTER__; }\n"), false},
-                    {S8("const char* cache_base = __BASE_FILE__;\n"), false},
-                    {S8("int cache_level = __INCLUDE_LEVEL__;\n"), false},
-                    {S8("const char* cache_timestamp = __TIMESTAMP__;\n"), false},
+                    {S8("int cache_value(void) { return __COUNTER__; }\n"), true},
+                    {S8("const char* cache_base = __BASE_FILE__;\n"), true},
+                    {S8("int cache_level = __INCLUDE_LEVEL__;\n"), true},
+                    {S8("const char* cache_timestamp = __TIMESTAMP__;\n"), true},
                     {S8("int cache_value(void) { return 51; }\n"), true},
                 };
                 for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(edits); index += 1)
@@ -304,6 +357,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_source_cache_replay(Unit
             UnitTestResult lifetime = source_cache_test_preprocess_lifetime(arguments, arena, input);
             result.test_count += lifetime.test_count;
             result.succeeded_test_count += lifetime.succeeded_test_count;
+            UnitTestResult lexical_key = source_cache_test_lexical_key(arguments, arena, input);
+            result.test_count += lexical_key.test_count;
+            result.succeeded_test_count += lexical_key.succeeded_test_count;
             String8 flags[] = {S8("-fsource-cache"), S8("-fno-source-cache"), S8("-fsyntax-only"), input};
             CompilerDriverInvocation disabled = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flags));
             BUSTER_TEST(arguments, disabled.error == COMPILER_DRIVER_ERROR_NONE && !disabled.enable_source_cache);
