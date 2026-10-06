@@ -85,6 +85,9 @@
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
 //                                              parsing
+//   c_preprocess_respell_identifiers,          final-stream rewrites: C23 and
+//   c_preprocess_rewrite_obsolete_designators  UCN respellings, and GNU
+//                                              `member:` as `.member =`
 //   c_preprocess_seal, c_phase_arena_retire    the phase boundary: the result
 //                                              copied out of the phase arena
 //                                              before its release
@@ -10446,6 +10449,169 @@ BUSTER_C_INTERNAL void c_preprocess_respell_identifiers(CSpellingSpace* space, C
     }
 }
 
+// GNU's obsolete field designator `member: value` means `.member = value`;
+// GCC and Clang accept it in every dialect (#2855). Rewriting it in the final
+// stream gives every initializer scanner the one designator spelling it
+// already handles, and leaves no identifier-colon pair for label discovery to
+// turn into a phantom label. A pair qualifies only directly after an element
+// boundary ('{' or ',') whose innermost open delimiter is an initializer
+// brace. Nearly every unit has no candidate, so a one-byte shape scan gates
+// the delimiter walk, and the walk gates the copy. Returns the tokens added.
+enum
+{
+    C_OBSOLETE_DESIGNATOR_BRACE = 1 << 0,
+    C_OBSOLETE_DESIGNATOR_INITIALIZER = 1 << 1,
+    // A parenthesis whose closer may be the type of a compound literal: not a
+    // call, declarator, attribute, or control-statement head.
+    C_OBSOLETE_DESIGNATOR_COMPOUND_LITERAL = 1 << 2,
+};
+
+BUSTER_C_INTERNAL bool c_obsolete_designator_compound_literal_parenthesis(CPreprocessResult const* result, CTokenShape const* shapes, u64 open)
+{
+    CTokenShape before = open ? shapes[open - 1] : (CTokenShape)C_TOKEN_END_OF_FILE;
+    bool capable = before != (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                   before != (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_BRACKET);
+    if (before == C_TOKEN_IDENTIFIER)
+    {
+        String8 keyword = c_token_spelling(result->spelling_base, result->tokens[open - 1]);
+        capable = string_equal(keyword, S8("return")) || string_equal(keyword, S8("sizeof")) || string_equal(keyword, S8("case")) ||
+                  string_equal(keyword, S8("__extension__"));
+    }
+    return capable;
+}
+
+BUSTER_C_INTERNAL u64 c_preprocess_rewrite_obsolete_designators(Arena* arena, CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result)
+{
+    CSourceMapRecovery* recovery = result->recovery;
+    CTokenShape const* shapes = recovery->token_shapes;
+    u64 count = result->token_count;
+    CTokenShape const colon = (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_COLON);
+    CTokenShape const comma = (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_COMMA);
+    CTokenShape const left_brace = (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_BRACE);
+    u64 candidates = 0;
+    for (u64 index = 2; index < count; index += 1)
+    {
+        candidates += (u64)(shapes[index] == colon && shapes[index - 1] == C_TOKEN_IDENTIFIER &&
+                            (shapes[index - 2] == left_brace || shapes[index - 2] == comma));
+    }
+    u64 accepted = 0;
+    u32* positions = 0;
+    if (candidates)
+    {
+        positions = arena_allocate(arena, u32, candidates);
+        u8* stack = arena_allocate(arena, u8, count);
+        u64 depth = 0;
+        bool closed_compound_literal = false;
+        for (u64 index = 0; index < count; index += 1)
+        {
+            CPunctuator punctuator = c_token_shape_punctuator(shapes[index]);
+            CTokenShape before = index ? shapes[index - 1] : (CTokenShape)C_TOKEN_END_OF_FILE;
+            u8 top = depth ? stack[depth - 1] : 0;
+            bool in_initializer = (top & C_OBSOLETE_DESIGNATOR_INITIALIZER) != 0;
+            if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
+            {
+                CPunctuator previous = c_token_shape_punctuator(before);
+                bool initializer = previous == C_PUNCTUATOR_ASSIGN ||
+                                   (previous == C_PUNCTUATOR_RIGHT_PARENTHESIS && closed_compound_literal) ||
+                                   (in_initializer && (previous == C_PUNCTUATOR_LEFT_BRACE || previous == C_PUNCTUATOR_COMMA ||
+                                                       previous == C_PUNCTUATOR_COLON || previous == C_PUNCTUATOR_RIGHT_BRACKET));
+                stack[depth++] = (u8)(C_OBSOLETE_DESIGNATOR_BRACE | (initializer ? C_OBSOLETE_DESIGNATOR_INITIALIZER : 0));
+            }
+            else if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
+            {
+                stack[depth++] = (u8)(c_obsolete_designator_compound_literal_parenthesis(result, shapes, index) ? C_OBSOLETE_DESIGNATOR_COMPOUND_LITERAL : 0);
+            }
+            else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
+            {
+                stack[depth++] = 0;
+            }
+            else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET || punctuator == C_PUNCTUATOR_RIGHT_BRACE)
+            {
+                // Mismatches are the parser's to diagnose; the walk only has
+                // to stay bounded.
+                closed_compound_literal = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && (top & C_OBSOLETE_DESIGNATOR_COMPOUND_LITERAL) != 0;
+                depth = depth ? depth - 1 : 0;
+            }
+            else if (shapes[index] == C_TOKEN_IDENTIFIER && in_initializer && (top & C_OBSOLETE_DESIGNATOR_BRACE) && index + 1 < count &&
+                     shapes[index + 1] == colon && (before == left_brace || before == comma))
+            {
+                BUSTER_CHECK(accepted < candidates);
+                positions[accepted++] = (u32)index;
+            }
+        }
+    }
+    if (accepted)
+    {
+        bool strict = !c_preprocess_dialect_is_gnu(result->dialect);
+        u64 new_count = count + accepted;
+        CToken* tokens = arena_allocate(recovery->token_arena, CToken, new_count);
+        CTokenShape* new_shapes = arena_allocate(recovery->token_shape_arena, CTokenShape, new_count);
+        IrSourceMapCursor cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+        u64 source = 0;
+        u64 destination = 0;
+        for (u64 rewrite = 0; rewrite < accepted; rewrite += 1)
+        {
+            u64 position = positions[rewrite];
+            u64 run = position - source;
+            memcpy(tokens + destination, result->tokens + source, run * sizeof(CToken));
+            memcpy(new_shapes + destination, shapes + source, run * sizeof(CTokenShape));
+            destination += run;
+            CToken member = result->tokens[position];
+            CSourceLocation location = c_preprocess_token_location_cursor(result, member, &cursor);
+            // One two-byte spelling serves both synthesized punctuators, and
+            // one stamp maps both to the member name the user wrote.
+            CToken dot = c_space_token(space, S8(".="), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_DOT);
+            c_source_map_append(map, (IrSourceRegion){
+                                         .start = dot.offset,
+                                         .source = location.file,
+                                         .stamp = c_position_from_source_location(location),
+                                         .kind = IR_SOURCE_REGION_STAMP,
+                                         .origin_plus_one = location.map_offset + 1,
+                                     });
+            // Appends can move the region array; see c_preprocess_respell_identifiers.
+            recovery->map.regions = map->regions;
+            dot.length = 1;
+            CToken assign = {
+                .offset = dot.offset + 1,
+                .length = 1,
+                .kind = C_TOKEN_PUNCTUATOR,
+                .punctuator = C_PUNCTUATOR_ASSIGN,
+            };
+            tokens[destination] = dot;
+            new_shapes[destination] = c_token_shape_from_token(dot);
+            tokens[destination + 1] = member;
+            new_shapes[destination + 1] = shapes[position];
+            tokens[destination + 2] = assign;
+            new_shapes[destination + 2] = c_token_shape_from_token(assign);
+            destination += 3;
+            source = position + 2;
+            if (strict)
+            {
+                c_preprocess_diagnostic_push_severity(arena, result, location, C_DIAGNOSTIC_OBSOLETE_DESIGNATOR, C_DIAGNOSTIC_WARNING,
+                                                      string_format(arena, S8("use of GNU obsolete field designator '{S8}:'; ISO C spells it '.{S8} ='"),
+                                                                    c_token_spelling(result->spelling_base, member),
+                                                                    c_token_spelling(result->spelling_base, member)));
+            }
+        }
+        memcpy(tokens + destination, result->tokens + source, (count - source) * sizeof(CToken));
+        memcpy(new_shapes + destination, shapes + source, (count - source) * sizeof(CTokenShape));
+        // A pack change at or past an inserted '.' moves with its token.
+        u64 shifted = 0;
+        for (u32 change = 0; change < result->pack_change_count; change += 1)
+        {
+            while (shifted < accepted && positions[shifted] <= result->pack_changes[change].token_index)
+            {
+                shifted += 1;
+            }
+            result->pack_changes[change].token_index += (u32)shifted;
+        }
+        result->tokens = tokens;
+        recovery->token_shapes = new_shapes;
+        result->token_count = new_count;
+    }
+    return accepted;
+}
+
 typedef struct CTargetFeatureMacro CTargetFeatureMacro;
 struct CTargetFeatureMacro
 {
@@ -12471,6 +12637,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // their backing array). Rebuild keys only for that appended tail; without
     // it, a second publication would retain an identical key array in the TU.
     c_preprocess_respell_identifiers(space, &map, &result);
+    u64 designator_tokens = options.preserve_spellings || options.assembly_comment_lines
+                                ? 0 : c_preprocess_rewrite_obsolete_designators(arena, space, &map, &result);
+    output_count += designator_tokens;
+    result.detail->preprocessed.tokens += designator_tokens;
     c_source_map_publish_appended(arena, recovery, &map);
     u32 page_count = (u32)((space->used >> IR_SOURCE_MAP_PAGE_SHIFT) + 1);
     u32* pages = arena_allocate(arena, u32, page_count);

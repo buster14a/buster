@@ -167,8 +167,27 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `sizeof(int) * 8 - 7` lays out identically in a folded `sizeof`/`offsetof`
   and in the object. An unresolved width holds the layout unresolved instead
   of reading as zero; lowering still evaluates such a width itself as a
-  temporary bridge, and `c_parse_validate_bit_field_widths` re-evaluates only
-  unresolved widths to diagnose a non-integer one.
+  temporary bridge. A constant the declaration evaluates but the field cannot
+  hold (negative, or wider than 32 bits) is diagnosed at the declaration with
+  the constant it evaluated, and the member's unresolved `bit_width` is set to
+  `C_PARSE_BIT_WIDTH_DIAGNOSED` so nothing evaluates it again;
+  `c_parse_validate_members` re-evaluates only other unresolved widths to
+  diagnose non-integer values. Both paths build their text with
+  `c_parse_bit_field_width_message`. A lexically invalid literal such as
+  `3junk` is reported by the parser's invalid-integer-literal check instead.
+  Semantic validation also refuses a width exceeding the target's declared integer
+  type, including an enum's resolved underlying type and qualified,
+  typedef, or `typeof` spellings. `_Bool` has a one-bit value limit even
+  though its storage occupies a byte. Resolved widths keep their declaration
+  point value; this check does not add a layout or constant-evaluation
+  authority. The `C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH` error names the
+  member, actual width, and type limit, or points at the width expression
+  for an unnamed field. `c_analyze_semantics_only` and both canonical
+  lowering forms report the same error before attempting to lower a record.
+  `c_test_bit_field_width_constraints` covers the issue #1560 rows, unnamed
+  fields, nonconstant and wide or signed folded widths, target-dependent
+  `long` limits, scoped enumerators, and valid width boundaries on x86-64
+  and AArch64 Linux and Windows in GNU17 and GNU23.
   `c_test_bit_field_width_authority` pins clang's answers for each spelling.
   `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
   one-diagnostic-per-type budget with the rejected alignment specifier -- they

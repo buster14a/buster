@@ -144,6 +144,11 @@ struct CompilerDriverInvocation
     String8 output_path;
     String8 entry_symbol;
     String8 sysroot;
+    // Source text of the `-` input. A parsed command line names it with the
+    // path `-`; the cc command reads standard input into it before execution
+    // and embedding callers supply it themselves. A null pointer means it was
+    // not supplied; an empty translation unit has a nonnull pointer.
+    String8 standard_input;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
