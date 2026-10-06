@@ -134,6 +134,12 @@ not just a proxy or generated-program runtime.
 For a compiler change, run `tools/uarch_lab.py compare` (A/B; `run`
 profiles one binary) and read the verdict in its `summary.json`.
 
+To time a small standalone C workload on the dedicated Ryzen 7 9700X, add it
+under `benchmarks/9700x/` in a pull request opened with the owner's
+credentials; the run starts by itself and reports every run's timings and
+output. Follow [the workload guide](benchmarks/9700x/README.md). It measures
+that one program's process latency, not a compiler change.
+
 Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed
 index in `PERFORMANCE_AUDITS.md`, and never rewrite an existing audit.
