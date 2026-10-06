@@ -15,6 +15,7 @@ BUSTER_F_DECL ProcessResult entry_point(void);
 BUSTER_F_DECL void entry_point_exit_code_set(s32 exit_code);
 #if BUSTER_IOS
 BUSTER_F_DECL void buster_ios_launch_trace(String8 stage);
+BUSTER_F_DECL void buster_ios_launch_process_trace(void);
 #endif
 BUSTER_F_DECL ProcessResult buster_argument_process(u64 argument_index);
 BUSTER_F_DECL bool update(void);
