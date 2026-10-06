@@ -703,6 +703,8 @@ BUSTER_F_DECL bool os_is_tty(OsFileDescriptor* file);
 BUSTER_F_DECL OsModuleHandle* os_dynamic_library_load(String8 library);
 BUSTER_F_DECL void os_dynamic_library_unload(OsModuleHandle* module);
 BUSTER_F_DECL OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol);
+// Logical CPUs this process may run on: the affinity mask on Linux and
+// Windows, active CPUs on Apple.
 BUSTER_F_DECL u32 os_get_logical_thread_count(void);
 BUSTER_F_DECL u64 os_get_page_size(void);
 BUSTER_F_DECL u64 os_get_physical_memory_size(void);

@@ -6418,12 +6418,21 @@ OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbo
     return result;
 }
 
+// Logical CPUs this process may run on. Linux and Windows honour the affinity
+// mask (taskset, sched_setaffinity, cpusets, job objects) so a confined
+// process does not size its gangs past the CPUs it can be scheduled on; the
+// online count is the fallback when the mask cannot be read. Linux reads the
+// calling thread's mask, which new threads inherit. Apple exposes no affinity
+// mask, so it reports active CPUs. Cgroup CPU quotas are not considered.
 u32 os_get_logical_thread_count(void)
 {
     u32 result;
 
 #if defined(__linux__)
-    result = (u32)get_nprocs();
+    cpu_set_t permitted;
+    CPU_ZERO(&permitted);
+    int permitted_count = sched_getaffinity(0, sizeof(permitted), &permitted) == 0 ? CPU_COUNT(&permitted) : 0;
+    result = (u32)(permitted_count > 0 ? permitted_count : get_nprocs());
 #elif defined(__APPLE__)
     int os_result = 1;
     size_t size = sizeof(result);
@@ -6438,6 +6447,20 @@ u32 os_get_logical_thread_count(void)
     SYSTEM_INFO sysinfo = {0};
     GetSystemInfo(&sysinfo);
     result = sysinfo.dwNumberOfProcessors;
+    DWORD_PTR process_mask = 0;
+    DWORD_PTR system_mask = 0;
+    // Both masks are zero when the process spans processor groups; the mask
+    // then describes no single group and the online count stands.
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask) && process_mask)
+    {
+        u32 permitted = 0;
+        while (process_mask)
+        {
+            process_mask &= process_mask - 1;
+            permitted += 1;
+        }
+        result = BUSTER_MIN(result, permitted);
+    }
 #endif
 
     return result;

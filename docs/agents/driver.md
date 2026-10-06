@@ -69,8 +69,11 @@ inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
 `-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
 existing execution. Objects, archives, assembly and each `-l` occurrence are
 serial boundaries, even when `-x c` is present. A library between C sources
-ends the cohort before later translation units can publish definitions. Worker count is clamped to logical CPUs, input
-count and one inside an embedding caller's multi-lane gang.
+ends the cohort before later translation units can publish definitions. Worker count is clamped to the logical CPUs the
+process may run on (the affinity mask on Linux and Windows, so `taskset`, a
+cpuset or a job object narrows it; cgroup CPU quotas are not considered), input
+count and one inside an embedding caller's multi-lane gang. The default
+`lane_run` width uses the same count.
 
 Each cohort contains at most one full TU per worker. `lane_range` gives
 stable input slots, the existing persistent gang is reused, and each worker
