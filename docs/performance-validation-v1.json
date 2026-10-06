@@ -2,7 +2,7 @@
   "schema": "buster-performance-validation-v1",
   "rule": "Every performance-validation test requires actual execution of its relevant workload on the approved Zen 5 benchmark host (AMD Ryzen 7 9700X). Without complete evidence matching the candidate, workload and configuration, performance validation is incomplete; hosted, simulated and static evidence is diagnostic.",
   "routes": {
-    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent, #2752)",
+    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752)",
     "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request, #2769)",
     "direct-workload": "9700x-direct-bench.yml job bench (benchmarks/9700x/*.c and *.data, #2704)"
   },
@@ -245,7 +245,18 @@
       "zen5": {
         "route": "none",
         "status": "not applicable",
-        "reason": "marker; measures nothing"
+        "reason": "marker and queued-check bridge; measures nothing"
+      }
+    },
+    {
+      "id": "workflow:9700x-compiler-report.yml",
+      "kind": "workflow",
+      "validation": "policy",
+      "measures": "publication-only recovery of a past main comparison's commit report",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "republishes retained 9700X evidence; measures nothing"
       }
     },
     {

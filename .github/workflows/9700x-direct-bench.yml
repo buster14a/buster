@@ -1,7 +1,9 @@
 name: 9700X direct workload benchmark
 
 # Runs the owner's pull-request workloads directly on the 9700X runner (#2704),
-# and compares each commit that lands on main with its first parent (#2752).
+# and compares each commit that lands on main with its first parent, or with
+# the nearest measured first-parent ancestor when that has no valid
+# measurement, so a merge burst's unmeasured commits sit in a range (#2752).
 # workflow_run executes this definition from main, so a pull request cannot
 # edit the gate, and the runner group stays pinned to this one file at
 # refs/heads/main.
@@ -15,10 +17,21 @@ name: 9700X direct workload benchmark
 #
 # Main compiler comparison: starts when 9700x-compiler-request.yml completes for
 # a push to main and BENCH_COMPILER_ENABLED is also true. authorize-compiler
-# re-reads the commit, its first parent and main; main is trusted code, so no
-# author gate applies. compare builds and times both compilers; the hosted
-# publish-compiler job validates the evidence as data and alone holds
-# checks: write. Merging never waits for it, and the verdict is report-only.
+# re-reads the commit, its first-parent chain, the chosen baseline and main
+# (checks: read finds the nearest measured ancestor); main is trusted code, so
+# no author gate applies. compare builds and times both compilers; the hosted
+# publish-compiler job validates the evidence as data and completes the check.
+# Merging never waits for it, and the verdict is report-only.
+#
+# Visibility (#2803, #2804): 9700x-compiler-request.yml creates the queued
+# "9700X compiler benchmark" check before this run exists; the hosted
+# start-compiler / start-pull jobs reconcile orphans, adopt or create the
+# attempt's check and mark it in progress when the 9700X job starts; the
+# publish jobs complete that same check. comment-compiler, the only job with
+# contents: write (for the commit-comment API), upserts one report comment on
+# the main commit from publish-compiler's validated output, downloading
+# nothing. compiler_github.py, compiler_publish.py and compiler_comment.py say
+# how ownership, ordering and retries are bounded.
 #
 # Trusted main supplies the gates and harnesses. The host jobs receive no token
 # capability or secret, and no checkout persists credentials: persist-credentials: false
@@ -187,6 +200,43 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+  # Display only (#2803): adopts or creates this attempt's pull check once
+  # authorized, closes this pull request's superseded open checks, and marks
+  # the check running when compare-pull starts on the 9700X. It polls the
+  # Actions jobs API for at most 20 minutes and never fails the run.
+  start-pull:
+    name: Show the pull request comparison check
+    needs: authorize
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.compare == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      checks: write
+      pull-requests: read
+    timeout-minutes: 25
+    steps:
+      - name: Check out the trusted check writer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Queue the check and mark it running when the 9700X starts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_MODE: pull
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}
+          BQ_PULL: ${{ needs.authorize.outputs.pull }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+        run: python3 -B tools/bench_direct/compiler_github.py start
+
   publish-pull:
     name: Publish the pull request compiler benchmark check
     needs: [authorize, compare-pull]
@@ -212,6 +262,7 @@ jobs:
           BQ_REF: refs/pull/${{ needs.authorize.outputs.pull }}/head
           BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
           BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           BQ_RUN_ID: ${{ github.run_id }}
           BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
           BQ_TRUSTED_REVISION: ${{ github.sha }}
@@ -237,6 +288,7 @@ jobs:
       contents: read
       pull-requests: read
       actions: read
+      checks: read
     timeout-minutes: 5
     outputs:
       attempt: ${{ steps.verify.outputs.attempt }}
@@ -245,6 +297,8 @@ jobs:
       head_tree: ${{ steps.verify.outputs.head_tree }}
       pull: ${{ steps.verify.outputs.pull }}
       pull_head: ${{ steps.verify.outputs.pull_head }}
+      first_parent: ${{ steps.verify.outputs.first_parent }}
+      range: ${{ steps.verify.outputs.range }}
     steps:
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -262,6 +316,42 @@ jobs:
           BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
           BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 -B tools/bench_direct/authorize_compiler.py
+
+  # Display only (#2803): closes earlier main commits' open checks (displaced
+  # or cancelled attempts are "Not measured"), adopts the queued check the
+  # request bridge created (or creates one) and marks it running when compare
+  # starts on the 9700X. Polls at most 20 minutes; never fails the run.
+  start-compiler:
+    name: Show the main commit comparison check
+    needs: authorize-compiler
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize-compiler.outputs.attempt == format('{0}', github.run_attempt) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+    timeout-minutes: 25
+    steps:
+      - name: Check out the trusted check writer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Queue the check and mark it running when the 9700X starts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_MODE: main
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_BASE_COMMIT: ${{ needs.authorize-compiler.outputs.base }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+        run: python3 -B tools/bench_direct/compiler_github.py start
 
   compare:
     name: Compare the main commit compiler
@@ -292,14 +382,15 @@ jobs:
           path: trusted
           sparse-checkout: tools
           persist-credentials: false
-      # The main commit with its parents: the base and, for a queue merge, the
-      # pull request head.
+      # The main commit with its history without blobs: the baseline on its
+      # first-parent chain and, for a queue merge, the pull request head.
       - name: Check out the main commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           path: candidate
-          fetch-depth: 2
+          fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
       - name: Build and compare both compilers
         shell: bash
@@ -339,6 +430,9 @@ jobs:
       actions: read
       checks: write
     timeout-minutes: 10
+    outputs:
+      comment: ${{ steps.publish.outputs.comment }}
+      head: ${{ steps.publish.outputs.head }}
     steps:
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -347,6 +441,7 @@ jobs:
           sparse-checkout: tools/bench_direct
           persist-credentials: false
       - name: Validate the evidence and publish the check
+        id: publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -355,6 +450,7 @@ jobs:
           BQ_REF: refs/heads/main
           BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
           BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           BQ_RUN_ID: ${{ github.run_id }}
           BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
           BQ_TRUSTED_REVISION: ${{ github.sha }}
@@ -366,6 +462,42 @@ jobs:
           BQ_BASE_COMMIT: ${{ needs.authorize-compiler.outputs.base }}
           BQ_BASE_TREE: ${{ needs.authorize-compiler.outputs.base_tree }}
           BQ_HEAD_TREE: ${{ needs.authorize-compiler.outputs.head_tree }}
+          BQ_FIRST_PARENT: ${{ needs.authorize-compiler.outputs.first_parent }}
+          BQ_RANGE: ${{ needs.authorize-compiler.outputs.range }}
           BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}
           BQ_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: python3 -B tools/bench_direct/compiler_publish.py
+
+  # The commit-page report (#2804). Its own job, so contents: write (required
+  # by the commit-comment API) never meets evidence: it downloads nothing and
+  # upserts publish-compiler's validated entry as data. A failure here leaves
+  # the measurement and its check as they are; "Re-run failed jobs" of this
+  # job alone, or 9700x-compiler-report.yml, republishes without measuring.
+  comment-compiler:
+    name: Publish the compiler benchmark commit report
+    needs: publish-compiler
+    if: ${{ always() && needs.publish-compiler.result == 'success' && needs.publish-compiler.outputs.comment != '' && vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-compiler-comment-${{ needs.publish-compiler.outputs.head }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out the trusted comment writer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Upsert the report comment on the main commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_COMMENT: ${{ needs.publish-compiler.outputs.comment }}
+          BQ_PUBLISHER_RUN_ID: ${{ github.run_id }}
+          BQ_PUBLISHER_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+        run: python3 -B tools/bench_direct/compiler_comment.py

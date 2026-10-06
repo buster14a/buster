@@ -3294,7 +3294,7 @@ def compare_summary(directory):
             "steps": {name: state.get("status") for name, state in meta.get("steps", {}).items()},
             "warnings": compare_warnings(variants, outputs_identical, metrics, checks, meta) + rss_warnings(runs) +
                         ([] if counters["perf_stat"] is not False else
-                         ["perf stat unusable (%s): timed without perf; wall time, wait4 CPU time and peak RSS are measured, every "
+                         ["%s: timed without perf; wall time, wait4 CPU time and peak RSS are measured, every "
                           "counter is NA" % counters["reason"]])}
 
 

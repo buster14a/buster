@@ -399,7 +399,7 @@ jobs:
           python3 tools/native_retirement_materializer_test.py -v
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
-          python3 tests/ci_tools_test.py
+          python3 tools/ci_workflow_policy_test.py
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c \
             -o "$RUNNER_TEMP/native-retirement-build"
           "$RUNNER_TEMP/native-retirement-build" native_retirement_census --self-test

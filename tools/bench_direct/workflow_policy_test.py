@@ -19,6 +19,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 DIRECT = WORKFLOWS / "9700x-direct-bench.yml"
 DIRECT_REQUEST = WORKFLOWS / "9700x-direct-request.yml"
 COMPILER_REQUEST = WORKFLOWS / "9700x-compiler-request.yml"
+COMPILER_REPORT = WORKFLOWS / "9700x-compiler-report.yml"
 ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 ADMISSION_GUIDE = ROOT / "benchmarks" / "9700x" / "ADMISSION.md"
@@ -167,7 +168,7 @@ TRUSTED_TOOLS_CHECKOUT = (
 COMPILER_AUTHORIZE_BLOCKS = (
     ("    runs-on: ubuntu-24.04",),
     ("    permissions:", "      contents: read", "      pull-requests: read", "      actions: read",
-     "    timeout-minutes: 5"),
+     "      checks: read", "    timeout-minutes: 5"),
     TRUSTED_TOOLS_CHECKOUT,
     (
         "        id: verify",
@@ -212,7 +213,8 @@ COMPILER_CHECKOUTS = (
         "        with:",
         "          ref: ${{ github.event.workflow_run.head_sha }}",
         "          path: candidate",
-        "          fetch-depth: 2",
+        "          fetch-depth: 0",
+        "          filter: blob:none",
         "          persist-credentials: false",
     ),
     (
@@ -297,6 +299,99 @@ COMPILER_REQUEST_TRIGGER = (
     "    branches: [main]",
 )
 
+# Check and report visibility (#2803, #2804). The start jobs share the host
+# job's gate, so they run only after this attempt's authorization; they and
+# the request bridge hold checks: write and never touch the 9700X.
+START_PULL_BLOCKS = (
+    ("    needs: authorize", PULL_RUN_IF, "    runs-on: ubuntu-24.04", "    permissions:", "      actions: read",
+     "      checks: write", "      pull-requests: read", "    timeout-minutes: 25"),
+    TRUSTED_TOOLS_CHECKOUT,
+    ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
+    ("        run: python3 -B tools/bench_direct/compiler_github.py start",),
+)
+START_COMPILER_BLOCKS = (
+    ("    needs: authorize-compiler", COMPILER_RUN_IF, "    runs-on: ubuntu-24.04", "    permissions:",
+     "      actions: read", "      checks: write", "      contents: read", "    timeout-minutes: 25"),
+    TRUSTED_TOOLS_CHECKOUT,
+    ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: main"),
+    ("        run: python3 -B tools/bench_direct/compiler_github.py start",),
+)
+# The commit report: contents: write (the commit-comment API's permission) in
+# its own job that downloads nothing and takes the publisher's entry as data.
+COMMENT_IF = "    if: ${{ " + " && ".join((
+    "always()", "needs.publish-compiler.result == 'success'", "needs.publish-compiler.outputs.comment != ''",
+    *COMPILER_TERMS)) + " }}"
+COMMENT_WRITER = (
+    "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+    "        with:",
+    "          ref: ${{ github.sha }}",
+    "          sparse-checkout: tools/bench_direct",
+    "          persist-credentials: false",
+    "      - name: Upsert the report comment on the main commit",
+    "        shell: bash",
+    "        env:",
+    "          GH_TOKEN: ${{ github.token }}",
+    "          BQ_REPOSITORY: ${{ github.repository }}",
+)
+COMMENT_RUN = (
+    "          BQ_PUBLISHER_RUN_ID: ${{ github.run_id }}",
+    "          BQ_PUBLISHER_ATTEMPT: ${{ github.run_attempt }}",
+    "          BQ_TRUSTED_REVISION: ${{ github.sha }}",
+    "        run: python3 -B tools/bench_direct/compiler_comment.py",
+)
+COMMENT_BLOCKS = (
+    ("    needs: publish-compiler", COMMENT_IF, "    runs-on: ubuntu-24.04", "    permissions:",
+     "      contents: write", "    timeout-minutes: 5", "    concurrency:",
+     "      group: buster-9700x-compiler-comment-${{ needs.publish-compiler.outputs.head }}",
+     "      cancel-in-progress: false"),
+    COMMENT_WRITER,
+    ("          BQ_COMMENT: ${{ needs.publish-compiler.outputs.comment }}", *COMMENT_RUN),
+)
+ANNOUNCE_BLOCKS = (
+    ("    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' }}",
+     "    runs-on: ubuntu-24.04", "    permissions:", "      checks: write", "    timeout-minutes: 3",
+     "    continue-on-error: true"),
+    TRUSTED_TOOLS_CHECKOUT,
+    ("          GH_TOKEN: ${{ github.token }}", "          BQ_REPOSITORY: ${{ github.repository }}",
+     "          BQ_HEAD_COMMIT: ${{ github.sha }}", "          BQ_REQUEST_RUN_ID: ${{ github.run_id }}",
+     "          BQ_REQUEST_ATTEMPT: ${{ github.run_attempt }}",
+     "        run: python3 -B tools/bench_direct/compiler_github.py announce"),
+)
+REPORT_TRIGGER = (
+    "on:",
+    "  workflow_dispatch:",
+    "    inputs:",
+    "      run_id:",
+    "        description: 9700X direct workload benchmark run ID",
+    "        required: true",
+    "        type: string",
+    "      run_attempt:",
+    "        description: Its measurement attempt",
+    "        required: true",
+    "        type: string",
+)
+REPORT_OWNER = "github.ref == 'refs/heads/main' && github.actor == 'davidgmbb' && github.triggering_actor == 'davidgmbb'"
+REPORT_BLOCKS = {
+    "validate": (
+        ("    if: ${{ " + REPORT_OWNER + " }}", "    runs-on: ubuntu-24.04", "    permissions:", "      actions: read",
+         "      checks: read", "      contents: read", "      pull-requests: read", "    timeout-minutes: 10"),
+        TRUSTED_TOOLS_CHECKOUT,
+        ("          BQ_RECOVER_RUN_ID: ${{ inputs.run_id }}", "          BQ_RECOVER_ATTEMPT: ${{ inputs.run_attempt }}",
+         "          BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}",
+         "        run: python3 -B tools/bench_direct/compiler_publish.py"),
+    ),
+    "comment": (
+        ("    needs: validate", "    if: ${{ " + REPORT_OWNER + " && needs.validate.outputs.comment != '' }}",
+         "    runs-on: ubuntu-24.04", "    permissions:", "      contents: write", "    timeout-minutes: 5",
+         "    concurrency:", "      group: buster-9700x-compiler-comment-${{ needs.validate.outputs.head }}",
+         "      cancel-in-progress: false"),
+        COMMENT_WRITER,
+        ("          BQ_COMMENT: ${{ needs.validate.outputs.comment }}", *COMMENT_RUN),
+    ),
+}
+HOSTED_FORBIDDEN = ("buster-zen5", "ryzen-9700x", "self-hosted", "path: candidate", "pull-requests: write",
+                    "actions: write", "statuses: write", "download-artifact", "upload-artifact", "secrets.")
+
 DOCUMENTATION_REQUIREMENTS = {
     ACTIONLINT: (
         ".github/workflows/9700x-direct-bench.yml",
@@ -314,6 +409,8 @@ DOCUMENTATION_REQUIREMENTS = {
         "## Main compiler comparison",
         "BENCH_COMPILER_ENABLED",
         "The performance verdict is report-only.",
+        "## Check and commit report",
+        ".github/workflows/9700x-compiler-report.yml",
     ),
 }
 
@@ -358,10 +455,10 @@ def check_direct_workflow(errors: list[str]) -> None:
     direct = DIRECT.read_text(encoding="utf-8")
     lines = direct.splitlines()
     jobs = job_blocks(direct)
-    if list(jobs) != ["authorize", "bench", "compare-pull", "publish-pull", "authorize-compiler", "compare",
-                      "publish-compiler"]:
-        errors.append(f"direct workflow jobs must be authorize, bench, compare-pull, publish-pull, "
-                      f"authorize-compiler, compare, publish-compiler: {list(jobs)}")
+    if list(jobs) != ["authorize", "bench", "compare-pull", "start-pull", "publish-pull", "authorize-compiler",
+                      "start-compiler", "compare", "publish-compiler", "comment-compiler"]:
+        errors.append(f"direct workflow jobs must be authorize, bench, compare-pull, start-pull, publish-pull, "
+                      f"authorize-compiler, start-compiler, compare, publish-compiler, comment-compiler: {list(jobs)}")
     authorize, run = jobs.get("authorize", []), jobs.get("bench", [])
 
     # The trigger block is exact: no other event or workflow may start it.
@@ -370,9 +467,9 @@ def check_direct_workflow(errors: list[str]) -> None:
     if tuple(trigger) != DIRECT_TRIGGER:
         errors.append("direct workflow trigger must be exactly the reviewed workflow_run block")
     declarations = [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")]
-    if declarations != ["permissions: {}"] + ["    permissions:"] * 4:
-        errors.append("direct workflow must grant GITHUB_TOKEN permissions only to its hosted authorize "
-                      "and publish jobs")
+    if declarations != ["permissions: {}"] + ["    permissions:"] * 7:
+        errors.append("direct workflow must grant GITHUB_TOKEN permissions only to its hosted authorize, "
+                      "start, publish and comment jobs")
 
     if DIRECT_AUTHORIZE_IF not in authorize:
         errors.append("direct authorize job is missing its exact condition")
@@ -513,6 +610,7 @@ def check_compiler_path(errors: list[str]) -> None:
                    "pull-requests: write", "actions: write", "statuses: write"):
         if any(marker in line for line in publish_pull):
             errors.append(f"pull publish job must not use: {marker}")
+    check_visibility(errors, jobs)
 
     request = COMPILER_REQUEST.read_text(encoding="utf-8")
     request_lines = request.splitlines()
@@ -524,14 +622,77 @@ def check_compiler_path(errors: list[str]) -> None:
         errors.append("compiler request workflow trigger must be exactly the reviewed push-to-main block")
     if not contains_block(DIRECT.read_text(encoding="utf-8").splitlines(), DIRECT_CONCURRENCY):
         errors.append("direct workflow concurrency must never cancel a main measurement in progress")
-    if [line.rstrip() for line in request_lines if line.lstrip().startswith("permissions:")] != ["permissions: {}"]:
-        errors.append("compiler request workflow must grant no GITHUB_TOKEN permissions")
-    for marker in ("uses:", "self-hosted", "buster-zen5", "ryzen-9700x", "group: buster-9700x-service",
-                   "secrets.", "github.token", "environment:", "pull_request", "workflow_dispatch"):
+    if [line.rstrip() for line in request_lines if line.lstrip().startswith("permissions:")] != \
+            ["permissions: {}", "    permissions:"]:
+        errors.append("compiler request workflow must grant GITHUB_TOKEN permissions only to its announce job")
+    for marker in ("self-hosted", "buster-zen5", "ryzen-9700x", "group: buster-9700x-service",
+                   "secrets.", "environment:", "pull_request", "workflow_dispatch"):
         if marker in request:
             errors.append(f"compiler request workflow must not use: {marker}")
+    request_jobs = job_blocks(request)
+    if list(request_jobs) != ["request", "announce"]:
+        errors.append(f"compiler request workflow jobs must be request, announce: {list(request_jobs)}")
+    for marker in ("uses:", "github.token", "permissions:", "if:"):
+        if any(marker in line for line in request_jobs.get("request", [])):
+            errors.append(f"compiler request marker job must not use: {marker}")
+    announce = request_jobs.get("announce", [])
+    for block in ANNOUNCE_BLOCKS:
+        if not contains_block(announce, block):
+            errors.append(f"compiler announce job is missing exact block starting: {block[0].strip()}")
+    if len([line for line in announce if "uses:" in line]) != 1 or len([line for line in announce if "run:" in line]) != 1:
+        errors.append("compiler announce job must be one trusted checkout and one check-writer call")
     if expression_lines_in_scripts(request):
         errors.append("compiler request workflow must not interpolate an expression inside a run script")
+
+
+def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
+    """Start, comment and recovery jobs (#2803, #2804): hosted, narrowly permitted, trusted code only."""
+    for name, blocks in (("start-pull", START_PULL_BLOCKS), ("start-compiler", START_COMPILER_BLOCKS),
+                         ("comment-compiler", COMMENT_BLOCKS)):
+        job = jobs.get(name, [])
+        for block in blocks:
+            if not contains_block(job, block):
+                errors.append(f"{name} job is missing exact block starting: {block[0].strip()}")
+        if len([line for line in job if "uses:" in line]) != 1 or len([line for line in job if "run:" in line]) != 1:
+            errors.append(f"{name} job must be one trusted checkout and one trusted script call")
+        for marker in (*HOSTED_FORBIDDEN, *(("actions: read", "checks:", "pull-requests:")
+                                            if name == "comment-compiler" else ("contents: write",))):
+            if any(marker in line for line in job):
+                errors.append(f"{name} job must not use: {marker}")
+    if [line for line in jobs.get("publish-compiler", []) if line.strip().startswith(("comment:", "head:"))] != \
+            ["      comment: ${{ steps.publish.outputs.comment }}", "      head: ${{ steps.publish.outputs.head }}"]:
+        errors.append("publish-compiler must expose exactly its comment entry and head outputs")
+    writer = (ROOT / "tools" / "bench_direct" / "compiler_comment.py").read_text(encoding="utf-8")
+    for marker in (".download(", "/artifacts", "/check-runs", "zipfile"):
+        if marker in writer:
+            errors.append(f"the comment writer must not read evidence or checks: {marker}")
+    if not COMPILER_REPORT.is_file():
+        errors.append(f"missing report recovery workflow: {COMPILER_REPORT.relative_to(ROOT)}")
+        return
+    report_text = COMPILER_REPORT.read_text(encoding="utf-8")
+    lines = report_text.splitlines()
+    start = lines.index("on:") if "on:" in lines else len(lines)
+    if tuple(line for line in lines[start:start + len(REPORT_TRIGGER) + 1] if line.strip()) != REPORT_TRIGGER:
+        errors.append("report recovery trigger must be exactly the reviewed workflow_dispatch block")
+    if [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")] != \
+            ["permissions: {}", "    permissions:", "    permissions:"]:
+        errors.append("report recovery must grant permissions only to its validate and comment jobs")
+    report_jobs = job_blocks(report_text)
+    if list(report_jobs) != list(REPORT_BLOCKS):
+        errors.append(f"report recovery jobs must be validate, comment: {list(report_jobs)}")
+    for name, blocks in REPORT_BLOCKS.items():
+        job = report_jobs.get(name, [])
+        for block in blocks:
+            if not contains_block(job, block):
+                errors.append(f"report recovery {name} job is missing exact block starting: {block[0].strip()}")
+        if len([line for line in job if "uses:" in line]) != 1 or len([line for line in job if "run:" in line]) != 1:
+            errors.append(f"report recovery {name} job must be one trusted checkout and one trusted script call")
+        for marker in (*HOSTED_FORBIDDEN, *(("actions: read", "checks:", "pull-requests:") if name == "comment"
+                                            else ("contents: write", "checks: write"))):
+            if any(marker in line for line in job):
+                errors.append(f"report recovery {name} job must not use: {marker}")
+    if expression_lines_in_scripts(report_text):
+        errors.append("report recovery must not interpolate an expression inside a run script")
 
 
 def job_blocks(workflow: str) -> dict[str, list[str]]:

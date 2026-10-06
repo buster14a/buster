@@ -64,6 +64,9 @@ group is unavailable. Report either instead of working around it.
   ten-second limit per run.
 - A nonzero exit, a signal, a timeout or a compile error fails the run. Print
   a self-check line and exit nonzero when it does not hold.
+- The report's `Observed host:` line is the CPU model the kernel reports
+  (#2761). On any CPU other than the AMD Ryzen 7 9700X nothing is compiled
+  or run and the run fails, whatever runner label selected the job.
 
 ## Compiler comparison of a pull request
 
@@ -77,11 +80,15 @@ gate applies, and these jobs follow `authorize`:
   `tools/uarch_lab.py compare` on the same frozen merge-base source, using the
   `compiler-compare-v1` profile. A head that moved before measurement is
   recorded as superseded.
+- `start-pull` (hosted) shows the check
+  `9700X compiler benchmark (pull request)` on the head commit as soon as the
+  request is authorized: queued while the 9700X is busy, then in progress
+  with a link to the live job once `compare-pull` starts. It also closes the
+  open check of an earlier head of the same pull request as superseded.
 - `publish-pull` (hosted) validates the evidence, including that the observed
-  CPU is the Ryzen 7 9700X. It posts the check
-  `9700X compiler benchmark (pull request)` on the head commit. Its summary
-  states the identities, the pair count, the verdict with its 95% CI, and
-  the host time spent. The run's artifact `buster-9700x-compiler-<head>-<attempt>`
+  CPU is the Ryzen 7 9700X, and completes that same check. Its summary
+  states the identities, the pair count, the verdict with its 95% CI, the
+  host time spent, and links to the workflow attempt and the evidence. The run's artifact `buster-9700x-compiler-<head>-<attempt>`
   holds `receipt.json` and the lab's `summary.json` and raw pairs.
 
 The verdict is report-only and blocks nothing; the comparison of each commit

@@ -9,17 +9,22 @@ these checks: they are report-only evidence.
 
 Two modes measure the same way and differ only in what they compare:
     main   a commit after it landed on main against its first parent, the
-           main commit it landed on (#2752); merging never waits for it
+           main commit it landed on, or, when that commit has no valid
+           measurement, the nearest first-parent ancestor with one, so a
+           merge burst's unmeasured commits are inside a measured range
+           (#2752); merging never waits for it
     pull   an owner pull request head against its merge base with the base
            branch, on request and without merging (#2769)
 Each mode publishes its own check name and marker.
 
 Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
+    attempt_marker                                         one attempt's check (#2803)
     PROFILE                                                frozen profile
-    APPROVED_HOST, host_problem                            observed Zen 5 host
+    APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     REGRESSION_POLICIES, regression_policy                 report-only switch
+    range_label                                            main baseline relation
     render                                                 readable report
 """
 
@@ -27,6 +32,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 RECEIPT_SCHEMA = "buster-9700x-compiler-receipt-v1"
 LAB_SCHEMA = "buster-uarch-lab-compare-v2"
@@ -41,6 +47,7 @@ CHECK_NAME, MARKER = MODES["main"]
 APPROVED_HOST = re.compile(r"AMD Ryzen 7 9700X\b")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+DECIMAL = re.compile(r"[1-9][0-9]*\Z")
 
 # The routine comparison of both modes. It is frozen per profile name:
 # changing any value needs a new name so receipts stay comparable. Deeper
@@ -82,6 +89,33 @@ def check_marker(head: str, mode: str = "main") -> str:
     return MODES[mode][1] + ":" + head
 
 
+def attempt_marker(head: str, mode: str, request_run_id: str, request_attempt: str, run_attempt: str) -> str:
+    """External ID of one measurement attempt's check (#2803).
+
+    The request run and its attempt name the scheduling, the bench attempt the
+    measurement, so a transport retry finds the same check while a deliberate
+    re-run (of either workflow) gets its own. The external ID is only a lookup
+    key; ownership also needs the GitHub Actions app, the name and the head.
+    """
+    for value in (request_run_id, request_attempt, run_attempt):
+        if not (isinstance(value, str) and DECIMAL.fullmatch(value)):
+            raise ValueError("attempt marker needs decimal run and attempt numbers")
+    return f"{check_marker(head, mode)}:{request_run_id}.{request_attempt}:{run_attempt}"
+
+
+def observed_cpu_model() -> str:
+    """The running host's CPU model name from /proc/cpuinfo, or 'NA'."""
+    model = "NA"
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("model name"):
+                model = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    return model
+
+
 def host_problem(receipt: object) -> str:
     """Why the receipt's observed host is not the approved Zen 5 host, or ''."""
     host = receipt.get("host") if isinstance(receipt, dict) else None
@@ -101,6 +135,23 @@ def regression_policy(value: str) -> tuple[str, str]:
         problem = (f"regression policy {policy!r} is not implemented; only report-only exists until "
                    "regression thresholds are qualified (#2752)")
     return policy, problem
+
+
+def range_label(commits: object, first_parent: object) -> str:
+    """A main baseline's relation to the head, from the authorized range size, or '' when unknown.
+
+    commits counts the first-parent main commits the comparison spans: 1 is
+    the head alone against its first parent.
+    """
+    label = ""
+    if commits == "1":
+        label = "first parent"
+    elif isinstance(commits, str) and DECIMAL.fullmatch(commits) and isinstance(first_parent, str) and \
+            SHA.fullmatch(first_parent):
+        label = (f"range of {commits} first-parent main commits: the nearest earlier main commit with a valid "
+                 f"measurement, because first parent `{first_parent}` has none; the result covers the whole range "
+                 "and does not isolate one commit")
+    return label
 
 
 def classify(summary: object, binaries: object) -> list[str]:
@@ -157,6 +208,10 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
     ]
     for key in IDENTITY_KEYS:
         lines.append(f"| {key} | `{identity.get(key, 'NA')}` |")
+    coverage = receipt.get("coverage") if isinstance(receipt, dict) else None
+    label = range_label(coverage.get("range"), coverage.get("first_parent")) if isinstance(coverage, dict) else ""
+    if mode == "main" and label:
+        lines += ["", f"Baseline: {label}."]
     profile = receipt.get("profile", {}) if isinstance(receipt, dict) else {}
     host = receipt.get("host", {}) if isinstance(receipt, dict) else {}
     lines += ["", f"Profile `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}.",

@@ -14,7 +14,9 @@ import os
 import shutil
 import stat
 import struct
+import subprocess
 import sys
+import sysconfig
 import tempfile
 import unittest
 from unittest import mock
@@ -364,11 +366,18 @@ for arg in args:
             sys.stderr.write("cc: error: unknown argument\n")
             sys.exit(1)
         open(arg.split("=", 1)[1], "w").write(METRICS)
-output = globals().get("OUTPUT", b"\x7fELF same bytes")
-if globals().get("OUTPUT_FILE"):
-    # The stage-1 "executable": a real ELF (the Python interpreter) plus a pad.
-    output = open(OUTPUT_FILE, "rb").read() + OUTPUT_PAD
-open(out, "wb").write(output)
+with open(out, "wb") as target:
+    if globals().get("OUTPUT_FILE"):
+        # The stage-1 "executable": a real ELF (the Python interpreter) plus a
+        # pad.  Streamed in small blocks, so a fake without ALLOC stays near
+        # the interpreter's own RSS however large the interpreter is (a
+        # standalone build is several times a system one).
+        import shutil
+        with open(OUTPUT_FILE, "rb") as source:
+            shutil.copyfileobj(source, target, 1 << 16)
+        target.write(OUTPUT_PAD)
+    else:
+        target.write(globals().get("OUTPUT", b"\x7fELF same bytes"))
 '''
 
 FAKE_PERF = r'''#!/usr/bin/env python3
@@ -470,11 +479,26 @@ os.execvp(args[0], args)
 '''
 
 
+# Fixture interpreter contract: every fake script runs under the interpreter
+# that runs this file.  `#!/usr/bin/env python3` would pick whatever PATH
+# selects, so a standalone test interpreter would mix with the system one.
+# Linux reads at most 255 shebang bytes and splits the line at whitespace.
+SHEBANG_LIMIT = 255
+
+
+def fixture_shebang():
+    shebang = "#!" + sys.executable
+    if not sys.executable or any(character.isspace() for character in sys.executable) or len(shebang.encode()) > SHEBANG_LIMIT:
+        raise unittest.SkipTest("unsupported fixture: the test interpreter path %r cannot be a shebang (empty, whitespace, or over %d bytes)"
+                                % (sys.executable, SHEBANG_LIMIT))
+    return shebang
+
+
 def write_script(path, body, constants):
     header = "".join("%s = %r\n" % item for item in constants.items())
     lines = body.split("\n", 1)
     with open(path, "w") as handle:
-        handle.write(lines[0] + "\n" + header + lines[1])
+        handle.write(fixture_shebang() + "\n" + header + lines[1])
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
 
 
@@ -495,7 +519,7 @@ class Fakes:
         if refuse:
             with open(perf) as handle:
                 script = handle.read()
-            write_script(perf, script.replace("#!/usr/bin/env python3\n", "#!/usr/bin/env python3\nREFUSE = %r\n" % (list(refuse),), 1), {})
+            write_script(perf, script, {"REFUSE": list(refuse)})
         write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": mode,
                                         "COMPILE_LOG": os.path.join(root, "compile.jsonl")}, **(compiler or {})))
         output = os.path.join(root, "out")
@@ -1117,7 +1141,9 @@ class CompareFlowTests(Fakes, unittest.TestCase):
         self.assertEqual(summary["metrics"]["task_clock"]["n"], 6)
         for name in ("instructions", "cycles", "branch_misses", "page_faults"):
             self.assertEqual((summary["metrics"][name]["n"], summary["metrics"][name]["outcome"]), (0, "no data"), name)
-        self.assertTrue(any(warning.startswith("perf stat unusable") for warning in summary["warnings"]), summary["warnings"])
+        warnings = [warning for warning in summary["warnings"] if warning.startswith("perf stat unusable")]
+        self.assertEqual(len(warnings), 1, summary["warnings"])
+        self.assertNotIn("unusable (perf stat unusable", warnings[0])
         with open(os.path.join(output, "pairs.json")) as handle:
             records = json.load(handle)
         self.assertTrue(all(record["counters"] is False and record["cpu_s"] is not None for record in records))
@@ -1883,6 +1909,40 @@ class RetirementLimitTests(unittest.TestCase):
         self.assertIn("quality sub-run failed (stopped)", summary["verdict"]["inconclusive"])
 
 
+def copied_interpreter_environment(directory):
+    """Return the environment additions under which a copy of the test
+    interpreter, moved away from its installation, still starts; raise
+    SkipTest naming each attempt's failure when none works.  A standalone
+    distribution finds its standard library (and a shared libpython) relative
+    to its original executable, so a lone copy needs PYTHONHOME and, for a
+    shared build, the library directory."""
+    copy = os.path.join(directory, "copied-interpreter")
+    shutil.copy2(sys.executable, copy)
+    home = sys.base_prefix if sys.base_prefix == sys.base_exec_prefix else sys.base_prefix + os.pathsep + sys.base_exec_prefix
+    attempts = [{}, {"PYTHONHOME": home}]
+    library = sysconfig.get_config_var("LIBDIR")
+    if sysconfig.get_config_var("Py_ENABLE_SHARED") and library:
+        search = os.environ.get("LD_LIBRARY_PATH")
+        attempts.append({"PYTHONHOME": home, "LD_LIBRARY_PATH": library + (os.pathsep + search if search else "")})
+    failures = []
+    found = None
+    for extra in attempts:
+        if found is None:
+            probe = subprocess.run([copy, "-c", "print('ready')"], env=dict(os.environ, **extra), capture_output=True, text=True)
+            if probe.returncode == 0 and probe.stdout == "ready\n":
+                found = extra
+            else:
+                lines = [line.strip() for line in probe.stderr.splitlines() if line.strip()]
+                errors = [line for line in lines if "Error" in line or "error" in line]
+                failures.append("%s: exit %d, %s" % (sorted(extra) or "no additions", probe.returncode,
+                                                    (errors or lines or ["no stderr"])[-1]))
+    os.unlink(copy)
+    if found is None:
+        raise unittest.SkipTest("unsupported fixture: a lone copy of %s (%s) does not start; %s"
+                                % (sys.executable, sys.version.split()[0], "; ".join(failures)))
+    return found
+
+
 @unittest.skipIf(not sys.platform.startswith("linux"), "the fake stage-1 compiler is a copied Linux ELF interpreter")
 class RetirementFlowTests(Fakes, unittest.TestCase):
     # The fakes: A and B write the Python interpreter (a real ELF64, so code
@@ -1890,9 +1950,14 @@ class RetirementFlowTests(Fakes, unittest.TestCase):
     # generated-runtime cell that output runs as a compiler: the copied
     # interpreter executes the repository root's `cc` script (the default
     # command's first argument), whose speed is the pad byte.  A is slower
-    # and larger than B, so every interval check passes clearly.
+    # and larger than B, so every interval check passes clearly.  A copied
+    # standalone interpreter needs its home in the environment the lab hands
+    # to every child (captured from os.environ when it starts).
     def setUp(self):
         self.root, self.ide, self.perf = self.fakes("new")
+        environment = mock.patch.dict(os.environ, copied_interpreter_environment(self.root))
+        environment.start()
+        self.addCleanup(environment.stop)
         common = {"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new", "OUTPUT_FILE": sys.executable}
         write_script(self.ide, FAKE_IDE, dict(common, DELAY=0.25, ALLOC=192 << 20, OUTPUT_PAD=b"S"))
         self.candidate = os.path.join(self.root, "ide-b")
