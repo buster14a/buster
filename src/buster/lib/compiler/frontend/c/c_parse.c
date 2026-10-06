@@ -22376,21 +22376,21 @@ BUSTER_C_INTERNAL CScopeId c_parse_scope_descend(CParseResult* result, CScopeId 
     return best;
 }
 
-// c_parse_scope_for_token's answer for a caller that already holds `near`, the
-// answer of an earlier query under the same root: climb from `near` to the
+// c_parse_scope_for_token's answer for a caller that already holds `hint`, the
+// answer of an earlier query under the same root: climb from `hint` to the
 // lowest ancestor holding the token, then descend from there. Scopes nest, so
 // that ancestor lies on the root's own descent path and the answer is the
 // same, but the cost is the tree distance between consecutive queries, not
 // the depth of the root-to-token path -- a lowering that asks about each loop
 // of a D-deep nest in turn pays one level per loop instead of D (#2676). The
-// caller guarantees `near` is `root` or under it; the climb stops at `root`.
-BUSTER_C_SHARED CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId near, u32 token_index)
+// caller guarantees `hint` is `root` or under it; the climb stops at `root`.
+BUSTER_C_SHARED CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId hint, u32 token_index)
 {
     CScopeId answer;
     CScopeId start = root;
-    if (result && result->scope_children_offsets && root.value < result->scope_count && near.value < result->scope_count && near.value != root.value)
+    if (result && result->scope_children_offsets && root.value < result->scope_count && hint.value < result->scope_count && hint.value != root.value)
     {
-        CScopeId cursor = near;
+        CScopeId cursor = hint;
         bool climbing = true;
         while (climbing)
         {

@@ -38368,12 +38368,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_scope_interval_index(UnitTestArguments
         BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){0}, 0, siblings * 4 + 9) == 0);
         BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){siblings}, 2, 8) == 0);
         // Starting from any earlier answer gives the answer a descent from the root does.
-        u32 near_step = size_index == 0 ? 1 : parse.scope_count / 5 + 1;
-        for (u32 near = 0; near < parse.scope_count; near += near_step)
+        u32 hint_step = size_index == 0 ? 1 : parse.scope_count / 5 + 1;
+        for (u32 hint = 0; hint < parse.scope_count; hint += hint_step)
         {
             for (u32 token = 0; token < siblings * 4 + 10; token += size_index == 0 ? 1 : 3)
             {
-                BUSTER_TEST(arguments, c_parse_scope_for_token_near(&parse, (CScopeId){0}, (CScopeId){near}, token).value ==
+                BUSTER_TEST(arguments, c_parse_scope_for_token_near(&parse, (CScopeId){0}, (CScopeId){hint}, token).value ==
                                            c_parse_scope_for_token(&parse, (CScopeId){0}, token).value);
             }
         }

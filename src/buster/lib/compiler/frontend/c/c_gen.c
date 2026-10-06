@@ -37714,8 +37714,8 @@ BUSTER_C_INTERNAL CScopeId c_ir_scope_for_token(CIntegerIrBuilder* builder, u32 
 {
     CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
                                                                                      : C_SCOPE_ID_INVALID;
-    CScopeId near = builder->scope_finger_root.value == root.value ? builder->scope_finger : root;
-    CScopeId scope = c_parse_scope_for_token_near(&builder->parse, root, near, token_index);
+    CScopeId hint = builder->scope_finger_root.value == root.value ? builder->scope_finger : root;
+    CScopeId scope = c_parse_scope_for_token_near(&builder->parse, root, hint, token_index);
     if (scope.value < builder->parse.scope_count)
     {
         builder->scope_finger = scope;
