@@ -72,9 +72,8 @@ did not change admission or rebinding policy, and requires the queue ref to
 retain the same group identity at admission. Its bounded 310-minute job accommodates the
 five-hour wait.
 The self-hosted 9700X direct workload workflow is not a `merge_group` workflow.
-Its standalone workload path runs only for the owner's pull requests. Its
-compiler comparison starts from a hosted `merge_group` marker; it is an
-optional prerequisite of this admission, not a required check (see
+Its standalone workload path runs only for the owner's pull requests, and its
+compiler comparison runs after a commit lands on main (see
 [9700X compiler comparison](#9700x-compiler-comparison-2752)).
 
 There is no second retirement publisher. The existing protected
@@ -220,80 +219,14 @@ tracked on #1807.
 
 ## 9700X compiler comparison (#2752)
 
-Every main queue candidate can be benchmarked on the Ryzen 7 9700X before it
-lands. The hosted `9700x-compiler-request.yml` marker runs on
-`merge_group: checks_requested` without a path filter. Its completion starts
-the compiler comparison jobs of `9700x-direct-bench.yml` from `main`; see
-[the 9700X admission guide](../benchmarks/9700x/ADMISSION.md#merge-group-compiler-comparison)
-for the authorization, host and publication contract. The result is the check
-`9700X compiler benchmark` with external ID
-`buster-9700x-compiler-bench-v1:<head>` on the exact group head. Merging uses
-merge commits, so the landed main commit is that head and carries the check
-and its link to the run and evidence. The main push does not run the
-comparison again. A commit pushed directly to main has no such check: that is
-a visible coverage gap, not a benchmarked change.
-
-Each candidate is compared with the group's first parent, the immediate
-predecessor it lands on. GitHub builds a later group on the preceding
-synthetic merge, so the pairing is exact while the predecessor is still
-speculative. This reconciler admits the group only once that first parent is
-main. A replaced group has a new head and is measured afresh; the old head's
-check never transfers. Measurement therefore runs ahead of admission rather
-than waiting for the predecessor to land, at the cost of host time spent on
-groups GitHub later replaces. The harness skips a group whose queue ref has
-already moved. The host runs one job at a time; ordinary hosted CI keeps its
-existing concurrency.
-
-The reconciler consults the check only when the administrator variable
-`BENCH_COMPILER_ADMISSION` is `require`. Unset or `off` keeps admission
-unchanged and records `"compiler_benchmark": {"policy": "off"}` in the
-admission report. A candidate cannot change the setting. With `require`, after
-the six gates pass, `compiler_benchmark` reads the exact head's check runs from
-the GitHub Actions app. The marked run with the highest ID decides:
-
-- absent or still running: the group stays pending;
-- a completed success: admitted, provided its details URL names an attempt of
-  `.github/workflows/9700x-direct-bench.yml` started by `workflow_run`;
-- any other conclusion: a terminal rejection, because the candidate was not
-  benchmarked. Re-enqueueing builds and measures a new group.
-
-The second collection re-reads the check and stays pending if a newer attempt
-appeared. The pull-request comparison (#2769) publishes under a different name
-and marker, `9700X compiler benchmark (pull request)`, so it never counts
-toward admission. A merge group is always measured as its own candidate. Success means a valid measurement, never a performance judgement;
-slow results are admitted and published like fast ones.
-
-The reconciler runs on every required merge-group workflow completion, on main
-pushes and on its 15-minute sweep. The bench workflow's own completion is not
-a trigger. A `workflow_run`-started run is expected to report `main` as its
-branch, which the reconciler's queue-branch filter excludes; confirm that in
-the live trace. A front group whose six gates have
-already passed can therefore wait up to one sweep after its check is
-published; record that latency in the live trace.
-
-Rollout, in order, each step through the normal queue and trusted main:
-
-1. Land this source with all three variables unset. Nothing changes.
-2. Set `BENCH_COMPILER_ENABLED=true` (with `BENCH_DIRECT_ENABLED=true`). Pilot
-   the 90-minute job bound and record benchmark duration, runner queue delay
-   and added merge latency from the check reports.
-3. Only then set `BENCH_COMPILER_ADMISSION=require`, and record the setting
-   change. Setting it back to `off` is the recorded, explicit operational
-   override when the host is unavailable. A merge during `off` is a coverage
-   exception, not a benchmarked change.
-
-Groups whose pull request is not authored by the owner are refused before the
-runner and published as failures. Under `require` they cannot be admitted
-until a reviewed change widens the host trust boundary or the administrator
-records an `off` exception. This applies to bot-authored catch-up pull
-requests.
-
-Regression enforcement is a later phase. `BENCH_COMPILER_REGRESSION_POLICY`
-accepts only `report-only` (or unset), and any other value fails closed. An
-`enforce` mode needs qualified A/A noise and build repeatability, per-workload
-and aggregate budgets, confidence and unavailable-data rules, cumulative
-history so a moving baseline cannot hide gradual regressions, and a separately
-reviewed rollout with an auditable return to report-only.
+The 9700X compiler comparison is not part of queue admission. It measures each
+commit after it lands on main, against its first parent, and publishes the
+report-only `9700X compiler benchmark` check on that main commit; see the
+[9700X admission guide](../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
+A brief queue-gated rollout (#2754) made every merge wait about 13 minutes for
+the single host and could not admit bot-authored catch-up pull requests; it was
+replaced by the post-merge comparison, and the reconciler no longer reads any
+benchmark setting.
 
 ## Exact identities and fail-closed evidence
 
@@ -561,8 +494,6 @@ python3 -B tools/merge_queue_admission_test.py -v
 python3 -B tools/merge_queue_admission.py audit-workflows .
 python3 -B tools/merge_queue_admission.py check-ruleset .github/main-merge-queue.ruleset.json
 python3 -B tools/merge_queue_admission.py check-ruleset /tmp/live-main-ruleset.json
-python3 -B tools/bench_direct/compiler_test.py
-python3 -B tools/bench_direct/authorize_compiler_test.py
 # One bounded pass; publishes only for reconciler-owned groups (needs checks: write).
 GH_TOKEN=... python3 -B tools/merge_queue_admission.py reconcile --repo-root . \
   --repository buster14a/buster --details-url URL --output /tmp/reconcile.json

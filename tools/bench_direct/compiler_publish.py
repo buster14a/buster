@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate a 9700X compiler receipt and publish its exact-head check (#2752, #2769).
 
-Run from trusted `main` by the hosted `publish-compiler` (queue mode) and
+Run from trusted `main` by the hosted `publish-compiler` (main mode) and
 `publish-pull` (pull mode) jobs of `.github/workflows/9700x-direct-bench.yml`,
 the only jobs there that hold `checks: write`. It reads this run's evidence
 artifact through the API as data (a size-bounded zip; nothing in it is
@@ -9,11 +9,11 @@ executed), re-checks the receipt against the identities authorization produced
 in the same attempt, requires the observed host to be the approved Zen 5 host,
 re-derives validity from the lab's own summary.json, and creates one completed
 check run named check_name(mode) with external ID check_marker(head, mode) on
-the head. Queue admission accepts only the queue mode's name and marker.
+the head. The checks are report-only; nothing gates merging on them.
 
 Conclusions (the performance verdict never decides; report-only):
     success  a valid core measurement, whatever its direction
-    neutral  the group was replaced or removed before measurement
+    neutral  a pull request head moved before measurement
     failure  authorization refused, evidence missing, mismatched or invalid,
              or an unimplemented regression policy was requested
 A failure says the candidate was not benchmarked; it is never relabelled.
@@ -42,7 +42,7 @@ ARTIFACT_PREFIX = "buster-9700x-compiler-"
 ARTIFACT_LIMIT = 64 * 1024 * 1024
 MEMBER_LIMIT = 8 * 1024 * 1024
 TEXT_LIMIT = 60000
-COMPARE_JOBS = {"queue": "Compare the merge group compiler", "pull": "Compare the pull request compiler"}
+COMPARE_JOBS = {"main": "Compare the main commit compiler", "pull": "Compare the pull request compiler"}
 
 
 def artifact_name(head: str, attempt: str) -> str:

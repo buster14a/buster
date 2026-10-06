@@ -3,15 +3,15 @@
 
 Run from trusted `main` by `.github/workflows/9700x-direct-bench.yml` in one
 of two modes (compiler_receipt.MODES), after its hosted authorization:
-    queue  (`compare` job) a main merge-group head against its first parent;
-           the checkout holds the head with both parents (fetch depth 2)
+    main   (`compare` job) a commit after it landed on main against its first
+           parent; the checkout holds it with its parents (fetch depth 2)
     pull   (`compare-pull` job) an owner pull request's head against its merge
            base, requested by benchmarks/9700x/compiler-compare.request
 The checkout has no persisted credentials. This harness, the build commands,
 the lab and the frozen PROFILE come from `main`.
 
 It follows the documented A/B recipe of docs/agents/benchmarking.md in one
-tree: a tests-off Clang Release `ide` of the base (the group's first parent),
+tree: a tests-off Clang Release `ide` of the base (first parent or merge base),
 then of the head, then the base again so the frozen workload has its generated
 closure; `tools/uarch_lab.py compare` then times both compilers on that same
 base source. Builds are preparation and are timed separately.
@@ -21,7 +21,7 @@ and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
 
-Map: queue_head (supersession), build (one ide), toolchain, collect_evidence,
+Map: queue_head (pull-mode supersession), build (one ide), toolchain, collect_evidence,
 main. Validity rules live in compiler_receipt.classify.
 """
 
@@ -186,15 +186,18 @@ def main(argv: list[str] | None = None) -> int:
     bins.mkdir()
     summary = None
 
-    # Identity first. A queue head has the base as first parent and the pull
-    # request head as second; a pull request head is its own pull head and
-    # descends from the base (its merge base). Both trees must match.
+    # Identity first. A main commit has the base as first parent and, when a
+    # queue merge produced it, the pull request head as second (else it is its
+    # own pull head); a pull request head is its own pull head and descends
+    # from the base (its merge base). Both trees must match.
     problem = host_problem(receipt)
     if problem:
         reasons.append(problem)
     try:
-        if arguments.mode == "queue":
-            parents = (git(candidate, "rev-parse", "HEAD^1"), git(candidate, "rev-parse", "HEAD^2"))
+        if arguments.mode == "main":
+            second = subprocess.run(["git", "-C", str(candidate), "rev-parse", "--verify", "--quiet", "HEAD^2"],
+                                    capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False).stdout.strip()
+            parents = (git(candidate, "rev-parse", "HEAD^1"), second or git(candidate, "rev-parse", "HEAD"))
         else:
             ancestry = subprocess.run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
                                       capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
@@ -208,12 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     if observed is not None and observed != expected:
         reasons.append(f"candidate checkout {observed} does not match the authorized identity {expected}")
 
-    # Skip a candidate whose ref already moved or vanished; an unknown answer measures.
-    live = queue_head(arguments.repository, arguments.ref) if not reasons else None
+    # Skip a pull request whose head already moved; an unknown answer measures.
+    # A main commit stays on main as main moves on, so it is always measured.
+    live = queue_head(arguments.repository, arguments.ref) if not reasons and arguments.mode == "pull" else None
     if live is not None and live != arguments.head:
         receipt["state"] = "superseded"
         reasons.append(f"{arguments.ref} names {live or 'nothing'} before measurement")
-    elif live is None and not reasons:
+    elif live is None and not reasons and arguments.mode == "pull":
         receipt["notes"] = [f"{arguments.ref} could not be read before measurement; measured anyway"]
 
     if not reasons:

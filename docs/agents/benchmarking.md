@@ -462,11 +462,12 @@ captures (#2741).
   diagnostic, unsealed process latency; see
   [`benchmarks/9700x/README.md`](../../benchmarks/9700x/README.md) and its
   [admission guide](../../benchmarks/9700x/ADMISSION.md). Once enabled, it
-  also runs the routine `uarch_lab.py compare` of each owner-authored main
-  merge-queue candidate against its first parent (#2752; frozen
-  `compiler-compare-v1` profile, report-only). Each comparison is published as
-  the `9700X compiler benchmark` check on the candidate commit; see
-  [merge-queue admission](../merge-queue-admission.md#9700x-compiler-comparison-2752).
+  also runs the routine `uarch_lab.py compare` of each commit after it lands
+  on main against its first parent (#2752; frozen `compiler-compare-v1`
+  profile, report-only, merging never waits). Each comparison is published as
+  the `9700X compiler benchmark` check on that main commit; during merge bursts
+  only the newest pending commit is measured. See the
+  [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
   An owner pull request can request the same comparison of its head against
   its merge base before merging by changing
   `benchmarks/9700x/compiler-compare.request` (#2769); see the
@@ -782,6 +783,24 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    code. A count metric whose ratio of medians and median of per-pair ratios
    differ by more than 5% carries the note "bimodal counts: compare medians,
    not the paired ratio" (page faults in LAB3: 0.921 against 0.9965).
+   **Thread timeline (opt-in).** `run --threads` or `compare --profile-steps
+   threads` adds one Superluminal-style capture per binary,
+   `DIR/[a|b/]threads/threads.data`, for [Hotspot](https://github.com/KDAB/hotspot).
+   Hotspot shows a per-thread timeline, off-CPU time, flame graphs and
+   caller/callee views. The capture runs `perf record -F 10000 --call-graph fp
+   --switch-events` on the binary in place, so its symbols stay resolvable; the
+   Release `ide` keeps frame pointers. `step_threads` takes the richest mode the
+   host permits and records why richer ones were refused:
+   - `full`: kernel and user `cycles` stacks plus `sched:sched_switch` and
+     `sched:sched_wakeup`, which give off-CPU waits and `perf sched timehist
+     --summary`. It needs `kernel.perf_event_paranoid = -1`, tracefs readable by
+     the account, and `kernel.kptr_restrict = 0` for kernel symbol names.
+   - `user`: `cycles:u` stacks and context switches; works at `2`.
+   - `cpu-clock`: the same with a software clock, for hosts without a PMU.
+
+   The step is never part of the automated 9700X comparisons, whose policy
+   forbids profile steps.
+
    With `--profile-steps`, the top-down table and the per-symbol share movers
    show where the time moved. Movers come from one capture per variant and are
    hints only: a capture with fewer than 2,000 samples on either side is

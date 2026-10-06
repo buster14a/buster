@@ -319,6 +319,51 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_scope(Arena* arena, WmHandle* windowi
     arena_reset_to_start(arena);
 }
 
+BUSTER_GLOBAL_LOCAL void raster_native_xim_session_controls(WmHandle* windowing, WmWindowHandle* window)
+{
+    // CREATE_IC publication through the real begin/apply/finish helpers: the
+    // library may run the completion callback before xcb_xim_create_ic returns.
+    WmWindowHandle probe = {.focused = true, .xim_input_style_attempt_index = 2};
+    raster_native_check(!wm_xim_create_ic_publication_for_test(&probe, true, true, 0) && !probe.xim_create_ic_pending && !probe.ic &&
+                        probe.xim_input_style_attempt_index == 3, "XIM synchronous CREATE_IC failure stays cleared and advances once");
+    probe = (WmWindowHandle){.focused = true, .xim_input_style_attempt_index = 2};
+    raster_native_check(!wm_xim_create_ic_publication_for_test(&probe, true, false, 0) && probe.xim_create_ic_pending && !probe.ic &&
+                        probe.xim_input_style_attempt_index == 2, "XIM accepted asynchronous CREATE_IC remains pending without advancing");
+    probe = (WmWindowHandle){.focused = true, .xim_input_style_attempt_index = 2};
+    raster_native_check(wm_xim_create_ic_publication_for_test(&probe, true, true, 7) && !probe.xim_create_ic_pending && probe.ic == 7 &&
+                        probe.xim_input_style_attempt_index == 2, "XIM synchronous CREATE_IC success publishes the context and focus");
+    probe = (WmWindowHandle){.focused = true, .xim_input_style_attempt_index = 2};
+    raster_native_check(!wm_xim_create_ic_publication_for_test(&probe, false, false, 0) && !probe.xim_create_ic_pending && !probe.ic &&
+                        probe.xim_input_style_attempt_index == 3, "XIM refused CREATE_IC clears pending and advances once");
+
+    // Provider disconnect through the registered callback on the real handle.
+    WmHandle saved_handle = *windowing;
+    WmWindowHandle saved_window = *window;
+    windowing->xim_open = true;
+    windowing->xim_input_styles_ready = true;
+    windowing->xim_input_styles_pending = true;
+    windowing->xim_supported_input_style_count = 1;
+    windowing->xim_forward_event_mask = XCB_EVENT_MASK_KEY_PRESS;
+    windowing->xim_synchronous_event_mask = XCB_EVENT_MASK_KEY_PRESS;
+    window->ic = 5;
+    window->xim_create_ic_pending = true;
+    window->xim_input_style_attempt_index = 4;
+    wm_xim_disconnect_for_test(windowing);
+    raster_native_check(!windowing->xim_open && !windowing->xim_input_styles_ready && !windowing->xim_input_styles_pending &&
+                        !windowing->xim_supported_input_style_count && !windowing->xim_forward_event_mask && !windowing->xim_synchronous_event_mask,
+                        "XIM disconnect invalidates negotiated session state");
+    raster_native_check(!window->ic && !window->xim_create_ic_pending && !window->xim_input_style_attempt_index &&
+                        window->handle == saved_window.handle && window->owner == windowing && window->focused == saved_window.focused &&
+                        windowing->xim == saved_handle.xim && windowing->window_arena == saved_handle.window_arena,
+                        "XIM disconnect clears per-window contexts while retaining window and arena ownership");
+    // Without a provider the saved XIM masks are zero, so the native event mask
+    // the callback re-applied already equals the restored subscription.
+    raster_native_check(!saved_handle.xim_forward_event_mask && !saved_handle.xim_synchronous_event_mask,
+                        "XIM disconnect control runs without provider-selected event masks");
+    *windowing = saved_handle;
+    *window = saved_window;
+}
+
 BUSTER_GLOBAL_LOCAL void raster_native_xdnd_message(Arena* arena, WmHandle* windowing, xcb_window_t target, xcb_window_t source,
                                                   char const* type, u32 data1, u32 data2)
 {
@@ -578,6 +623,24 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider_callback(xcb_im_t* server, x
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool raster_native_xim_provider_open(RasterNativeXimProvider* provider, int screen_id, xcb_window_t server_window, char* name,
+                                                        bool compound)
+{
+    u32 style = XCB_IM_PreeditNothing | XCB_IM_StatusNothing;
+    xcb_im_styles_t styles = {1, &style};
+    char* encoding_name = compound ? "COMPOUND_TEXT" : "UTF8_STRING";
+    xcb_im_encodings_t encodings = {1, &encoding_name};
+    provider->server = xcb_im_create(provider->connection, screen_id, server_window, name, XCB_IM_ALL_LOCALES,
+        &styles, 0, 0, &encodings, XCB_EVENT_MASK_KEY_PRESS, raster_native_xim_provider_callback, provider);
+    bool result = provider->server != 0;
+    if (result)
+    {
+        xcb_im_set_use_sync_mode(provider->server, false);
+        result = xcb_im_open_im(provider->server);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 raster_native_xim_now_ms(void)
 {
     struct timespec now;
@@ -597,7 +660,7 @@ BUSTER_GLOBAL_LOCAL bool raster_native_xim_pump(Arena* arena, WmHandle* windowin
             break;
         }
         result = (event->response_type & 0x7fu) != 0;
-        if (result)
+        if (result && provider->server)
         {
             BUSTER_UNUSED(xcb_im_filter_event(provider->server, event));
         }
@@ -738,8 +801,12 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     // (xorg.freedesktop.org/archive/current/doc/xorg-docs/ctext/ctext.html).
     String8 compound_wire = S8("A\x1b-A\xe9");
     String8 compound_expected = S8("A\xc3\xa9");
-    String8 wire = mode == 0 ? unicode : compound_wire;
-    String8 expected = mode == 0 ? unicode : compound_expected;
+    // Mode 2 restarts a UTF-8 provider under the same advertisement name.
+    bool compound = mode == 1;
+    bool restart = mode == 2;
+    u32 sessions = restart ? 2 : 1;
+    String8 wire = compound ? compound_wire : unicode;
+    String8 expected = compound ? compound_expected : unicode;
     if (ready)
     {
         xcb_screen_iterator_t screens = xcb_setup_roots_iterator(xcb_get_setup(provider.connection));
@@ -759,19 +826,8 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     }
     if (ready)
     {
-        u32 style = XCB_IM_PreeditNothing | XCB_IM_StatusNothing;
-        xcb_im_styles_t styles = {1, &style};
-        char* encoding_name = mode == 0 ? "UTF8_STRING" : "COMPOUND_TEXT";
-        xcb_im_encodings_t encodings = {1, &encoding_name};
-        provider.server = xcb_im_create(provider.connection, screen_id, server_window, name, XCB_IM_ALL_LOCALES,
-            &styles, 0, 0, &encodings, XCB_EVENT_MASK_KEY_PRESS, raster_native_xim_provider_callback, &provider);
-        ready = provider.server != 0;
-        if (ready)
-        {
-            xcb_im_set_use_sync_mode(provider.server, false);
-            opened = xcb_im_open_im(provider.server);
-            ready = opened;
-        }
+        opened = raster_native_xim_provider_open(&provider, screen_id, server_window, name, compound);
+        ready = opened;
         if (ready)
         {
             environment_changed = setenv("XMODIFIERS", modifiers, 1) == 0;
@@ -806,12 +862,67 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
         }
     }
     ready = ready && provider.input_context && provider.created == 1 && window->ic && windowing->xim_open &&
-            xcb_xim_get_encoding(windowing->xim) == (mode == 0 ? XCB_XIM_UTF8_STRING : XCB_XIM_COMPOUND_TEXT);
+            xcb_xim_get_encoding(windowing->xim) == (compound ? XCB_XIM_COMPOUND_TEXT : XCB_XIM_UTF8_STRING);
     raster_native_check(ready, "real XIM provider handshakes and both nonzero input contexts negotiate the intended encoding");
     if (ready)
     {
         raster_native_check(raster_native_xim_commit(arena, windowing, window, &provider, wire, expected, &final_text),
                             "real XIM callback yields independent Unicode in caller-owned event storage after native payload release");
+        if (restart)
+        {
+            // Closing the provider destroys its per-client accept window; the
+            // client's disconnected callback must invalidate the dead session.
+            xcb_im_close_im(provider.server);
+            xcb_im_destroy(provider.server);
+            provider.server = 0;
+            opened = false;
+            ready = xcb_flush(provider.connection) > 0;
+            start = raster_native_xim_now_ms();
+            ready = ready && start <= UINT64_MAX - 5000;
+            for (u32 pass = 0; ready && windowing->xim_open && pass < 2048; pass += 1)
+            {
+                ready = raster_native_xim_now_ms() < start + 5000;
+                if (ready)
+                {
+                    arena_reset_to_start(arena);
+                    WmEventList events;
+                    ready = raster_native_xim_pump(arena, windowing, &provider, &events);
+                }
+            }
+            ready = ready && !windowing->xim_open && !window->ic && !window->xim_create_ic_pending && !windowing->xim_input_styles_ready &&
+                    !windowing->xim_input_styles_pending && provider.destroyed == 1 && !provider.input_context;
+            raster_native_check(ready, "real XIM provider close invalidates the client session and every window context");
+            // Missing provider: bounded polling continues and fabricates no context.
+            for (u32 pass = 0; ready && pass < 8; pass += 1)
+            {
+                arena_reset_to_start(arena);
+                WmEventList events;
+                ready = raster_native_xim_pump(arena, windowing, &provider, &events) && !window->ic && !windowing->xim_open;
+            }
+            raster_native_check(ready, "missing XIM provider leaves the window without a fabricated context");
+            if (ready)
+            {
+                opened = raster_native_xim_provider_open(&provider, screen_id, server_window, name, false);
+                ready = opened;
+            }
+            start = raster_native_xim_now_ms();
+            ready = ready && start <= UINT64_MAX - 5000;
+            for (u32 pass = 0; ready && !(provider.input_context && window->ic && windowing->xim_open) && pass < 2048; pass += 1)
+            {
+                ready = raster_native_xim_now_ms() < start + 5000;
+                if (ready)
+                {
+                    arena_reset_to_start(arena);
+                    WmEventList events;
+                    ready = raster_native_xim_pump(arena, windowing, &provider, &events);
+                }
+            }
+            ready = ready && provider.input_context && provider.created == 2 && window->ic && windowing->xim_open &&
+                    xcb_xim_get_encoding(windowing->xim) == XCB_XIM_UTF8_STRING;
+            raster_native_check(ready, "restarted same-name XIM provider rebuilds a nonzero context for the existing window");
+            ready = ready && raster_native_xim_commit(arena, windowing, window, &provider, wire, expected, &final_text);
+            raster_native_check(ready, "restarted XIM session commits the expected text");
+        }
         if (mode == 0)
         {
             char8 large[4097];
@@ -845,7 +956,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
                 drained = raster_native_xim_pump(arena, 0, &provider, &events);
             }
         }
-        raster_native_check(!ready || (drained && !provider.input_context && provider.destroyed == 1),
+        raster_native_check(!ready || (drained && !provider.input_context && provider.destroyed == sessions),
                             "real XIM teardown consumes the server's borrowed input context");
         xcb_im_close_im(provider.server);
         // close_im queues removal of our root-window advertisement. Complete
@@ -876,7 +987,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
                         memcmp(final_text.pointer, expected.pointer, expected.length) == 0),
                         "caller-owned committed text survives complete client and provider shutdown");
     printf("XIM_PROVIDER_GATE_V1 encoding=%s status=%s created=%u destroyed=%u sync_replies=%u\n",
-           mode == 0 ? "utf8" : "compound", !ready ? "provider-unavailable-or-handshake-failed" :
+           restart ? "utf8-restart" : compound ? "compound" : "utf8", !ready ? "provider-unavailable-or-handshake-failed" :
            raster_native_failures == failures_before ? "passed" : "failed",
            (unsigned)provider.created, (unsigned)provider.destroyed, (unsigned)provider.sync_replies);
     arena_reset_to_start(arena);
@@ -933,6 +1044,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
                 raster_native_bounded_poll(arena, windowing, window, surface);
                 raster_native_file_drop_opt_out(arena, windowing, window, surface, cycle != 0);
                 raster_native_xim_scope(arena, windowing, window);
+                raster_native_xim_session_controls(windowing, window);
                 if (cycle == 0)
                 {
                     raster_native_xdnd_budgets(arena, windowing, window, surface);
@@ -1013,6 +1125,7 @@ int main(int argc, char* argv[])
         }
         raster_native_xim_provider(arena, 0);
         raster_native_xim_provider(arena, 1);
+        raster_native_xim_provider(arena, 2);
     }
     printf("rendering_raster_native_tests: %u/%u assertions passed; mode=%s\n",
            (unsigned)(raster_native_assertions - raster_native_failures), (unsigned)raster_native_assertions,
