@@ -677,6 +677,8 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_MATH,
     C_SYMBOL_BUILTIN_MEMORY,
     C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS,
+    C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS,
+    C_SYMBOL_BUILTIN_OVERFLOW,
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_FIND_FIRST_SET,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
@@ -1413,6 +1415,7 @@ BUSTER_C_EXTERN bool c_semantic_asm_fixed_operands_conflict(u64 const* constrain
 BUSTER_C_EXTERN String8 c_semantic_asm_x87_operands_message(u64 const* constraints, u32 count, bool stack_clobber);
 
 BUSTER_C_EXTERN String8 c_ir_math_builtin_link_name(String8 name);
+BUSTER_C_EXTERN u32 c_semantic_memory_builtin_arity(String8 name);
 
 typedef enum CIrSimdArgument
 {

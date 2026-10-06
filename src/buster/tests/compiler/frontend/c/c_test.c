@@ -14218,6 +14218,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_isunordered"), all_targets},
         {S8("__builtin_isnormal"), all_targets},
         {S8("__builtin_fpclassify"), all_targets},
+        {S8("__builtin_sadd_overflow"), all_targets},
+        {S8("__builtin_saddl_overflow"), all_targets},
+        {S8("__builtin_saddll_overflow"), all_targets},
+        {S8("__builtin_uadd_overflow"), all_targets},
+        {S8("__builtin_uaddl_overflow"), all_targets},
+        {S8("__builtin_uaddll_overflow"), all_targets},
+        {S8("__builtin_ssub_overflow"), all_targets},
+        {S8("__builtin_ssubl_overflow"), all_targets},
+        {S8("__builtin_ssubll_overflow"), all_targets},
+        {S8("__builtin_usub_overflow"), all_targets},
+        {S8("__builtin_usubl_overflow"), all_targets},
+        {S8("__builtin_usubll_overflow"), all_targets},
+        {S8("__builtin_smul_overflow"), all_targets},
+        {S8("__builtin_smull_overflow"), all_targets},
+        {S8("__builtin_smulll_overflow"), all_targets},
+        {S8("__builtin_umul_overflow"), all_targets},
+        {S8("__builtin_umull_overflow"), all_targets},
+        {S8("__builtin_umulll_overflow"), all_targets},
+        {S8("__builtin_clrsb"), all_targets},
+        {S8("__builtin_clrsbl"), all_targets},
+        {S8("__builtin_clrsbll"), all_targets},
+        {S8("__builtin_fabsl"), all_targets},
+        {S8("__builtin_fmax"), all_targets},
+        {S8("__builtin_fmaxf"), all_targets},
+        {S8("__builtin_fmaxl"), all_targets},
+        {S8("__builtin_fmin"), all_targets},
+        {S8("__builtin_fminf"), all_targets},
+        {S8("__builtin_fminl"), all_targets},
+        {S8("__builtin_powi"), all_targets},
+        {S8("__builtin_powif"), all_targets},
+        {S8("__builtin_powil"), all_targets},
+        {S8("__builtin_strcmp"), all_targets},
+        {S8("__builtin_strcpy"), all_targets},
+        {S8("__builtin_strchr"), all_targets},
+        {S8("__builtin_strlen"), all_targets},
         {S8("__is_target_arch"), all_targets},
         {S8("not_a_builtin"), 0},
         {S8("__atomic_"), 0},
@@ -14241,6 +14276,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__va_start"), 0},
         {S8("_mm_pause"), 0},
         {S8("__builtin_buster_simd_load"), 0},
+        // Generic overflow checks and the return address are not lowered yet.
+        {S8("__builtin_add_overflow"), 0},
+        {S8("__builtin_return_address"), 0},
     };
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
@@ -14420,6 +14458,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        c_test_scratch_end(temporary);
+    }
+
+    // The GNU builtins added for #2847 lower without importing a libm or
+    // compiler-runtime helper: the typed overflow checks and clrsb are integer
+    // IR, fabsl/fmax/fmin/powi are float IR, and only the string forms (and a
+    // non-constant strlen, with no <string.h> in scope) call the C library.
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            bool floating = target.cpu_arch != CPU_ARCH_BPFEL;
+#define C_TEST_GNU_LIBRARY_BUILTINS_BASE \
+                "_Static_assert(sizeof(__builtin_sadd_overflow(1, 2, (int*)0)) == sizeof(_Bool), \"overflow result\");\n" \
+                "_Static_assert(sizeof(__builtin_clrsbll(1)) == sizeof(int), \"clrsb result\");\n" \
+                "int query_integers(long long a, long long b, int* i, long* l, long long* ll, unsigned* u, unsigned long* ul, unsigned long long* ull) {\n" \
+                "    return __builtin_sadd_overflow(a, b, i) + __builtin_saddl_overflow(a, b, l) + __builtin_saddll_overflow(a, b, ll) +\n" \
+                "           __builtin_uadd_overflow(a, b, u) + __builtin_uaddl_overflow(a, b, ul) + __builtin_uaddll_overflow(a, b, ull) +\n" \
+                "           __builtin_ssub_overflow(a, b, i) + __builtin_ssubl_overflow(a, b, l) + __builtin_ssubll_overflow(a, b, ll) +\n" \
+                "           __builtin_usub_overflow(a, b, u) + __builtin_usubl_overflow(a, b, ul) + __builtin_usubll_overflow(a, b, ull) +\n" \
+                "           __builtin_smul_overflow(a, b, i) + __builtin_smull_overflow(a, b, l) + __builtin_smulll_overflow(a, b, ll) +\n" \
+                "           __builtin_umul_overflow(a, b, u) + __builtin_umull_overflow(a, b, ul) + __builtin_umulll_overflow(a, b, ull) +\n" \
+                "           __builtin_clrsb(a) + __builtin_clrsbl(a) + __builtin_clrsbll(a);\n" \
+                "}\n" \
+                "char* query_strings(char* p, char* q) {\n" \
+                "    return __builtin_strcmp(p, q) + __builtin_strlen(p) ? __builtin_strcpy(p, q) : __builtin_strchr(q, 98);\n" \
+                "}\n"
+            // A binary128 long double (AArch64 Linux) computes through
+            // soft-float runtime calls, so only its lowering is required;
+            // Wasm lowers no wide floating arithmetic at all yet.
+            String8 source = floating ? S8(C_TEST_GNU_LIBRARY_BUILTINS_BASE
+                                            "double query_floats(double x, int n) {\n"
+                                            "    return __builtin_fmax(x, x) + __builtin_fminf(x, x) + __builtin_fmin(x, x) + __builtin_fmaxf(x, x) +\n"
+                                            "           __builtin_powi(x, n) + __builtin_powif(x, n);\n"
+                                            "}\n"
+                                            "#ifndef __wasm__\n"
+                                            "double query_long_doubles(double x, int n) {\n"
+                                            "    long double y = x;\n"
+                                            "    return __builtin_fmaxl(y, y) + __builtin_fminl(y, y) + __builtin_fabsl(y) + __builtin_powil(y, n);\n"
+                                            "}\n"
+                                            "#endif\n")
+                                      : S8(C_TEST_GNU_LIBRARY_BUILTINS_BASE);
+#undef C_TEST_GNU_LIBRARY_BUILTINS_BASE
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("gnu-library-builtins.c"), preprocess, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
+                    string_format(temporary.arena, S8("gnu library builtins target={u32}/{u32}: {S8}"), (u32)target.cpu_arch, (u32)target.os,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("")));
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* integers = c_test_find_ir_function(module, S8("query_integers"));
+                    IrFunction* strings = c_test_find_ir_function(module, S8("query_strings"));
+                    IrFunction* floats = c_test_find_ir_function(module, S8("query_floats"));
+                    IrFunction* long_doubles = c_test_find_ir_function(module, S8("query_long_doubles"));
+                    if (BUSTER_REQUIRE(arguments, integers != 0 && strings != 0 && (floats != 0) == floating && (long_doubles != 0) == (floating && target.cpu_arch != CPU_ARCH_WASM64)))
+                    {
+                        BUSTER_TEST(arguments, c_test_ir_call_count(integers) == 0);
+                        BUSTER_TEST(arguments, c_test_ir_call_count(strings) == 4);
+                        BUSTER_TEST(arguments, !floating || c_test_ir_call_count(floats) == 0);
+                    }
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+
+    String8 invalid_library_sources[] = {
+        S8("int f(int* r) { return __builtin_sadd_overflow(1, 2); }"),
+        S8("int f(int* r) { return __builtin_umulll_overflow(1, 2, r, r); }"),
+        S8("int f(void) { return __builtin_clrsb(); }"),
+        S8("int f(void) { return __builtin_clrsbl((int*)0); }"),
+        S8("int f(void) { return __builtin_strcmp(\"a\"); }"),
+        S8("char* f(char* p) { return __builtin_strchr(p, 1, 2); }"),
+        S8("char* f(char* p) { return __builtin_strcpy(p); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_library_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_library_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, parse.diagnostic_count != 0, invalid_library_sources[index]);
         c_test_scratch_end(temporary);
     }
 
@@ -34776,6 +34907,237 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
 }
 
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+// The GNU builtins of #2847 as a self-checking program: every typed overflow
+// spelling over pairs of boundary values against an exact __int128 oracle,
+// clrsb against a bit loop, fmax/fmin over ordered values and NaN operands,
+// powi against repeated multiplication of exactly representable powers and
+// the INT_MIN exponent, fabsl over signed zero, NaN, infinity and a
+// subnormal, the string forms with no <string.h> in scope, and exactly-once
+// argument evaluation. It links without -lm: none of these lowers to a libm
+// or compiler-runtime call. GCC and Clang build the same source; GCC needs
+// -lm because it calls fmax at -O0.
+BUSTER_GLOBAL_LOCAL String8 const c_test_gnu_library_builtins_sources[] = {
+    S8_INITIALIZER(
+        "static volatile unsigned evaluations;\n"
+        "static long long next(long long v) { evaluations++; return v; }\n"
+        "static volatile long long values[] = {0, 1, -1, 2, -2, 3, -3, 46340, 46341, -46341, 65535, 65536, -65536, 2147483647LL, -2147483647LL - 1,\n"
+        "    2147483646LL, -2147483647LL, 4294967295LL, 4294967296LL, 3037000499LL, 3037000500LL, -3037000500LL, 9223372036854775807LL,\n"
+        "    -9223372036854775807LL - 1, 9223372036854775806LL, 4611686018427387904LL, -4611686018427387904LL};\n"
+        "#define COUNT (int)(sizeof(values) / sizeof(values[0]))\n"
+        "#define SIGNED(NAME, T, UT, OP, MIN, MAX) { T r = 0; T a = (T)x, b = (T)y; __int128 exact = (__int128)a OP (__int128)b; \\\n"
+        "    int over = exact < (__int128)(MIN) || exact > (__int128)(MAX); \\\n"
+        "    failed |= NAME(a, b, &r) != over || r != (T)(UT)(unsigned __int128)exact; }\n"
+        "#define UNSIGNED(NAME, UT, OP, MAX) { UT r = 0; UT a = (UT)x, b = (UT)y; __int128 exact = (__int128)(unsigned __int128)a OP (__int128)(unsigned __int128)b; \\\n"
+        "    int over = exact < 0 || (unsigned __int128)exact > (unsigned __int128)(MAX); \\\n"
+        "    failed |= NAME(a, b, &r) != over || r != (UT)(unsigned __int128)exact; }\n"
+        "#define UMUL(NAME, UT, MAX) { UT r = 0; UT a = (UT)x, b = (UT)y; unsigned __int128 exact = (unsigned __int128)a * b; \\\n"
+        "    failed |= NAME(a, b, &r) != (exact > (unsigned __int128)(MAX)) || r != (UT)exact; }\n"
+        "static int clrsb_reference(long long v, int width)\n"
+        "{\n"
+        "    int count = 0;\n"
+        "    int sign = (int)((unsigned long long)v >> (width - 1)) & 1;\n"
+        "    for (int bit = width - 2; bit >= 0 && ((int)((unsigned long long)v >> bit) & 1) == sign; bit--) count++;\n"
+        "    return count;\n"
+        "}\n"),
+    S8_INITIALIZER(
+        "static int integer_test(void)\n"
+        "{\n"
+        "    int failed = 0;\n"
+        "    for (int i = 0; i < COUNT; i++)\n"
+        "    {\n"
+        "        for (int j = 0; j < COUNT; j++)\n"
+        "        {\n"
+        "            long long x = values[i], y = values[j];\n"
+        "            SIGNED(__builtin_sadd_overflow, int, unsigned, +, -2147483647 - 1, 2147483647)\n"
+        "            SIGNED(__builtin_ssub_overflow, int, unsigned, -, -2147483647 - 1, 2147483647)\n"
+        "            SIGNED(__builtin_smul_overflow, int, unsigned, *, -2147483647 - 1, 2147483647)\n"
+        "            SIGNED(__builtin_saddl_overflow, long, unsigned long, +, -__LONG_MAX__ - 1, __LONG_MAX__)\n"
+        "            SIGNED(__builtin_ssubl_overflow, long, unsigned long, -, -__LONG_MAX__ - 1, __LONG_MAX__)\n"
+        "            SIGNED(__builtin_smull_overflow, long, unsigned long, *, -__LONG_MAX__ - 1, __LONG_MAX__)\n"
+        "            SIGNED(__builtin_saddll_overflow, long long, unsigned long long, +, -__LONG_LONG_MAX__ - 1, __LONG_LONG_MAX__)\n"
+        "            SIGNED(__builtin_ssubll_overflow, long long, unsigned long long, -, -__LONG_LONG_MAX__ - 1, __LONG_LONG_MAX__)\n"
+        "            SIGNED(__builtin_smulll_overflow, long long, unsigned long long, *, -__LONG_LONG_MAX__ - 1, __LONG_LONG_MAX__)\n"
+        "            UNSIGNED(__builtin_uadd_overflow, unsigned, +, 4294967295u)\n"
+        "            UNSIGNED(__builtin_usub_overflow, unsigned, -, 4294967295u)\n"
+        "            UMUL(__builtin_umul_overflow, unsigned, 4294967295u)\n"
+        "            UNSIGNED(__builtin_uaddl_overflow, unsigned long, +, __LONG_MAX__ * 2UL + 1)\n"
+        "            UNSIGNED(__builtin_usubl_overflow, unsigned long, -, __LONG_MAX__ * 2UL + 1)\n"
+        "            UMUL(__builtin_umull_overflow, unsigned long, __LONG_MAX__ * 2UL + 1)\n"
+        "            UNSIGNED(__builtin_uaddll_overflow, unsigned long long, +, __LONG_LONG_MAX__ * 2ULL + 1)\n"
+        "            UNSIGNED(__builtin_usubll_overflow, unsigned long long, -, __LONG_LONG_MAX__ * 2ULL + 1)\n"
+        "            UMUL(__builtin_umulll_overflow, unsigned long long, __LONG_LONG_MAX__ * 2ULL + 1)\n"
+        "        }\n"
+        "        long long v = values[i];\n"
+        "        failed |= (__builtin_clrsb((int)v) != clrsb_reference((int)v, 32)) << 1;\n"
+        "        failed |= (__builtin_clrsbl((long)v) != clrsb_reference((long)v, (int)sizeof(long) * 8)) << 1;\n"
+        "        failed |= (__builtin_clrsbll(v) != clrsb_reference(v, 64)) << 1;\n"
+        "    }\n"
+        "    int r = 0;\n"
+        "    evaluations = 0;\n"
+        "    failed |= (__builtin_smul_overflow(next(6), next(7), &r) || r != 42 || evaluations != 2 || __builtin_clrsb(next(-1)) != 31 || evaluations != 3) << 2;\n"
+        "    failed |= (sizeof(__builtin_sadd_overflow(1, 2, &r)) != sizeof(_Bool) || sizeof(__builtin_clrsbll(1)) != sizeof(int)) << 2;\n"
+        "    return failed;\n"
+        "}\n"),
+    S8_INITIALIZER(
+        "#define FLOAT_TEST(NAME, T, FMAX, FMIN, POWI, MAX) \\\n"
+        "static int NAME(void) \\\n"
+        "{ \\\n"
+        "    int failed = 0; \\\n"
+        "    volatile T zero = 0, one = 1, two = 2, half = (T)0.5, three_halves = (T)1.5, minus = (T)-2.5; \\\n"
+        "    T nan = zero / zero; \\\n"
+        "    T values[] = {minus, -one, zero, half, one, three_halves, two}; \\\n"
+        "    int n = (int)(sizeof(values) / sizeof(values[0])); \\\n"
+        "    for (int i = 0; i < n; i++) \\\n"
+        "    { \\\n"
+        "        for (int j = 0; j < n; j++) \\\n"
+        "        { \\\n"
+        "            T x = values[i], y = values[j]; \\\n"
+        "            failed |= FMAX(x, y) != (x < y ? y : x) || FMIN(x, y) != (y < x ? y : x); \\\n"
+        "        } \\\n"
+        "        T x = values[i]; \\\n"
+        "        failed |= FMAX(nan, x) != x || FMAX(x, nan) != x || FMIN(nan, x) != x || FMIN(x, nan) != x; \\\n"
+        "        for (int e = -10; e <= 10; e++) \\\n"
+        "        { \\\n"
+        "            T product = one; \\\n"
+        "            for (int k = 0; k < (e < 0 ? -e : e); k++) product *= x; \\\n"
+        "            T expected = e < 0 ? one / product : product; \\\n"
+        "            T got = POWI(x, e); \\\n"
+        "            failed |= (got != expected && !(got != got && expected != expected)) << 1; \\\n"
+        "        } \\\n"
+        "    } \\\n"
+        "    T both = FMAX(nan, nan); \\\n"
+        "    failed |= (both == both) << 2; \\\n"
+        "    failed |= (POWI(nan, 0) != one || POWI(-one, -2147483647 - 1) != one || POWI(-one, 2147483647) != -one || POWI(two, -2147483647 - 1) != zero) << 3; \\\n"
+        "    failed |= (POWI(half, -2147483647 - 1) != one / zero || POWI(zero, -1) != one / zero || POWI(two, MAX) != two * POWI(two, MAX - 1)) << 3; \\\n"
+        "    return failed; \\\n"
+        "}\n"
+        "FLOAT_TEST(float_test, float, __builtin_fmaxf, __builtin_fminf, __builtin_powif, 127)\n"
+        "FLOAT_TEST(double_test, double, __builtin_fmax, __builtin_fmin, __builtin_powi, 1023)\n"
+        "FLOAT_TEST(long_double_test, long double, __builtin_fmaxl, __builtin_fminl, __builtin_powil, 16383)\n"),
+    S8_INITIALIZER(
+        "static int fabsl_test(void)\n"
+        "{\n"
+        "    int failed = 0;\n"
+        "    volatile long double zero = 0.0L, minus = -2.5L, tiny = -__LDBL_DENORM_MIN__, huge = -__LDBL_MAX__;\n"
+        "    long double negative_zero = -zero, inf = 1.0L / zero, nan = -(zero / zero);\n"
+        "    failed |= __builtin_fabsl(minus) != 2.5L || __builtin_fabsl(tiny) != __LDBL_DENORM_MIN__ || __builtin_fabsl(huge) != __LDBL_MAX__;\n"
+        "    failed |= __builtin_fabsl(-inf) != inf || __builtin_signbit(__builtin_fabsl(negative_zero)) || __builtin_fabsl(negative_zero) != 0.0L;\n"
+        "    long double magnitude = __builtin_fabsl(nan);\n"
+        "    failed |= magnitude == magnitude || __builtin_signbit(magnitude) || __builtin_fabsl(2) != 2.0L || sizeof(__builtin_fabsl(1.0)) != sizeof(long double);\n"
+        "    return failed;\n"
+        "}\n"
+        "static unsigned long length(char* p) { return __builtin_strlen(p); }\n"
+        "static int string_test(void)\n"
+        "{\n"
+        "    int failed = 0;\n"
+        "    char empty[9] = \"\";\n"
+        "    char buffer[8];\n"
+        "    failed |= __builtin_strlen(empty) != 0 || length(empty) != 0;\n"
+        "    failed |= __builtin_strcpy(buffer, \"abc\") != buffer || length(buffer) != 3 || __builtin_strcmp(buffer, \"abc\") != 0;\n"
+        "    failed |= __builtin_strcmp(\"a\", \"b\") >= 0 || __builtin_strcmp(\"b\", \"a\") <= 0;\n"
+        "    failed |= __builtin_strchr(buffer, 98) != buffer + 1 || __builtin_strchr(buffer, 'z') != 0 || __builtin_strchr(buffer, 0) != buffer + 3;\n"
+        "    return failed;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    return integer_test() | float_test() << 3 | double_test() << 7 | long_double_test() << 11 | fabsl_test() << 15 | string_test() << 16;\n"
+        "}\n"),
+};
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_library_builtins_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("gnu-library-builtins"), S8(".c"));
+    // The program is split only to stay within the portable string-literal
+    // length; the parts are written back to back.
+    String8 program = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}"), c_test_gnu_library_builtins_sources[0],
+                                    c_test_gnu_library_builtins_sources[1], c_test_gnu_library_builtins_sources[2],
+                                    c_test_gnu_library_builtins_sources[3]);
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(program));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("gnu-library-builtins-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"),
+                    S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("gnu library builtins mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 command_line[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult run = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("gnu library builtins mode={u32} form={u32}: status={u32} timeout={u32}"),
+                                mode, form, run.platform_status, (u32)run.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+#if BUSTER_LINUX
+        String8 references[] = {S8("gcc"), S8("clang")};
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("gnu-library-builtins-reference"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+            {
+                String8 command[] = {compiler, S8("-std=gnu17"), S8("-O0"), S8("-nostdinc"), S8("-fno-fast-math"), input, S8("-o"), output, S8("-lm")};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                    (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                        .use_process_environment = true, .search_path = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult build = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !build.timed_out && build.result == PROCESS_RESULT_SUCCESS,
+                        BYTE_SLICE_TO_STRING(8, build.streams[STANDARD_STREAM_ERROR]));
+                    if (!build.timed_out && build.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 command_line[] = {output};
+                        ProcessSpawnResult executable = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, executable.handle != 0))
+                        {
+                            ProcessWaitResult run = os_process_wait_deadline(temporary.arena, executable, 30000000);
+                            BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("gnu library builtins reference={S8}: status={u32} timeout={u32}"),
+                                    references[reference], run.platform_status, (u32)run.timed_out));
+                        }
+                        BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+#endif
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
 // IEC 60559 compareQuietEqual: == and != never raise FE_INVALID for a quiet NaN,
 // while the relational operators are signaling and always do (C17 F.3). Each
 // type is tested through values and through a branch condition. The same source
@@ -44677,6 +45039,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
     C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
     C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
+    C_TEST_FIXTURE(arguments, c_test_gnu_library_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
     C_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);
 

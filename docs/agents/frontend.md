@@ -157,6 +157,27 @@ signed int. Semantic expression queries and lowering share the spelling policy;
 the canonical count operation runs at the converted operand width, and its
 result converts to int before the surrounding C expression uses it. Keep
 clz/ctz runtime oracles on nonzero inputs.
+`__builtin_clrsb`/`l`/`ll` share that policy with signed int/long/long long
+operands; lowering counts leading zeros of `((x ^ (x >> (w - 1))) << 1) | 1`,
+which is never zero.
+
+The typed `__builtin_{s,u}{add,sub,mul}{,l,ll}_overflow` checks
+(`c_ir_overflow_builtins`) convert both operands to the spelling's type, store
+the wrapped result through the third argument and answer `_Bool`. Lowering
+computes in the unsigned counterpart: sign tests for add/sub, and for multiply
+a divide-back check of the magnitudes' product, so no wider type, trap or
+runtime helper is needed. The generic `__builtin_*_overflow` forms (#1394) and
+`__builtin_return_address` are not implemented and answer `__has_builtin` 0.
+`__builtin_fabsl` clears the stored sign bit, `__builtin_fmax`/`fmin` and their
+`f`/`l` forms read NaN-ness from the stored bits and select the other operand,
+and `__builtin_powi`/`powif`/`powil` run an inline square-and-multiply loop;
+none of them imports libm or a compiler-runtime `__powi*f2` helper. The
+`__builtin_strcmp`/`strcpy`/`strchr` forms and a non-constant `__builtin_strlen`
+share `c_ir_emit_library_call` with the memory family: they prefer a
+translation-unit declaration and otherwise import the standard prototype from
+`c_ir_memory_builtin_signatures`, so no `<string.h>` is needed.
+`c_test_gnu_library_builtins_runtime` checks all of these against exact oracles
+in every native allocator mode and both frontend forms.
 
 ## Target ABI predefined macros
 

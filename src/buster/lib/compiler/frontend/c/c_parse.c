@@ -5362,8 +5362,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                 {
                     CTypeKind kind = builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
                                          ? C_TYPE_INT : name.length && name.pointer[name.length - 1] == 'f' && !string_equal(name, S8("__builtin_inf"))
-                                         ? C_TYPE_FLOAT : C_TYPE_DOUBLE;
+                                         ? C_TYPE_FLOAT : name.length && name.pointer[name.length - 1] == 'l'
+                                         ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
                     return c_parse_expression_scalar_type(result, kind);
+                }
+                if (builtin == C_SYMBOL_BUILTIN_OVERFLOW)
+                {
+                    return c_parse_expression_scalar_type(result, C_TYPE_BOOL);
                 }
                 CIrSse2ImmediateShiftBuiltin shift = {0};
                 if (c_semantic_sse2_immediate_shift_builtin(name, &shift))
@@ -28305,9 +28310,8 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         {
         case C_SYMBOL_BUILTIN_ATOMIC: minimum = maximum = c_semantic_atomic_builtin_arity(c_ir_atomic_builtin_spelling(name)); break;
         case C_SYMBOL_BUILTIN_EXPECT: minimum = 2; break;
-        case C_SYMBOL_BUILTIN_MEMORY:
-            minimum = maximum = string_starts_with_sequence(name, S8("__builtin___")) ? 4u : 3u;
-            break;
+        case C_SYMBOL_BUILTIN_MEMORY: minimum = maximum = c_semantic_memory_builtin_arity(name); break;
+        case C_SYMBOL_BUILTIN_OVERFLOW: minimum = maximum = 3; break;
         case C_SYMBOL_BUILTIN_COMPLEX:
         case C_SYMBOL_BUILTIN_VA_ARG:
         case C_SYMBOL_BUILTIN_VA_START:
@@ -28317,6 +28321,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_ALLOCA:
         case C_SYMBOL_BUILTIN_STRLEN:
         case C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS:
+        case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
         case C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS:
         case C_SYMBOL_BUILTIN_FIND_FIRST_SET:
         case C_SYMBOL_BUILTIN_POPULATION_COUNT: minimum = maximum = 1; break;
