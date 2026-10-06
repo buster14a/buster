@@ -868,6 +868,8 @@ function(buster_filter_supported_c_flags out_var)
             string(APPEND CMAKE_REQUIRED_FLAGS " -Werror=unknown-warning-option")
         endif()
 
+        # Callers re-filter only on a new compiler signature; drop the previous compiler's answer.
+        unset(${flag_var} CACHE)
         check_c_compiler_flag("${flag}" ${flag_var})
         set(CMAKE_REQUIRED_FLAGS "${saved_required_flags}")
 
@@ -1067,6 +1069,7 @@ buster_register_module(compiler_aarch64_direct_simd "${BUSTER_SOURCE_DIR}/compil
 buster_register_module(compiler_aarch64_complex_simd "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_complex_simd_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_memory_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_memory_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_alias_projection "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_alias_projection${COMMON_EXTENSION}")
+buster_register_module(compiler_aarch64_base_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_base_assembly${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_unit "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly_unit${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_metadata "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_metadata${COMMON_EXTENSION}")
@@ -1087,6 +1090,7 @@ buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${C
 buster_register_module(compiler_gpu "${BUSTER_SOURCE_DIR}/compiler/gpu/gpu${COMMON_EXTENSION}")
 buster_register_module(compiler_llvm_bitcode "${BUSTER_SOURCE_DIR}/compiler/llvm/bitcode${COMMON_EXTENSION}")
 buster_register_module(compiler_ebpf "${BUSTER_SOURCE_DIR}/compiler/ebpf/ebpf${COMMON_EXTENSION}")
+buster_register_module(compiler_spirv "${BUSTER_SOURCE_DIR}/compiler/spirv/spirv${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -1126,6 +1130,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/frontend/c/record_layout_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
+    src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c
     src/buster/tests/compiler/assembly/aarch64_system_registers_test.c
     src/buster/tests/compiler/assembly/aarch64_semantics_test.c
@@ -1145,6 +1150,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
     src/buster/tests/compiler/diagnostic_test.c
     src/buster/tests/compiler/ir/ir_test.c
+    src/buster/tests/compiler/ir/ir_oracle_test.c
     src/buster/tests/compiler/ir/vector_contract_test.c
     src/buster/tests/compiler/llvm/bitcode_test.c
     src/buster/tests/compiler/codegen/machine_select_test.c
@@ -1159,6 +1165,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/jit/jit_test.c
     src/buster/tests/compiler/link/link_test.c
     src/buster/tests/compiler/gpu/gpu_test.c
+    src/buster/tests/compiler/spirv/spirv_test.c
     src/buster/tests/compiler/driver/driver_test.c
     src/buster/tests/compiler/driver/object_path_test.c
 )
@@ -1173,6 +1180,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/simd_test.h
     src/buster/tests/string_test.h
     src/buster/tests/os_test.h
+    src/buster/tests/os_capture_replay_test_internal.h
     src/buster/tests/file_test.h
     src/buster/tests/target_test.h
     src/buster/tests/truetype_test.h
@@ -1180,6 +1188,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
+    src/buster/tests/compiler/codegen/ebpf_call_test_internal.h
     src/buster/tests/compiler/frontend/c/c_test.h
     src/buster/tests/compiler/frontend/c/once_test.h
     src/buster/tests/compiler/frontend/c/type_layout_test.h
@@ -1188,6 +1197,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/frontend/c/record_layout_corpus.generated.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
+    src/buster/tests/compiler/assembly/aarch64_base_assembly_test.h
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.h
     src/buster/tests/compiler/assembly/aarch64_system_registers_test.h
     src/buster/tests/compiler/assembly/aarch64_semantics_test.h
@@ -1207,6 +1217,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.h
     src/buster/tests/compiler/diagnostic_test.h
     src/buster/tests/compiler/ir/ir_test.h
+    src/buster/tests/compiler/ir/ir_oracle_test.h
     src/buster/tests/compiler/ir/vector_contract_test.h
     src/buster/tests/compiler/llvm/bitcode_test.h
     src/buster/tests/compiler/codegen/machine_select_test.h
@@ -1221,7 +1232,9 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/jit/jit_test.h
     src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/gpu/gpu_test.h
+    src/buster/tests/compiler/spirv/spirv_test.h
     src/buster/tests/compiler/driver/driver_test.h
+    src/buster/tests/compiler/driver/wasm_switch_test_internal.h
     src/buster/tests/compiler/driver/object_path_test.h
 )
 set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
@@ -1368,17 +1381,26 @@ set(GNU_FAMILY_UNITY_DISABLE_WARNINGS
     "$<${BUSTER_UNITY_BUILD_CONDITION}:-Wno-unused-function>"
 )
 
-set(GNU_FAMILY_NATIVE_TARGET -march=native)
+# Diagnostic trees may pick another -march= value, for example x86-64-v3 so
+# Valgrind (which cannot decode EVEX) runs the compiler. Trusted trees keep
+# native; see docs/agents/benchmarking.md.
+set(BUSTER_NATIVE_TARGET native CACHE STRING "GNU-family -march= value for host builds")
+if (NOT BUSTER_NATIVE_TARGET MATCHES "^[A-Za-z0-9_.+-]+$")
+    message(FATAL_ERROR "BUSTER_NATIVE_TARGET must be a single -march= value, got '${BUSTER_NATIVE_TARGET}'")
+endif()
+set(GNU_FAMILY_NATIVE_TARGET -march=${BUSTER_NATIVE_TARGET})
 if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # Win64 guarantees only 16-byte stack alignment. MinGW GCC 15 can emit
     # 32-byte-aligned AVX spills without realigning the incoming stack.
     list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
 endif()
-buster_native_target_compatibility_flags(
-    GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
-    "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
-)
-list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
+if (BUSTER_NATIVE_TARGET STREQUAL "native")
+    buster_native_target_compatibility_flags(
+        GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
+        "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
+    )
+    list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
+endif()
 
 # Match the unsigned plain-char contract of GNU_FAMILY_OPTIONS. /J changes
 # the compiler's type semantics; defining _CHAR_UNSIGNED alone is not enough.
@@ -2077,12 +2099,13 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
-# The headless compiler has no production font or image consumer. Keep the
-# reusable modules registered above, but add them to ide only for their tests
-# (and image fuzzing). Future product targets must name their own dependencies.
+# The headless compiler has no production font, image or AArch64 syntax-model
+# consumer. Keep the reusable modules registered above, but add them to ide only
+# for their tests (and image fuzzing). Future product targets must name their
+# own dependencies.
 set(BUSTER_COMPILER_TEST_MODULES)
 if (BUSTER_INCLUDE_TESTS)
-    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype compiler_aarch64_syntax)
 endif()
 if (BUSTER_INCLUDE_TESTS OR BUSTER_FUZZ_AVAILABLE)
     list(APPEND BUSTER_COMPILER_TEST_MODULES image)
@@ -2105,12 +2128,12 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_system_registers
     compiler_aarch64_semantics
     compiler_aarch64_system_semantics
-    compiler_aarch64_syntax
     compiler_aarch64_semantic_vm
     compiler_aarch64_direct_simd
     compiler_aarch64_complex_simd
     compiler_aarch64_memory_semantics
     compiler_aarch64_alias_projection
+    compiler_aarch64_base_assembly
     compiler_assembly
     compiler_assembly_unit
     compiler_assembly_metadata
@@ -2132,6 +2155,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_gpu
     compiler_llvm_bitcode
     compiler_ebpf
+    compiler_spirv
     compiler_driver
     simd
     file
@@ -2140,6 +2164,8 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     hash
     ${BUSTER_COMPILER_PLATFORM_MODULES}
 )
+
+include(cmake/HotReloadDemo.cmake)
 
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
      CMAKE_SYSTEM_PROCESSOR MATCHES
@@ -2301,6 +2327,23 @@ else()
             COMMENT "Run headless UI UTF-8 consumer regressions"
             VERBATIM)
     endif()
+    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
+        # Counter-based scalability regressions for keyed-box lookup and focus
+        # navigation, against the production ui_core and an inert renderer.
+        executable_add(ui_scale_component_tests OFF src/buster/tests/ui_scale_component_test.c
+            MODULES os arena integer string file hash time float ui_core)
+        if (UNIX)
+            target_link_libraries(ui_scale_component_tests PRIVATE m)
+        elseif (WIN32)
+            target_link_libraries(ui_scale_component_tests PRIVATE ws2_32)
+        endif()
+        add_custom_target(test_ui_scale
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_scale_component_tests>"
+            DEPENDS ui_scale_component_tests
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run headless UI scalability regressions"
+            VERBATIM)
+    endif()
     add_custom_target(test_units
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
@@ -2374,6 +2417,11 @@ else()
     if (TARGET test_ui_utf8)
         add_dependencies(test_all test_ui_utf8)
         add_dependencies(test_units test_ui_utf8)
+    endif()
+
+    if (TARGET test_ui_scale)
+        add_dependencies(test_all test_ui_scale)
+        add_dependencies(test_units test_ui_scale)
     endif()
 
     # Desktop-only performance benchmark. Not wired up for Android/iOS:

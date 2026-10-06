@@ -107,11 +107,17 @@ UTF-16 NUL code units.
 Children inherit only standard streams selected by the caller. Captured pipe
 ends are first moved above descriptors 0-2, so a parent with closed standard
 streams cannot make `dup2` alias a pipe end that is subsequently closed. Linux
-uses a close-from spawn action, Apple uses `POSIX_SPAWN_CLOEXEC_DEFAULT` plus
+uses a close-from spawn action under glibc, other Linux libcs close an
+enumerated `/proc/self/fd` snapshot (a failed `readdir` fails the spawn rather
+than yielding a partial set), Apple uses `POSIX_SPAWN_CLOEXEC_DEFAULT` plus
 explicit standard-stream inheritance, and Windows passes only duplicated
 standard handles and captured pipe ends through
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. Parent pipe ends are non-inheritable and
-all temporary duplicates are closed after `CreateProcessW`.
+all temporary duplicates are closed after `CreateProcessW`. A snapshot cannot
+be atomic with a concurrent open, so every first-party POSIX descriptor is
+created close-on-exec (`O_CLOEXEC`, `pipe2`, `F_DUPFD_CLOEXEC`); the standard
+streams reach the child through `dup2` file actions, which clear the flag on
+the target.
 
 GPU tool execution opts into captured-PATH lookup for the tool itself, then
 passes a fixed SDK/locale/temporary-directory environment allowlist rather than
@@ -119,6 +125,145 @@ the complete compiler environment. Registered `os_tests` inject each setup
 failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
+
+Linux process-group cleanup reads `self/status` from its retained procfs
+descriptor. `NSpid` lists the procfs mount's namespace followed by successively
+nested namespaces; the final coordinate is the caller's active namespace and
+must equal `getpid()`. Numeric IDs may repeat across levels. Context selection
+uses that ordered coordinate, retains the procfs and PID-namespace identities,
+and rejects missing/malformed/duplicate fields or a mismatching final ID. Leader
+identity checks, exact-child reservations and the two matching census snapshots
+remain required before successful cleanup.
+
+Registered Linux `os_tests` exercise the production raw-status context selection
+with unique/repeated IDs, nonfinal-only matches, invalid identity prerequisites,
+zero/negative/mismatching current IDs and malformed fields. A real procfs context
+open/close control checks descriptor release; the exited private-group control
+uses a three-second deadline. These fixtures do not create nested PID namespaces
+or claim attribution for unrelated historical process-group failures. The field
+ordering follows the Linux man-pages project's
+[`proc_pid_status(5)`](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html)
+and namespace-local numbering follows
+[`pid_namespaces(7)`](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
+
+## Captured-payload storage
+
+The Windows and POSIX capture collectors pack retained stdout and stderr into
+16 KiB payload blocks. Each stream fills its last block before another block is
+allocated, independently of native read boundaries. Empty reads and bytes past
+the capture limits allocate no retained-payload storage. Prefixes, shared-quota
+admission order, overflow policy and observed/captured/streamed/dropped counters
+keep their existing meanings. Overflow-file descriptors remain caller-owned.
+
+`STREAM_TO_FILE` requires a regular-file descriptor for each captured stdout or
+stderr stream, even when its configured quota would avoid overflow. Admission
+runs after policy/argv/environment validation and before executable lookup or
+platform process setup. POSIX checks descriptor metadata with `fstat`; Windows
+requires `GetFileType` disk classification before checked file metadata. Missing
+or nonregular sinks fail with `PROCESS_SPAWN_FAILURE_CAPTURE_SINK` and the native
+invalid-argument error; failed metadata/type queries preserve their native
+errors. Uncaptured sinks and all sink fields under truncate/fail are ignored.
+Refusal launches no child and acquires no process pipes or containment objects.
+
+The caller must keep the original borrowed descriptors open, writable and
+unrebound through wait, and must not change their flags while the operation is
+active. Admission does not seek, write, flush, close or change those flags.
+Synchronous regular-file storage and metadata I/O can delay deadline/cancellation
+servicing; this policy rejects stream backpressure and does not promise a hard
+wall-clock bound on storage or operating-system scheduling. Spill write failures
+still preserve native child status, explicit capture failure and exact transferred
+and dropped-byte counts while owned process cleanup continues.
+
+Registered desktop `os_tests` run sink-refusal probes inside a first-party helper
+with its own 30-second outer deadline and private group/job. Inner probes inherit
+that containment. POSIX fills an actual pipe to `EAGAIN`, restores its original
+blocking flags, and checks refusal for stdout, stderr and valid-first/bad-second
+sinks without a child marker. Actual FIFO/socket and Windows pipe/character
+handles supplement missing/invalid/query-error controls. Descriptor/handle census,
+identity and flag controls check caller ownership. Separate literal both-stream
+regular spill controls cover partial writes, real read-only-descriptor write
+failure, caller reuse, platform deadline cleanup and POSIX flag cancellation.
+Mobile retains production compilation and existing collector coverage; these
+desktop process fixtures do not claim mobile process execution.
+
+For retained stream lengths `R_s`, the collector allocates exactly
+`N = sum(ceil(R_s / 16384))` chunk headers and payload blocks. With `R` total
+retained bytes, `S` nonempty streams and header size/alignment `H`/`A`, requested
+scratch-arena storage, including alignment padding, is at most
+`R + S * 16383 + N * (H + A - 1)`. Only each stream's last block can contain
+unused payload capacity. Flattening separately allocates `R` bytes in the
+caller's arena before capture scratch storage is released. This bounds requested
+collector storage rather than arena committed pages, process RSS or all memory
+used by the invocation; explicitly unbounded capture limits still admit
+unbounded retained output.
+
+The private `BUSTER_INCLUDE_TESTS` collector in `os_internal.h` feeds the
+production append/flatten boundary and reports chunk counts and requested
+scratch bytes before flattening. Registered `os_tests` compare identical inputs
+fed whole, one byte at a time and in 97-byte fragments at lengths 0, 1, 16384,
+16385 and 1 MiB. They overwrite released scratch storage before checking caller
+output ownership. Literal quota controls cover zero/default and `UINT64_MAX`
+limits, the 32 MiB default total, interleaved stream admission, truncation and
+failure, and exact overflow-file payloads including a partial write failure and
+caller descriptor reuse. Existing live-process drain and transport controls
+remain required. These allocation controls make no speed or RSS claim.
+
+## Deterministic captured-pipe replay
+
+Ordinary POSIX `os_process_wait_deadline` drains the blocking pipes created by
+`os_process_spawn`. `os_process_capture_step` in `os_internal.h` separates
+readiness, byte progress, EOF, abandonment and close observations from native
+calls. One readiness observation admits one read. A successful short read
+advances by its exact count; an interrupted read contributes no bytes and
+returns to polling. Poll timeout/interruption can be retried. EOF stops reads;
+one close attempt ends descriptor authority, even if that attempt fails.
+A close error conservatively leaves release outcome unknown and is never
+retried: it cannot authorize reuse of a possibly recycled descriptor.
+
+Transport failure and abandoned draining remain failed after successful child
+termination. Successfully drained prefixes are retained and the child's native
+status remains separately available. `capture_failed` reports transport/cleanup
+failure; abandonment without EOF remains unsuccessful without setting that bit.
+A timeout alone preserves the Wasm consumer's existing pre-readiness retry
+eligibility. The reducer does not authorize restarting a child whose external
+effects may already have happened.
+The reducer does not own process-group identity, cancellation signalling,
+descendant enumeration or the quiescent-group buffered-byte snapshot.
+
+Registered `os_tests` replay numeric `capture-replay-v1` event/count traces with
+an independent ownership/readiness/accounting oracle after every transition.
+The bounded worklist enumerates native-permitted prefixes through six events;
+deletion minimization retains admission and failure class, including the
+invariant class for discovered counterexamples. Shared poll failure is applied
+to every open stream. Traces contain no payloads, paths, command lines or user
+environment. Tests reject malformed counts, reads without readiness and reuse
+after close. They represent idle polls and EINTR, not read EAGAIN on these
+blocking pipes. The recorded `WAIT_FAILED, CLOSE_OK` regression is a minimal
+poll-resource-failure witness, conditional on a successful child exit.
+
+Read EBADF and close-after-release EIO injections are separate adapter
+robustness controls, excluded from native event generation. They test failure
+wiring, prefix preservation and uncertain-close handling; they do not prove
+that an exclusively owned anonymous pipe naturally returns these errors.
+The native fixture observes a real five-byte child's successful exit without
+reaping it, then applies a calling-thread, bounded call-index fault. Healthy
+controls before and after check real bytes and descriptor census. Existing
+real flood, deadlines and process-tree tests remain independent challenges;
+simulated success is not complete OS validation. Native fixture execution is
+desktop Linux/macOS; the reducer itself is portable C. Windows capture and
+group lifecycle are outside this replay model.
+
+Primary contracts are the Linux man-pages `read(2)`, `poll(2)`, `pipe(7)` and
+`close(2)` pages (rendered man-pages 6.19 at
+[man7.org](https://man7.org/linux/man-pages/)). Short progress, zero-byte EINTR,
+blocking-pipe EOF and poll ENOMEM are modeled; generic-file EIO examples are
+not transferred to anonymous pipes. At Apple XNU
+`f6217f891ac0bb64f3d375211650a4c1ff8ca1ea` (`xnu-12377.1.9`),
+[`pipe_close`](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sys_pipe.c)
+returns zero. That file's header has APSL-2.0 plus John S. Dyson's custom
+redistribution terms; no code is imported. The inspected Linux documentation's
+per-page licenses/provenance and any unavailable verification remain recorded
+on the owning issue/PR rather than inferred as a repository-wide license.
 
 ## Virtual memory commitment and prefaulting
 
@@ -171,6 +316,26 @@ intact, and a real commit failure is reported without an advisory request
 having been made — none of which needs privileges or real memory exhaustion.
 The `commit_prefault` child-process failure mode asserts the fatal commit
 diagnostic with prefaulting requested.
+
+## Arena discard and zeroed reuse
+
+`arena_set_position_and_decommit` discards only complete native pages beyond
+the retained position. Legal sub-page granularities and non-page-sized
+reservations can leave a partial tail page above the discarded range. If any
+previous allocation reached that tail, its dirty watermark remains conservative
+through rewind, recommit and pooled reuse, so `arena_allocate_zeroed_bytes`
+clears the retained bytes. When no dirty bytes survive above the discarded end,
+non-Apple platforms can lower the mark to the retained prefix. Darwin preserves
+the mark for discarded pages as well because its discard may preserve contents.
+A failed discard leaves the logical cursor, committed extent and dirty mark
+unchanged; a rewind with no complete page to discard still succeeds.
+
+Registered `arena_tests` exercise actual create/allocate/decommit/recommit calls
+for dirty partial tails, complete-page and untouched-tail controls, sub-page
+reservations, no-discard rewinds, repeated cycles and retirement/pool reuse.
+The private `arena_internal.h` one-shot seam skips one discard attempt on the
+calling thread to check failure-state and payload preservation. It does not
+represent an observed native OS failure.
 
 ## Exclusive directory ownership
 

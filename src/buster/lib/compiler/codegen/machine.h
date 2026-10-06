@@ -1544,7 +1544,7 @@ typedef enum MachineEditKind
 } MachineEditKind;
 
 // Result of selecting one canonical typed-IR function into machine IR.
-// `supported` false is an explicit per-function fallback: `failed_opcode`
+// `supported` false is an explicit selection refusal: `failed_opcode`
 // names the first construct outside the selected subset.
 // How the relocation at a call-target site resolves. DIRECT uses the target's
 // default form (rip-relative on x86-64). GOT
@@ -1569,7 +1569,14 @@ typedef struct MachineSelectResult MachineSelectResult;
 struct MachineSelectResult
 {
     MachineFunction function;
+    // Canonical block ID -> selected MIR entry block after expansion/layout.
+    // Null means identity. Owned by the selector arena and valid until the
+    // caller releases that function's scratch, like the selected MIR itself.
+    u32* canonical_block_entries;
     IrOpcode failed_opcode;
+    // Rule-specific selector refusal, if present. The caller copies these
+    // bytes before releasing the selector's scratch arena.
+    String8 failure_detail;
     bool supported;
     bool returns_value;
     // Set only after a target selector has finished all typed-builder streams
@@ -1905,6 +1912,11 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 // original is safe.
 BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function);
 BUSTER_F_DECL bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function);
+// Compose an optional canonical -> MIR projection through block renumbering.
+// A null map means identity; a split publishes an arena-owned projection before
+// reclaiming scratch, while an unchanged function retains its existing map.
+BUSTER_F_DECL bool machine_function_split_parameter_edges_with_canonical_map(Arena* arena, MachineFunction* function,
+                                                                            u32** canonical_entries, u32 canonical_count);
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
 BUSTER_F_DECL String8 machine_verify_error_name(MachineVerifyError error);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);
@@ -1996,6 +2008,10 @@ struct MachineFastPrepass
     u32* last_use;
     u8* escapes;
     u32* next_call;
+    // One advisory physical register per virtual register, or 0xFF: the
+    // fixed register (or forced scratch) of the value's first constrained
+    // use, when that use sits close after the definition in the same block.
+    u8* register_hints;
     // One compact SoA word per instruction. Six four-bit lane masks record
     // physical, virtual, block, use, define, and use-define operands after
     // the prepass has classified the row once. Two high state bits separate

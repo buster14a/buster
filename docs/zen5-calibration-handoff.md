@@ -44,9 +44,10 @@ binary, root, host/profile or output-oracle change requires a new plan and job.
 
 ## Service producer
 
-The served `zen5-calibration-v1` recipe (`tools/bench_service/zen5_recipe.c`,
-described in `tools/bench_service/README.md`) is the producer; it has not yet
-run on the physical 9700X. It
+The `zen5-calibration-v1` recipe was served by the benchmark service, which
+is removed (#2708); it never ran on the physical 9700X and nothing currently
+produces these bundles. The remainder of this section records what that
+producer emitted, as the input contract for `tools/zen5_aa_evaluator.py`. It
 builds the five trusted subjects serially, writes this plan in the canonical
 `freeze` form before any timed child, publishes a durable plan manifest, and
 emits `immutable.json`, `same-root-rebuild.json` and `cross-root.json` under
@@ -169,8 +170,7 @@ receipts. The worker's terminal hook (`bq_worker_before_terminal`) validates
 the zen5 manifest (`bq_worker_result_validate`) and journals `BQ_RESULT_BIND`.
 The RESULT reply then reports the manifest digest, and `bq_export_snapshot`
 writes it at offset 112 and the SHA-256 of `bq_recipe_profile` at offset 608.
-`bq_test_zen5_served_binding` (`tools/bench_service/tests.c`) checks this end to
-end on the recipe self-test's result tree. An attempt without these receipts,
+An attempt without these receipts,
 or with digests that differ from them, is `invalid`.
 
 The confirmatory set is fixed in advance by the protocol's
@@ -215,6 +215,29 @@ The evaluator self-test requires it to be valid with no unset choice.
 - **Confirmatory jobs.** The range is `120..9999`. No other job may be
   submitted to the service from this protocol's merge until window 2 closes,
   or the confirmatory set is `invalid`.
+
+Window 2 evaluated `inconclusive` (`aa-policy-sha256=8366b4d9…`). The cause was
+CPU 2 power management: after each 2 s inter-block gap, the first children ran
+slow and the following pairs ramped up, which shifted block medians. Host packet
+H1 pinned CPU 2's frequency policy, disabled its idle states deeper than C1,
+moved IRQs away and offlined its SMT sibling
+([#36](https://github.com/buster14a/buster/issues/36#issuecomment-5947820015)).
+
+### Frozen window-3 protocol
+
+`docs/zen5-aa-protocol-window3.json` is the protocol for window 3 on the H1
+host, approved on
+[#36](https://github.com/buster14a/buster/issues/36#issuecomment-5949598169).
+The self-test checks it as it checks the window-2 protocol.
+
+- **Pilots.** The H1 verification attempt (job 703) and four pilots (jobs 712,
+  721, 730, 739). No window-2 confirmatory value was used.
+- **Limits.** The limits use the window-2 rule unchanged.
+- **Seed and range.** The seed is `4260883` and the confirmatory range is
+  `740..9999`. The band and applicability are unchanged.
+- **Known host property.** A constant cold first child follows each 2 s gap.
+  A pilot also showed an unexplained periodic slowdown of about 8 s, which
+  sets the cross-root wall-time `block_shift` limit at 0.17.
 
 Each attempt is replayed from its exported result root:
 

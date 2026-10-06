@@ -997,14 +997,14 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             {
                 if (format.pointer[right_brace_index] == '{')
                 {
-                    os_fail();
+                    os_fail_message_raw(S8("string_format: nested opening brace in placeholder (write a literal brace as {{)"));
                 }
                 right_brace_index += 1;
             }
 
             if (right_brace_index >= format.length)
             {
-                os_fail();
+                os_fail_message_raw(S8("string_format: unterminated placeholder (write a literal brace as {{)"));
             }
 
             String8 format_body = string_slice(format, format_index + 1, right_brace_index);
@@ -1073,7 +1073,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
             if (format_string_i >= BUSTER_ARRAY_LENGTH(possible_format_strings))
             {
-                os_fail();
+                os_fail_message_raw(S8("string_format: unknown placeholder type (write a literal brace as {{)"));
             }
 
             FormatTypeId format_type_id = (FormatTypeId)format_string_i;
@@ -1566,6 +1566,130 @@ void string_print(String8 format, ...)
     va_end(variable_arguments);
 }
 
+void string_print_error(String8 format, ...)
+{
+    va_list variable_arguments;
+    va_start(variable_arguments, format);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(2));
+    va_end(variable_arguments);
+}
+
+// Needles shorter than this use the direct sliding comparison; longer needles
+// use the allocation-free Crochemore-Perrin two-way search, which bounds the
+// work at O(haystack + needle) even for long repeated-prefix inputs.
+#define STRING_FIRST_SEQUENCE_TWO_WAY_MINIMUM_NEEDLE (32)
+
+BUSTER_GLOBAL_LOCAL u64 string_first_sequence_two_way(String8 s, String8 sub)
+{
+    const u8* needle = (const u8*)sub.pointer;
+    const u8* haystack = (const u8*)s.pointer;
+    u64 needle_length = sub.length;
+    u64 result = BUSTER_STRING_NO_MATCH;
+
+    // Maximal suffix under both byte orderings; indices start at u64 -1 and rely on wraparound.
+    u64 suffix_end[2];
+    u64 suffix_period[2];
+    for (u64 order = 0; order < 2; order += 1)
+    {
+        u64 ip = (u64)-1;
+        u64 jp = 0;
+        u64 k = 1;
+        u64 p = 1;
+        while (jp + k < needle_length)
+        {
+            u8 a = needle[ip + k];
+            u8 b = needle[jp + k];
+            if (a == b)
+            {
+                if (k == p)
+                {
+                    jp += p;
+                    k = 1;
+                }
+                else
+                {
+                    k += 1;
+                }
+            }
+            else if (order == 0 ? a > b : a < b)
+            {
+                jp += k;
+                k = 1;
+                p = jp - ip;
+            }
+            else
+            {
+                ip = jp;
+                jp += 1;
+                k = 1;
+                p = 1;
+            }
+        }
+        suffix_end[order] = ip;
+        suffix_period[order] = p;
+    }
+
+    bool reverse_longer = suffix_end[1] + 1 > suffix_end[0] + 1;
+    u64 critical = reverse_longer ? suffix_end[1] : suffix_end[0];
+    u64 period = reverse_longer ? suffix_period[1] : suffix_period[0];
+
+    bool periodic = period + critical + 1 <= needle_length;
+    if (periodic)
+    {
+        periodic = string_equal(string_slice(sub, 0, critical + 1), string_slice(sub, period, period + critical + 1));
+    }
+    u64 memory_reset = 0;
+    if (periodic)
+    {
+        memory_reset = needle_length - period;
+    }
+    else
+    {
+        u64 right_length = needle_length - critical - 1;
+        period = (critical > right_length ? critical : right_length) + 1;
+    }
+
+    u64 memory = 0;
+    u64 position = 0;
+    bool searching = true;
+    while (searching && position + needle_length <= s.length)
+    {
+        const u8* window = haystack + position;
+        u64 k = critical + 1 > memory ? critical + 1 : memory;
+        while (k < needle_length && needle[k] == window[k])
+        {
+            k += 1;
+        }
+
+        if (k < needle_length)
+        {
+            position += k - critical;
+            memory = 0;
+        }
+        else
+        {
+            k = critical + 1;
+            while (k > memory && needle[k - 1] == window[k - 1])
+            {
+                k -= 1;
+            }
+
+            if (k <= memory)
+            {
+                result = position;
+                searching = false;
+            }
+            else
+            {
+                position += period;
+                memory = memory_reset;
+            }
+        }
+    }
+
+    return result;
+}
+
 u64 string_first_sequence(String8 s, String8 sub)
 {
     u64 result = BUSTER_STRING_NO_MATCH;
@@ -1576,14 +1700,30 @@ u64 string_first_sequence(String8 s, String8 sub)
     }
     else if (s.length >= sub.length)
     {
-        u64 end = s.length - sub.length + 1;
-        for (u64 i = 0; i < end; i += 1)
+        if (sub.length >= STRING_FIRST_SEQUENCE_TWO_WAY_MINIMUM_NEEDLE)
         {
-            String8 chunk = string_slice(s, i, i + sub.length);
-            if (string_equal(chunk, sub))
+            // One full prefix probe costs at most the needle length and keeps
+            // immediate matches on the existing optimized equality path.
+            if (string_equal(string_slice(s, 0, sub.length), sub))
             {
-                result = i;
-                break;
+                result = 0;
+            }
+            else
+            {
+                result = string_first_sequence_two_way(s, sub);
+            }
+        }
+        else
+        {
+            u64 end = s.length - sub.length + 1;
+            for (u64 i = 0; i < end; i += 1)
+            {
+                String8 chunk = string_slice(s, i, i + sub.length);
+                if (string_equal(chunk, sub))
+                {
+                    result = i;
+                    break;
+                }
             }
         }
     }

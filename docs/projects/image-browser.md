@@ -129,7 +129,7 @@ bounded polling and repeated shutdown. `test_rendering_raster_no_display`
 checks recoverable unavailable-display failure.
 
 `test_image_browser_native` runs the actual application with the hand-authored
-`tests/image-browser` directory and `--smoke`: it loads and presents both files,
+`src/buster/tests/image_browser/fixtures` directory and `--smoke`: it loads and presents both files,
 checks decoded pixels/metadata and server readback, sends native XCB key,
 wheel, drag and close events, requires the resulting generation/viewport
 transitions, and shuts down the persistent loader. Smoke is available only in test builds (`BUSTER_INCLUDE_TESTS=ON`).

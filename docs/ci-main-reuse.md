@@ -1,6 +1,6 @@
 # Exact queue-to-main CI reuse (#1808)
 
-`Buster CI` may reuse validation from nineteen jobs from a successful `merge_group` execution when
+`Buster CI` may reuse validation from twenty-five jobs from a successful `merge_group` execution when
 GitHub merges **that same commit SHA** to `main`. The source run remains the
 authoritative execution. The main `CI complete` job links it and says that the
 native/mobile/UEFI main jobs were skipped and desktop jobs ran only their cache lifecycle. It does not claim that their validation ran twice. Required
@@ -10,7 +10,7 @@ check names and the merge-queue ruleset are unchanged.
 
 | Main-push obligation | Policy | Reason |
 | --- | --- | --- |
-| Ten desktop `release`/`checks` shards | Reuse validation; run cache lifecycle on main | Same queue-proven compiler/configuration/fixture coverage. Main retains exact-key Zig restore, digest verification, publication and evidence, logs and existing job names. |
+| Eighteen desktop owners: `release` plus isolated check owners on Linux, macOS and x86 Windows; grouped `checks` on Windows ARM | Reuse validation; run cache lifecycle on main | Same queue-proven compiler/configuration/fixture coverage. Main retains exact-key Zig restore, digest verification, publication and evidence, logs and existing job names. |
 | Workflow lint | Run on main | The merge-parent guard evaluates the main push's `before` SHA and event. |
 | Clang analyzer shards | Reuse exact queue analysis; retain main receipt job | Both events use the exact SHA as candidate and baseline. Queue performs the full candidate analysis and failure/coverage controls, possibly with an additional comparison; main ordinarily requests candidate-only analysis. All four source execution steps and its artifact must succeed. |
 | Five desktop-native mode lanes and three Unix differentials | Reuse exact queue jobs if admitted | Same commit, job definitions and input-free test commands; source job and required step results remain authoritative. |
@@ -19,7 +19,7 @@ check names and the merge-queue ruleset are unchanged.
 | UEFI boot | Reuse exact queue job if admitted | Same commit, pinned firmware packages and boot commands; source boot result and retained artifact are required. |
 | Independent required workflows | Unchanged | This policy affects only `Buster CI`; their checks still run under their own contracts. |
 
-The nineteen exact names and artifact prefixes are declared in
+The twenty-five exact names and artifact prefixes are declared in
 `tools/main_ci_reuse.py`; tests compare those names with the workflow matrix
 inventory. The source artifact record retains its digest, run/attempt binding,
 runner and resolved toolchain logs. Native LLVM is resolved at execution time
@@ -36,8 +36,8 @@ contents and Actions permissions. It checks the current run's repository ID,
 workflow ID/path, exact commit, main ref, push event and first attempt. It
 requires one successful, completed first-attempt merge-queue run with the same
 SHA, the expected queue ref, and completion within two hours before the main
-run. It checks the exact workflow blob against the local checkout, all 21
-successful source job identities and mandatory coverage steps, and nineteen
+run. It checks the exact workflow blob against the local checkout, all 27
+successful source job identities and mandatory coverage steps, and twenty-five
 nonempty, unexpired, source-bound artifacts with SHA-256 digests. Paged API
 results must be complete. It rereads the source and current runs after
 collection to catch attempt movement.
@@ -61,7 +61,7 @@ authority, no cross-event cancellation key is shared, and no check is forged.
 
 This is policy `buster-main-ci-reuse-v2`. Existing required checks, matrix
 names, cache keys, cache write policy and artifact names remain unchanged.
-Desktop cache jobs still allocate all ten platform runners and the analyzer receipt still allocates its Linux runner; this change saves
+Desktop cache jobs still allocate all eighteen desktop runners and the analyzer receipt still allocates its Linux runner; this change saves
 build/test and compiler-install work, not those allocations. Reducing them to
 five cache publishers is a separate cache/check-contract transition. Independent
 workflows require their own event/coverage review before reuse can be enabled.
@@ -85,8 +85,9 @@ The bound source is rechecked during those waits. Multiple/replacement runs,
 changed attempts/identity, failed execution, malformed listings, exhausted page
 bounds, and definite permission errors do not retry. A persistently unavailable
 or inconsistent listing remains a failure: direct retrieval alone is not a
-waiver of the uniqueness/completeness policy. Before scheduling, missing proof
-still selects full CI immediately rather than polling.
+waiver of the uniqueness/completeness policy. Before scheduling, the decision uses the same bounded discovery recollection.
+It still selects full CI if complete proof cannot be collected. See the decision
+recollection contract below.
 
 Both phases write `buster-main-ci-reuse-result-v1` diagnostic JSON. Only a
 `status: verified` result contains `receipt`. Failures record the phase, stage,
@@ -111,7 +112,7 @@ and retained main execution checks remain required.
 
 Run `python3 -B tools/main_ci_reuse_test.py -v` and the existing workflow
 policy/inventory tests. On a bounded queue-to-main transition, retain the
-source and main run/attempt IDs, the nineteen source job IDs, the receipt and the
+source and main run/attempt IDs, the twenty-five source job IDs, the receipt and the
 current job inventory. Compare the source and main jobs' `created_at`,
 `started_at` and `completed_at` values: sum actual runner busy seconds, report
 queue delay separately, and report run creation to aggregate completion for
@@ -121,3 +122,41 @@ transition; an older incident is a baseline, not an after measurement.
 The existing `github_ci_time.py` normal matrix cohorts describe full
 executions. Reused main runs must be measured separately and must not be
 pooled into those full-execution medians.
+
+## Bounded decision discovery recollection
+
+Both phases may recollect the workflow-scoped, exact-SHA discovery listing at
+most three times, with one- and two-second backoff. Only an empty listing,
+a moving pagination total, HTTP 429/5xx, or an identified transport failure is
+eligible. The production GET reader wraps exhausted failures in
+`APIReadError`; the reuse reader recognizes its numeric status or transport
+classification and retains HTTP status in diagnostics. Definite 403/404,
+malformed metadata, duplicate runs, wrong identities, changed attempts, failed
+coverage and unavailable artifacts remain refusals. No pages or evidence from a
+failed read are combined with another snapshot.
+
+A decision retry has no source receipt to trust yet. Every recovered listing
+must still yield exactly one already-completed, successful first attempt,
+finished before the main run was created within the existing two-hour window.
+The full job, step, artifact, workflow and run-recheck predicate is unchanged.
+A source that completes during backoff cannot authorize reuse for that main run.
+At finish, the previously bound source is still reread before discovery and
+during backoff; changed evidence fails the aggregate.
+
+The three seconds are backoff, not total request time. The shared GET reader
+already permits four transport attempts within a 30-second budget per GET.
+Discovery can therefore add two listing collections beyond the former decision
+policy. The existing five-minute decision-job timeout bounds live execution;
+a timeout or persistent uncertainty cannot enable reuse. There are no retries
+of missing jobs, failed/cancelled required steps, stale workflow blobs or
+expired/missing artifacts in this change.
+
+The network-free state replay compares the former one-read decision with
+absent-then-complete evidence: the old policy falls back; the new policy reuses
+only after all twenty-five jobs and artifacts are independently verified. The
+production wrapper regression exercises actual `GitHub.pages/get` and the
+shared GET reader with a mocked HTTP transport in both phases. Hosted CI runs
+these controls through the existing workflow-tools suite. This is a prospective
+reliability improvement: historical full-main fallbacks in the lifecycle sample
+had no exact-SHA queue source and remain full executions under this policy.
+No observed runner-minute saving or latency speedup is attributed to this change.
