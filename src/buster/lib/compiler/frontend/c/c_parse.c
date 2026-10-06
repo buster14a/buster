@@ -14894,6 +14894,20 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
         }
         else
         {
+            // An abstract group has no name token: its callers place the name
+            // at the group's `)`, or at its `(` for a nested group. When an
+            // array suffix follows the pointer chain, the name would stand
+            // before it instead, so `(*[3])` derives that suffix outside the
+            // pointer exactly as `(*name[3])` does (C17 6.7.7).
+            bool abstract_group = !frame->has_name && frame->kind == C_TYPE_PARSE_FRAME_PARENTHESIZED &&
+                                  nested_index > frame->declarator_start + 1 &&
+                                  (frame->name_index == frame->declarator_start ||
+                                   c_parse_matching_delimiter_indexed(result, preprocess, frame->declarator_start) == frame->name_index);
+            bool abstract_suffix = abstract_group && c_token_is_punctuator(&preprocess.tokens[nested_index], C_PUNCTUATOR_LEFT_BRACKET);
+            if (abstract_group)
+            {
+                frame->name_index = nested_index;
+            }
             // `void (*getf(int))(void)` is a function returning a pointer to
             // function: the name inside the pointer declarator carries its own
             // parameter list.  Take that group out of the way of the scan looking
@@ -14917,7 +14931,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                                  : frame->has_name                            ? frame->name_index + 1
                                                                               : frame->name_index;
             u32 bracket_depth = 0;
-            while (frame->has_name && frame->close_index < frame->end)
+            while ((frame->has_name || abstract_suffix) && frame->close_index < frame->end)
             {
                 const CToken* token = &preprocess.tokens[frame->close_index];
                 if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_BRACKET))
@@ -15147,9 +15161,12 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             }
             return;
         }
-        if (frame->has_name)
+        // An abstract group's suffixes start at its name position itself; only
+        // an abstract group with an in-group suffix leaves its `)` past that
+        // position. A function suffix frame reaches here with its own range.
+        if (frame->has_name || (frame->kind == C_TYPE_PARSE_FRAME_PARENTHESIZED && frame->close_index > frame->name_index))
         {
-            u32 array_index = frame->has_inner_parameters ? frame->inner_close + 1 : frame->name_index + 1;
+            u32 array_index = frame->has_inner_parameters ? frame->inner_close + 1 : frame->name_index + frame->has_name;
             frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &array_index, frame->close_index);
             if (array_index != frame->close_index)
             {
