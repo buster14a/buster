@@ -36878,7 +36878,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(Uni
 // scope the initializer dominates every reachable read. The shortcut must not
 // change the IR: each shape lowers with and without it to the same parameters,
 // values and instructions. Eligible shapes must create fewer provisional
-// parameters; labels, case/default and statement-expression labels disable it.
+// parameters. A label or case/default disables it only for a local whose scope
+// it lies in when a jump to it starts before the local's initializer ends or
+// outside that scope.
 // A branching initializer stores in its join block and still qualifies; a
 // conditional first assignment or an initializer that reads the local does not.
 // The dead `r-=y` after a braced `break` sends an unreachable edge into the
@@ -36889,23 +36891,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_declaration_definition(Unit
     struct DeclarationDefinitionCase
     {
         String8 source;
-        bool eligible;
+        // 1: the shortcut must create fewer provisional parameters; 0: it
+        // must not apply; -1: it applies where the walk would only have
+        // forwarded through single-predecessor blocks, so the count may tie.
+        s32 fewer;
     } cases[] = {
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}return r;}"), true},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}done:return r;}"), false},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}switch(c){default:r+=1;}return r;}"), false},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=({int z=x;l:z;});else r-=y;n-=1;}}return r;}"), false},
-        {S8("int test(int c,int n){int r=0;if(c)goto in;{int x=n*3;in:while(n>0){r+=x;n-=1;}}return r;}"), false},
-        {S8("int test(int k,int n){int r=0;switch(k){int x=n*3;case 1:while(n>0){r+=x;n-=1;}}return r;}"), false},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){{r+=x;break;}r-=y;}}return r;}"), true},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){r+=(int){x};r+=c?x:y;n-=1;}}return r;}"), true},
-        {S8("int test(int c,int n){int r=0;if(c){int y;int x=y;while(n>0){r+=x;n-=1;}}return r;}"), true},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;while(n>0){r+=x;if(r>9)x=1;n-=1;}}return r;}"), false},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}done:return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}switch(c){default:r+=1;}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=({int z=x;l:z;});else r-=y;n-=1;}}return r;}"), 1},
+        // Jumps whose source and target both lie in the scope after the
+        // initializer keep the shortcut; a jump past the initializer does not.
+        {S8("int test(int*p,int n){int r=0;while(n-->0){int op=*p++;int k=op*2;switch(op){case 1:r+=k;break;case 2:r-=k;break;default:r^=k;}r+=op;}return r;}"), -1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;again:r+=x;if(--n>0)goto again;r+=x;}return r;}"), -1},
+        {S8("int test(int k,int n){int r=0;switch(k){case 0:{int x=n*3;case 1:while(n>0){r+=x;n-=1;}}}return r;}"), 0},
+        {S8("int test(int k,int n){int r=0;if(k){int x=n*3;switch(k){case 1:while(n>0){r+=x;n-=1;}}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c)goto in;{int x=n*3;in:while(n>0){r+=x;n-=1;}}return r;}"), 0},
+        {S8("int test(int k,int n){int r=0;switch(k){int x=n*3;case 1:while(n>0){r+=x;n-=1;}}return r;}"), 0},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){{r+=x;break;}r-=y;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){r+=(int){x};r+=c?x:y;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int y;int x=y;while(n>0){r+=x;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;while(n>0){r+=x;if(r>9)x=1;n-=1;}}return r;}"), 0},
         // Initializers that branch store in a later block than the declaration.
-        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?n*3:n;int y=n&&c;int z=n||c;while(n>0){r+=x+y-z;n-=1;}}return r;}"), true},
-        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?(n?n*3:n):c;while(n>0){r+=x;n-=1;}}return r;}"), true},
-        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?x:n;while(n>0){r+=x;n-=1;}}return r;}"), false},
-        {S8("int test(int c,int n){int r=0;if(c){int x;if(n)x=n*3;while(n>0){r+=x;n-=1;}}return r;}"), false},
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?n*3:n;int y=n&&c;int z=n||c;while(n>0){r+=x+y-z;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?(n?n*3:n):c;while(n>0){r+=x;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?x:n;while(n>0){r+=x;n-=1;}}return r;}"), 0},
+        {S8("int test(int c,int n){int r=0;if(c){int x;if(n)x=n*3;while(n>0){r+=x;n-=1;}}return r;}"), 0},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -36929,8 +36940,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_declaration_definition(Unit
         CIRDirectSsaStatistics walk = lowered[1].direct_ssa;
         BUSTER_TEST_RAW(arguments, shortcut.parameters_created - shortcut.parameters_removed == walk.parameters_created - walk.parameters_removed,
                         test.source);
-        BUSTER_TEST_RAW(arguments, test.eligible ? shortcut.parameters_created < walk.parameters_created
-                                                 : shortcut.parameters_created == walk.parameters_created, test.source);
+        BUSTER_TEST_RAW(arguments, test.fewer > 0   ? shortcut.parameters_created < walk.parameters_created
+                                   : test.fewer == 0 ? shortcut.parameters_created == walk.parameters_created
+                                                     : shortcut.parameters_created <= walk.parameters_created,
+                        test.source);
         IrFunction* left = functions[0];
         IrFunction* right = functions[1];
         bool same = left && right && left->block_count == right->block_count && left->value_count == right->value_count &&

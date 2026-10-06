@@ -146,6 +146,22 @@ uninitialized owner; disconnected reads keep the ordinary predecessor path.
 The dependency walk is unnecessary when every retained owner already has entry
 initialization; restored loads still become independent definitions first.
 
+A named, non-temporary owner can also take this shortcut outside the entry
+block when its only write is its declaration's initializer. That store must
+directly follow the owner's `LOCAL` event, with no read between them. It may
+sit in the same block or, through `c_ir_emit_initializer_store`, in the join
+block of a branching initializer (`?:`, `&&`, `||`). The store dominates every
+reachable read unless a jump enters the scope past it.
+`c_ir_ssa_record_jump_targets` records each named label with the extent of its
+`goto`s, and each `case`/`default` with its enclosing `switch`.
+`c_ir_ssa_finish_jump_scopes` revokes the shortcut for an owner when a
+recorded target lies in its scope after the declarator starts and a jump to it
+starts before the declarator ends or outside the scope. A switch without a
+braced body disables the shortcut for the whole function, and so does a
+refused scratch carve. `CIRLowerOptions.disable_declaration_shortcut` is the
+differential reference: with and without it, the published IR must be
+identical.
+
 After predecessor propagation finishes, parameter simplification reuses its
 block cursor for a stable list of blocks that still own parameters. Empty
 blocks leave the list after each sweep. Simplification never adds parameters,
