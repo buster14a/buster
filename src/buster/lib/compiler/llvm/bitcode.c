@@ -419,6 +419,7 @@ struct LlvmBcContext
     u32 function_capacity;
     u32 stack_save_function_index;
     u32 stack_restore_function_index;
+    u32 debug_trap_function_index;
     LlvmBcString* strings;
     u32 string_count;
     u32 string_capacity;
@@ -1886,6 +1887,32 @@ static bool llvm_bc_add_stack_intrinsic(LlvmBcContext* context, bool save)
     return result;
 }
 
+static bool llvm_bc_add_debug_trap_intrinsic(LlvmBcContext* context)
+{
+    bool result;
+    String8 name = llvm_bc_s8("llvm.debugtrap");
+    if (!llvm_bc_name_available(context, name, 0))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM debugtrap intrinsic collides with a module symbol"),
+                     0, 0, 0, IR_SYMBOL_ID_INVALID);
+        result = false;
+    }
+    else
+    {
+        u64 signature[2] = {0, context->void_type_id};
+        u32 type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, signature, 2);
+        llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
+                            sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
+        u32 index = context->function_count++;
+        context->functions[index] = (LlvmBcFunction){.name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
+                                                     .type_id = type_id, .declaration = true, .synthetic = true};
+        llvm_bc_register_name(context, name, index | LLVM_BC_NAME_FUNCTION);
+        context->debug_trap_function_index = index;
+        result = true;
+    }
+    return result;
+}
+
 static bool llvm_bc_is_integer_count(IrUnaryOperation operation)
 {
     return operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
@@ -2178,6 +2205,7 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
 
     bool needs_stack_save = false;
     bool needs_stack_restore = false;
+    bool needs_debug_trap = false;
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         IrFunction* function = context->functions[index].function;
@@ -2190,10 +2218,12 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             IrOpcode opcode = function->instructions[instruction_index].opcode;
             needs_stack_save |= opcode == IR_OPCODE_STACK_SAVE;
             needs_stack_restore |= opcode == IR_OPCODE_STACK_RESTORE;
+            needs_debug_trap |= opcode == IR_OPCODE_DEBUG_TRAP;
         }
     }
     if ((needs_stack_save && !llvm_bc_add_stack_intrinsic(context, true)) ||
-        (needs_stack_restore && !llvm_bc_add_stack_intrinsic(context, false)))
+        (needs_stack_restore && !llvm_bc_add_stack_intrinsic(context, false)) ||
+        (needs_debug_trap && !llvm_bc_add_debug_trap_intrinsic(context)))
     {
         return false;
     }
@@ -3320,6 +3350,7 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     }
     case IR_OPCODE_STORE:
     case IR_OPCODE_STACK_RESTORE:
+    case IR_OPCODE_DEBUG_TRAP:
     case IR_OPCODE_ATOMIC_STORE:
     case IR_OPCODE_ATOMIC_FENCE:
     case IR_OPCODE_BRANCH:
@@ -3370,10 +3401,6 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
         return LLVM_BC_INVALID_ID;
     case IR_OPCODE_INDIRECT_BRANCH:
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode indirect branches are not implemented"), function, block,
-                     instruction, instruction->symbol);
-        return LLVM_BC_INVALID_ID;
-    case IR_OPCODE_DEBUG_TRAP:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode debug traps are not implemented"), function, block,
                      instruction, instruction->symbol);
         return LLVM_BC_INVALID_ID;
     case IR_OPCODE_COUNT:
@@ -4715,6 +4742,22 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         *current_value_id += save;
         break;
     }
+    case IR_OPCODE_DEBUG_TRAP:
+    {
+        if (context->debug_trap_function_index == LLVM_BC_INVALID_ID)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("missing LLVM debugtrap intrinsic declaration"), function, block,
+                         instruction, instruction->symbol);
+            return false;
+        }
+        LlvmBcFunction* intrinsic = context->functions + context->debug_trap_function_index;
+        operands[count++] = 0; // no parameter attributes
+        operands[count++] = LLVM_BC_CALL_EXPLICIT_TYPE;
+        operands[count++] = intrinsic->type_id;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, intrinsic->value_id, context->pointer_type_id);
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
+        break;
+    }
     case IR_OPCODE_LOAD:
     case IR_OPCODE_ATOMIC_LOAD:
     {
@@ -5057,7 +5100,6 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
     case IR_OPCODE_SIMD:
     case IR_OPCODE_LABEL_ADDRESS:
     case IR_OPCODE_INDIRECT_BRANCH:
-    case IR_OPCODE_DEBUG_TRAP:
     case IR_OPCODE_COUNT:
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION,
                      llvm_bc_s8("unsupported canonical opcode reached LLVM emission"), function, block, instruction, instruction->symbol);
@@ -5464,6 +5506,7 @@ LlvmBitcodeArtifact llvm_bitcode_emit_with_options(Arena* arena, IrProgram* prog
         .options = options,
         .stack_save_function_index = LLVM_BC_INVALID_ID,
         .stack_restore_function_index = LLVM_BC_INVALID_ID,
+        .debug_trap_function_index = LLVM_BC_INVALID_ID,
         .error = {
             .function = IR_FUNCTION_ID_INVALID,
             .block = IR_BLOCK_ID_INVALID,
