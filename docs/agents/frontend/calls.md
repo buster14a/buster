@@ -476,6 +476,33 @@ for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
 
+## Non-void closing-brace return edge
+
+C 6.9.1p12 makes a non-void closing-brace falloff undefined when the caller
+uses its result. A discarded result retains the return edge and all earlier
+side effects. It does not justify UNREACHABLE. Explicit returns, void returns,
+main's implicit zero and actual noreturn effects have their separate contracts.
+
+`c_test_nonvoid_falloff` checks typed canonical RETURN/no-UNREACHABLE for
+integer, pointer, floating and small/4-KiB aggregate results, plus the explicit
+return, void and noreturn neighbors, across six target layouts, GNU17/GNU23
+and both frontend forms. Separate caller/callee sources exercise sixteen
+independently selected runtime paths through combined and separately linked
+objects in all four native allocators. VLA repetition, GNU cleanup, indirect,
+void-cast and comma-discard calls keep their observable scope effects. Main
+falls off only after checking the exact effects, so its defined zero is also
+exercised. Bare/incompatible returns and wrong arity remain refused. No runtime
+oracle uses an unspecified fallen-off result.
+
+The final ordinary non-void root-body path uses the existing iterative typed
+zero-value constructor and canonical RETURN. That deterministic carrier is an
+implementation detail, not a guarantee for a source program that uses a missing
+result. Scope cleanup and stack restoration run before it; statement-expression
+continuations, explicit returns, main and actual noreturn calls retain their
+existing paths. The historical control-flow expectation now requires both
+returning branches and no manufactured UNREACHABLE. Constructor allocation
+and aggregate materialization costs are unmeasured; no performance claim is made.
+
 ## Fixed scalar register-to-stack regression
 
 `compiler_driver_test_scalar_argument_boundaries` extends the existing driver
