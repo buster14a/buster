@@ -17381,11 +17381,16 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
         {
             break;
         }
+        // Only a leading `({ ... });` expression statement splits off a tail.
+        // Without the semicolon the nested statement expression is an operand
+        // of the following tokens (`({ ... }) + 2;`), so the whole body must be
+        // lowered as one unit or the operand's value is lost.
         u32 tail_start = nested_close + 2;
-        if (tail_start < close && c_token_is_punctuator(&builder->preprocess.tokens[tail_start], C_PUNCTUATOR_SEMICOLON))
+        if (tail_start >= close || !c_token_is_punctuator(&builder->preprocess.tokens[tail_start], C_PUNCTUATOR_SEMICOLON))
         {
-            tail_start += 1;
+            break;
         }
+        tail_start += 1;
         if (tail_start >= close)
         {
             break;
@@ -21603,19 +21608,22 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // _Generic and __builtin_choose_expr own their selected expression.
         // Deferred preparation lets that expression prepare its own calls.
         // __builtin_constant_p also discards side effects in its operand.
-        if (builtin_generic)
+        // A selection or choice can designate a function, so a `(` after
+        // its close calls the result: stop on the close, its open folded
+        // into the scan, so the `)(` chain call is discovered there exactly
+        // as it is for `get()(3)`.
+        if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p)
         {
-            // The selection's value is the callee of a directly following
-            // argument list, `_Generic(...)(3)`. Stop on the closing
-            // parenthesis rather than past it so that list classifies as the
-            // call of this selection's result; the opening parenthesis is
-            // folded here so the scan sees the group balanced.
-            c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index + 1);
-            index = close - 1;
-        }
-        else if (builtin_choose_expr || builtin_object_size || builtin_constant_p)
-        {
-            index = close;
+            if ((builtin_generic || builtin_choose_expr) && close + 1 < end &&
+                c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index + 1);
+                index = close - 1;
+            }
+            else
+            {
+                index = close;
+            }
         }
     }
     u32 remaining = builder->prepared_call_count - first_new;
@@ -29097,11 +29105,15 @@ typedef struct CIrPromotedMemberPath CIrPromotedMemberPath;
 struct CIrPromotedMemberPath
 {
     IrTypeId type;
+    // The selected union member and the outer projection slot are distinct
+    // when promotion traverses an anonymous union inside a struct.
+    IrTypeId union_type;
     IrField* field;
     u64 offset;
     u64 union_offset;
     u64 union_size;
     u32 root_field;
+    u32 union_field;
     bool ambiguous;
     bool has_union;
     u8 reserved[2];
@@ -29111,11 +29123,13 @@ typedef struct CIrPromotedMemberWork CIrPromotedMemberWork;
 struct CIrPromotedMemberWork
 {
     IrTypeId type;
+    IrTypeId union_type;
     u64 offset;
     u64 union_offset;
     u64 union_size;
     u32 root_field;
     u32 depth;
+    u32 union_field;
     bool has_union;
     u8 reserved[3];
 };
@@ -29157,7 +29171,9 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
     IrType* root_type = ir_type_from_id(&builder->program->types, root);
     work[0] = (CIrPromotedMemberWork){
         .type = root,
+        .union_type = root,
         .root_field = UINT32_MAX,
+        .union_field = UINT32_MAX,
         .depth = 0,
         .has_union = root_type && root_type->kind == IR_TYPE_UNION,
         .union_size = root_type && root_type->kind == IR_TYPE_UNION ? root_type->layout.size : 0,
@@ -29192,11 +29208,13 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
                 {
                     *result = (CIrPromotedMemberPath){
                         .type = field->type,
+                        .union_type = type->kind == IR_TYPE_UNION ? current.type : current.union_type,
                         .field = field,
                         .offset = current.offset + field->offset,
                         .union_offset = current.union_offset,
                         .union_size = current.union_size,
                         .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
+                        .union_field = type->kind == IR_TYPE_UNION ? field_index : current.union_field,
                         .has_union = current.has_union,
                     };
                     found = true;
@@ -29220,11 +29238,13 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
                 bool child_is_union = child->kind == IR_TYPE_UNION && child->layout.resolved;
                 work[work_count++] = (CIrPromotedMemberWork){
                     .type = child_id,
+                    .union_type = child_is_union ? child_id : current.union_type,
                     .offset = current.offset + field->offset,
                     .union_offset = child_is_union ? current.offset + field->offset : current.union_offset,
                     .union_size = child_is_union ? child->layout.size : current.union_size,
                     .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
                     .depth = current.depth + 1,
+                    .union_field = child_is_union ? UINT32_MAX : type->kind == IR_TYPE_UNION ? field_index : current.union_field,
                     .has_union = child_is_union || current.has_union,
                 };
             }
@@ -42590,11 +42610,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 for (u32 header_index = index + 2; header_index < header_close; header_index += 1)
                 {
                     CToken token = builder->preprocess.tokens[header_index];
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                        c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
                     {
                         nested += 1;
                     }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                             c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
                     {
                         if (!nested)
                         {
@@ -45280,6 +45302,7 @@ typedef struct CIrConstantInitializerFrame CIrConstantInitializerFrame;
 struct CIrConstantInitializerFrame
 {
     IrTypeId type;
+    IrTypeId last_union_type;
     u64 offset;
     u32 cursor;
     u32 limit;
@@ -46376,6 +46399,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder* 
             else if (first)
             {
                 selected = member_slot;
+                selected_end = member_slot;
             }
             else
             {
@@ -46920,6 +46944,7 @@ struct CIrConstantInitializerRange
 struct CIrConstantInitializerDesignator
 {
     IrTypeId value_type;
+    IrTypeId clear_union_type;
     IrField* value_field;
     u64 value_offset;
     u32 value_start;
@@ -47237,6 +47262,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
             if (container->kind == IR_TYPE_UNION)
             {
                 result->clear_union = true;
+                result->clear_union_type = current_type;
                 result->clear_offset = current_offset;
                 result->clear_size = container->layout.size;
                 result->clear_field = UINT32_MAX;
@@ -47296,10 +47322,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
                     return c_ir_constant_initializer_fail(builder, S8("aggregate designator offset overflows the target object"), cursor);
                 }
                 result->clear_union = true;
+                result->clear_union_type = path.union_type;
                 result->clear_offset = current_offset + path.union_offset;
                 result->clear_size = path.union_size;
                 result->clear_range_count = result->range_count;
-                result->clear_field = path.root_field;
+                result->clear_field = path.union_field;
             }
             u32 member_slot = c_ir_constant_initializer_field_slot(builder, container, path.root_field);
             if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1)
@@ -47329,6 +47356,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
             if (first)
             {
                 selected = member_slot;
+                selected_end = member_slot;
             }
             cursor += 2;
         }
@@ -47802,11 +47830,22 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             return true;
         }
         bool merge_union = designator.clear_union && frame->has_last_union && designator.clear_field != UINT32_MAX &&
+                           frame->last_union_type.value == designator.clear_union_type.value &&
                            frame->last_union_offset == designator.clear_offset && frame->last_union_field == designator.clear_field;
         bool clear_whole_union = designator.clear_union && !merge_union;
         u64 clear_offset = clear_whole_union ? designator.clear_offset : child_offset;
         u64 clear_size = clear_whole_union ? designator.clear_size : child->layout.size;
-        bool clear_value = designator.has_designator && (clear_whole_union || !designator.value_field || !designator.value_field->is_bit_field);
+        // A positional scalar or complete aggregate initializer also replaces
+        // its slot's old relocations. A bare scalar entering an aggregate by
+        // brace elision preserves the other scalar subobjects. Scalar tables
+        // with no relocation records need no additional clear.
+        bool aggregate = c_ir_initializer_type_is_aggregate(child);
+        bool complete_aggregate = aggregate &&
+                                  (c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) ||
+                                   (child->kind == IR_TYPE_ARRAY && c_ir_tokens_are_string_literals(builder->preprocess, value_start, value_end)));
+        bool scalar_relocation_overwrite = !aggregate && context->relocation_count && *context->relocation_count;
+        bool clear_value = (designator.has_designator || complete_aggregate || scalar_relocation_overwrite) &&
+                           (clear_whole_union || !designator.value_field || !designator.value_field->is_bit_field);
         if (clear_value && !c_ir_constant_initializer_context_clear(builder, context, clear_offset, clear_size))
         {
             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
@@ -47818,6 +47857,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
         if (designator.clear_union)
         {
             frame->has_last_union = true;
+            frame->last_union_type = designator.clear_union_type;
             frame->last_union_offset = designator.clear_offset;
             frame->last_union_field = designator.clear_field;
         }
@@ -47825,7 +47865,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
         {
             frame->has_last_union = false;
         }
-        bool aggregate = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION);
         if (aggregate && child->is_complex &&
             !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
         {
@@ -47963,6 +48002,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
                 if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_representation_types_compatible(builder, compound_type, child_type))
                 {
                     return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), value_start);
+                }
+                if (!designator.has_designator && !c_ir_constant_initializer_context_clear(builder, context, child_offset, child->layout.size))
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("compound literal initializer exceeds the target object"), value_start);
                 }
                 frame->cursor = value_end;
                 if (selected == UINT64_MAX)

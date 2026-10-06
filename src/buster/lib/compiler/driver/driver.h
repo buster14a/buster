@@ -29,8 +29,6 @@
 // the bytes read from all response files of one invocation together, and the
 // length of the expanded command line. A command line with no argument that
 // begins with '@' is not expanded and neither bound applies to it.
-// The path a `-` input carries; diagnostics and __FILE__ show it as written.
-#define COMPILER_DRIVER_STANDARD_INPUT_PATH S8("<stdin>")
 #define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
 #define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
@@ -145,6 +143,11 @@ struct CompilerDriverInvocation
     String8 output_path;
     String8 entry_symbol;
     String8 sysroot;
+    // Source text of the `-` input. A parsed command line names it with the
+    // path `-`; the cc command reads standard input into it before execution
+    // and embedding callers supply it themselves. A null pointer means it was
+    // not supplied; an empty translation unit has a nonnull pointer.
+    String8 standard_input;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
@@ -227,12 +230,6 @@ struct CompilerDriverInvocation
     // -shared or -pie: the NativeImageKind a link produces. Accepted for a
     // link only on x86-64 Linux, the one target with a writer for it.
     NativeImageKind image_kind;
-    // -static was given: the link must produce an image with no loader.
-    bool static_link;
-    // One plus the input index that `-` named, or 0: that input is read from
-    // standard input, whatever its displayed path; a file named like the
-    // displayed path is still an ordinary file.
-    u32 standard_input_index_plus_one;
     u8 optimization_level;
     bool has_gpu_target;
     bool save_gpu_temporaries;

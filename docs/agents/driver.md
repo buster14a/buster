@@ -69,8 +69,11 @@ inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
 `-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
 existing execution. Objects, archives, assembly and each `-l` occurrence are
 serial boundaries, even when `-x c` is present. A library between C sources
-ends the cohort before later translation units can publish definitions. Worker count is clamped to logical CPUs, input
-count and one inside an embedding caller's multi-lane gang.
+ends the cohort before later translation units can publish definitions. Worker count is clamped to the logical CPUs the
+process may run on (the affinity mask on Linux and Windows, so `taskset`, a
+cpuset or a job object narrows it; cgroup CPU quotas are not considered), input
+count and one inside an embedding caller's multi-lane gang. The default
+`lane_run` width uses the same count.
 
 Each cohort contains at most one full TU per worker. `lane_range` gives
 stable input slots, the existing persistent gang is reused, and each worker
@@ -260,6 +263,9 @@ Host detection falls back to the dynamic `native` identity if a virtualized
 family/model description names a processor incompatible with the executing
 architecture; independently probed host features are preserved. Explicit
 `-march`/`-mcpu` requests still receive the incompatibility diagnostic.
+`-mtune=<model>` is accepted with any nonempty value, `native` included, and
+ignored: it selects only a scheduling model, and instruction selection here has
+no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
@@ -1028,6 +1034,13 @@ On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
 
+`-static` follows the same split on every target: `-c`, `-S`, `-E` and
+`-fsyntax-only` ignore it, and a link refuses it as
+`unsupported option: -static (...)` because no image writer produces a
+static executable; hosted ELF links import `libc.so.6` dynamically. A
+configure probe that links with `-static` therefore learns the truth instead of
+receiving a dynamic executable (GitHub #2851).
+
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
 
@@ -1227,30 +1240,16 @@ invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
 
-## Standard input, `-static` and `-mtune`
-
-`-` names standard input as one translation unit. GCC cannot guess a language
-from a stream, so `-x <language>` must precede it (`-x c -`); without one the
-parser fails with a diagnostic naming `-x`, and a second `-` fails because the
-stream can be read only once. The input path, and so every diagnostic and
-`__FILE__`, is `<stdin>` (`COMPILER_DRIVER_STANDARD_INPUT_PATH`);
-`compiler_driver_read_input` reads the stream to end of file for the C
-pipeline. `-E -` preprocesses it.
-
-`-static` sets `CompilerDriverInvocation.static_link` and is ignored by `-c`,
-`-S` and `-E`, as it is for GCC. A link passes it to the linker as
-`NativeExecutableLinkOptions.require_static_image`. The Linux ELF writers
-already emit a loader-free image when nothing needs a dynamic import, so a
-self-contained program links statically; a program that imports from the
-system C library, uses thread-local storage or asks for a shared or PIE image
-fails with `-static is not supported when the program links against the
-system C library, thread-local storage or a shared object`. There is no
-static libc, so `-static` plus libc calls is refused rather than silently
-producing a dynamic executable. Other targets refuse `-static` for a link.
-
-`-mtune=<cpu>` is accepted and ignored: the compiler makes no per-CPU
-scheduling choices, and `-march=`/`-mcpu=` remain the options that change the
-target.
+A lone `-` is an input naming standard input, as for GCC and Clang. It has no
+suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
+it as C source; without either, or under another language, the parser refuses
+it, and it may appear only once. The source text travels in
+`CompilerDriverInvocation.standard_input`: the `cc` command reads standard
+input to EOF into it after parsing, and embedding callers fill it themselves. A
+null pointer there fails the input as a read error. Diagnostics and `__FILE__`
+name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+`compiler_driver_test_probe_spellings` covers the admission rules, both routes
+and the `-static`/`-mtune` spellings (GitHub #2851).
 
 ## Response files
 
