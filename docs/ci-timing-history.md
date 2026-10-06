@@ -23,7 +23,7 @@ clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function \
 ./ci-metrics collect --out /tmp/new-ci-history-bundle --days 2 --max-runs 100
 ./ci-metrics collect --out /tmp/new-backfill-bundle --run 37459678394
 ./ci-metrics report --input observations.jsonl --out /tmp/new-selected-report \
-  --event push --branch main --job-key native --os Windows --cpu "AMD EPYC 7763 64-Core Processor" \
+  --event push --branch main --job-key native --os "Windows Server 2025 Datacenter" --cpu "AMD EPYC 7763 64-Core Processor" \
   --revision 5e46e4f552a8caf9cbecaa408e5089436e831a8a \
   --since 2026-10-01T00:00:00Z --until 2026-10-07T00:00:00Z
 ~~~

@@ -56,7 +56,6 @@ jobs:
       - name: Native source-size report
         run: |
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-metrics-build"
-          "$RUNNER_TEMP/buster-metrics-build" source_size --write-baseline
           cat docs/source-size-baseline.txt
           "$RUNNER_TEMP/buster-metrics-build" source_size --base HEAD^1
           git diff --check HEAD^1 HEAD
