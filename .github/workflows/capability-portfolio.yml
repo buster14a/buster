@@ -23,40 +23,81 @@ jobs:
       BUSTER_TEST_JOBS: '2'
       BUSTER_MATRIX_THREADS: '2'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
           fetch-depth: 10
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: DaveGamble/cJSON
           ref: c859b25da02955fef659d658b8f324b5cde87be3
           path: external/cjson
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: external/cjson
+          source-repository: DaveGamble/cJSON
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: madler/zlib
           ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
           path: external/zlib
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: external/zlib
+          source-repository: madler/zlib
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: nothings/stb
           ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
           path: external/stb
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: external/stb
+          source-repository: nothings/stb
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: lua/lua
           ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
           path: external/lua-git
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: external/lua-git
+          source-repository: lua/lua
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: bellard/quickjs
           ref: 3d5e064e9dd67c70f7962836505a7fa067bf0a4e
           path: external/quickjs
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: external/quickjs
+          source-repository: bellard/quickjs
       - name: Authenticate release and retain input provenance
         shell: bash
         run: |
@@ -198,6 +239,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
           path: |
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
             evidence
             build/cjson-*
             build/zlib-*
@@ -213,10 +255,21 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       BUSTER_TEST_JOBS: '2'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 133e11167a0e6818a6e226aedab68560add0673c
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain and authenticate pinned baseline inputs
         shell: bash
         run: |
@@ -257,5 +310,6 @@ jobs:
           retention-days: 30
           if-no-files-found: error
           path: |
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
             evidence
             build/sqlite-*

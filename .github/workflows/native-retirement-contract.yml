@@ -91,12 +91,23 @@ jobs:
       run:
         working-directory: candidate
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - name: Check out exact revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           path: candidate
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Check out the previously trusted rebinder revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -105,6 +116,12 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Reject candidate-controlled checkout destinations
         working-directory: ${{ github.workspace }}
         run: |
@@ -139,6 +156,12 @@ jobs:
           path: candidate/external/cjson
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate/external/cjson
+          source-repository: DaveGamble/cJSON
       - name: Check out pinned DoomGeneric closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -147,6 +170,12 @@ jobs:
           path: candidate/external/doom
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate/external/doom
+          source-repository: ozkl/doomgeneric
       - name: Check out pinned LZ4 closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -155,6 +184,12 @@ jobs:
           path: candidate/external/lz4
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate/external/lz4
+          source-repository: lz4/lz4
       - name: Check out pinned yyjson closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -163,6 +198,12 @@ jobs:
           path: candidate/external/yyjson
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate/external/yyjson
+          source-repository: ibireme/yyjson
       - name: Check out pinned stb closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -171,6 +212,12 @@ jobs:
           path: candidate/external/stb
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate/external/stb
+          source-repository: nothings/stb
       - name: Check out pinned zlib closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -179,6 +226,12 @@ jobs:
           path: candidate/external/zlib
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate/external/zlib
+          source-repository: madler/zlib
       - name: Check out pinned musl closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -189,6 +242,12 @@ jobs:
           persist-credentials: false
       # Archives are content-addressed and re-verified against the pinned
       # sha256 before use, so a cache entry can only skip the download.
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate/external/musl
+          source-repository: ifduyue/musl
       - name: Restore pinned SDK archives
         id: sdk_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -303,7 +362,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-retirement-contract-${{ github.run_id }}
-          path: candidate/evidence/
+          path: |
+            candidate/evidence/
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
           retention-days: 7
           if-no-files-found: error
       - name: State durable evidence boundary

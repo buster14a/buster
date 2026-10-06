@@ -150,3 +150,14 @@ attestation of the bundled JavaScript dependency graph. These MIT licenses cover
 the named upstream action projects, not all transitive packages or Buster's
 first-party code. No upstream source, theme, or license text is copied into the
 published site. See [Pages setup and acceptance](github-pages.md).
+
+## Machine specifications collector
+
+Every executing job starts with `buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed`.
+This repository-owned C collector is frozen independently of candidate checkouts.
+It receives only the configured runner and matrix index; it receives no token,
+secret, candidate code, or publication authority. Its compiler bootstrap uses the
+preinstalled Clang and installs nothing. The same pin records actual checkout
+identities after each checkout. Update both implementation blob identities and
+the immutable action reference when changing it. Workflow lint rejects absent,
+conditional, delayed, renamed-only, or unreviewed startup reporting.

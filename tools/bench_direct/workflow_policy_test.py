@@ -182,7 +182,7 @@ def check_direct_workflow(errors: list[str]) -> None:
             errors.append(f"missing direct workload file: {path.relative_to(ROOT)}")
     if any(not path.is_file() for path in (DIRECT, DIRECT_REQUEST, authorizer, harness)):
         return
-    direct = DIRECT.read_text(encoding="utf-8")
+    direct = remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8"))
     lines = direct.splitlines()
     jobs = job_blocks(direct)
     if list(jobs) != ["authorize", "bench"]:
@@ -240,7 +240,7 @@ def check_direct_workflow(errors: list[str]) -> None:
         if marker in direct:
             errors.append(f"direct workflow contains forbidden path: {marker}")
 
-    request = DIRECT_REQUEST.read_text(encoding="utf-8")
+    request = remove_reviewed_machine_steps(DIRECT_REQUEST.read_text(encoding="utf-8"))
     request_lines = request.splitlines()
     if "name: 9700X direct workload request" not in request_lines:
         errors.append("request workflow name must match the direct workflow's trigger")
@@ -256,6 +256,25 @@ def check_direct_workflow(errors: list[str]) -> None:
             errors.append(f"request workflow must not use: {marker}")
     if expression_lines_in_scripts(request):
         errors.append("request workflow must not interpolate an expression inside a run script")
+
+
+def remove_reviewed_machine_steps(text: str) -> str:
+    """The separate startup policy verifies these read-only pinned C steps.
+    Strip only the reviewed literal reference before applying the unchanged
+    workload/checkouts/authority contract; never strip arbitrary uses or runs.
+    """
+    pin = "buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed"
+    pieces = re.split(r"(?=^      - (?:name|uses|id):)", text, flags=re.MULTILINE)
+    result = []
+    for piece in pieces:
+        if ("        uses: " + pin + "\n") in piece:
+            lines = piece.splitlines(keepends=True)
+            end = next((i for i, line in enumerate(lines)
+                        if i and line.strip() and not line.startswith("        ")), len(lines))
+            result.extend(lines[end:])
+        else:
+            result.append(piece)
+    return "".join(result)
 
 
 def job_blocks(workflow: str) -> dict[str, list[str]]:

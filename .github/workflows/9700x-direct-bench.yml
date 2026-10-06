@@ -38,12 +38,23 @@ jobs:
       attempt: ${{ steps.verify.outputs.attempt }}
       base: ${{ steps.verify.outputs.base }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Verify the request run and its pull request
         id: verify
         shell: bash
@@ -69,6 +80,11 @@ jobs:
       BQ_BASE_COMMIT: ${{ needs.authorize.outputs.base }}
       BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       # The harness, compile command and sample plan come from main.
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -80,6 +96,12 @@ jobs:
       # Full commit history without file contents, so the harness can list
       # what the pull request changed; only the workload directory is
       # materialized.
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Check out the pull request workloads
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -89,6 +111,12 @@ jobs:
           filter: blob:none
           sparse-checkout: benchmarks/9700x
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Compile and run the changed workloads
         shell: bash
         run: |

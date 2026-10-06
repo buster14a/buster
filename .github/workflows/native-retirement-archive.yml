@@ -44,29 +44,59 @@ jobs:
             candidate_asset: buster-candidate-source-2bb4ce9.tar.gz
             census_asset: native-retirement-2bb4ce9-34718946098.zip
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+          matrix-index: ${{ strategy.job-index }}
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           path: validation
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: validation
+          source-repository: ${{ github.repository }}
       - name: Check out pinned validation source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ matrix.validation_ref }}
           path: replay-validation
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: replay-validation
+          source-repository: ${{ github.repository }}
       - name: Check out pinned candidate source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ matrix.candidate_ref }}
           path: candidate
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Check out pinned direct-oracle source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           path: reference
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: reference
+          source-repository: ${{ github.repository }}
       - name: Download published census and source assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -135,7 +165,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: census-replay-${{ matrix.label }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/census-replay-${{ matrix.label }}-${{ github.run_id }}.json
+          path: |
+            ${{ runner.temp }}/census-replay-${{ matrix.label }}-${{ github.run_id }}.json
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
           retention-days: 7
           if-no-files-found: error
 
@@ -159,11 +191,23 @@ jobs:
             candidate_asset: buster-candidate-source-2bb4ce9.tar.gz
             strict_pattern: strict-retirement-2bb4ce9-34718946098.zip.part-*
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+          matrix-index: ${{ strategy.job-index }}
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           path: validation
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: validation
+          source-repository: ${{ github.repository }}
       - name: Download published strict and source assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -224,6 +268,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: strict-replay-${{ matrix.label }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json
+          path: |
+            ${{ runner.temp }}/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
           retention-days: 7
           if-no-files-found: error

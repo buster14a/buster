@@ -31,10 +31,22 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ${{ matrix.os }}
+          matrix-index: ${{ strategy.job-index }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Native harness tests (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -86,6 +98,7 @@ jobs:
         with:
           name: throughput-harness-${{ matrix.os }}
           path: |
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
             build/throughput-tool-tests
             build/throughput-tool-tests-sanitized
             build/allocation-census.log
@@ -99,6 +112,11 @@ jobs:
     needs: harness
     timeout-minutes: 35
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       # Neither fork code nor compiler output receives credentials or a shared
       # cache. Both compilers are built sequentially, before any measurement.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -106,11 +124,23 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref || github.sha }}
           path: baseline
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: baseline
+          source-repository: ${{ github.repository }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Record checked-out revisions
         shell: bash
         run: |
@@ -139,6 +169,7 @@ jobs:
         with:
           name: compiler-throughput-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
             candidate/build/throughput-ci-results
             candidate/build/throughput-ci-compiler/CMakeCache.txt
             candidate/build/throughput-ci-compiler/compile_commands.json
@@ -155,12 +186,23 @@ jobs:
     env:
       BUSTER_TEST_JOBS: '2'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       # Diagnostic-only compiler, isolated from the uninstrumented timing job.
       # #497's registered geometric work budgets are compiled out otherwise.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Install existing Linux linker dependency
         shell: bash
         run: |
@@ -231,6 +273,7 @@ jobs:
         with:
           name: direct-ssa-census-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
             direct-ssa-census-evidence
             build/CMakeCache.txt
             build/compile_commands.json

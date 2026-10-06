@@ -29,6 +29,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - name: Require CI admission to be enabled
         shell: bash
         env:
@@ -41,6 +46,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Bootstrap native build driver
         run: |
           clang --version
@@ -80,7 +91,9 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: bootstrap-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/self-host-audit/
+          path: |
+            build/self-host-audit/
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
           retention-days: 7
           if-no-files-found: error
           compression-level: 6

@@ -39,6 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ github.event_name == 'merge_group' && 310 || 20 }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-latest
       # Push maintenance executes its exact event revision. Every other route
       # retains the independently trusted current-main checkout. The exclusive
       # steps implement: github.event_name == 'push' && github.sha || github.event.repository.default_branch
@@ -49,6 +54,13 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        if: ${{ github.event_name == 'push' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Check out trusted current main
         if: ${{ github.event_name != 'push' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -56,6 +68,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        if: ${{ github.event_name != 'push' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Refresh default-branch pull-request snapshot after main push
         if: ${{ github.event_name == 'push' }}
         env:
@@ -108,6 +127,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: merge-conflict-preflight-${{ github.run_id }}-${{ github.run_attempt }}
-          path: evidence/merge-conflict-preflight/**/*.json
+          path: |
+            evidence/merge-conflict-preflight/**/*.json
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
           if-no-files-found: ignore
           retention-days: 14

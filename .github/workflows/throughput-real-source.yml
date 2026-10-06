@@ -36,10 +36,21 @@ jobs:
       BUSTER_TEST_JOBS: '1'
       BUSTER_MATRIX_THREADS: '1'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain exact source for review and reproduction
         shell: bash
         env:
@@ -54,7 +65,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: real-source-qualification-source-${{ github.event.pull_request.head.sha || github.sha }}
-          path: evidence
+          path: |
+            evidence
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
           retention-days: 14
           if-no-files-found: error
       - name: Prepare pristine cJSON input outside timing
@@ -65,6 +78,12 @@ jobs:
           ref: c859b25da02955fef659d658b8f324b5cde87be3
           path: external/cjson
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: external/cjson
+          source-repository: DaveGamble/cJSON
       - name: Prepare pristine Lua Git input outside timing
         id: lua_git
         if: ${{ !cancelled() }}
@@ -74,6 +93,13 @@ jobs:
           ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
           path: external/lua-git
           persist-credentials: false
+      - name: Record actual checkout identity
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: external/lua-git
+          source-repository: lua/lua
       - name: Prepare authenticated Lua release outside timing
         id: lua_release
         if: ${{ !cancelled() }}
@@ -430,6 +456,7 @@ jobs:
         with:
           name: real-source-qualification-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
             evidence
             build/cjson-v1.7.19-*
             build/lua-v5.4.8-*

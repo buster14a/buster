@@ -63,11 +63,23 @@ jobs:
       BUSTER_UNIT_DRIVER: ${{ matrix.driver }}
       BUSTER_UNIT_BINARY: ${{ matrix.binary }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ${{ matrix.runner }}
+          matrix-index: ${{ strategy.job-index }}
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
 
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Install Linux linker
         if: ${{ matrix.platform == 'linux' }}
         shell: bash
@@ -285,6 +297,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unit-partitions-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/unit-partitions/
+          path: |
+            ${{ runner.temp }}/unit-partitions/
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
           if-no-files-found: warn
           retention-days: 14

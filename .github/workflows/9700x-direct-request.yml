@@ -28,6 +28,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Record the request
         shell: bash
         run: echo 'A 9700X workload run was requested; see the 9700X direct workload benchmark workflow.'

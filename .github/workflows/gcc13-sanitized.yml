@@ -30,6 +30,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Checkout exact candidate
         id: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -37,6 +42,12 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Build and run GCC 13 Release string fixtures
         id: strings
         shell: bash
@@ -78,7 +89,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gcc13-release-strings-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/buster-ci/
+          path: |
+            ${{ runner.temp }}/buster-ci/
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
           if-no-files-found: error
           retention-days: 14
 
@@ -90,6 +103,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Checkout exact candidate
         id: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -97,6 +115,12 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Resolve GCC 13
         id: gcc
         shell: bash
@@ -220,6 +244,7 @@ jobs:
         with:
           name: gcc13-sanitized-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
             ${{ runner.temp }}/buster-ci/
             ${{ runner.temp }}/elf-data-alias/
           if-no-files-found: error

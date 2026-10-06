@@ -39,10 +39,21 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 10
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          requested-runner: >-
+            macos-26
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Native harness tests (Unix)
         shell: bash
         run: |
@@ -59,6 +70,7 @@ jobs:
         with:
           name: throughput-harness-macos-26
           path: |
+            ${{ runner.temp }}/buster-machine-specifications/*.json*
             build/throughput-tool-tests
             build/allocation-census.log
             build/allocation-census-report
