@@ -6,6 +6,7 @@
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
@@ -1030,7 +1031,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-sizeof-expression-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("enum-sizeof-expression-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation =
@@ -1072,7 +1073,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                     String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-sizeof-reference-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("enum-sizeof-reference-run"), S8(".exe"));
                     if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                     {
                         String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"),
@@ -1635,7 +1636,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_bit_field_assignment_val
             for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("parenthesized-bit-field-assignment-values-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("parenthesized-bit-field-assignment-values-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), modes[mode], frontends[form],
                                      S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
@@ -1807,7 +1808,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
             for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("bool-bit-field-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("bool-bit-field-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-fverify-codegen"), modes[mode], frontends[form], S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 invocation.reject_machine_fallback = mode != 0;
@@ -2341,7 +2342,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                 for (u32 form = 0; form < 2; form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-bool-conversion-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("enum-bool-conversion-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                                          form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -3249,7 +3250,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
                     for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("enum-runtime-run"), S8(".exe"));
+                        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("enum-runtime-run"), S8(".exe"));
                         String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
                                              S8("-fverify-codegen"), S8("-o"), output, source};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -3335,7 +3336,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unnamed_parameter_definitions(UnitTest
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("unnamed-parameter-definitions-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("unnamed-parameter-definitions-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -3458,7 +3459,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
                     for (u32 promotion = 0; promotion < BUSTER_ARRAY_LENGTH(promotion_forms); promotion += 1)
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("volatile-split-bit-fields-run"), S8(".exe"));
+                        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("volatile-split-bit-fields-run"), S8(".exe"));
                         String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], allocators[allocator], frontend_forms[form],
                                             promotion_forms[promotion], S8("-fverify-codegen"), S8("-o"), output, source_path};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
@@ -3550,7 +3551,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_spellings(UnitTestArgu
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        String8 output = buster_test_temporary_path(temporary.arena, S8("bit-field-width-spellings-run"), S8(".exe"));
+        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("bit-field-width-spellings-run"), S8(".exe"));
         String8 command[] = {S8("-nostdinc"), S8("-std=gnu23"), S8("-fverify-codegen"), S8("-o"), output, source_path};
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
@@ -3955,7 +3956,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations_runtime(U
                 for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("local-linkage-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("local-linkage-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], frontends[form], allocators[allocator],
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -5172,7 +5173,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
                 for (u32 form = 0; form < 2; form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("unbraced-switch-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("unbraced-switch-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                                          form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -6287,7 +6288,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_group_nesting(UnitTestArgum
         c_test_append_source(run_buffer, run_capacity, &run_length, run_call);
         String8 run_source = {.pointer = run_buffer, .length = run_length};
         String8 source_path = buster_test_temporary_path(temporary.arena, S8("declarator-group-nesting"), S8(".c"));
-        String8 output = buster_test_temporary_path(temporary.arena, S8("declarator-group-nesting-run"), S8(".exe"));
+        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("declarator-group-nesting-run"), S8(".exe"));
         if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(run_source))))
         {
             String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fregister-allocator=fast"), S8("-o"), output, source_path};
@@ -7673,7 +7674,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArgument
             for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("braced-string-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("braced-string-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form],
                     S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
@@ -7704,7 +7705,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArgument
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-            String8 output = buster_test_temporary_path(temporary.arena, S8("braced-string-reference"), S8(".exe"));
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("braced-string-reference"), S8(".exe"));
             if (BUSTER_REQUIRE(arguments, compiler.length != 0))
             {
                 String8 command[] = {compiler, S8("-std=c17"), S8("-pedantic-errors"), S8("-nostdinc"), S8("-o"), output, source};
@@ -8673,7 +8674,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_resolved_call_effects(UnitTestArgument
                     for (u32 form = 0; form < 2; form += 1)
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("resolved-call-effects-run"), S8(".exe"));
+                        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("resolved-call-effects-run"), S8(".exe"));
                         String8 command[] = {S8("-nostdinc"), S8("-fno-builtin"), dialects[dialect], modes[mode],
                             form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -8987,7 +8988,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(Unit
             for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("cast-noreturn-operand-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("cast-noreturn-operand-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 invocation.reject_machine_fallback = mode != 0;
@@ -9722,7 +9723,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_tls_dialect_runtime(UnitTestArgum
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("file-tls-dialect-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("file-tls-dialect-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -12188,7 +12189,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_digraphs(UnitTestArguments* arguments)
         for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            String8 output = buster_test_temporary_path(temporary.arena, S8("digraph-runtime-run"), S8(".exe"));
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("digraph-runtime-run"), S8(".exe"));
             String8 command[] = {S8("-nostdinc"), S8("-std=c17"), forms[form], S8("-fregister-allocator=fast"),
                 S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -12435,7 +12436,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("ucn-runtime-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("ucn-runtime-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
                         S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
@@ -12471,7 +12472,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("ucn-reference-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("ucn-reference-run"), S8(".exe"));
                 if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                 {
                     String8 command[] = {compiler, dialects[dialect], S8("-pedantic-errors"), S8("-nostdinc"), S8("-o"), output, source};
@@ -13731,7 +13732,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArgumen
     if (BUSTER_REQUIRE(arguments, file_write(program_path, BUSTER_SLICE_TO_BYTE_SLICE(program))))
     {
         temporary = scratch_begin(&arguments->arena, 1);
-        String8 output = buster_test_temporary_path(temporary.arena, S8("macro-plain-production-run"), S8(".exe"));
+        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("macro-plain-production-run"), S8(".exe"));
         String8 command[] = {S8("-nostdinc"), S8("-fverify-codegen"), S8("-o"), output, program_path};
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
@@ -21419,6 +21420,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_type_name_attributes(UnitTestArg
     return result;
 }
 
+// Named-object array bounds must have the same constant layout in semantic
+// queries and canonical IR. Runtime bounds remain variable (#1782).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_bound_object_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u64 size;
+        u64 count;
+    } const cases[] = {
+        {S8("int g; int arr[sizeof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16 && sizeof(arr) == 16, \"sizeof object bound\");\n"), 16, 4},
+        {S8("int g; int arr[sizeof g]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16, \"unary sizeof object bound\");\n"), 16, 4},
+        {S8("int g; int arr[sizeof (g) + sizeof g]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 32, \"two object operands\");\n"), 32, 8},
+        {S8("int g; int arr[_Alignof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16, \"alignof object bound\");\n"), 16, 4},
+        {S8("_Alignas(32) int g; int arr[__alignof__((g))]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 128, \"declared object alignment\");\n"), 128, 32},
+        {S8("_Alignas(double) int g; int arr[_Alignof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 32, \"type-naming object alignment\");\n"), 32, 8},
+        {S8("extern int g; _Alignas(32) int g; int arr[_Alignof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 128, \"redeclared object alignment\");\n"), 128, 32},
+        {S8("struct S { int x; int y; } g; int arr[sizeof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 32, \"aggregate object layout dependency\");\n"), 32, 8},
+        {S8("int g; int observe(void) { char g = 0; int arr[sizeof g]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 4, \"block shadow\"); return g; }\n"), 4, 1},
+        {S8("int observe(void) { int g = 0; int arr[sizeof(g)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16, \"block object\"); return g; }\n"), 16, 4},
+        {S8("int observe(int p[2]) { int arr[sizeof(p)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == sizeof(void *) * sizeof(int), \"adjusted parameter\"); return 0; }\n"), 32, 8},
+        {S8("int arr[sizeof(int)]; enum { E = sizeof(arr) };\n"
+            "_Static_assert(E == 16, \"type-name control\");\n"), 16, 4},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 mode = 0; mode < 3; mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                    (CPreprocessOptions){
+                                                        .target = target_native,
+                                                        .data_layout = target_data_layout(target_native),
+                                                        .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                    });
+            CParseResult parse;
+            if (!mode)
+            {
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 0, cases[case_index].source);
+                parse = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST(arguments, parse.analysis_complete);
+            }
+            else parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, cases[case_index].source);
+            BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, cases[case_index].source);
+            bool enumerator = false;
+            for (u32 index = 0; index < parse.entity_count; index += 1)
+            {
+                CEntity* entity = parse.entities + index;
+                enumerator |= entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, S8("E")) &&
+                              !entity->constant_is_negative && entity->constant_value == cases[case_index].size;
+            }
+            BUSTER_TEST_RAW(arguments, enumerator, cases[case_index].source);
+            if (mode && parse.diagnostic_count == 0)
+            {
+                CIRLowerResult ir = c_lower_to_ir_with_options(temporary.arena, S8("array-bound-object.c"), tokens, parse, target_native,
+                                                                  (CIRLowerOptions){.disable_direct_ssa = mode == 2});
+                if (BUSTER_REQUIRE(arguments, ir.program && ir.program->module_count && ir.diagnostic_count == 0))
+                {
+                    IrModule* module = ir.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+                    IrType* array = 0;
+                    for (u32 index = 0; index < module->global_count; index += 1)
+                    {
+                        IrGlobal* global = module->globals + index;
+                        IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, global->symbol);
+                        if (symbol && string_equal(symbol->link_name, S8("arr"))) array = ir_type_from_id(&ir.program->types, global->type);
+                    }
+                    for (u32 index = 0; index < module->function_count; index += 1)
+                    {
+                        IrFunction* function = module->functions + index;
+                        for (u32 local = 0; local < function->debug_local_count; local += 1)
+                        {
+                            IrDebugLocal* debug = function->debug_locals + local;
+                            if (string_equal(debug->name, S8("arr"))) array = ir_type_from_id(&ir.program->types, debug->type);
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, array && array->kind == IR_TYPE_ARRAY && array->layout.resolved &&
+                                               array->layout.size == cases[case_index].size && array->element_count == cases[case_index].count,
+                                    cases[case_index].source);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 source;
+        CDiagnosticKind kind;
+    } const refused[] = {
+        {S8("int g; int arr[sizeof(g)]; _Static_assert(sizeof(arr) == 8, \"false sizeof\");\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("_Alignas(32) int g; int arr[_Alignof(g)]; _Static_assert(sizeof(arr) == 16, \"false alignment\");\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int observe(int n) { int g[n]; int arr[sizeof(g)];\n"
+            "_Static_assert(sizeof(arr) == 16, \"runtime VLA\"); return 0; }\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+        // Valid GNU source remains unsupported by the legacy layout reader
+        // until #1247 replaces its identifier-as-zero alignment evaluator.
+        {S8("enum { A = 32 }; _Alignas(A) int g; int arr[_Alignof(g)];\n"
+            "_Static_assert(sizeof(arr) == 128, \"unsupported alignment request\");\n"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, refused[index].source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, refused[index].source);
+        BUSTER_TEST_RAW(arguments, analysis.diagnostic_count == 1, refused[index].source);
+        if (analysis.diagnostic_count == 1) BUSTER_TEST(arguments, analysis.diagnostics[0].kind == refused[index].kind);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // GNU `_Alignof`/`__alignof__` over an object answers the object's
 // alignment, `_Alignas` and `aligned` included, and it is an integer constant
 // expression wherever GCC and Clang fold it (#1704). Both layout engines must
@@ -21916,7 +22052,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
                 for (u32 form = 0; form < 2; form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("alignof-member-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("alignof-member-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -22549,7 +22685,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
                     {
                         Arena* conflicts[] = {arguments->arena};
                         TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("parenthesized-typedef-conversions-run"), S8(".exe"));
+                        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("parenthesized-typedef-conversions-run"), S8(".exe"));
                         String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimization == 0 ? S8("-O0") : S8("-O2"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                         invocation.reject_machine_fallback = mode != 0;
@@ -22580,7 +22716,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                     String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("parenthesized-typedef-reference"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("parenthesized-typedef-reference"), S8(".exe"));
                     if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                     {
                         String8 command[] = {compiler, optimization == 0 ? S8("-O0") : S8("-O2"), S8("-std=gnu17"), S8("-fwrapv"), S8("-nostdinc"), S8("-o"), output, source_path};
@@ -22836,7 +22972,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                 for (u32 form = 0; process_admission && form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("function-parameters-expression-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("function-parameters-expression-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation =
@@ -22881,7 +23017,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                     String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("function-parameters-reference-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("function-parameters-reference-run"), S8(".exe"));
                     if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                     {
                         String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"), S8("-Wno-strict-prototypes"),
@@ -23666,7 +23802,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
                 BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("{S8} syntax: {S8}"), context, checked.diagnostic));
-                String8 output = buster_test_temporary_path(temporary.arena, S8("attribute-call-roles"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("attribute-call-roles"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 invocation.reject_machine_fallback = mode != 0;
@@ -24764,7 +24900,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTe
         for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            String8 output = buster_test_temporary_path(temporary.arena, S8("expression-aggregate-bit-fields-run"), S8(".exe"));
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("expression-aggregate-bit-fields-run"), S8(".exe"));
             String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), allocators[allocator], frontends[frontend],
                                  S8("-fverify-codegen"), S8("-o"), output, source_path};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -25056,7 +25192,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_control_preparation(UnitTestArg
             {
                 Arena* conflicts[] = {arguments->arena};
                 TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                String8 output = buster_test_temporary_path(temporary.arena, S8("sizeof-control-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("sizeof-control-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[frontend],
                                      S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation =
@@ -25295,8 +25431,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
                 String8 context = string_format(temporary.arena, S8("falloff {S8} {S8} form={u32}"), flags[dialect], modes[mode], form);
                 String8 frontend = form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa");
                 String8 outputs[] = {
-                    buster_test_temporary_path(temporary.arena, S8("falloff-combined"), S8(".exe")),
-                    buster_test_temporary_path(temporary.arena, S8("falloff-separate"), S8(".exe")),
+                    buster_test_temporary_unique_path(temporary.arena, S8("falloff-combined"), S8(".exe")),
+                    buster_test_temporary_unique_path(temporary.arena, S8("falloff-separate"), S8(".exe")),
                 };
                 String8 combined_command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"),
                     S8("-o"), outputs[0], inputs[0], inputs[1]};
@@ -26275,7 +26411,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
                 {
                     Arena* conflicts[] = {arguments->arena};
                     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("nested-conditional-conversions-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("nested-conditional-conversions-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimization == 0 ? S8("-O0") : S8("-O2"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     invocation.reject_machine_fallback = mode != 0;
@@ -26306,7 +26442,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("nested-conditional-reference"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("nested-conditional-reference"), S8(".exe"));
                 if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                 {
                     String8 command[] = {compiler, optimization == 0 ? S8("-O0") : S8("-O2"), S8("-std=gnu17"), S8("-fwrapv"), S8("-nostdinc"), S8("-o"), output, source_path};
@@ -26717,7 +26853,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                 for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("integer-conversion-rank-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("integer-conversion-rank-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], allocator_modes[allocator], frontends[frontend],
                                          optimizations[optimization], S8("-fverify-codegen"), S8("-o"), output, runtime_source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
@@ -27021,7 +27157,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
             for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(runtime_frontends); frontend += 1)
             {
                 TemporalArena runtime_temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(runtime_temporary.arena, S8("typeof-integer-promotions-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(runtime_temporary.arena, S8("typeof-integer-promotions-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), runtime_dialects[dialect], allocator_modes[allocator], runtime_frontends[frontend],
                                      S8("-fverify-codegen"), S8("-o"), output, runtime_source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(runtime_temporary.arena,
@@ -27397,7 +27533,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontend_modes); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&source_temporary.arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("generic-string-subscripts-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("generic-string-subscripts-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], modes[mode], frontend_modes[form],
                                          S8("-fverify-codegen"), S8("-o"), output, input};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -27675,7 +27811,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_character_literal_query_types(UnitTest
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontend_modes); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&source_temporary.arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("character-literal-queries-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("character-literal-queries-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], modes[mode], frontend_modes[form],
                                          S8("-fverify-codegen"), S8("-o"), output, input};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -28490,7 +28626,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
                     for (u32 form = 0; form < 2; form += 1)
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("call-result-callees-run"), S8(".exe"));
+                        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("call-result-callees-run"), S8(".exe"));
                         String8 command[] = {S8("-nostdinc"), S8("-fno-builtin"), dialects[dialect], modes[mode],
                             form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -28894,7 +29030,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
                 for (u32 form = 0; form < 2; form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("call-assignment-values-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("call-assignment-values-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                                          form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -29993,7 +30129,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_attributes(UnitTestArguments
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_type_name_attribute_source))))
     {
         TemporalArena run_temporary = scratch_begin(&arguments->arena, 1);
-        String8 output = buster_test_temporary_path(run_temporary.arena, S8("type-name-attributes-run"), S8(".exe"));
+        String8 output = buster_test_temporary_unique_path(run_temporary.arena, S8("type-name-attributes-run"), S8(".exe"));
         String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-o"), output, source};
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(run_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         CompilerDriverResult compiled = compiler_driver_execute_invocation(run_temporary.arena, invocation);
@@ -34254,7 +34390,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_runtime(UnitTestArgu
                     for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("x87-integer-unary-run"), S8(".exe"));
+                        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("x87-integer-unary-run"), S8(".exe"));
                         String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], optimizations[optimization],
                             S8("-fverify-codegen"), S8("-o"), output, input};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -34292,7 +34428,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_runtime(UnitTestArgu
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                         String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("x87-integer-unary-reference"), S8(".exe"));
+                        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("x87-integer-unary-reference"), S8(".exe"));
                         if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                         {
                             String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-nostdinc"),
@@ -34517,7 +34653,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_classifier_runtime(UnitTestArgumen
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("x87-classifier-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("x87-classifier-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-DBUSTER_CLASSIFIER_TYPED_VARIANTS=1"), dialects[dialect], modes[mode], forms[form], S8("-O0"),
                         S8("-fverify-codegen"), S8("-o"), output, input};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -34553,7 +34689,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_classifier_runtime(UnitTestArgumen
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("x87-classifier-reference"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("x87-classifier-reference"), S8(".exe"));
                 if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                 {
                     String8 command[] = {compiler, reference_dialects[dialect], S8("-O0"), S8("-nostdinc"), S8("-fno-fast-math"), input, S8("-o"), output};
@@ -34808,7 +34944,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("generic-float-builtins-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("generic-float-builtins-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], forms[form], S8("-O0"),
                         S8("-fverify-codegen"), S8("-o"), output, input, S8("-lm")};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -34844,7 +34980,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("generic-float-builtins-reference"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("generic-float-builtins-reference"), S8(".exe"));
                 if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                 {
                     String8 command[] = {compiler, reference_dialects[dialect], S8("-O0"), S8("-nostdinc"), S8("-fno-fast-math"), input, S8("-o"), output, S8("-lm")};
@@ -34940,7 +35076,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArgu
             for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("quiet-nan-compare-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("quiet-nan-compare-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), modes[mode], forms[form], S8("-O0"), S8("-fverify-codegen"),
                     S8("-o"), output, input, S8("-lm")};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -34971,7 +35107,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArgu
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-            String8 output = buster_test_temporary_path(temporary.arena, S8("quiet-nan-compare-reference"), S8(".exe"));
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("quiet-nan-compare-reference"), S8(".exe"));
             if (BUSTER_REQUIRE(arguments, compiler.length != 0))
             {
                 String8 command[] = {compiler, S8("-O0"), S8("-nostdinc"), S8("-fno-fast-math"), reference == 1 ? S8("-DSIG=0") : S8("-DSIG=1"), input, S8("-o"), output, S8("-lm")};
@@ -36405,7 +36541,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_extension_constants(UnitTestArguments*
             for (u32 form = 0; form < 2; form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("extension-constants-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("extension-constants-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
                     S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -37760,7 +37896,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_runtime(Unit
             for (u32 frontend = 0; frontend < 2; frontend += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("float-literal-initializer-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("float-literal-initializer-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -37871,7 +38007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_initializer_elision_runtime(Un
             for (u32 frontend = 0; frontend < 2; frontend += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("complex-initializer-elision-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("complex-initializer-elision-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -40820,7 +40956,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_qualifiers_runtime(U
             for (u32 frontend = 0; frontend < 2; frontend += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("transparent-union-qualifiers-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("transparent-union-qualifiers-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -41090,7 +41226,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_vla_evaluation(UnitTestArgument
             for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("sizeof-vla-evaluation-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("sizeof-vla-evaluation-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
                                      allocators[allocator], frontends[form], S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -41335,7 +41471,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
                 {
                     Arena* conflicts[] = {arguments->arena, source_temporary.arena};
                     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("compound-conversion-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("compound-conversion-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
                         S8("-fverify-codegen"), allocators[allocator], frontends[form], optimizations[optimization], S8("-o"), output, source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -41421,7 +41557,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArgumen
                 for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-compound-result-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("atomic-compound-result-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fverify-codegen"), allocators[allocator],
                                         frontends[form], optimizations[optimization], S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -41630,7 +41766,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
             for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("runtime-place-updates"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("runtime-place-updates"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fverify-codegen"), allocators[allocator], forms[form],
                                      optimizations[optimization], S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -41702,7 +41838,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                     String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("place-update-reference"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("place-update-reference"), S8(".exe"));
                     if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                     {
                         String8 reference_input = reference == 0 ? gcc_input : reference_inputs[control];
@@ -41989,7 +42125,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_bool_conversion(UnitTestArgume
                 {
                     Arena* conflicts[] = {arguments->arena, source_temporary.arena};
                     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("complex-bool-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("complex-bool-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fverify-codegen"), allocators[allocator], frontends[form],
                                          optimizations[optimization], S8("-o"), output, family_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -42141,7 +42277,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTes
                 for (u32 form = 0; form < 2; form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("integer-literal-policy-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("integer-literal-policy-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -42603,7 +42739,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_types_runtime(UnitTe
             for (u32 form = 0; form < 2; form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("constexpr-integer-types-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("constexpr-integer-types-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu23"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -42855,7 +42991,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_indices_runtime(UnitTes
             for (u32 form = 0; form < 2; form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("offsetof-typed-indices-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("offsetof-typed-indices-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -42898,7 +43034,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArgum
             for (u32 form = 0; form < 2; form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("offsetof-members-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("offsetof-members-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -42989,7 +43125,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitT
                 for (u32 form = 0; form < 2; form += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("local-array-sizeof-bound-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("local-array-sizeof-bound-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -43325,7 +43461,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                 {
                     Arena* conflicts[] = {arguments->arena, sources.arena};
                     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("constant-truth-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("constant-truth-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fverify-codegen"), allocators[allocator], frontends[form],
                                          optimizations[optimization], S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -43506,7 +43642,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
             {
                 Arena* conflicts[] = {arguments->arena, sources_temporary.arena};
                 TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                String8 output = buster_test_temporary_path(temporary.arena, S8("choose-expr-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("choose-expr-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 invocation.reject_machine_fallback = mode != 0;
@@ -43846,7 +43982,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArg
                 {
                     Arena* conflicts[] = {arguments->arena};
                     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("comma-condition-run"), S8(".exe"));
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("comma-condition-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimizations[optimization], S8("-fverify-codegen"), S8("-o"), output, source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     invocation.reject_machine_fallback = mode != 0;
@@ -43947,7 +44083,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments
             {
                 Arena* conflicts[] = {arguments->arena};
                 TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                String8 output = buster_test_temporary_path(temporary.arena, S8("comma-value-operands-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("comma-value-operands-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-O0"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 invocation.reject_machine_fallback = mode != 0;
@@ -44222,7 +44358,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
             for (u32 form = 0; form < 2; form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("switch-integer-controls-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("switch-integer-controls-run"), S8(".exe"));
                 String8 command[] = {S8("-std=gnu17"), modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
                                      S8("-fverify-codegen"), S8("-o"), output, path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -44245,6 +44381,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
         }
     }
 #endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_work_and_scratch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {1, 16, 17, 33, 65};
+    for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(counts); test += 1)
+    {
+        for (u32 control = 0; control < 3; control += 1)
+        {
+            // Independent expected constants distinguish last-arm selection,
+            // default selection and a compatible duplicate after growth.
+            u32 count = counts[test];
+            String8 parts[70];
+            u32 part_count = 0;
+            parts[part_count++] = string_format(arguments->arena,
+                S8("int query(void) {{ return _Generic((int (*)[{u32}])0,"), control == 1 ? count + 1 : count);
+            for (u32 arm = 1; arm <= count; arm += 1)
+                parts[part_count++] = string_format(arguments->arena, S8("int (*)[{u32}]: {u32},"), arm, arm);
+            if (control == 2) parts[part_count++] = S8("int (*)[1]: 99,");
+            // Long discarded spans must not increase association workspace.
+            parts[part_count++] = S8("default: ((((((((((((((((0))))))))))))))))); }\n");
+            String8 source = string_join_arena(arguments->arena, (SliceString8){.pointer = parts, .length = part_count}, false);
+            for (u32 replay = 0; replay < 2; replay += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                // Rewound bytes remain dirty on the second replay.
+                if (replay)
+                {
+                    u64 mark = temporary.arena->position;
+                    memset(arena_allocate(temporary.arena, u8, 8192), 0xa5, 8192);
+                    arena_set_position(temporary.arena, mark);
+                }
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                u64 before = c_test_generic_association_scratch_bytes();
+                CParseResult parsed = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                u64 bytes = c_test_generic_association_scratch_bytes() - before;
+                BUSTER_TEST(arguments, !tokens.diagnostic_count);
+                if (control == 2)
+                {
+                    BUSTER_TEST(arguments, parsed.diagnostic_count != 0);
+                    BUSTER_TEST(arguments, count <= 16 ? bytes == 0 : bytes > 0);
+                }
+                else if (BUSTER_REQUIRE(arguments, parsed.diagnostic_count == 0))
+                {
+                    BUSTER_TEST(arguments, count <= 16 ? bytes == 0 : bytes > 0 && bytes < (u64)count * 16);
+                    for (u32 form = 0; form < 2; form += 1)
+                    {
+                        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-scratch.c"), tokens, parsed, target_native,
+                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.program->module_count))
+                        {
+                            IrModule* module = lowered.program->modules;
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                            IrFunction* function = c_test_find_ir_function(module, S8("query"));
+                            u32 returns = 0;
+                            if (BUSTER_REQUIRE(arguments, function != 0))
+                            {
+                                for (u32 row = 0; row < function->instruction_count; row += 1)
+                                {
+                                    IrInstruction* instruction = function->instructions + row;
+                                    if (instruction->opcode == IR_OPCODE_RETURN && instruction->operand_count == 1)
+                                    {
+                                        IrValueId value = instruction->operands[0];
+                                        if (BUSTER_REQUIRE(arguments, value.value < function->value_count))
+                                        {
+                                            IrInstructionId definition = function->values[value.value].definition;
+                                            if (BUSTER_REQUIRE(arguments, definition.value < function->instruction_count))
+                                            {
+                                                IrInstruction* constant = function->instructions + definition.value;
+                                                if (BUSTER_REQUIRE(arguments, constant->opcode == IR_OPCODE_CONSTANT_INTEGER && constant->immediate_count))
+                                                    BUSTER_TEST(arguments, constant->immediates[0] == (control == 1 ? 0 : count));
+                                            }
+                                        }
+                                        returns += 1;
+                                    }
+                                }
+                                BUSTER_TEST(arguments, returns == 1);
+                            }
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("int query(int x) { return _Generic(x, int: x, default: 0); }\n"), (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+#if BUSTER_WORK_LEDGER
+        WorkLedgerCounters before = work_ledger_counters();
+#endif
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-work.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+#if BUSTER_WORK_LEDGER
+        WorkLedgerCounters after = work_ledger_counters();
+        BUSTER_TEST(arguments, after.values[WORK_LEDGER_REDERIVE_LOWER_TYPE_PREDICTIONS] == before.values[WORK_LEDGER_REDERIVE_LOWER_TYPE_PREDICTIONS]);
+#endif
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        scratch_end(temporary);
+    }
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("int query(int x) { return _Generic(x, int: missing_value, default: 0); }\n"), (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-invalid-child.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !lowered.program);
+        // Identifier binding rejects this selected value before lowering. The
+        // invalid semantic result must not become a successful partial module.
+        if (BUSTER_REQUIRE(arguments, parsed.diagnostic_count != 0))
+        {
+            BUSTER_TEST(arguments, parsed.diagnostics[0].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+            BUSTER_TEST(arguments, parsed.diagnostics[0].message.length != 0);
+        }
+        scratch_end(temporary);
+    }
     return result;
 }
 
@@ -44435,7 +44696,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestAr
             {
                 Arena* conflicts[] = {arguments->arena, sources.arena};
                 TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-                String8 output = buster_test_temporary_path(temporary.arena, S8("logical-constant-fallbacks-run"), S8(".exe"));
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("logical-constant-fallbacks-run"), S8(".exe"));
                 String8 command[] = {modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
                                      S8("-fverify-codegen"), S8("-o"), output, path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -44465,6 +44726,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestAr
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
 #if BUSTER_BENCH_ALLOCATIONS
     C_TEST_FIXTURE(arguments, c_test_source_fact_census);
@@ -44482,6 +44744,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_alignof_object);
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
+    C_TEST_FIXTURE(arguments, c_test_array_bound_object_layout);
     C_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
     C_TEST_FIXTURE(arguments, c_test_attribute_call_roles);
     C_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);

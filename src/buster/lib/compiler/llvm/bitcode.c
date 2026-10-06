@@ -12,6 +12,8 @@
 // LLVM's bitstream is LSB-first. The writer intentionally emits
 // unabbreviated records: this keeps the implementation small and auditable,
 // while remaining a fully conforming, self-describing LLVM bitcode stream.
+// llvm_bc_linkage preserves weak definitions versus optional declarations;
+// llvm_bc_visibility keeps external hidden binding separate from linkage.
 //
 // Collection-time lookups stay O(1) expected as the module grows:
 // llvm_bc_add_constant deduplicates through the constant_slots hash index,
@@ -155,6 +157,11 @@ enum
     LLVM_BC_LINKAGE_EXTERNAL = 0,
     LLVM_BC_LINKAGE_APPENDING = 2,
     LLVM_BC_LINKAGE_INTERNAL = 3,
+    LLVM_BC_LINKAGE_EXTERNAL_WEAK = 7,
+    LLVM_BC_LINKAGE_WEAK = 16,
+
+    LLVM_BC_VISIBILITY_DEFAULT = 0,
+    LLVM_BC_VISIBILITY_HIDDEN = 1,
 
     LLVM_BC_GLOBAL_STRING = 1,
     LLVM_BC_GLOBAL_CTORS = 2,
@@ -1516,9 +1523,32 @@ static u32 llvm_bc_access_alignment(LlvmBcContext* context, IrFunction* function
 }
 
 // LLVM accepts only external or extern_weak linkage on a declaration.
-static u32 llvm_bc_linkage(IrSymbol* symbol, bool declaration)
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_linkage(IrSymbol* symbol, bool declaration)
 {
-    return !declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL ? LLVM_BC_LINKAGE_INTERNAL : LLVM_BC_LINKAGE_EXTERNAL;
+    u32 result;
+    if (!declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL)
+    {
+        result = LLVM_BC_LINKAGE_INTERNAL;
+    }
+    else if (symbol && symbol->is_weak)
+    {
+        // WeakAny is wire value 16; legacy value 1 implies an old COMDAT.
+        // LLVM BitcodeWriter.cpp getEncodedLinkage, llvmorg-23.1.2.
+        result = declaration ? LLVM_BC_LINKAGE_EXTERNAL_WEAK : LLVM_BC_LINKAGE_WEAK;
+    }
+    else
+    {
+        result = LLVM_BC_LINKAGE_EXTERNAL;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_visibility(IrSymbol* symbol, bool declaration)
+{
+    // LLVM requires default visibility for internal definitions. Hidden
+    // external references keep their independent visibility and weak binding.
+    return symbol && symbol->is_hidden && (declaration || symbol->linkage != IR_LINKAGE_INTERNAL) ?
+           LLVM_BC_VISIBILITY_HIDDEN : LLVM_BC_VISIBILITY_DEFAULT;
 }
 
 static u32 llvm_bc_calling_convention(IrCallingConvention convention)
@@ -5156,7 +5186,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
                 ? LLVM_BC_LINKAGE_APPENDING : llvm_bc_linkage(global->symbol, global->declaration),
             alignment,
             section_ids[index],
-            0, // visibility
+            llvm_bc_visibility(global->symbol, global->declaration),
             global->is_thread_local ? 1 : 0,
         };
         llvm_bc_record(&context->stream, LLVM_BC_MODULE_GLOBALVAR, operands, 8);
@@ -5172,7 +5202,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             function->synthetic ? 0 : context->abi_signatures[function->canonical_type.value]->attribute_list_id,
             0, // alignment
             section_ids[context->global_count + index],
-            0, // visibility
+            llvm_bc_visibility(function->symbol, function->declaration),
         };
         llvm_bc_record(&context->stream, LLVM_BC_MODULE_FUNCTION, operands, 8);
     }
