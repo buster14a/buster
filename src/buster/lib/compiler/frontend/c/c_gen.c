@@ -16356,6 +16356,43 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* bu
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
 
+// Whether [start, end) is a bare member chain: an identifier followed only by
+// `.name`, `->name`, `[...]` and call `(...)` suffixes. Such a group is lowered as a place
+// child; any other group (`p + 1`, `p++`, `q = p + 1`) is an expression whose
+// value must be computed exactly once and cannot be re-walked as a place.
+BUSTER_C_INTERNAL bool c_ir_place_group_is_member_chain(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER;
+    u32 index = start + 1;
+    while (result && index < end)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            result = close < end;
+            index = close + 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            // A call is prepared before place lowering; its value is a chain base.
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            result = close < end;
+            index = close + 1;
+        }
+        else if ((c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW)) && index + 1 < end &&
+                 builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            index += 2;
+        }
+        else
+        {
+            result = false;
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -16430,6 +16467,14 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             dereference_count += 1;
             leading_dereference = true;
             start += 1;
+        }
+        if (leading_dereference && start + 1 < end &&
+            (c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
+             c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_MINUS_MINUS)))
+        {
+            // `*p++` is `*(p++)`: the postfix update is part of the pointer
+            // operand, so evaluate that operand once as an expression.
+            goto c_ir_place_expression_base;
         }
         u32 index = start;
         u32 base_index = index;
@@ -16536,8 +16581,7 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             // child, then resume this frame at the outer suffix; treating the
             // group as a single identifier would otherwise reject valid
             // postfix updates in Lua's buffered-reader macro.
-            if (!depth && nested_end > nested_start + 1 &&
-                builder->preprocess.tokens[nested_start].kind == C_TOKEN_IDENTIFIER)
+            if (!depth && nested_end > nested_start + 1 && c_ir_place_group_is_member_chain(builder, nested_start, nested_end))
             {
                 IrSourceRange group_source = c_ir_token_source_range(builder, builder->preprocess.tokens[nested_start]);
                 frame->as.place.local = 0;
@@ -16825,8 +16869,17 @@ c_ir_place_base_resolved:
             // The expression child only materializes a value to return it.
             // Retract its terminal read when the existing recovery contract
             // proves it is unused, retaining all earlier operand effects.
-            IrValueId direct_place = c_ir_recover_place_from_value(builder, place);
-            if (direct_place.value == IR_ID_UNDERLYING_INVALID)
+            // A pointer value that is about to be dereferenced is the operand
+            // itself: re-reading the place it was loaded from would observe
+            // side effects of the operand (`*(p++)` would use the incremented
+            // `p`). Without a pending dereference the expression covers the
+            // whole place and the recovered place is the final object.
+            IrType* value_type = place.value < builder->function->value_count
+                                     ? ir_type_from_id(&builder->program->types, builder->function->values[place.value].canonical_type) : 0;
+            bool pointer_value = frame->as.place.dereference_count && value_type && value_type->kind == IR_TYPE_POINTER &&
+                                 builder->function->values[place.value].category != IR_VALUE_PLACE;
+            IrValueId direct_place = pointer_value ? IR_VALUE_ID_INVALID : c_ir_recover_place_from_value(builder, place);
+            if (!pointer_value && direct_place.value == IR_ID_UNDERLYING_INVALID)
             {
                 direct_place = c_ir_ssa_read_place(builder, place, false);
             }
@@ -16838,7 +16891,7 @@ c_ir_place_base_resolved:
             // the addressable source from that load for complex postfix
             // operands such as `(ptr - 2)[index]++`; plain arithmetic values
             // remain invalid places and are rejected below.
-            if (place.value < builder->function->value_count && builder->function->values[place.value].category != IR_VALUE_PLACE)
+            if (!pointer_value && place.value < builder->function->value_count && builder->function->values[place.value].category != IR_VALUE_PLACE)
             {
                 IrInstructionId definition = builder->function->values[place.value].definition;
                 if (definition.value < builder->function->instruction_count)

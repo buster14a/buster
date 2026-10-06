@@ -9226,6 +9226,102 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast(UnitTes
         "}\n"));
 }
 
+// Runtime check for #1241: the pointer of a dereferenced update operand is
+// computed once, before the operand's own side effect. Each line stands for one
+// Clang-verified result; main returns the number of the first shape that
+// differs, so a failure names the shape.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_pointer_update_operand_program = S8_INITIALIZER(
+    "struct S { int m; int n; };\n"
+    "static int check(void)\n"
+    "{\n"
+    "    int a[4] = {10, 20, 30, 40};\n"
+    "    int* p = a;\n"
+    "    int* q = a;\n"
+    "    int i = 0;\n"
+    "    int r = 0;\n"
+    "    struct S s[3] = {{1, 2}, {3, 4}, {5, 6}};\n"
+    "    struct S* sp = s;\n"
+    "    r = (*((p++)))++;\n"
+    "    if (a[0] != 11 || a[1] != 20 || r != 10 || p != a + 1) return 1;\n"
+    "    p = a; r = (*(p + 1))++;\n"
+    "    if (a[1] != 21 || r != 20 || p != a) return 2;\n"
+    "    r = (sp + 1)->m++;\n"
+    "    if (s[1].m != 4 || r != 3 || sp != s) return 3;\n"
+    "    p = a; r = (*(p++)) += 5;\n"
+    "    if (a[0] != 16 || r != 16 || p != a + 1) return 4;\n"
+    "    p = a; *(p++) += 5;\n"
+    "    if (a[0] != 21 || a[1] != 21 || p != a + 1) return 5;\n"
+    "    p = a; r = (*p++)++;\n"
+    "    if (a[0] != 22 || a[1] != 21 || r != 21 || p != a + 1) return 6;\n"
+    "    p = a; r = ++*(p++);\n"
+    "    if (a[0] != 23 || a[1] != 21 || r != 23 || p != a + 1) return 7;\n"
+    "    p = a; r = (*(q = p + 1))++;\n"
+    "    if (a[0] != 23 || a[1] != 22 || r != 21 || q != a + 1 || p != a) return 8;\n"
+    "    i = 0; r = a[i++]++;\n"
+    "    if (a[0] != 24 || a[1] != 22 || r != 23 || i != 1) return 9;\n"
+    "    p = a; (*(p++)) = 7;\n"
+    "    if (a[0] != 7 || a[1] != 22 || p != a + 1) return 10;\n"
+    "    i = 0; r = s[i++].m++;\n"
+    "    if (s[0].m != 2 || s[1].m != 4 || r != 1 || i != 1) return 11;\n"
+    "    p = a + 2; r = (*(p--))--;\n"
+    "    if (a[2] != 29 || a[1] != 22 || r != 30 || p != a + 1) return 12;\n"
+    "    p = a; r = (*(++p))++;\n"
+    "    if (a[0] != 7 || a[1] != 23 || r != 22 || p != a + 1) return 13;\n"
+    "    p = a; r = (*((p++) + 1))++;\n"
+    "    if (a[1] != 24 || a[0] != 7 || r != 23 || p != a + 1) return 14;\n"
+    "    p = a; r = (p++)[0]++;\n"
+    "    if (a[0] != 8 || a[1] != 24 || r != 7 || p != a + 1) return 15;\n"
+    "    return 0;\n"
+    "}\n"
+    "int main(void) { return check(); }\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_update_operand_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("pointer-update-operand"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_pointer_update_operand_program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("pointer-update-operand-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("pointer update operand {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("pointer update operand runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -44620,6 +44716,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     C_TEST_FIXTURE(arguments, c_test_phase_arena_release);
     C_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
+    C_TEST_FIXTURE(arguments, c_test_pointer_update_operand_runtime);
     C_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
     C_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     C_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
