@@ -2097,6 +2097,8 @@ BUSTER_C_SHARED u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 
     return size;
 }
 
+BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
+
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
                                                           u32* index_out);
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type_core(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
@@ -3094,31 +3096,70 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 {
                     CToken token = preprocess.tokens[bound.token_start + bound_index];
                     bool bound_word_is_alignof = token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
-                    if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) || bound_word_is_alignof) &&
-                        bound_index + 2 < bound.token_count &&
-                        c_token_is_punctuator(&preprocess.tokens[bound.token_start + bound_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    bool bound_word_is_sizeof = token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof"));
+                    if ((bound_word_is_sizeof || bound_word_is_alignof) && bound_index + 1 < bound.token_count)
                     {
-                        u32 operand_start = bound.token_start + bound_index + 2;
+                        u32 operand_start = bound.token_start + bound_index + 1;
                         u32 bound_end = bound.token_start + bound.token_count;
-                        u32 close = operand_start;
-                        u32 depth = 1;
-                        while (close < bound_end && depth)
+                        bool parenthesized = c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
+                        u32 close = operand_start + 1;
+                        u32 depth = 0;
+                        if (parenthesized)
                         {
-                            CToken operand_token = preprocess.tokens[close];
-                            if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                            operand_start += 1;
+                            close = operand_start;
+                            depth = 1;
+                            while (close < bound_end && depth)
                             {
-                                depth += 1;
-                            }
-                            else if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                            {
-                                depth -= 1;
-                                if (!depth)
+                                CToken operand_token = preprocess.tokens[close];
+                                if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                                 {
-                                    break;
+                                    depth += 1;
                                 }
+                                else if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                                {
+                                    depth -= 1;
+                                    if (!depth)
+                                    {
+                                        break;
+                                    }
+                                }
+                                close += 1;
                             }
-                            close += 1;
                         }
+                        // A bound reads the object bound at its declaration,
+                        // including block shadowing, rather than a type name at
+                        // file scope. Read its existing layout in this solve;
+                        // an open dependency keeps the array on the same agenda.
+                        u32 object_start = operand_start;
+                        u32 object_end = close;
+                        while (object_end > object_start + 1 &&
+                               c_token_is_punctuator(&preprocess.tokens[object_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                               c_parse_matching_delimiter(preprocess, object_start, object_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                          C_PUNCTUATOR_RIGHT_PARENTHESIS) + 1 == object_end)
+                        {
+                            object_start += 1;
+                            object_end -= 1;
+                        }
+                        CEntityId object = C_ENTITY_ID_INVALID;
+                        if (!depth && object_end == object_start + 1 && preprocess.tokens[object_start].kind == C_TOKEN_IDENTIFIER &&
+                            !c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[object_start]))
+                        {
+                            u32 use_index = c_parse_identifier_use_index(result, object_start);
+                            if (use_index != C_ID_UNDERLYING_INVALID)
+                            {
+                                object = result->identifier_uses[use_index].entity;
+                            }
+                            else
+                            {
+                                CScopeId scope = c_parse_scope_for_token(result, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                                        object_start);
+                                object = c_parse_lookup_entity_at_token(result, preprocess, scope, object_start);
+                            }
+                        }
+                        CEntity const* object_entity = object.value < result->entity_count ? result->entities + object.value : 0;
+                        bool object_operand = object_entity && (object_entity->kind == C_ENTITY_OBJECT || object_entity->kind == C_ENTITY_LOCAL ||
+                                                               object_entity->kind == C_ENTITY_PARAMETER);
                         u32 operand_type_index = operand_start;
                         CParseResult operand_parse = *result;
                         // Callers inside the explicit type-parse machine pass no
@@ -3129,7 +3170,12 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         // `sizeof(char[sizeof(T)])` folds rather than failing
                         // its whole enum.
                         CTypeId operand_type;
-                        if (!depth && close > operand_start)
+                        if (object_operand)
+                        {
+                            operand_type = object_entity->type;
+                            operand_type_index = close;
+                        }
+                        else if (parenthesized && !depth && close > operand_start)
                         {
                             operand_type = machine ? c_parse_type_name_specifiers(machine, &operand_parse, preprocess,
                                                                                    result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
@@ -3142,7 +3188,10 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         {
                             operand_type = C_TYPE_ID_INVALID;
                         }
-                        bool pointer_type = false;
+                        bool pointer_type = object_operand && object_entity->kind == C_ENTITY_PARAMETER &&
+                                            operand_type.value < operand_parse.type_count &&
+                                            (operand_parse.types[operand_type.value].kind == C_TYPE_ARRAY ||
+                                             operand_parse.types[operand_type.value].kind == C_TYPE_FUNCTION);
                         while (operand_type.value != C_ID_UNDERLYING_INVALID && operand_type_index < close)
                         {
                             CToken type_token = preprocess.tokens[operand_type_index];
@@ -3171,13 +3220,14 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             operand_alignment = c_preprocess_detail(preprocess)->data_layout.pointer.alignment;
                         }
                         else if (operand_resolved && operand_type.value < type_count &&
-                                 c_parse_layout_operand_resolved(context, agenda, operand_parse.types[operand_type.value].kind, operand_type.value))
+                                 (object_operand ? c_parse_layout_resolved(context, agenda, operand_type.value)
+                                                 : c_parse_layout_operand_resolved(context, agenda, operand_parse.types[operand_type.value].kind, operand_type.value)))
                         {
                             operand_size = c_parse_layout_size(context, agenda, operand_type.value);
                             operand_alignment = c_parse_layout_alignment(context, agenda, operand_type.value);
                             array_provisional |= c_parse_layout_provisional(context, agenda, operand_type.value);
                         }
-                        else if (operand_resolved && operand_type.value < operand_parse.type_count)
+                        else if (!object_operand && operand_resolved && operand_type.value < operand_parse.type_count)
                         {
                             // Kind-matching answers only for kinds whose layout
                             // the kind alone determines. A struct, union,
@@ -3199,6 +3249,39 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         {
                             operand_resolved = false;
                         }
+                        if (operand_resolved && object_operand && bound_word_is_alignof &&
+                            (object_entity->kind == C_ENTITY_OBJECT || object_entity->kind == C_ENTITY_LOCAL))
+                        {
+                            u32 alignment_cursor = 0;
+                            u32 run_start = 0;
+                            u32 run_count = 0;
+                            while (operand_resolved && c_alignof_object_next_run(result, object, object_start, &alignment_cursor, &run_start, &run_count))
+                            {
+                                // This layout reader's legacy integer evaluator
+                                // reads identifiers as zero. Keep unsupported
+                                // requests unresolved until the typed authority
+                                // migration (#1247), rather than publish a wrong
+                                // object alignment as a constant bound.
+                                for (u32 request = 0; operand_resolved && request < run_count; request += 1)
+                                {
+                                    operand_resolved = run_start <= result->alignment_count && request < result->alignment_count - run_start;
+                                    if (operand_resolved)
+                                    {
+                                        CAlignmentSpecifier specifier = result->alignments[run_start + request];
+                                        if (specifier.type.value >= type_count)
+                                        {
+                                            for (u32 index = 0; operand_resolved && index < specifier.token_count; index += 1)
+                                            {
+                                                operand_resolved = preprocess.tokens[specifier.token_start + index].kind != C_TOKEN_IDENTIFIER;
+                                            }
+                                        }
+                                    }
+                                }
+                                operand_resolved = operand_resolved &&
+                                                   c_parse_layout_alignment_specifiers(context, agenda, run_start, run_count, &operand_alignment, 0,
+                                                                                       &array_provisional);
+                            }
+                        }
                         if (!operand_resolved)
                         {
                             unresolved_identifier = true;
@@ -3207,7 +3290,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         bound_tokens[bound_token_count++] = c_space_token(
                             &bound_space, string_format(arena, S8("{u64}"), bound_word_is_alignof ? operand_alignment : operand_size),
                             C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-                        bound_index += close - (bound.token_start + bound_index);
+                        bound_index += close - (bound.token_start + bound_index) - !parenthesized;
                         continue;
                     }
                     if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
