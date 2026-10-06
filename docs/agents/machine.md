@@ -165,6 +165,12 @@ fixture as well as compiling both architectures.
   impossible X16/SP pointer aliases fail before writing a prefix. Registered
   large-copy tests cross 32 KiB/64 KiB, both C forms and every allocator, with
   native Unix AArch64 byte/guard verification in addition to encoding checks.
+- Boolean-to-i128 casts zero-extend the existing eight-bit Boolean image into
+  the low limb and clear the high limb, for signed and unsigned destinations.
+  The canonical conversion remains ZERO_EXTEND only; semantic width one must
+  not become an encoder operand width. `machine_test_boolean_i128_cast` checks
+  actual canonical casts, both frontend forms, all allocators and six desktop
+  generation targets, with matching-host full-limb and guard observations.
 - Native i128 block parameters expand to two general-register MIR parameters.
   The selector allocates pair mappings only for functions with wide joins and
   snapshots each incoming instruction result at its definition. Entry stores
@@ -1038,3 +1044,15 @@ Native selectors accept any valid canonical entry block. They emit that block
 first, remap expanded MIR block ranges and CFG edges, and capture arguments in
 the actual entry. The canonical-entry regression retains all block rotations,
 re-publishes the CFG after mutation, and checks every allocator spelling.
+
+## System V MEMORY variadic records
+
+The registered SysV padding fixture (`compiler_driver_test_sysv_padding_eightbytes`)
+also reads non-f80 MEMORY-class structs/unions (17-byte, packed 9-byte and
+16-aligned 32-byte records) with `va_arg`. It observes that the overflow cursor
+advances by the size rounded to eight (after sixteen-byte alignment where
+required), that GP/FP save-slot counters are untouched, that `va_copy` advances
+independently, and that every payload byte arrives, including a read after GP
+exhaustion, in both compiler directions and every allocator/frontend
+combination. The retired direct emitter had no such path; current `none`
+selects MIR-stack.

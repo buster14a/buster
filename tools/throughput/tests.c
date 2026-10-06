@@ -202,6 +202,14 @@ static int test_child(int argc, char** argv)
     }
 #endif
     else if (!strcmp(argv[2], "sleep")) test_delay(5000);
+#ifdef __linux__
+    else if (!strcmp(argv[2], "affinity-count"))
+    {
+        cpu_set_t affinity;
+        CPU_ZERO(&affinity);
+        result = sched_getaffinity(0, sizeof(affinity), &affinity) == 0 ? CPU_COUNT(&affinity) : 255;
+    }
+#endif
     else if (!strcmp(argv[2], "admission-transcript")) result = test_admission_transcript();
     else if (argc == 4 && !strcmp(argv[2], "descendant-marker"))
     {
@@ -298,7 +306,7 @@ static int test_child(int argc, char** argv)
     return result;
 }
 
-static int test_compiler_child(int argc, char** argv)
+static int test_object_compiler_child(int argc, char** argv)
 {
     char const* source = NULL;
     char const* output = NULL;
@@ -370,6 +378,17 @@ static int test_compiler_child(int argc, char** argv)
         }
         if (!ok) result = 8;
     }
+    return result;
+}
+
+static int test_scale_compiler(int argc, char** argv);
+
+/* -fmetrics-out selects the multi-input link compiler used by scale tests. */
+static int test_compiler_child(int argc, char** argv)
+{
+    int scale = 0;
+    for (int i = 2; i < argc; ++i) scale |= !strncmp(argv[i], "-fmetrics-out=", 14);
+    int result = scale ? test_scale_compiler(argc, argv) : test_object_compiler_child(argc, argv);
     return result;
 }
 
@@ -2042,6 +2061,7 @@ static void test_retirement_statistics(void)
 }
 
 #include "qualification_test.h"
+#include "scaling_test.h"
 
 int main(int argc, char** argv)
 {
@@ -2110,6 +2130,7 @@ int main(int argc, char** argv)
         test_launch_errors(executable, root);
 #endif
         test_retirement_statistics();
+        test_scaling(executable, root);
         printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
                sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,
                TP_MAX_JOBS * (sizeof(TpJob) + 2 * sizeof(TpRow)),

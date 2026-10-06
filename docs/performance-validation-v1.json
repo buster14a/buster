@@ -11,12 +11,22 @@
       "id": "build:bench_throughput",
       "kind": "build-command",
       "validation": "performance",
-      "measures": "native compiler throughput corpus, paired baseline/candidate",
+      "measures": "native compiler throughput corpus, paired baseline/candidate: the predeclared default CI corpus runs as profile throughput-corpus-v1 in every pull-request comparison (custom and real-source workload selections, and the scale subcommand's multi-TU -fcompile-jobs series (#424), stay diagnostic; a scaling claim needs a scale bundle produced on the 9700X itself)",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "No 9700X route yet. A throughput claim needs a pull-compare or a new reviewed profile that runs this corpus on the 9700X."
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "build:bench_throughput@main",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "the same throughput-corpus-v1 run for each commit after it lands on main",
+      "zen5": {
+        "route": "main-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
       }
     },
     {
