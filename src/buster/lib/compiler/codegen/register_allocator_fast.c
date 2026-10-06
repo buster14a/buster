@@ -814,7 +814,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         {
             target = state->pinned_registers[destination_value];
         }
-        u32 stored = target;
+        u32 stored;
         if (!direct)
         {
             stored = target != UINT32_MAX ? target : (vector ? state->description->vector_slot_scratch[0] : state->description->slot_scratch[0]);
