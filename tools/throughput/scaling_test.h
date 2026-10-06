@@ -263,6 +263,7 @@ static void test_scale_options(void)
     CHECK(!tp_options(5, run, &config));
 }
 
+#ifdef __linux__
 static int test_file_contains(char const* directory, char const* leaf, char const* needle)
 {
     char path[TP_PATH_CAP], text[1 << 16];
@@ -273,7 +274,6 @@ static int test_file_contains(char const* directory, char const* leaf, char cons
     return file && strstr(text, needle) != NULL;
 }
 
-#ifdef __linux__
 typedef struct TestScaleRun
 {
     char const* executable;
