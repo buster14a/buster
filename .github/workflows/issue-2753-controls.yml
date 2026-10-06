@@ -1,0 +1,69 @@
+name: Issue 2753 sanitized failure controls
+on:
+  push:
+    branches: ['codex/2753-assembly-output-validation']
+permissions:
+  contents: read
+jobs:
+  controls:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Machine and source identities
+        run: |
+          git rev-parse HEAD
+          lscpu
+          nproc
+          free -b
+          uname -a
+          clang --version
+          cmake --version
+      - name: Build sanitized Release with temporary failure controls
+        env:
+          BUSTER_TEST_JOBS: '1'
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --sanitize --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j4
+      - name: Healthy assembly positive control
+        run: build/Release/ide test --module=compiler_driver_tests --verbose=1 --ci=1 > healthy.log 2>&1
+      - name: Original failure must reproduce fatal UBSan
+        env:
+          BUSTER_ISSUE_2753_FORCE_FAILURE: '1'
+          BUSTER_ISSUE_2753_BASELINE: '1'
+        run: |
+          status=0
+          build/Release/ide test --module=compiler_driver_tests --verbose=1 --ci=1 > baseline.log 2>&1 || status=$?
+          test "$status" -ne 0
+          grep -F 'null pointer passed as argument 1' baseline.log
+          ! grep -F 'fixture=retired_buster_path' baseline.log
+      - name: Fixed failure must report assertions and continue
+        env:
+          BUSTER_ISSUE_2753_FORCE_FAILURE: '1'
+        run: |
+          status=0
+          build/Release/ide test --module=compiler_driver_tests --verbose=1 --ci=1 > fixed-failure.log 2>&1 || status=$?
+          test "$status" -ne 0
+          grep -F 'assembly_file.error == COMPILER_DRIVER_ERROR_NONE' fixed-failure.log
+          grep -F 'fixture=retired_buster_path' fixed-failure.log
+          ! grep -E 'runtime error:|ERROR: AddressSanitizer|SUMMARY: .*Sanitizer' fixed-failure.log
+      - name: Empty successful output must fail safely and continue
+        env:
+          BUSTER_ISSUE_2753_EMPTY: '1'
+        run: |
+          status=0
+          build/Release/ide test --module=compiler_driver_tests --verbose=1 --ci=1 > empty.log 2>&1 || status=$?
+          test "$status" -ne 0
+          grep -F 'assembly_file_bytes.length != 0 && assembly_file_bytes.length == assembly_file.output.length' empty.log
+          grep -F 'fixture=retired_buster_path' empty.log
+          ! grep -E 'runtime error:|ERROR: AddressSanitizer|SUMMARY: .*Sanitizer' empty.log
+      - name: Retain control logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-2753-controls
+          path: '*.log'
+          retention-days: 14
