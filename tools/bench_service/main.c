@@ -3,6 +3,7 @@
  * either fixes validate-buster-v1 (submit) or names one registry service recipe
  * (submit-recipe), which bq_recipe_service admits exactly as for the client.
  * bq_cli owns dispatch and diagnostics; bq_response_write prints bounded receipts.
+ * bq_mcp_run adapts the same socket protocol to bounded stdio MCP.
  * Tests include this entry point, as the existing throughput tests do.
  */
 #ifndef _GNU_SOURCE
@@ -12,13 +13,21 @@
 #define _CRT_SECURE_NO_WARNINGS 1
 #endif
 #include "queue.c"
+#include "native_store.c"
 #include "exclusive_admission.c"
 #include "workspace.c"
 #include "worker_linux.c"
+#include "native_subject.c"
+#include "native_runtime.c"
+#include "native_execution.c"
 #include "export.c"
 #include "protocol.c"
 #include "transport.c"
 #include "export_client.c"
+#include "native_client.c"
+#include "offhost_session.c"
+#include "offhost_control.c"
+#include "offhost_transport.c"
 #include <inttypes.h>
 #include <limits.h>
 
@@ -47,6 +56,15 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
     {
         *operation = BQ_OP_CAPABILITIES;
         valid = true;
+    }
+    else if (argc == 3 && (!strcmp(argv[0], "submit-program") || !strcmp(argv[0], "submit-runtime")))
+    {
+        String8 fields[BQ_FIELD_COUNT] = {S8("github-actions"), string_from_pointer(argv[1]), !strcmp(argv[0], "submit-runtime") ? S8(BQ_RUNTIME_RECIPE) : S8(BQ_NATIVE_RECIPE),
+            string_from_pointer(argv[2]), string_from_pointer(argv[2])};
+        BqRequest submission;
+        valid = bq_request_make(fields, &submission) == BQ_OK;
+        *operation = BQ_OP_SUBMIT;
+        if (valid) { size = submission.size; memcpy(body, submission.bytes, size); }
     }
     else if ((argc == (gateway ? 4 : 6) && !strcmp(argv[0], "submit")) ||
              (gateway && argc == 5 && !strcmp(argv[0], "submit-recipe")))
@@ -141,6 +159,11 @@ BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* respon
     {
         written = fwrite(data + 4, 1, response->size - BQ_CONTROL_HEADER - 4, output) == response->size - BQ_CONTROL_HEADER - 4;
     }
+    else if (operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
+    {
+        written = fprintf(output, "program-manifest-sha256=%.64s uploaded-bytes=%" PRIu64 "\n", data + 12,
+                          (uint64_t)bq_u64(data + 4)) >= 0;
+    }
     else if (operation == BQ_OP_LOGS)
     {
         for (u32 i = 0; written && i < bq_u32(data + 4); i += 1)
@@ -157,7 +180,13 @@ BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* respon
     }
     else
     {
-        written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " sequence=%" PRIu64
+        if (bq_observation(response))
+            written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " phase=%s outcome=%s validity=not-evaluated"
+                              " cancel-requested=%u request-sha256=%.64s failure=%s\n",
+                              (uint64_t)bq_u64(data + 4), (uint64_t)bq_u64(data + 12),
+                              bq_phase_name(bq_u32(data + 28)), bq_outcome_name(bq_u32(data + 32)), bq_u32(data + 40),
+                              (char const*)data + 56, bq_error_name((BqError)bq_u32(data + 120))) >= 0;
+        else written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " sequence=%" PRIu64
                           " phase=%s outcome=%s validity=not-evaluated cancel-requested=%u reconciliation=%u"
                           " pending=%u retained=%u request-sha256=%.64s failure=%s\n",
                           (uint64_t)bq_u64(data + 4), (uint64_t)bq_u64(data + 12), (uint64_t)bq_u64(data + 20),
@@ -166,18 +195,34 @@ BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* respon
                           bq_error_name((BqError)bq_u32(data + 120))) >= 0;
         if (written)
         {
-            bool bound = response->size == BQ_CONTROL_CAP;
+            bool bound = bq_response_body_size(response) == BQ_CONTROL_BODY;
             written = fprintf(output, "result-bound=%u statistical-decision=not-evaluated\n", bound ? 1u : 0u) >= 0;
             if (written && bound)
             {
-                written = fprintf(output, "result-root=%.*s\nmanifest-sha256=%.64s\nbundle-sha256=%.64s\n"
-                                  "full-result-sha256=%.64s\n", (int)bq_u32(data + 124), (char const*)data + 128,
+                if (!bq_observation(response))
+                    written = fprintf(output, "result-root=%.*s\n", (int)bq_u32(data + 124), (char const*)data + 128) >= 0;
+                if (written) written = fprintf(output, "manifest-sha256=%.64s\nbundle-sha256=%.64s\n"
+                                  "full-result-sha256=%.64s\n",
                                   (char const*)data + 320, (char const*)data + 384, (char const*)data + 448) >= 0;
             }
         }
     }
+    u8 const* observation = bq_observation(response);
+    if (written && observation)
+    {
+        u32 flags = bq_u32(observation + 16);
+        char const* cancellation[] = {"none", "intent", "applied", "too-late"};
+        written = fprintf(output, "last-observed-utc-ms=%" PRIu64 " stale=%u live-export-paused=%u reconciliation=%u"
+                          " quarantined=%u lifecycle-unavailable=%u cancellation=%s\n",
+                          (uint64_t)bq_u64(observation + 8), !!(flags & BQ_OBSERVATION_STALE),
+                          !!(flags & BQ_OBSERVATION_PAUSED), !!(flags & BQ_OBSERVATION_RECONCILIATION),
+                          !!(flags & BQ_OBSERVATION_QUARANTINE), !!(flags & BQ_OBSERVATION_LIFECYCLE_UNAVAILABLE),
+                          cancellation[bq_u32(observation + 20)]) >= 0;
+    }
     return written;
 }
+
+#include "mcp.c"
 
 BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output, FILE* diagnostics)
 {
@@ -199,7 +244,86 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     u64 id = 0;
     u64 argument = 0;
     u64 attempt = 0;
-    if (argc == 5 && !strcmp(argv[1], "unpack-export"))
+    if (argc == 5 && !strcmp(argv[1], "control-serve"))
+    {
+        valid = true;
+#ifdef __linux__
+        char machine[SHA256_HEX_CAPACITY] = {0};
+        error = bq_offhost_operator_identity(machine);
+        if (error == BQ_OK) error = bq_control_serve(argv[2], argv[3], argv[4], machine);
+#else
+        error = BQ_UNSUPPORTED;
+#endif
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "worker-stdio"))
+    {
+        valid = true;
+#ifdef __linux__
+        error = bq_worker_stdio(fileno(input), fileno(output), BQ_OFFHOST_WORKER_SOCKET);
+#else
+        error = BQ_UNSUPPORTED;
+#endif
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "worker-agent"))
+    {
+        BqWorkerConfig config = {
+            .installed_root = S8("/opt/buster-bench/installed"),
+            .workspace_root = S8("/var/lib/buster-bench/workspaces"),
+            .lease_file = S8("/var/lib/buster-bench/lease/host.lock"),
+            .boot_id_file = S8("/proc/sys/kernel/random/boot_id"),
+            .cgroup_root = S8("/sys/fs/cgroup"),
+            .limits = {2, 8ull * 1024 * 1024 * 1024, 0, 256, 60ull * 60 * 1000000},
+            .quarantine = &bq_worker_quarantine,
+            .queue_root = S8("/var/lib/buster-bench/queue"),
+            .production_path = true,
+        };
+        valid = true;
+        error = bq_offhost_worker_agent("/var/lib/buster-bench/queue", &config);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 3 && !strcmp(argv[1], "mcp"))
+    {
+        valid = true;
+        error = bq_mcp_run(argv[2], input, output);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if ((argc == 5 && !strcmp(argv[1], "client") && !strcmp(argv[3], "upload-program")) ||
+        (argc == 4 && !strcmp(argv[1], "gateway") && !strcmp(argv[2], "upload-program")))
+    {
+        valid = true;
+        bool gateway = !strcmp(argv[1], "gateway");
+        error = bq_native_client_upload(gateway ? BQ_GATEWAY_SOCKET : argv[2], argv[gateway ? 3 : 4], output);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 4 && !strcmp(argv[1], "native-payload"))
+    {
+        valid = true;
+        error = bq_native_payload(argv[2], argv[3]);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 4 && !strcmp(argv[1], "native-sampler"))
+    {
+        valid = true;
+        error = bq_native_sampler(argv[2], argv[3]);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 8 && (!strcmp(argv[1], "native-driver") || !strcmp(argv[1], "native-runtime-driver")))
+    {
+        valid = true;
+        error = bq_native_driver(!strcmp(argv[1], "native-runtime-driver") ? BQ_RECIPE_NATIVE_RUNTIME : BQ_RECIPE_NATIVE_EXECUTE, argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 5 && !strcmp(argv[1], "unpack-export"))
     {
         valid = true;
         error = bq_export_unpack(argv[2], argv[3], argv[4]);
@@ -449,8 +573,10 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
-                    "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
-                    "gateway capabilities | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
+                    "control-serve ROOT PUBLIC_SOCKET WORKER_SOCKET | worker-agent | worker-stdio | "
+                    "mcp SOCKET | client SOCKET capabilities/submit/status/result/cancel/logs ... | "
+                    "gateway capabilities | gateway upload-program FILE | gateway submit-program KEY MANIFEST_SHA | "
+                    "gateway submit KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway submit-recipe RECIPE KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
                     "gateway export JOB TOKEN FULL_SHA | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "

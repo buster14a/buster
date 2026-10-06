@@ -1,0 +1,29 @@
+{
+  "source": "c58ed3aa22f1c2fdc2b671689b6f08b33f44f9f8",
+  "production_comment_followup": "291c309709ac837607c8394143c185e5e8585821",
+  "full_unit_pass": 5670896,
+  "full_unit_total": 5670900,
+  "passed_modules": 56,
+  "total_modules": 57,
+  "failed_assertions": [
+    "object.error == OBJECT_ERROR_NONE && local_dynamic_count != 0 && dtp_offset_count >= 2 failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:15178",
+    "linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:15219",
+    "linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:15219",
+    "linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:15219"
+  ],
+  "baseline_failure_issue": 2469,
+  "all_tests_log_sha256": "edd2603720b057495850683108782181de4af77f4bb806645fca1d4e659f2f57",
+  "selfhost_bytes": 37496424,
+  "mode_matrix_legs": 24,
+  "mode_matrix_executed": 12,
+  "mode_matrix_oracle": 12,
+  "machine_codegen_x64_assertions": 617099,
+  "aarch64_assertions": 263633,
+  "macro_compiles_pass": 4,
+  "ui_assertions": [
+    43,
+    193
+  ],
+  "production_growth_bytes": 6596,
+  "build_growth_bytes": 0
+}

@@ -1,0 +1,14 @@
+# started on Sun Oct  4 13:03:38 2026
+
+
+ Performance counter stats for 'taskset -c 5 /home/david/buster-lab/bin/ide-pinned-perf cc -Isrc -Ibuild-dvperf/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o /home/david/buster-lab/results/ide-self-pinned -v -fsource-metrics=/home/david/buster-lab/results/pinned-self.metrics' (5 runs):
+
+          2.345,45 msec task-clock:u                                                            ( +-  3,09% )
+    21.512.707.724      instructions:u                                                          ( +-  0,00% )
+     9.983.163.806      cycles:u                                                                ( +-  2,42% )
+     3.941.049.274      branches:u                                                              ( +-  0,00% )
+        74.376.381      branch-misses:u                                                         ( +-  0,39% )
+            28.278      page-faults:u                                                           ( +- 21,13% )
+
+       2,376858128 +- 0,073846868 seconds time elapsed  ( +-  3,11% )
+

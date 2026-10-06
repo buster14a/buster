@@ -1,0 +1,9 @@
+# started on Mon Oct  5 09:22:39 2026
+
+9.33,msec,task-clock:u,9325560,100.00,,
+4934529,,cycles:u,9325560,100.00,,
+2180340,,instructions:u,9325560,100.00,,
+15019,,branch-misses:u,9325560,100.00,,
+567,,page-faults:u,9325560,100.00,,
+98,,minor-faults:u,9325560,100.00,,
+469,,major-faults:u,9325560,100.00,,

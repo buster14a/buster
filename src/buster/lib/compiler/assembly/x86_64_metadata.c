@@ -3973,19 +3973,37 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_operand_width(BusterX86Metadata
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_data_operand_width(BusterX86MetadataPhysicalBinding* bindings, u32 binding_count)
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_data_operand_width(BusterX86MetadataForm form,
+    BusterX86MetadataPhysicalBinding* bindings, u32 binding_count)
 {
-    for (u32 index = 0; index < binding_count; index += 1)
+    bool port_io = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("IN")) ||
+                   buster_x86_metadata_string_input_equal(form.iclass.offset, S8("OUT"));
+    u16 result = 0;
+    bool selected = false;
+    for (u32 index = 0; !selected && index < binding_count; index += 1)
     {
-        BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
-        if (physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
-            physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        if (port_io)
         {
-            u16 width = buster_x86_metadata_emit_operand_width(physical);
-            if (width == 16 || width == 32 || width == 64) return width;
+            // DX is a 16-bit port selector, independently of transferred data.
+            // Only the validated accumulator can determine an I/O size prefix.
+            BusterX86MetadataOperand metadata = bindings[index].metadata;
+            selected = buster_x86_metadata_string_input_equal(metadata.atom.offset, S8("XED_REG_AL")) ||
+                       buster_x86_metadata_string_input_equal(metadata.atom.offset, S8("OeAX()"));
+            if (selected) result = buster_x86_metadata_emit_operand_width(bindings[index].physical);
+        }
+        else
+        {
+            BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
+            if (physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+                physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            {
+                u16 width = buster_x86_metadata_emit_operand_width(physical);
+                selected = width == 16 || width == 32 || width == 64;
+                if (selected) result = width;
+            }
         }
     }
-    return 0;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_variable_width(u16 data_width, u8 form_width, bool immediate)
@@ -4683,11 +4701,13 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source(BusterX86
     // suffix heuristics.
     if (metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED)
         return BUSTER_X86_METADATA_FIELD_SOURCE_FIXED;
-    // MOV moffs uses OrAX() for its hidden accumulator operand.  The atom is
-    // a fixed architectural choice even though the generated field source is
-    // REG; keep this exception closed to that one hidden register spelling.
+    // MOV moffs uses OrAX() and port I/O uses OeAX() for hidden accumulator
+    // operands. These fixed architectural choices have no ModRM REG field,
+    // even though the generated field source is REG.
     u8 result;
-    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible && buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")))
+    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible &&
+        (buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")) ||
+         buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OeAX()"))))
     {
         result = BUSTER_X86_METADATA_FIELD_SOURCE_FIXED;
     }
@@ -4994,14 +5014,16 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_prefix(BusterX86MetadataS
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX86MetadataOperand metadata,
                                                                           BusterX86MetadataPhysicalOperand physical)
 {
+    bool accumulator16_32 = buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OeAX()"));
     if (metadata.field_source != BUSTER_X86_METADATA_FIELD_SOURCE_FIXED &&
-        !buster_x86_metadata_emit_atom_contains(metadata.atom, S8("XED_REG_")))
+        !buster_x86_metadata_emit_atom_contains(metadata.atom, S8("XED_REG_")) && !accumulator16_32)
         return true;
     if (physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) return false;
-    if (buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")))
+    if (accumulator16_32 || buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")))
     {
         return physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.index == 0 &&
-               (physical.reg.width == 16 || physical.reg.width == 32 || physical.reg.width == 64) && !physical.reg.high_byte;
+               (physical.reg.width == 16 || physical.reg.width == 32 || (!accumulator16_32 && physical.reg.width == 64)) &&
+               !physical.reg.high_byte;
     }
     u8 expected_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN;
     u16 expected_index = UINT16_MAX;
@@ -6339,6 +6361,29 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_unsigned_operand_fits(BusterX8
     return result;
 }
 
+// An unsigned (UIMM*) immediate whose field is as wide as the data operand
+// is not extended, so it stores the operand's low bytes verbatim. Like GNU as,
+// accept every value representable at that width in either interpretation:
+// source folding already turns byte literals 0x80..0xff into -128..-1, and
+// `mov rax, -2147483649` selects the imm64 row. Narrower fields (shift and
+// rotate counts, vector selectors) and sign-extended SIMM* fields keep their
+// single interpretation.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_unsigned_immediate_fits(BusterX86MetadataPhysicalOperand operand, u8 width,
+                                                                           bool full_width)
+{
+    bool result;
+    if (full_width && !operand.has_unsigned_value && operand.has_value && operand.value < 0)
+    {
+        result = buster_x86_metadata_emit_signed_fits(operand.value, width);
+    }
+    else
+    {
+        result = buster_x86_metadata_emit_unsigned_operand_fits(operand, width);
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_checked_add_s64(s64 left, s64 right, s64* result)
 {
     bool valid = (right <= 0 || left <= INT64_MAX - right) && (right >= 0 || left >= INT64_MIN - right);
@@ -6982,7 +7027,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     u8 mandatory_prefix = (u8)form.mandatory_prefix;
     if (pattern.mandatory_prefix) mandatory_prefix = (u8)pattern.mandatory_prefix;
     u8 pp = buster_x86_metadata_emit_mandatory_pp(mandatory_prefix);
-    u16 data_width = buster_x86_metadata_emit_data_operand_width(bindings, binding_count);
+    u16 data_width = buster_x86_metadata_emit_data_operand_width(form, bindings, binding_count);
     // FISTTP's m16 form belongs to the SSE3 ISA set, but its DF encoding
     // still uses the architectural 16-bit field without an operand-size
     // override.  Treat it like the other x87 fixed-width rows when deriving
@@ -7357,10 +7402,25 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         BusterX86MetadataPhysicalOperand immediate = binding->physical;
         if (!immediate.has_symbol && !immediate.has_value && !immediate.has_unsigned_value)
             return BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE;
+        u16 operand_width = 0;
+        for (u32 index = 0; index < binding_count && !operand_width; index += 1)
+        {
+            BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
+            if (physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+                physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+                operand_width = buster_x86_metadata_emit_operand_width(physical);
+        }
+        bool full_width_immediate = operand_width == (u16)width * 8 &&
+                                    !buster_x86_metadata_string_input_equal(form.category.offset, S8("SHIFT")) &&
+                                    !buster_x86_metadata_string_input_equal(form.category.offset, S8("ROTATE"));
+        // A 64-bit operand reads a literal above INT64_MAX as its two's
+        // complement, so `addq $0xffffffffffffffff` is the sign-extended -1.
+        bool wrapped_signed = operand_width == 64 && immediate.has_unsigned_value &&
+                              buster_x86_metadata_emit_signed_fits((s64)immediate.unsigned_value, width);
         if (!immediate.has_symbol &&
             !(signed_immediate ?
-                  (immediate.has_value && buster_x86_metadata_emit_signed_fits(immediate.value, width))
-                                      : buster_x86_metadata_emit_unsigned_operand_fits(immediate, width)))
+                  ((immediate.has_value && buster_x86_metadata_emit_signed_fits(immediate.value, width)) || wrapped_signed)
+                                      : buster_x86_metadata_emit_unsigned_immediate_fits(immediate, width, full_width_immediate)))
         {
             if (immediate.has_unsigned_value) buster_x86_metadata_emit_diagnostic_u64(diagnostic_value, immediate.unsigned_value);
             else if (diagnostic_value) *diagnostic_value = immediate.value;
@@ -9489,6 +9549,15 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                         // diagnostic supersede an address-size mismatch.  An
                         // unrelated feature-disabled form must not hide a structural
                         // addressing error.
+                        prefer_failure = true;
+                    }
+                    if (status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
+                        first_failure == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE && first_failure_form_recorded &&
+                        (first_failure_form.apx_flags & BUSTER_X86_METADATA_APX) && !(form.apx_flags & BUSTER_X86_METADATA_APX) &&
+                        !query.attributes.apx_flags)
+                    {
+                        // An out-of-range literal on the legacy row is the real
+                        // error; the disabled APX twin must not report a feature.
                         prefer_failure = true;
                     }
                     if (prefer_failure)
@@ -12106,6 +12175,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_le[BUSTER_X86_METADATA_TLS_GD_SIZ
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_gd_indirect_call[BUSTER_X86_METADATA_TLS_GD_SIZE - 8];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ie[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_add[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ie_mov[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_mov[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
 // Local dynamic's LEA and direct CALL, and the -fno-plt indirect CALL that can
 // stand in for the direct one.
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ld[BUSTER_X86_METADATA_TLS_LD_SIZE];
@@ -12229,11 +12300,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
                 valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_ie[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
                                                       S8("ADD"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
                                                       BUSTER_X86_METADATA_RELOCATION_PC32);
+                valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_ie_mov[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
+                                                      S8("MOV"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
+                                                      BUSTER_X86_METADATA_RELOCATION_PC32);
                 operands[1] = (BusterX86MetadataPhysicalOperand){
                     .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 32, .has_symbol = true, .symbol = S8("tls"),
                 };
                 valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_add[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
                                                       S8("ADD"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
+                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
+                valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_mov[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
+                                                      S8("MOV"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
                                                       BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
             }
             if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_IE;
@@ -12317,12 +12394,19 @@ bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86Metadata
                 for (u32 reg = 0; reg < 16; reg += 1)
                 {
                     // REX.X/B are ignored for this RIP-relative input, but B
-                    // selects the output register in ADD reg,imm32. Never
+                    // selects the output register in ADD/MOV reg,imm32. Never
                     // carry ignored input bits into a different operand role.
                     if ((sequence[0] & 0xfcu) == buster_x86_metadata_tls_ie[reg][0] &&
                         memcmp(sequence + 1, buster_x86_metadata_tls_ie[reg] + 1, BUSTER_X86_METADATA_TLS_IE_OFFSET - 1) == 0)
                     {
                         replacement = buster_x86_metadata_tls_add[reg];
+                        size = BUSTER_X86_METADATA_TLS_IE_SIZE;
+                        break;
+                    }
+                    if ((sequence[0] & 0xfcu) == buster_x86_metadata_tls_ie_mov[reg][0] &&
+                        memcmp(sequence + 1, buster_x86_metadata_tls_ie_mov[reg] + 1, BUSTER_X86_METADATA_TLS_IE_OFFSET - 1) == 0)
+                    {
+                        replacement = buster_x86_metadata_tls_mov[reg];
                         size = BUSTER_X86_METADATA_TLS_IE_SIZE;
                         break;
                     }
@@ -14119,6 +14203,12 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_register_view_resolve(Bust
     {
         *physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR;
         *physical_width_flags = BUSTER_X86_METADATA_PHYSICAL_WIDTH_8;
+    }
+    else if (buster_x86_metadata_pool_string_equal_literal(operand.atom_offset, S8("OeAX()")))
+    {
+        // The imported port-I/O accumulator atom selects AX/EAX, never RAX.
+        *physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR;
+        *physical_width_flags = BUSTER_X86_METADATA_PHYSICAL_WIDTH_16 | BUSTER_X86_METADATA_PHYSICAL_WIDTH_32;
     }
     else if (buster_x86_metadata_pool_string_has_prefix(operand.atom_offset, S8("GPR16")))
     {
