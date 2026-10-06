@@ -260,12 +260,32 @@ Host detection falls back to the dynamic `native` identity if a virtualized
 family/model description names a processor incompatible with the executing
 architecture; independently probed host features are preserved. Explicit
 `-march`/`-mcpu` requests still receive the incompatibility diagnostic.
+`-march=x86-64` (the existing `baseline` model) and the psABI levels
+`-march=x86-64-v2`, `-v3` and `-v4` are accepted on x86-64 targets only (other
+targets keep `unsupported CPU model`): each level is `baseline` plus the
+cumulative features of `compiler_driver_psabi_features` (v2: cx16, popcnt,
+sse3, ssse3, sse4.1, sse4.2; v3: avx, avx2, bmi1, bmi2, f16c, fma, lzcnt,
+movbe, xsave; v4: avx512f/bw/cd/dq/vl), so `__SSE4_2__`, `__AVX2__` and the
+other feature predefines follow, and `-mattr` overrides still refine the level.
+The psABI's LAHF-SAHF has no target feature and is implied by long mode.
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+`-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
+there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
+accepted and publishes no warning text or records; the only warnings the driver
+emits are the preprocessor's (`#warning`), gated in
+`compiler_driver_publish_c_diagnostics`. `--version`, `-dumpversion` and
+`-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
+`-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
+`__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
+`-dumpmachine` prints the effective target as `arch-os[-environment]` with the
+`gnu` environment on Linux and `msvc` on Windows (for example
+`x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
+`Target: <that triple>` and `Thread model: posix`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings
 (`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
 `unsupported target environment` instead of being aliased to MSVC (#1492);

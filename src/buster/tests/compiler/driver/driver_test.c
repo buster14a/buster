@@ -769,6 +769,168 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
     return result;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+// Runs `ide cc <arguments>` and captures both streams; true when it exited 0.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_run_cc(UnitTestArguments* arguments, SliceString8 cc_arguments, String8* output, String8* error)
+{
+    String8 command[16];
+    u32 count = 0;
+    command[count++] = program_state->input.arguments.pointer[0];
+    command[count++] = S8("cc");
+    for (u64 index = 0; index < cc_arguments.length && count < BUSTER_ARRAY_LENGTH(command); index += 1)
+    {
+        command[count++] = cc_arguments.pointer[index];
+    }
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = 1, .search_path = 1};
+    ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, capture);
+    bool succeeded = false;
+    if (spawned.handle != 0)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawned, 30000000);
+        *output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+        *error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+        succeeded = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
+    }
+    return succeeded;
+}
+#endif
+
+// GCC/Clang spellings of #1418: the x86-64 psABI levels, -fno-strict-overflow,
+// -w and the --version/-dumpversion/-dumpmachine queries.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 level_names[] = {S8("-march=x86-64"), S8("-march=x86-64-v2"), S8("-march=x86-64-v3"), S8("-march=x86-64-v4")};
+    TargetCpuFeature level_features[][5] = {
+        {TARGET_CPU_FEATURE_NONE},
+        {TARGET_CPU_FEATURE_X86_CX16, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE4_1},
+        {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_BMI2, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_MOVBE},
+        {TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ,
+         TARGET_CPU_FEATURE_X86_AVX512VL},
+    };
+    for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(level_names); level += 1)
+    {
+        String8 command_line[] = {S8("--target=x86_64-linux"), level_names[level], S8("-c"), S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(invocation.target));
+        for (u32 checked = 0; checked < BUSTER_ARRAY_LENGTH(level_names); checked += 1)
+        {
+            for (u32 feature = 0; feature < 5; feature += 1)
+            {
+                if (level_features[checked][feature] != TARGET_CPU_FEATURE_NONE)
+                {
+                    BUSTER_TEST(arguments, target_cpu_feature_has(invocation.target, level_features[checked][feature]) == (checked <= level));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, target_cpu_feature_has(invocation.target, TARGET_CPU_FEATURE_X86_SSE2));
+        BUSTER_TEST(arguments, target_cpu_feature_has(invocation.target, TARGET_CPU_FEATURE_X86_AVX512F) == (level == 3));
+    }
+    // x86-64 is the existing baseline model, not an explicit feature set.
+    String8 baseline_line[] = {S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-c"), S8("source.c")};
+    String8 x86_64_line[] = {S8("--target=x86_64-linux"), S8("-march=x86-64"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation baseline = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(baseline_line));
+    CompilerDriverInvocation x86_64 = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(x86_64_line));
+    BUSTER_TEST(arguments, x86_64.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, x86_64.target.cpu_model == baseline.target.cpu_model);
+    BUSTER_TEST(arguments, x86_64.target.cpu_features_explicit == baseline.target.cpu_features_explicit);
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(x86_64.target), target_cpu_features_effective(baseline.target)));
+    // -mattr keeps refining the level in either order, and -mcpu is the same option.
+    String8 refined_line[] = {S8("-mattr=-avx2"), S8("--target=x86_64-linux"), S8("-mcpu=x86-64-v3"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation refined = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refined_line));
+    BUSTER_TEST(arguments, refined.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, !target_cpu_feature_has(refined.target, TARGET_CPU_FEATURE_X86_AVX2));
+    BUSTER_TEST(arguments, target_cpu_feature_has(refined.target, TARGET_CPU_FEATURE_X86_AVX));
+    // Other architectures keep diagnosing the spelling as an unknown model.
+    String8 foreign_line[] = {S8("--target=aarch64-linux"), S8("-march=x86-64-v3"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation foreign = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(foreign_line));
+    BUSTER_TEST(arguments, foreign.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, foreign.diagnostic, S8("unsupported CPU model: x86-64-v3"));
+    String8 unknown_line[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v5"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation unknown = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unknown_line));
+    BUSTER_TEST(arguments, unknown.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+
+    String8 strict_line[] = {S8("-fno-strict-overflow"), S8("-fwrapv"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation strict = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(strict_line));
+    BUSTER_TEST(arguments, strict.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 quiet_line[] = {S8("-w"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation quiet = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(quiet_line));
+    BUSTER_TEST(arguments, quiet.error == COMPILER_DRIVER_ERROR_NONE && quiet.suppress_warnings);
+    String8 loud_line[] = {S8("-Wall"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation loud = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(loud_line));
+    BUSTER_TEST(arguments, loud.error == COMPILER_DRIVER_ERROR_NONE && !loud.suppress_warnings);
+
+    // The queries need no input and render from the effective target.
+    String8 version_line[] = {S8("--target=aarch64-linux"), S8("--version")};
+    String8 dumpversion_line[] = {S8("-dumpversion")};
+    String8 dumpmachine_line[] = {S8("--target=aarch64-linux"), S8("-dumpmachine")};
+    CompilerDriverInvocation version = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_line));
+    CompilerDriverInvocation dump_version = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dumpversion_line));
+    CompilerDriverInvocation dump_machine = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dumpmachine_line));
+    BUSTER_TEST(arguments, version.error == COMPILER_DRIVER_ERROR_NONE && version.query == COMPILER_DRIVER_QUERY_VERSION);
+    BUSTER_TEST(arguments, dump_version.error == COMPILER_DRIVER_ERROR_NONE && dump_version.query == COMPILER_DRIVER_QUERY_DUMP_VERSION);
+    BUSTER_TEST(arguments, dump_machine.error == COMPILER_DRIVER_ERROR_NONE && dump_machine.query == COMPILER_DRIVER_QUERY_DUMP_MACHINE);
+    BUSTER_STRING_TEST(arguments, compiler_driver_query_text(arguments->arena, &dump_version), S8("18.0.0\n"));
+    BUSTER_STRING_TEST(arguments, compiler_driver_query_text(arguments->arena, &dump_machine), S8("aarch64-linux-gnu\n"));
+    String8 version_text = compiler_driver_query_text(arguments->arena, &version);
+    BUSTER_TEST(arguments, string_starts_with_sequence(version_text, S8("Buster clang version 18.0.0")));
+    BUSTER_TEST(arguments, string_first_sequence(version_text, S8("\nTarget: aarch64-linux-gnu\n")) != BUSTER_STRING_NO_MATCH);
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("gcc-spellings"), S8(".c"));
+    String8 source = S8("#warning spelled-warning\nint avx = __AVX__;\nint avx2 = __AVX2__;\nint avx512 = __AVX512F__;\n"
+                        "char const* version = __clang_version__;\n");
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 output = {0};
+        String8 error = {0};
+        // The predefines follow the level.
+        String8 v2[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(v2), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx = __AVX__;")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx2 = __AVX2__;")) != BUSTER_STRING_NO_MATCH);
+        String8 v3[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v3"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(v3), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx2 = 1 ;")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx = 1 ;")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx512 = __AVX512F__;")) != BUSTER_STRING_NO_MATCH);
+        String8 v4[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v4"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(v4), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx512 = 1 ;")) != BUSTER_STRING_NO_MATCH);
+        // -dumpversion agrees with the frontend's __clang_version__.
+        String8 dump[] = {S8("-dumpversion")};
+        String8 dumped = {0};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(dump), &dumped, &error));
+        BUSTER_TEST(arguments, dumped.length > 1 && string_first_sequence(output, S8("\"18.0.0 (buster)\"")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_STRING_TEST(arguments, dumped, S8("18.0.0\n"));
+        // #warning is published unless -w.
+        String8 warned[] = {S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(warned), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(error, S8("spelled-warning")) != BUSTER_STRING_NO_MATCH);
+        String8 silenced[] = {S8("-w"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(silenced), &output, &error));
+        BUSTER_TEST(arguments, error.length == 0);
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx")) != BUSTER_STRING_NO_MATCH);
+        String8 silenced_compile[] = {S8("-w"), S8("-fno-strict-overflow"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(silenced_compile), &output, &error));
+        BUSTER_TEST(arguments, error.length == 0);
+        // The queries exit 0 with their text on stdout and nothing on stderr.
+        String8 machine[] = {S8("--target=x86_64-linux"), S8("-dumpmachine")};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(machine), &output, &error));
+        BUSTER_STRING_TEST(arguments, output, S8("x86_64-linux-gnu\n"));
+        BUSTER_TEST(arguments, error.length == 0);
+        String8 banner[] = {S8("--target=x86_64-linux"), S8("--version")};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(banner), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("clang version 18.0.0")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("Target: x86_64-linux-gnu")) != BUSTER_STRING_NO_MATCH);
+        (void)os_file_delete(source_path);
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23591,6 +23753,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frontend_reservation_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_pack_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);

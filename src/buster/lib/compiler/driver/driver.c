@@ -851,11 +851,56 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_check_gpu_inputs(Arena* arena, Compiler
     }
 }
 
+// The x86-64 psABI microarchitecture levels, spelled -march=x86-64 and
+// -march=x86-64-v2..v4. Level 1 is Buster's `baseline` model; each higher
+// level is that model plus the cumulative features below. The psABI's LAHF-SAHF
+// has no target feature: long mode on every supported x86-64 host has it.
+typedef struct CompilerDriverPsabiFeature CompilerDriverPsabiFeature;
+struct CompilerDriverPsabiFeature
+{
+    String8 name;
+    u8 level;
+};
+
+BUSTER_GLOBAL_LOCAL CompilerDriverPsabiFeature const compiler_driver_psabi_features[] = {
+    {S8_INITIALIZER("cx16"), 2}, {S8_INITIALIZER("popcnt"), 2}, {S8_INITIALIZER("sse3"), 2}, {S8_INITIALIZER("ssse3"), 2},
+    {S8_INITIALIZER("sse4.1"), 2}, {S8_INITIALIZER("sse4.2"), 2},
+    {S8_INITIALIZER("avx"), 3}, {S8_INITIALIZER("avx2"), 3}, {S8_INITIALIZER("bmi1"), 3}, {S8_INITIALIZER("bmi2"), 3},
+    {S8_INITIALIZER("f16c"), 3}, {S8_INITIALIZER("fma"), 3}, {S8_INITIALIZER("lzcnt"), 3}, {S8_INITIALIZER("movbe"), 3},
+    {S8_INITIALIZER("xsave"), 3},
+    {S8_INITIALIZER("avx512f"), 4}, {S8_INITIALIZER("avx512bw"), 4}, {S8_INITIALIZER("avx512cd"), 4}, {S8_INITIALIZER("avx512dq"), 4},
+    {S8_INITIALIZER("avx512vl"), 4},
+};
+
+// 0 when the spelling is not a psABI level.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_psabi_level(String8 name)
+{
+    u32 result = 0;
+    if (string_equal(name, S8("x86-64")))
+    {
+        result = 1;
+    }
+    else if (string_equal(name, S8("x86-64-v2")))
+    {
+        result = 2;
+    }
+    else if (string_equal(name, S8("x86-64-v3")))
+    {
+        result = 3;
+    }
+    else if (string_equal(name, S8("x86-64-v4")))
+    {
+        result = 4;
+    }
+    return result;
+}
+
 // Resolves the native target's CPU model and feature set, and rejects the GPU
 // options that have no target to apply to.
 BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, CompilerDriverInvocation* invocation, String8 architecture_option,
                                                                CompilerDriverFeatureOverride* feature_overrides, u64 feature_override_count)
 {
+    u32 psabi_level = 0;
     bool gpu_option = invocation->gpu_architecture.length || invocation->gpu_entry_point.length || invocation->gpu_stage.length ||
                       invocation->gpu_shader_model.length || invocation->metal_sdk.length || invocation->cuda_path.length || invocation->rocm_path.length ||
                       invocation->gpu_tools.clang_path.length || invocation->gpu_tools.llc_path.length || invocation->gpu_tools.spirv_link_path.length ||
@@ -868,12 +913,25 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
     }
     else if (architecture_option.length)
     {
-        compiler_driver_set_cpu_model(arena, invocation, architecture_option);
+        // The psABI levels exist only for x86-64; elsewhere the spelling is an
+        // unknown CPU model, as it always was.
+        psabi_level = invocation->target.cpu_arch == CPU_ARCH_X86_64 ? compiler_driver_psabi_level(architecture_option) : 0;
+        compiler_driver_set_cpu_model(arena, invocation, psabi_level ? S8("baseline") : architecture_option);
     }
-    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && feature_override_count)
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && (feature_override_count || psabi_level > 1))
     {
         invocation->target.cpu_features = target_cpu_features_effective(invocation->target);
         invocation->target.cpu_features_explicit = true;
+        // The level's features come first so that -mattr overrides, wherever
+        // they sit on the command line, keep refining the selected level.
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(compiler_driver_psabi_features); index += 1)
+        {
+            if (compiler_driver_psabi_features[index].level <= psabi_level)
+            {
+                invocation->target.cpu_features = target_cpu_features_add(
+                    invocation->target.cpu_features, target_cpu_feature_from_string(CPU_ARCH_X86_64, compiler_driver_psabi_features[index].name));
+            }
+        }
         for (u64 override_index = 0; override_index < feature_override_count && invocation->error == COMPILER_DRIVER_ERROR_NONE; override_index += 1)
         {
             CompilerDriverFeatureOverride override = feature_overrides[override_index];
@@ -894,7 +952,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
     }
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && !target_cpu_features_are_valid(invocation->target))
     {
-        if (feature_override_count)
+        if (feature_override_count || psabi_level > 1)
         {
             compiler_driver_argument_error(arena, invocation, S8("invalid target feature combination: {S8}"),
                                            target_cpu_features_to_string(arena, invocation->target));
@@ -1305,6 +1363,49 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_expand_response_files(Arena* ar
     return result;
 }
 
+// Kept equal to the __clang_major__/__clang_minor__/__clang_patchlevel__ and
+// __clang_version__ predefines of the C frontend (c_source.c); a driver test
+// compares the two.
+#define COMPILER_DRIVER_VERSION_STRING "18.0.0"
+
+// The target in the GNU triple shape `arch-os[-environment]` that -target
+// accepts back: Linux names its GNU environment, Windows the MSVC ABI.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_query_machine(Arena* arena, CompilerDriverInvocation const* invocation)
+{
+    String8 result;
+    if (invocation->has_gpu_target)
+    {
+        result = gpu_target_to_string(arena, invocation->gpu_target);
+    }
+    else
+    {
+        String8 environment = invocation->target.os == OPERATING_SYSTEM_LINUX ? S8("-gnu") :
+                              invocation->target.os == OPERATING_SYSTEM_WINDOWS ? S8("-msvc") : S8("");
+        result = string_format(arena, S8("{S8}-{S8}{S8}"), cpu_arch_to_string_os(invocation->target.cpu_arch),
+                               operating_system_to_string_os(invocation->target.os), environment);
+    }
+    return result;
+}
+
+String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation)
+{
+    String8 result = {0};
+    if (invocation->query == COMPILER_DRIVER_QUERY_VERSION)
+    {
+        result = string_format(arena, S8("Buster clang version " COMPILER_DRIVER_VERSION_STRING " (buster)\nTarget: {S8}\nThread model: posix\n"),
+                               compiler_driver_query_machine(arena, invocation));
+    }
+    else if (invocation->query == COMPILER_DRIVER_QUERY_DUMP_VERSION)
+    {
+        result = S8(COMPILER_DRIVER_VERSION_STRING "\n");
+    }
+    else if (invocation->query == COMPILER_DRIVER_QUERY_DUMP_MACHINE)
+    {
+        result = string_format(arena, S8("{S8}\n"), compiler_driver_query_machine(arena, invocation));
+    }
+    return result;
+}
+
 CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments)
 {
     CompilerDriverInvocation invocation = {
@@ -1465,6 +1566,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             {
                 compiler_driver_argument_error(arena, &invocation, S8("expected a positive 32-bit compile job count: {S8}"), argument);
             }
+            continue;
+        }
+        if (string_equal(argument, S8("--version")) || string_equal(argument, S8("-dumpversion")) || string_equal(argument, S8("-dumpmachine")))
+        {
+            invocation.query = string_equal(argument, S8("--version")) ? COMPILER_DRIVER_QUERY_VERSION :
+                               string_equal(argument, S8("-dumpversion")) ? COMPILER_DRIVER_QUERY_DUMP_VERSION : COMPILER_DRIVER_QUERY_DUMP_MACHINE;
+            continue;
+        }
+        // GCC and Clang spell "no warnings" -w. The only warnings the driver
+        // publishes are the preprocessor's (#warning), and they are gated at
+        // compiler_driver_publish_c_diagnostics.
+        if (string_equal(argument, S8("-w")))
+        {
+            invocation.suppress_warnings = true;
             continue;
         }
         if (string_equal(argument, S8("-v")) || string_equal(argument, S8("--verbose")))
@@ -2176,7 +2291,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         bool compatible_codegen_option =
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
             string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
-            string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
+            string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-overflow")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
             string_equal(argument, S8("-fsigned-char")) ||
             // Buster emits no stack-protector prologue, so the disabling
             // spelling is already what it does. A libc asks for it on the
@@ -2270,7 +2385,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation.diagnostic = S8("-framework is only supported for Apple targets");
         }
-        else if (!invocation.input_count)
+        else if (!invocation.input_count && invocation.query == COMPILER_DRIVER_QUERY_NONE)
         {
             invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation.diagnostic = S8("no input files");
@@ -3604,6 +3719,8 @@ struct CompilerDriverDiagnosticCollector
     u32 record_count;
     u32 record_capacity;
     bool suppress_records;
+    // -w: warnings are neither recorded nor rendered.
+    bool suppress_warnings;
 };
 
 #include <buster/lib/compiler/driver/driver_diagnostic.c>
@@ -3658,12 +3775,19 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_publish_c_diagnostics(Arena* arena, 
     {
         CompilerDiagnostic diagnostic = compiler_driver_c_diagnostic(preprocess, diagnostics[index], path);
         if (split_source.length) diagnostic.primary = compiler_driver_assembly_unsplit_location(split_source, path, diagnostic.primary);
-        compiler_driver_collect_diagnostic(collector, diagnostic);
-        if (diagnostic.severity == COMPILER_DIAGNOSTIC_WARNING)
+        bool warning = diagnostic.severity == COMPILER_DIAGNOSTIC_WARNING;
+        if (!warning || !collector->suppress_warnings)
         {
-            String8 rendered = compiler_diagnostic_render(collector->arena, diagnostic);
-            compiler_driver_warning_append_text(collector, rendered);
-            compiler_driver_warning_append_text(collector, S8("\n"));
+            compiler_driver_collect_diagnostic(collector, diagnostic);
+        }
+        if (warning)
+        {
+            if (!collector->suppress_warnings)
+            {
+                String8 rendered = compiler_diagnostic_render(collector->arena, diagnostic);
+                compiler_driver_warning_append_text(collector, rendered);
+                compiler_driver_warning_append_text(collector, S8("\n"));
+            }
         }
         else if (!first_error.length)
         {
@@ -5501,6 +5625,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
             unit->warnings = (CompilerDriverDiagnosticCollector){
                 .arena = unit->arena,
                 .suppress_records = batch->invocation.suppress_diagnostic_records,
+                .suppress_warnings = batch->invocation.suppress_warnings,
             };
             CompilerDriverInvocation single = batch->invocation;
             single.input_paths += batch->first_input + index;
@@ -5608,6 +5733,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     CompilerDriverDiagnosticCollector warnings = {
         .arena = arena,
         .suppress_records = invocation.suppress_diagnostic_records,
+        .suppress_warnings = invocation.suppress_warnings,
     };
     CompilerDriverResult result = {.compilation_workers = 1};
     CompilerDriverArchiveState archive_state = {0};

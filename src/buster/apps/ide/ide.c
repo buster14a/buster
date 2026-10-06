@@ -1067,6 +1067,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
+    // --version, -dumpversion and -dumpmachine answer without compiling.
+    bool query = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.query != COMPILER_DRIVER_QUERY_NONE;
+    if (query)
+    {
+        string_print(S8("{S8}"), compiler_driver_query_text(arena, &invocation));
+    }
     // The metrics clock starts after argument parsing: reading it earlier
     // would cost every compile a clock read to learn the option was absent.
     // Per-input offsets and wall_ns share this origin.
@@ -1078,7 +1084,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     }
     // Only the source reports below read the spelled-byte sum.
     invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
-    CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
+    CompilerDriverResult compile = query ? (CompilerDriverResult){0} : compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
     {
