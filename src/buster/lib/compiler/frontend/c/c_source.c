@@ -4101,6 +4101,16 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_acos"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fabsf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fabs"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fabsl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmaxf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmax"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmaxl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fminf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmin"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fminl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_powif"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_powi"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_powil"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_roundf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
@@ -4134,18 +4144,49 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin___memcpy_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin___memmove_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin___memset_chk"), C_SYMBOL_BUILTIN_MEMORY },
+    // The string forms GCC documents among its library builtins; like the
+    // memory family they lower to the ordinary libc call.
+    { S8_INITIALIZER("__builtin_strcmp"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin_strcpy"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin_strchr"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     // The `l` spellings take unsigned long, which is target-dependent (LP64
     // versus LLP64). The shared signature policy below selects their operand
     // width before the count operation; all these spellings return int.
     { S8_INITIALIZER("__builtin_clzl"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
+    // clrsb counts the bits after the sign bit that equal it; the operand is
+    // signed and is rewritten so the count is a clz of a nonzero value.
+    { S8_INITIALIZER("__builtin_clrsb"), C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS },
+    { S8_INITIALIZER("__builtin_clrsbl"), C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS },
+    { S8_INITIALIZER("__builtin_clrsbll"), C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzl"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzll"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ffs"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsl"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsll"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
+    // The typed checked-arithmetic forms: the spelling fixes the operand
+    // type, the third argument points at the wrapped result, and the call
+    // answers whether the exact result did not fit.
+    { S8_INITIALIZER("__builtin_sadd_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_saddl_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_saddll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_uadd_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_uaddl_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_uaddll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_ssub_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_ssubl_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_ssubll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_usub_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_usubl_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_usubll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_smul_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_smull_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_smulll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_umul_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_umull_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_umulll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
@@ -4199,9 +4240,10 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
     return C_SYMBOL_BUILTIN_NONE;
 }
 
-// Fixed GNU signatures for clz/ctz/popcount. The operation kind is shared by
-// three spellings; the suffix determines the parameter width, while the C
-// result type is always int. CTypeKind retains the target's long data model.
+// Fixed GNU signatures for clz/ctz/popcount/clrsb. The operation kind is
+// shared by three spellings; the suffix determines the parameter width, while
+// the C result type is always int. clrsb alone takes a signed operand.
+// CTypeKind retains the target's long data model.
 CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling)
 {
     CTypeKind result = C_TYPE_INVALID;
@@ -4210,6 +4252,11 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
     {
         result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_UNSIGNED_LONG_LONG :
                  string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+    }
+    else if (builtin == C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS)
+    {
+        result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_LONG : C_TYPE_INT;
     }
     return result;
 }
@@ -4601,7 +4648,7 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
 
 enum
 {
-    C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 256,
+    C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 512,
 };
 
 BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling);
@@ -7077,7 +7124,9 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
     static char const* supported[] = {
         "__builtin___clear_cache", "__builtin_acos",
         "__builtin_acosf",         "__builtin_ceil",
-        "__builtin_ceilf",         "__builtin_clz",
+        "__builtin_ceilf",         "__builtin_clrsb",
+        "__builtin_clrsbl",        "__builtin_clrsbll",
+        "__builtin_clz",
         "__builtin_clzl",          "__builtin_clzll",
         "__builtin_cos",           "__builtin_cosf",
         "__builtin_ctz",           "__builtin_ctzl",
@@ -7085,12 +7134,36 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_ffs",
         "__builtin_ffsl",
         "__builtin_ffsll",
+        "__builtin_sadd_overflow",
+        "__builtin_saddl_overflow",
+        "__builtin_saddll_overflow",
+        "__builtin_uadd_overflow",
+        "__builtin_uaddl_overflow",
+        "__builtin_uaddll_overflow",
+        "__builtin_ssub_overflow",
+        "__builtin_ssubl_overflow",
+        "__builtin_ssubll_overflow",
+        "__builtin_usub_overflow",
+        "__builtin_usubl_overflow",
+        "__builtin_usubll_overflow",
+        "__builtin_smul_overflow",
+        "__builtin_smull_overflow",
+        "__builtin_smulll_overflow",
+        "__builtin_umul_overflow",
+        "__builtin_umull_overflow",
+        "__builtin_umulll_overflow",
         "__builtin_popcount",      "__builtin_popcountl",
         "__builtin_popcountll",
         "__builtin_assume_aligned", "__builtin_choose_expr",
         "__builtin_constant_p",    "__builtin_object_size",
         "__builtin_expect",        "__builtin_expect_with_probability",
         "__builtin_fabs",          "__builtin_fabsf",
+        "__builtin_fabsl",
+        "__builtin_fmax",          "__builtin_fmaxf",
+        "__builtin_fmaxl",         "__builtin_fmin",
+        "__builtin_fminf",         "__builtin_fminl",
+        "__builtin_powi",          "__builtin_powif",
+        "__builtin_powil",
         "__builtin_floor",         "__builtin_floorf",
         "__builtin_fmod",          "__builtin_fmodf",
         "__builtin_pow",           "__builtin_powf",
@@ -7106,6 +7179,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_memset",        "__builtin_memcmp",
         "__builtin___memcpy_chk", "__builtin___memmove_chk", "__builtin___memset_chk",
         "__builtin_sqrt",          "__builtin_sqrtf",
+        "__builtin_strchr",        "__builtin_strcmp",
+        "__builtin_strcpy",
         "__builtin_strlen",        "__builtin_trap",
         "__builtin_ia32_pause",
         "__builtin_ia32_pslldi128", "__builtin_ia32_psllqi128",
