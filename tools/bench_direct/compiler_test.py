@@ -722,6 +722,123 @@ class RunLifecycleTest(unittest.TestCase):
         self.assertIn("could not be proven (original exit=0)", self.log.read_text())
 
 
+class ExportTest(unittest.TestCase):
+    """compiler_compare.export_tree bounds and reports evidence before it is copied (#2929)."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.source = self.root / "source"
+        self.evidence = self.root / "evidence"
+        self.source.mkdir()
+        self.evidence.mkdir()
+        (self.source / "summary.json").write_text("{}")
+        (self.source / "raw.txt").write_text("raw")
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def export(self, required: tuple = ("summary.json",), ignore: tuple = ("*.exe",)) -> tuple[list, list]:
+        return compiler_compare.export_tree(self.source, self.evidence / "lab", self.evidence, ignore, required)
+
+    def exported(self) -> list[str]:
+        return sorted(path.relative_to(self.evidence / "lab").as_posix()
+                      for path in (self.evidence / "lab").rglob("*") if path.is_file())
+
+    def test_complete_export_has_no_omissions_and_honours_ignores(self) -> None:
+        (self.source / "ref.exe").write_text("binary")
+        (self.source / "nested").mkdir()
+        (self.source / "nested" / "a.txt").write_text("a")
+        self.assertEqual(self.export(), ([], []))
+        self.assertEqual(self.exported(), ["nested/a.txt", "raw.txt", "summary.json"])
+        self.assertFalse((self.evidence / "lab.staging").exists())
+
+    def test_oversized_file_is_never_copied_and_is_reported(self) -> None:
+        (self.source / "big.txt").write_bytes(b"x" * 100)
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_LIMIT", 50):
+            problems, omissions = self.export()
+        self.assertEqual(problems, [])
+        self.assertEqual([item["path"] for item in omissions], ["big.txt"])
+        self.assertIn("exceeds", omissions[0]["reason"])
+        self.assertNotIn("big.txt", self.exported())
+        self.assertTrue((self.source / "big.txt").is_file())
+
+    def test_oversized_required_member_makes_the_export_incomplete(self) -> None:
+        (self.source / "summary.json").write_bytes(b" " * 100)
+        with mock.patch.object(compiler_compare, "EVIDENCE_MEMBER_LIMIT", 50):
+            problems, omissions = self.export()
+        self.assertEqual(len(problems), 1)
+        self.assertIn("required evidence lab/summary.json not exported", problems[0])
+        self.assertEqual(omissions[0]["path"], "summary.json")
+        self.assertNotIn("summary.json", self.exported())
+
+    def test_absent_required_member_is_a_problem(self) -> None:
+        problems, _ = self.export(required=("summary.json", "metadata.json"))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("metadata.json not exported: absent from the source", problems[0])
+
+    def test_many_small_files_hit_the_aggregate_budget_before_copying(self) -> None:
+        for index in range(20):
+            (self.source / f"part{index:02}.txt").write_bytes(b"y" * 10)
+        with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 100):
+            problems, omissions = self.export()
+        self.assertEqual(problems, [])
+        total = sum(path.stat().st_size for path in (self.evidence / "lab").rglob("*") if path.is_file())
+        self.assertLessEqual(total, 100)
+        self.assertTrue(omissions)
+        self.assertTrue(all("budget" in item["reason"] for item in omissions))
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 3):
+            self.export()
+        self.assertEqual(len(self.exported()), 3)
+
+    def test_symlinks_are_not_followed_or_copied(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("secret")
+        (self.source / "link.txt").symlink_to(outside / "secret.txt")
+        (self.source / "linkdir").symlink_to(outside, target_is_directory=True)
+        problems, omissions = self.export()
+        self.assertEqual(problems, [])
+        self.assertEqual(sorted(item["path"] for item in omissions), ["link.txt", "linkdir"])
+        self.assertEqual(self.exported(), ["raw.txt", "summary.json"])
+
+    def test_a_file_that_grows_while_copying_is_dropped_and_reported(self) -> None:
+        (self.source / "live.txt").write_bytes(b"z" * 100)
+        real = os.lstat
+
+        def stale(path, *args, **kwargs):  # the size seen before copying is small; the bytes then grow
+            result = real(path, *args, **kwargs)
+            if str(path).endswith("live.txt"):
+                return os.stat_result((result.st_mode, result.st_ino, result.st_dev, result.st_nlink, result.st_uid,
+                                       result.st_gid, 1, 0, 0, 0))
+            return result
+
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_LIMIT", 50), mock.patch("os.lstat", stale):
+            problems, omissions = self.export()
+        self.assertEqual(problems, [])
+        self.assertEqual([item["path"] for item in omissions], ["live.txt"])
+        self.assertIn("grew", omissions[0]["reason"])
+        self.assertNotIn("live.txt", self.exported())
+
+    def test_copy_error_is_reported_and_required_loss_is_a_problem(self) -> None:
+        real = os.open
+
+        def failing(path, *args, **kwargs):
+            if str(path).endswith("summary.json"):
+                raise OSError("injected")
+            return real(path, *args, **kwargs)
+
+        with mock.patch("os.open", failing):
+            problems, omissions = self.export()
+        self.assertEqual([item["path"] for item in omissions], ["summary.json"])
+        self.assertIn("copy failed: injected", omissions[0]["reason"])
+        self.assertEqual(len(problems), 1)
+
+    def test_publisher_member_limit_matches_the_producer(self) -> None:
+        self.assertEqual(compiler_compare.EVIDENCE_MEMBER_LIMIT, compiler_publish.MEMBER_LIMIT)
+        self.assertLess(compiler_compare.EVIDENCE_TOTAL_LIMIT, compiler_publish.ARTIFACT_LIMIT)
+
+
 class HarnessTest(unittest.TestCase):
     """The host harness against a real two-parent group with stand-in builds and lab."""
 
@@ -948,6 +1065,14 @@ class HarnessTest(unittest.TestCase):
                 self.assertIn("injected", " ".join(result["reasons"]))
                 self.assertEqual(result["identity"]["head"], self.head)
                 self.assertIn("baseline", result["timings"]["build_seconds"])
+
+    def test_omitted_required_evidence_fails_the_receipt_and_is_listed(self) -> None:
+        with mock.patch.object(compiler_compare, "EVIDENCE_MEMBER_LIMIT", 10):
+            code, result, evidence = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("required evidence lab/summary.json not exported", " ".join(result["reasons"]))
+        self.assertEqual(result["evidence_omissions"]["lab"]["shown"][0]["path"], "summary.json")
+        self.assertFalse((evidence / "lab" / "summary.json").exists())
 
     def test_missing_cmake_cache_is_a_build_failure_not_a_crash(self) -> None:
         (self.repo / "build.sh").write_text("#!/usr/bin/env bash\nmkdir -p build/Release\ncp compiler.txt build/Release/ide\n")

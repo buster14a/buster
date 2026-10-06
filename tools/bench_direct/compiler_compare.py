@@ -29,7 +29,7 @@ and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
 
-Map: queue_head (pull-mode supersession), build (one ide), toolchain, collect_evidence,
+Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export), collect_evidence,
 measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
 main. Validity rules live in compiler_receipt.classify.
 """
@@ -37,6 +37,7 @@ main. Validity rules live in compiler_receipt.classify.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -44,12 +45,13 @@ import platform
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from compiler_github import RECONCILE_DEPTH
+from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE, SCALING_REQUEST, SHA,
                               THROUGHPUT_PROFILE, classify, classify_scaling, classify_throughput, dumps, host_problem,
                               render, scaling_digest, throughput_digest)
@@ -61,6 +63,16 @@ THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
 GIT_TIMEOUT_SECONDS = 120
 EVIDENCE_FILE_LIMIT = 32 * 1024 * 1024
+# A required JSON member must stay within the publisher's per-member read limit
+# (compiler_publish.MEMBER_LIMIT; compiler_test keeps them equal), and the whole
+# evidence directory within three quarters of the 64 MiB artifact limit.
+EVIDENCE_MEMBER_LIMIT = 8 * 1024 * 1024
+EVIDENCE_TOTAL_LIMIT = ARTIFACT_LIMIT * 3 // 4
+EVIDENCE_FILE_COUNT = 4096
+OMISSIONS_SHOWN = 50
+LAB_REQUIRED = ("summary.json",)
+THROUGHPUT_REQUIRED = ("summary.json", "metadata.json")
+SCALING_REQUIRED = ("scaling.json", "scaling-metadata.json")
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
 # A scaling bundle keeps its reports, raw samples and per-sample logs; its
@@ -219,16 +231,121 @@ def toolchain() -> dict:
     return versions
 
 
-def collect_evidence(lab: Path, evidence: Path) -> None:
+def evidence_usage(evidence: Path) -> tuple[int, int]:
+    """(bytes, files) already under the evidence root, without following symlinks."""
+    total = count = 0
+    for directory, _, names in os.walk(evidence):
+        for name in names:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+                count += 1
+            except OSError:
+                pass
+    return total, count
+
+
+def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple[list[str], list]:
+    """Copy a measurement tree into the evidence under byte/file limits enforced before and during copying.
+
+    Only regular files are admitted: symlinks and other types are never followed or copied. A file over
+    its limit (EVIDENCE_MEMBER_LIMIT for JSON, else EVIDENCE_FILE_LIMIT), one that would exceed the
+    aggregate budget, one that grows while being read, or one that cannot be read is omitted and listed.
+    The tree is staged beside its destination and moved into place afterwards. Returns (problems,
+    omissions); an omitted or absent required member is a problem, so the export is incomplete rather than
+    quietly successful. The source is never modified.
+    """
+    problems: list[str] = []
+    omissions: list = []
+    staging = destination.with_name(destination.name + ".staging")
+    used, files = evidence_usage(evidence)
+    if destination.is_dir():  # a re-export replaces it
+        replaced = evidence_usage(destination)
+        used, files = used - replaced[0], files - replaced[1]
+    present: set[str] = set()
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        for directory, names, leaves in os.walk(source, followlinks=False):
+            relative = Path(directory).relative_to(source)
+            kept = []
+            for name in sorted(names):
+                shown = (relative / name).as_posix()
+                if any(fnmatch.fnmatch(name, pattern) for pattern in ignore):
+                    continue
+                if os.path.islink(os.path.join(directory, name)):
+                    omissions.append({"path": shown, "reason": "symlink is not followed"})
+                    continue
+                kept.append(name)
+                (staging / relative / name).mkdir(parents=True, exist_ok=True)
+            names[:] = kept
+            # Required members first, so an exhausted budget never starves them.
+            for name in sorted(leaves, key=lambda leaf: ((relative / leaf).as_posix() not in required, leaf)):
+                shown = (relative / name).as_posix()
+                if any(fnmatch.fnmatch(name, pattern) for pattern in ignore):
+                    continue
+                reason = ""
+                path = os.path.join(directory, name)
+                limit = EVIDENCE_MEMBER_LIMIT if name.endswith(".json") else EVIDENCE_FILE_LIMIT
+                try:
+                    status = os.lstat(path)
+                    if not stat.S_ISREG(status.st_mode):
+                        reason = "not a regular file"
+                    elif status.st_size > limit:
+                        reason = f"{status.st_size} bytes exceeds the {limit} byte file limit"
+                    elif used + status.st_size > EVIDENCE_TOTAL_LIMIT or files + 1 > EVIDENCE_FILE_COUNT:
+                        reason = "evidence byte or file-count budget exhausted"
+                    else:
+                        target = staging / shown
+                        copied = 0
+                        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                        with os.fdopen(descriptor, "rb") as reader, target.open("wb") as writer:
+                            for block in iter(lambda: reader.read(1 << 20), b""):
+                                copied += len(block)
+                                if copied > limit or used + copied > EVIDENCE_TOTAL_LIMIT:
+                                    reason = "grew past its limit while being copied"
+                                    break
+                                writer.write(block)
+                        if reason:
+                            target.unlink()
+                        else:
+                            used += copied
+                            files += 1
+                            present.add(shown)
+                except OSError as error:
+                    reason = f"copy failed: {error}"
+                if reason:
+                    omissions.append({"path": shown, "reason": reason})
+        for member in required:
+            if member not in present:
+                why = next((item["reason"] for item in omissions if item["path"] == member), "absent from the source")
+                problems.append(f"required evidence {destination.name}/{member} not exported: {why}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            shutil.rmtree(destination)
+        os.replace(staging, destination)
+    except OSError as error:
+        problems.append(f"evidence export of {destination.name} failed: {error}")
+        shutil.rmtree(staging, ignore_errors=True)
+    return problems, omissions
+
+
+def note_omissions(omissions: dict, name: str, found: list) -> None:
+    """Record a bounded omission list in the receipt's section so omissions are never silent."""
+    if found:
+        omissions[name] = {"count": len(found), "shown": found[:OMISSIONS_SHOWN]}
+
+
+def collect_evidence(lab: Path, evidence: Path, omissions: dict) -> list[str]:
+    problems: list[str] = []
     if lab.is_dir():
-        shutil.copytree(lab, evidence / "lab", ignore=shutil.ignore_patterns(*EVIDENCE_IGNORE))
-        for path in sorted((evidence / "lab").rglob("*")):
-            if path.is_file() and path.stat().st_size > EVIDENCE_FILE_LIMIT:
-                path.unlink()
+        problems, found = export_tree(lab, evidence / "lab", evidence, EVIDENCE_IGNORE, LAB_REQUIRED)
+        note_omissions(omissions, "lab", found)
+    return problems
 
 
 def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
-                       binaries: dict) -> tuple[list[str], dict]:
+                       binaries: dict, omissions: dict) -> tuple[list[str], dict]:
     """Run the corpus on both binaries from the checked-out base; (reasons, receipt section)."""
     output = work / "throughput"
     status = run(["./build.sh", "bench_throughput", "run", "--baseline", str(bins / "ide-base"),
@@ -236,17 +353,16 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
                   "--candidate-id", head, *THROUGHPUT_PROFILE["arguments"]],
                  candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
     documents = []
+    reasons = [] if status == 0 else [f"bench_throughput run exited {status} (see throughput.log)"]
     if output.is_dir():
-        shutil.copytree(output, evidence / "throughput", ignore=shutil.ignore_patterns(*EVIDENCE_IGNORE))
-        for path in sorted((evidence / "throughput").rglob("*")):
-            if path.is_file() and path.stat().st_size > EVIDENCE_FILE_LIMIT:
-                path.unlink()
+        problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
+        reasons.extend(problems)
+        note_omissions(omissions, "throughput", found)
     for name in ("summary.json", "metadata.json"):
         try:
             documents.append(json.loads((output / name).read_text(encoding="utf-8")))
         except (OSError, ValueError):
             documents.append(None)
-    reasons = [] if status == 0 else [f"bench_throughput run exited {status} (see throughput.log)"]
     reasons.extend(classify_throughput(documents[0], documents[1], binaries))
     return reasons, dict(throughput_digest(documents[0]), exit=status)
 
@@ -324,7 +440,7 @@ def scaling_requested(candidate: Path, base: str, head: str) -> bool:
 
 
 def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
-                    binaries: dict) -> tuple[list[str], dict]:
+                    binaries: dict, omissions: dict) -> tuple[list[str], dict]:
     """Run every scaling series on the candidate from the checked-out base; (reasons, digest)."""
     reasons: list[str] = []
     bundles: dict = {}
@@ -335,7 +451,10 @@ def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
                       "--output", str(output), *arguments], candidate, evidence / f"scaling-{name}.log",
                      SCALING_TIMEOUT_SECONDS)
         if output.is_dir():
-            shutil.copytree(output, evidence / "scaling" / name, ignore=shutil.ignore_patterns(*SCALING_IGNORE))
+            problems, found = export_tree(output, evidence / "scaling" / name, evidence, SCALING_IGNORE,
+                                          SCALING_REQUIRED)
+            reasons.extend(problems)
+            note_omissions(omissions, f"scaling/{name}", found)
         documents = []
         for leaf in ("scaling.json", "scaling-metadata.json"):
             try:
@@ -345,9 +464,6 @@ def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
         bundles[name] = {"summary": documents[0], "metadata": documents[1]}
         if status != 0:
             reasons.append(f"bench_throughput scale ({name}) exited {status} (see scaling-{name}.log)")
-    for path in sorted((evidence / "scaling").rglob("*")) if (evidence / "scaling").is_dir() else ():
-        if path.is_file() and path.stat().st_size > EVIDENCE_FILE_LIMIT:
-            path.unlink()
     reasons.extend(classify_scaling(bundles, binaries))
     return reasons, scaling_digest(bundles)
 
@@ -436,7 +552,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["timings"]["measurement_seconds"] = round(time.monotonic() - measured, 3)
         receipt["lab"]["exit"] = status
         mark(receipt, evidence, "lab-evidence")
-        collect_evidence(lab, evidence)
+        reasons.extend(collect_evidence(lab, evidence, receipt.setdefault("evidence_omissions", {})))
         try:
             summary = json.loads((lab / "summary.json").read_text(encoding="utf-8"))
             summaries[:] = [summary]
@@ -447,14 +563,16 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         mark(receipt, evidence, "throughput")
         measured = time.monotonic()
         corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
-                                                           arguments.head, receipt["binaries"])
+                                                           arguments.head, receipt["binaries"],
+                                                           receipt.setdefault("evidence_omissions", {}))
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
         if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
             mark(receipt, evidence, "scaling")
             measured = time.monotonic()
             receipt["scaling_profile"] = SCALING_PROFILE
-            scaled, receipt["scaling"] = measure_scaling(candidate, bins, work, evidence, receipt["binaries"])
+            scaled, receipt["scaling"] = measure_scaling(candidate, bins, work, evidence, receipt["binaries"],
+                                                      receipt.setdefault("evidence_omissions", {}))
             receipt["timings"]["scaling_seconds"] = round(time.monotonic() - measured, 3)
             reasons.extend(scaled)
         mark(receipt, evidence, "validate")
@@ -545,6 +663,8 @@ def main(argv: list[str] | None = None) -> int:
     receipt["timings"]["total_seconds"] = round(time.monotonic() - started, 3)
     receipt["timings"]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     receipt.pop("phase", None)
+    if not receipt.get("evidence_omissions"):
+        receipt.pop("evidence_omissions", None)
     persisted = write_receipt(receipt, evidence)
     if persisted:
         reasons.append(persisted)
