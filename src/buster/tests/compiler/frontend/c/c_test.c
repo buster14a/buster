@@ -34901,6 +34901,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArgu
     return result;
 }
 
+// Regression for #2846: compare-exchange on an `_Atomic` floating object
+// compares object representations, so it lowers through an integer view.
+// Negative zero must not match positive zero, and a NaN must match its own
+// bit pattern.
+BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_float_compare_exchange_source = S8_INITIALIZER(
+    "static _Atomic double d;\n"
+    "static _Atomic float f;\n"
+    "int main(void)\n"
+    "{\n"
+    "    int r = 0;\n"
+    "    double e = 0;\n"
+    "    if (!__c11_atomic_compare_exchange_strong(&d, &e, 1.0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) r |= 1;\n"
+    "    if (__c11_atomic_load(&d, __ATOMIC_SEQ_CST) != 1.0) r |= 2;\n"
+    "    e = 2.0;\n"
+    "    if (__c11_atomic_compare_exchange_strong(&d, &e, 3.0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) || e != 1.0) r |= 4;\n"
+    "    float g = 0.0f;\n"
+    "    while (!__c11_atomic_compare_exchange_weak(&f, &g, 5.0f, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) && g == 0.0f) {}\n"
+    "    if (__c11_atomic_load(&f, __ATOMIC_SEQ_CST) != 5.0f) r |= 8;\n"
+    "    __c11_atomic_store(&d, -0.0, __ATOMIC_SEQ_CST);\n"
+    "    e = 0.0;\n"
+    "    if (__c11_atomic_compare_exchange_strong(&d, &e, 7.0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) || !__builtin_signbit(e)) r |= 16;\n"
+    "    __c11_atomic_store(&f, __builtin_nanf(\"\"), __ATOMIC_SEQ_CST);\n"
+    "    g = __builtin_nanf(\"\");\n"
+    "    if (!__c11_atomic_compare_exchange_strong(&f, &g, 1.5f, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) r |= 32;\n"
+    "    if (__c11_atomic_load(&f, __ATOMIC_SEQ_CST) != 1.5f) r |= 64;\n"
+    "    return r;\n"
+    "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_float_compare_exchange_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("atomic-float-compare-exchange"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_float_compare_exchange_source));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-float-compare-exchange-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), modes[mode], forms[form], S8("-O0"), S8("-fverify-codegen"),
+                    S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("atomic float compare-exchange mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 command_line[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult run = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("atomic float compare-exchange mode={u32} form={u32}: status={u32} timeout={u32}"),
+                                mode, form, run.platform_status, (u32)run.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u32 c_test_count_object_words(ByteSlice object, u32 word)
 {
     u32 count = 0;
@@ -44678,6 +44755,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
     C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
+    C_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange_runtime);
     C_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);
 
 
