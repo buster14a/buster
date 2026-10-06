@@ -58,27 +58,28 @@ inventory follows; operand positions start at zero. A mask is a C-visible
 | `LOAD_MASKED` | Read active bytes; zero inactive bytes without accessing them | Operand 1, `predicate<64>` |
 | `STORE` | Write exactly 64 unaligned bytes | None |
 | `STORE_MASKED` | Write active bytes only | Operand 1, `predicate<64>` |
-| `SPLAT_BYTE` | Repeat one byte in 64 lanes | None |
-| `COMPARE_EQUAL_BYTE` | Pack byte equality results into bits | Result, `predicate<64>` |
-| `COMPARE_LESS_BYTE` | Pack unsigned byte less-than results | Result, `predicate<64>` |
-| `SIGN_MASK_BYTE` | Pack each byte's high bit | Result, `predicate<64>` |
-| `TEST_MASK_BYTE` | Pack byte-wise AND-nonzero results | Result, `predicate<64>` |
-| `PERMUTE2_BYTE` | Select from concatenated low/high vectors using low seven index bits; zero inactive lanes | Operand 0, `predicate<64>` |
-| `COMPRESS_BYTE` | Pack active bytes in original order; zero the tail | Operand 0, `predicate<64>` |
-| `COMPRESS_STORE_BYTE` | Write only packed active bytes in original order | Operand 1, `predicate<64>` |
-| `WIDEN_BYTE_TO_WORD` | Zero-extend one selected 16-byte quarter into sixteen u32 lanes; immediate 0–3 | None |
-| `SHIFT_LEFT_WORD` | Shift each u32 lane left; immediate 0–31 | None |
-| `TERNARY_WORD` | Apply the eight-bit three-input truth table independently to each bit | None |
-| `COMPARE_EQUAL_WORD` | Pack sixteen u32 equality results; clear upper 48 bits | Result, `predicate<16>` |
-| `SPLAT_WORD` | Repeat one u32 in sixteen lanes | None |
-| `COMPARE_LESS_WORD` | Pack sixteen unsigned u32 less-than results; clear upper 48 bits | Result, `predicate<16>` |
-| `COMPRESS_WORD` | Pack selected u32 lanes in original order; zero tail; ignore mask bits 16–63 | Operand 0, `predicate<16>` |
+| `SPLAT_U8` | Repeat one byte in 64 lanes | None |
+| `COMPARE_EQUAL_U8` | Pack byte equality results into bits | Result, `predicate<64>` |
+| `COMPARE_LESS_U8` | Pack unsigned byte less-than results | Result, `predicate<64>` |
+| `SIGN_MASK_U8` | Pack each byte's high bit | Result, `predicate<64>` |
+| `TEST_MASK_U8` | Pack byte-wise AND-nonzero results | Result, `predicate<64>` |
+| `PERMUTE2_U8` | Select from concatenated low/high vectors using low seven index bits; zero inactive lanes | Operand 0, `predicate<64>` |
+| `COMPRESS_U8` | Pack active bytes in original order; zero the tail | Operand 0, `predicate<64>` |
+| `COMPRESS_STORE_U8` | Write only packed active bytes in original order | Operand 1, `predicate<64>` |
+| `WIDEN_U8_TO_U32` | Zero-extend one selected 16-byte quarter into sixteen u32 lanes; immediate 0–3 | None |
+| `SHIFT_LEFT_U32` | Shift each u32 lane left; immediate 0–31 | None |
+| `TERNARY_U32` | Apply the eight-bit three-input truth table independently to each bit | None |
+| `COMPARE_EQUAL_U32` | Pack sixteen u32 equality results; clear upper 48 bits | Result, `predicate<16>` |
+| `SPLAT_U32` | Repeat one u32 in sixteen lanes | None |
+| `COMPARE_LESS_U32` | Pack sixteen unsigned u32 less-than results; clear upper 48 bits | Result, `predicate<16>` |
+| `COMPRESS_U32` | Pack selected u32 lanes in original order; zero tail; ignore mask bits 16–63 | Operand 0, `predicate<16>` |
+| `PERMUTE2_U32` | Select u32 lanes from concatenated low/high vectors using low five index bits; zero inactive lanes; ignore mask bits 16–63 | Operand 0, `predicate<16>` |
 
 The current exact lowering requires x86-64 AVX512F and AVX512BW for the whole
-vocabulary, including its 64-byte frame transfers. `PERMUTE2_BYTE` additionally
-requires AVX512VBMI; `COMPRESS_BYTE` and `COMPRESS_STORE_BYTE` additionally
-require AVX512VBMI2. `COMPRESS_WORD` does not require VBMI2. Unknown operation
-numbers always fail the shared gate. Feature bits on another architecture
+vocabulary, including its 64-byte frame transfers. `PERMUTE2_U8` additionally
+requires AVX512VBMI; `COMPRESS_U8` and `COMPRESS_STORE_U8` additionally
+require AVX512VBMI2. `COMPRESS_U32` does not require VBMI2, and `PERMUTE2_U32`
+does not require VBMI. Unknown operation numbers always fail the shared gate. Feature bits on another architecture
 cannot make an x86 intrinsic supported.
 
 An exact intrinsic must lower through its specified target form. Supporting
@@ -151,7 +152,7 @@ All sixteen combinations of F/BW/VBMI/VBMI2 are checked for every operation
 on every architecture. Invalid enum values must remain unsupported.
 
 The existing `basic_c_simd.c` execution fixture covers exact lane behavior,
-including zeroed upper word-comparison bits and ignored high word-mask bits.
+including zeroed upper u32-comparison bits and ignored high u32-mask bits.
 `basic_c_simd_translate.c` exercises the production header's explicit fallback
 instead of compiling the test body away. The native vector fixtures cover
 all-ones comparison lanes and scalar legalization independently of exact SIMD.

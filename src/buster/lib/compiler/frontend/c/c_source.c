@@ -1331,11 +1331,11 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offse
     while (!stopped && source.length - offset >= 64)
     {
         Simd512 chunk = simd512_load(source.pointer + offset);
-        Mask64 stop_mask = simd512_equal_byte(chunk, carriage_return) | simd512_equal_byte(chunk, line_feed) |
-                           simd512_equal_byte(chunk, backslash);
+        Mask64 stop_mask = simd512_equal_u8(chunk, carriage_return) | simd512_equal_u8(chunk, line_feed) |
+                           simd512_equal_u8(chunk, backslash);
         if (trigraphs)
         {
-            stop_mask |= simd512_equal_byte(chunk, simd512_splat('?'));
+            stop_mask |= simd512_equal_u8(chunk, simd512_splat('?'));
         }
         if (stop_mask)
         {
@@ -1493,15 +1493,15 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 while (source.length - input >= 64)
                 {
                     Simd512 chunk = simd512_load(source.pointer + input);
-                    Mask64 carriage = simd512_equal_byte(chunk, simd512_splat('\r'));
-                    Mask64 line_feed = simd512_equal_byte(chunk, simd512_splat('\n'));
-                    Mask64 backslash = simd512_equal_byte(chunk, simd512_splat('\\'));
+                    Mask64 carriage = simd512_equal_u8(chunk, simd512_splat('\r'));
+                    Mask64 line_feed = simd512_equal_u8(chunk, simd512_splat('\n'));
+                    Mask64 backslash = simd512_equal_u8(chunk, simd512_splat('\\'));
                     u64 stops = carriage | (backslash & ((line_feed | carriage) >> 1)) | (backslash & (UINT64_C(1) << 63));
                     if (trigraphs)
                     {
                         // Stop at the first question mark, including the last
                         // lanes whose raw triple belongs to the next chunk.
-                        stops |= simd512_equal_byte(chunk, simd512_splat('?'));
+                        stops |= simd512_equal_u8(chunk, simd512_splat('?'));
                     }
                     u64 limit = stops ? (u64)__builtin_ctzll(stops) : 64;
                     if (!limit)
@@ -2952,28 +2952,29 @@ BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_range(u64 low, u64 high)
 }
 
 // Sixteen finished rows: the compressed start, length, kind and punctuator
-// bytes widen to 32-bit lanes, the metadata dword assembles as
-// length | kind<<16 | punctuator<<24, and three masked vpermi2d interleave
-// offsets and metadata into the 48 dwords of sixteen 12-byte CToken rows —
-// 192 stored bytes.  The zero symbol dwords come from the permutes' own
-// zeroing masks rather than from sacrificial zero lanes, which is what
+// bytes widen to u32 lanes, the metadata u32 assembles as
+// length | kind<<16 | punctuator<<24, and three masked
+// simd512_permute2_u32 (vpermt2d) interleave offsets and metadata into the
+// 48 u32 lanes of sixteen 12-byte CToken rows — 192 stored bytes.  The zero
+// symbol u32 lanes come from the permutes' own zeroing masks rather than
+// from sacrificial zero lanes, which is what
 // lets one pass cover sixteen rows where the earlier eight-row form spent
 // the offset vector's masked-off upper lanes as its zero source.
 BUSTER_C_INLINE BUSTER_INLINE void c_lex_store_rows(CToken* out, CTokenShape* shapes_out, u64 shape_mask, __m512i starts, __m512i lengths,
                                                         __m512i kinds, __m512i punctuators, __m512i shapes, __m512i base, __m512i index_0,
                                                         __m512i index_1, __m512i index_2)
 {
-    __m512i start_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(starts));
-    __m512i length_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(lengths));
-    __m512i kind_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(kinds));
-    __m512i punctuator_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(punctuators));
-    __m512i offsets = _mm512_add_epi32(start_wide, base);
-    __m512i metadata = _mm512_or_si512(length_wide, _mm512_or_si512(_mm512_slli_epi32(kind_wide, 16), _mm512_slli_epi32(punctuator_wide, 24)));
-    u32* dwords = (u32*)out;
-    _mm512_storeu_si512((__m512i*)dwords, _mm512_maskz_permutex2var_epi32(0xDB6D, offsets, index_0, metadata));
-    _mm512_storeu_si512((__m512i*)(dwords + 16), _mm512_maskz_permutex2var_epi32(0x6DB6, offsets, index_1, metadata));
-    _mm512_storeu_si512((__m512i*)(dwords + 32), _mm512_maskz_permutex2var_epi32(0xB6DB, offsets, index_2, metadata));
-    _mm512_mask_storeu_epi8(shapes_out, (__mmask64)shape_mask, shapes);
+    Simd512 start_wide = simd512_widen_u8((Simd512)starts, 0);
+    Simd512 length_wide = simd512_widen_u8((Simd512)lengths, 0);
+    Simd512 kind_wide = simd512_widen_u8((Simd512)kinds, 0);
+    Simd512 punctuator_wide = simd512_widen_u8((Simd512)punctuators, 0);
+    Simd512 offsets = simd512_add_u32(start_wide, (Simd512)base);
+    Simd512 metadata = simd512_or(length_wide, simd512_or(simd512_shift_left_u32(kind_wide, 16), simd512_shift_left_u32(punctuator_wide, 24)));
+    u32* row_lanes = (u32*)out;
+    simd512_store(row_lanes, simd512_permute2_u32(0xDB6D, offsets, (Simd512)index_0, metadata));
+    simd512_store(row_lanes + 16, simd512_permute2_u32(0x6DB6, offsets, (Simd512)index_1, metadata));
+    simd512_store(row_lanes + 32, simd512_permute2_u32(0xB6DB, offsets, (Simd512)index_2, metadata));
+    simd512_store_masked(shapes_out, shape_mask, (Simd512)shapes);
 }
 
 BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
@@ -4152,21 +4153,22 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_buster_simd_load_masked"), C_SYMBOL_BUILTIN_SIMD },
     { S8_INITIALIZER("__builtin_buster_simd_store"), C_SYMBOL_BUILTIN_SIMD },
     { S8_INITIALIZER("__builtin_buster_simd_store_masked"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_splat_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_equal_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_less_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_sign_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_test_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_permute2_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_store_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_widen_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_shift_left_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_ternary_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_equal_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_splat_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_less_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_word"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_splat_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_equal_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_less_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_sign_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_test_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_permute2_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_store_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_widen_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_shift_left_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_ternary_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_equal_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_splat_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_less_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_permute2_u32"), C_SYMBOL_BUILTIN_SIMD },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)
@@ -4673,7 +4675,7 @@ BUSTER_C_INTERNAL void c_symbols_intern_tokens(CSymbolTable* table, char8 const*
         for (u64 window_base = 0; window_base < token_count; window_base += 64)
         {
             Mask64 window_mask = mask64_prefix(token_count - window_base);
-            Mask64 identifiers = simd512_equal_byte(simd512_load_masked(shapes + window_base, window_mask), identifier_shape);
+            Mask64 identifiers = simd512_equal_u8(simd512_load_masked(shapes + window_base, window_mask), identifier_shape);
             while (identifiers)
             {
                 u64 index = window_base + mask64_first_set(identifiers);
@@ -7759,10 +7761,10 @@ BUSTER_C_INTERNAL void c_pp_class_masks_build(Arena* arena, CPpClassMasks* masks
             u64 window_base = word_index * C_PP_CLASS_MASK_WINDOW;
             Mask64 window_mask = mask64_prefix(token_count - window_base);
             Simd512 window = simd512_load_masked(shapes + window_base, window_mask);
-            masks->stop[word_index] = mask64_or(simd512_equal_byte(window, newline_shape), simd512_equal_byte(window, end_shape));
-            masks->identifier[word_index] = simd512_equal_byte(window, identifier_shape);
-            masks->parenthesis_left[word_index] = simd512_equal_byte(window, left_shape);
-            masks->parenthesis_right[word_index] = simd512_equal_byte(window, right_shape);
+            masks->stop[word_index] = mask64_or(simd512_equal_u8(window, newline_shape), simd512_equal_u8(window, end_shape));
+            masks->identifier[word_index] = simd512_equal_u8(window, identifier_shape);
+            masks->parenthesis_left[word_index] = simd512_equal_u8(window, left_shape);
+            masks->parenthesis_right[word_index] = simd512_equal_u8(window, right_shape);
         }
         masks->word_count = word_count;
     }

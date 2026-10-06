@@ -3360,7 +3360,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("struct S{int x;};void g(int);void f(struct S s,int x,int*p){int a=((double)p)?1:2;}\n"), false, true},
         {S8("void f(void){__builtin_buster_simd_load();}\n"), false, true},
         {S8("void f(void){__builtin_buster_simd_load(1);}\n"), false, true},
-        {S8("void f(void){__builtin_buster_simd_sign_byte(1);}\n"), false, true},
+        {S8("void f(void){__builtin_buster_simd_sign_u8(1);}\n"), false, true},
         {S8("struct S{int x;};void f(struct S s){int a={s};}\n"), false, true},
         {S8("struct S{int x;};struct T{int x;};void f(struct S s){struct T t=s;}\n"), false, true},
         {S8("void g(void); void f(int c){c?g():(void)0;}\n"), true, true},
@@ -3383,7 +3383,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_psradi128(v,99);}\n"), true, true},
         {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_psrldi128(v,-1);}\n"), true, true},
         {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_pslldi128(__builtin_ia32_pslldi128(v,1),2);}\n"), true, true},
-        {S8("typedef unsigned char V __attribute__((vector_size(64))); V x=__builtin_buster_simd_splat_byte(1);\n"), false, true},
+        {S8("typedef unsigned char V __attribute__((vector_size(64))); V x=__builtin_buster_simd_splat_u8(1);\n"), false, true},
         {S8("typedef int V __attribute__((vector_size(16))); V x=__builtin_ia32_pslldi128((V){1,2,3,4},1);\n"), false, true},
         {S8("int x=__builtin_popcount(3);\n"), false, true},
         {S8("int x=__builtin_expect(1,1);\n"), false, true},
@@ -6552,7 +6552,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
                                     bool native = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS);
                                     bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
                                     if (native && runnable && clang.length && compiled->error_none)
                                     {
                                         String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-run"), S8(".exe"));
@@ -6658,7 +6658,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
                                     bool native = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS);
                                     bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
                                     if (native && runnable && frontend == 1 && pic == 1 && clang.length &&
                                         compiled->error_none)
                                     {
@@ -6678,7 +6678,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #endif
 #if BUSTER_CPU_ARCH_X86_64 && BUSTER_WINDOWS
                                     bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
                                     if (target == 4 && runnable && frontend == 1 && pic == 1 &&
                                         compiled->error_none)
                                     {
@@ -6861,7 +6861,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
         for (u32 cpu = 0; cpu < BUSTER_ARRAY_LENGTH(cpus); cpu += 1)
         {
             bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
             for (u32 host_provider = 0; runnable && host_provider < 2; host_provider += 1)
             {
                 TemporalArena host_temporary = scratch_begin(&arguments->arena, 1);
@@ -7290,7 +7290,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         u32 observer = fixture == 9 ? 3u : fixture >= 4 && fixture <= 6 ? fixture - 4 : UINT32_MAX;
         bool executable_cpu = cpu == 0 || (fixture >= 7 &&
             (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                      : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE)));
+                      : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8)));
         if (host_observer_available && native_target && executable_cpu && fixture != 3 &&
             cell->error_none && (observer == UINT32_MAX || host_compiled[observer]))
         {

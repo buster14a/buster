@@ -370,9 +370,9 @@ BUSTER_GLOBAL_LOCAL u32 ir_source_search_vector(void const* words, u32 low, u32 
     Mask64 valid = mask64_prefix(lanes);
     Mask64 bytes_valid = mask64_prefix(lanes * 4);
     Simd512 loaded = simd512_load_masked(words, bytes_valid);
-    // `simd512_less_word` is strict, so the covered lanes are the complement
+    // `simd512_less_u32` is strict, so the covered lanes are the complement
     // of "probe < key" inside the valid lanes.
-    Mask64 covered = valid & ~simd512_less_word(simd512_splat_word(probe), loaded);
+    Mask64 covered = valid & ~simd512_less_u32(simd512_splat_u32(probe), loaded);
     if (stride_words == 2)
     {
         covered &= (Mask64)0x5555;
@@ -778,21 +778,22 @@ IrSimdShape ir_simd_operation_shape(IrSimdOperation operation)
         [IR_SIMD_LOAD_MASKED] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 2, .predicate_lane_count = 64},
         [IR_SIMD_STORE] = {.operand_count = 2},
         [IR_SIMD_STORE_MASKED] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
-        [IR_SIMD_SPLAT_BYTE] = {.operand_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_EQUAL_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_COMPARE_LESS_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_SIGN_MASK_BYTE] = {.operand_count = 1, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_TEST_MASK_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_PERMUTE2_BYTE] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
-        [IR_SIMD_COMPRESS_BYTE] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
-        [IR_SIMD_COMPRESS_STORE_BYTE] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
-        [IR_SIMD_WIDEN_BYTE_TO_WORD] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_SHIFT_LEFT_WORD] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_TERNARY_WORD] = {.operand_count = 3, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_EQUAL_WORD] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
-        [IR_SIMD_SPLAT_WORD] = {.operand_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_LESS_WORD] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
-        [IR_SIMD_COMPRESS_WORD] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
+        [IR_SIMD_SPLAT_U8] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_EQUAL_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_COMPARE_LESS_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_SIGN_MASK_U8] = {.operand_count = 1, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_TEST_MASK_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_PERMUTE2_U8] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
+        [IR_SIMD_COMPRESS_U8] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
+        [IR_SIMD_COMPRESS_STORE_U8] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
+        [IR_SIMD_WIDEN_U8_TO_U32] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_SHIFT_LEFT_U32] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_TERNARY_U32] = {.operand_count = 3, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_EQUAL_U32] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
+        [IR_SIMD_SPLAT_U32] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_LESS_U32] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
+        [IR_SIMD_COMPRESS_U32] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
+        [IR_SIMD_PERMUTE2_U32] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
     };
     IrSimdShape result = {0};
     if ((u32)operation < IR_SIMD_COUNT)
@@ -810,11 +811,11 @@ bool ir_simd_operation_supported(Target target, IrSimdOperation operation)
     bool result = ir_vector_operation_semantics(IR_OPCODE_SIMD, (u32)operation) == IR_VECTOR_SEMANTICS_EXACT_X86_512 &&
                   target.cpu_arch == CPU_ARCH_X86_64 && target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) &&
                   target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW);
-    if (result && operation == IR_SIMD_PERMUTE2_BYTE)
+    if (result && operation == IR_SIMD_PERMUTE2_U8)
     {
         result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
     }
-    else if (result && (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE))
+    else if (result && (operation == IR_SIMD_COMPRESS_U8 || operation == IR_SIMD_COMPRESS_STORE_U8))
     {
         result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
     }
@@ -833,36 +834,38 @@ String8 ir_simd_operation_name(IrSimdOperation operation)
         return S8("simd.store");
     case IR_SIMD_STORE_MASKED:
         return S8("simd.store_masked");
-    case IR_SIMD_SPLAT_BYTE:
-        return S8("simd.splat_byte");
-    case IR_SIMD_COMPARE_EQUAL_BYTE:
-        return S8("simd.compare_equal_byte");
-    case IR_SIMD_COMPARE_LESS_BYTE:
-        return S8("simd.compare_less_byte");
-    case IR_SIMD_SIGN_MASK_BYTE:
-        return S8("simd.sign_mask_byte");
-    case IR_SIMD_TEST_MASK_BYTE:
-        return S8("simd.test_mask_byte");
-    case IR_SIMD_PERMUTE2_BYTE:
-        return S8("simd.permute2_byte");
-    case IR_SIMD_COMPRESS_BYTE:
-        return S8("simd.compress_byte");
-    case IR_SIMD_COMPRESS_STORE_BYTE:
-        return S8("simd.compress_store_byte");
-    case IR_SIMD_WIDEN_BYTE_TO_WORD:
-        return S8("simd.widen_byte_to_word");
-    case IR_SIMD_SHIFT_LEFT_WORD:
-        return S8("simd.shift_left_word");
-    case IR_SIMD_TERNARY_WORD:
-        return S8("simd.ternary_word");
-    case IR_SIMD_COMPARE_EQUAL_WORD:
-        return S8("simd.compare_equal_word");
-    case IR_SIMD_SPLAT_WORD:
-        return S8("simd.splat_word");
-    case IR_SIMD_COMPARE_LESS_WORD:
-        return S8("simd.compare_less_word");
-    case IR_SIMD_COMPRESS_WORD:
-        return S8("simd.compress_word");
+    case IR_SIMD_SPLAT_U8:
+        return S8("simd.splat_u8");
+    case IR_SIMD_COMPARE_EQUAL_U8:
+        return S8("simd.compare_equal_u8");
+    case IR_SIMD_COMPARE_LESS_U8:
+        return S8("simd.compare_less_u8");
+    case IR_SIMD_SIGN_MASK_U8:
+        return S8("simd.sign_mask_u8");
+    case IR_SIMD_TEST_MASK_U8:
+        return S8("simd.test_mask_u8");
+    case IR_SIMD_PERMUTE2_U8:
+        return S8("simd.permute2_u8");
+    case IR_SIMD_COMPRESS_U8:
+        return S8("simd.compress_u8");
+    case IR_SIMD_COMPRESS_STORE_U8:
+        return S8("simd.compress_store_u8");
+    case IR_SIMD_WIDEN_U8_TO_U32:
+        return S8("simd.widen_u8_to_u32");
+    case IR_SIMD_SHIFT_LEFT_U32:
+        return S8("simd.shift_left_u32");
+    case IR_SIMD_TERNARY_U32:
+        return S8("simd.ternary_u32");
+    case IR_SIMD_COMPARE_EQUAL_U32:
+        return S8("simd.compare_equal_u32");
+    case IR_SIMD_SPLAT_U32:
+        return S8("simd.splat_u32");
+    case IR_SIMD_COMPARE_LESS_U32:
+        return S8("simd.compare_less_u32");
+    case IR_SIMD_COMPRESS_U32:
+        return S8("simd.compress_u32");
+    case IR_SIMD_PERMUTE2_U32:
+        return S8("simd.permute2_u32");
     case IR_SIMD_COUNT:
         break;
     }
@@ -947,13 +950,13 @@ BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_mask(IrProgram* program, IrTypeId id)
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 64;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_byte(IrProgram* program, IrTypeId id)
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_u8(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 8;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_word(IrProgram* program, IrTypeId id)
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_u32(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 32;
@@ -1005,41 +1008,42 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
             valid = ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && result->kind == IR_TYPE_VOID;
             break;
         case IR_SIMD_STORE_MASKED:
-        case IR_SIMD_COMPRESS_STORE_BYTE:
+        case IR_SIMD_COMPRESS_STORE_U8:
             valid = ir_simd_type_is_address(program, operands[0]) &&
                    ir_simd_type_is_vector(program, operands[2]) && result->kind == IR_TYPE_VOID;
             break;
-        case IR_SIMD_SPLAT_BYTE:
-            valid = ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_SPLAT_U8:
+            valid = ir_simd_type_is_u8(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_SPLAT_WORD:
-            valid = ir_simd_type_is_word(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_SPLAT_U32:
+            valid = ir_simd_type_is_u32(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_COMPARE_EQUAL_BYTE:
-        case IR_SIMD_COMPARE_LESS_BYTE:
-        case IR_SIMD_TEST_MASK_BYTE:
-        case IR_SIMD_COMPARE_EQUAL_WORD:
-        case IR_SIMD_COMPARE_LESS_WORD:
+        case IR_SIMD_COMPARE_EQUAL_U8:
+        case IR_SIMD_COMPARE_LESS_U8:
+        case IR_SIMD_TEST_MASK_U8:
+        case IR_SIMD_COMPARE_EQUAL_U32:
+        case IR_SIMD_COMPARE_LESS_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]);
             break;
-        case IR_SIMD_SIGN_MASK_BYTE:
+        case IR_SIMD_SIGN_MASK_U8:
             valid = ir_simd_type_is_vector(program, operands[0]);
             break;
-        case IR_SIMD_PERMUTE2_BYTE:
+        case IR_SIMD_PERMUTE2_U8:
+        case IR_SIMD_PERMUTE2_U32:
             valid = ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, operands[3]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_COMPRESS_BYTE:
-        case IR_SIMD_COMPRESS_WORD:
+        case IR_SIMD_COMPRESS_U8:
+        case IR_SIMD_COMPRESS_U32:
             valid = ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_WIDEN_BYTE_TO_WORD:
+        case IR_SIMD_WIDEN_U8_TO_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;
             break;
-        case IR_SIMD_SHIFT_LEFT_WORD:
+        case IR_SIMD_SHIFT_LEFT_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 32;
             break;
-        case IR_SIMD_TERNARY_WORD:
+        case IR_SIMD_TERNARY_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, result_type) && immediate < 256;
             break;

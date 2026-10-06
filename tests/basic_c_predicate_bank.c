@@ -7,14 +7,14 @@ typedef u8 Simd512 __attribute__((vector_size(64)));
 void predicate_mask_chain(u8* output, u8 const* input)
 {
     Simd512 bytes = __builtin_buster_simd_load(input);
-    u64 a = __builtin_buster_simd_equal_byte(bytes, __builtin_buster_simd_splat_byte(3));
-    u64 b = __builtin_buster_simd_equal_byte(bytes, __builtin_buster_simd_splat_byte(7));
-    u64 c = __builtin_buster_simd_less_byte(bytes, __builtin_buster_simd_splat_byte(11));
+    u64 a = __builtin_buster_simd_equal_u8(bytes, __builtin_buster_simd_splat_u8(3));
+    u64 b = __builtin_buster_simd_equal_u8(bytes, __builtin_buster_simd_splat_u8(7));
+    u64 c = __builtin_buster_simd_less_u8(bytes, __builtin_buster_simd_splat_u8(11));
     __builtin_buster_simd_store_masked(output, (a | b) & c, bytes);
 }
 
 u64 predicate_word_boundary(u8 const* input)
 {
-    Simd512 words = __builtin_buster_simd_load(input);
-    return __builtin_buster_simd_equal_word(words, words);
+    Simd512 u32_lanes = __builtin_buster_simd_load(input);
+    return __builtin_buster_simd_equal_u32(u32_lanes, u32_lanes);
 }

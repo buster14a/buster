@@ -28,10 +28,10 @@ typedef u8 Simd512 __attribute__((vector_size(64)));
 
 #define simd512_load(address) __builtin_buster_simd_load(address)
 #define simd512_store(address, value) __builtin_buster_simd_store((address), (value))
-#define simd512_splat(byte) __builtin_buster_simd_splat_byte(byte)
-#define simd512_equal_byte(left, right) __builtin_buster_simd_equal_byte((left), (right))
-#define simd512_sign_byte(value) __builtin_buster_simd_sign_byte(value)
-#define simd512_test_byte(left, right) __builtin_buster_simd_test_byte((left), (right))
+#define simd512_splat(byte) __builtin_buster_simd_splat_u8(byte)
+#define simd512_equal_u8(left, right) __builtin_buster_simd_equal_u8((left), (right))
+#define simd512_sign_u8(value) __builtin_buster_simd_sign_u8(value)
+#define simd512_test_u8(left, right) __builtin_buster_simd_test_u8((left), (right))
 
 static u8 corpus_bytes[64 * 20];
 
@@ -52,8 +52,8 @@ static void corpus_fill(u64 seed)
 // (vector ABI is a later stage), and `ide cc` runs no inliner. Arguments
 // must be free of side effects.
 #define vector_signature(value)                                                                                                                                \
-    (simd512_sign_byte(value) ^ (simd512_test_byte((value), simd512_splat(0x0f)) * 0x9e3779b97f4a7c15ull) ^                                                    \
-     (simd512_equal_byte((value), simd512_splat(0)) >> 1))
+    (simd512_sign_u8(value) ^ (simd512_test_u8((value), simd512_splat(0x0f)) * 0x9e3779b97f4a7c15ull) ^                                                    \
+     (simd512_equal_u8((value), simd512_splat(0)) >> 1))
 
 // Eighteen vector values live simultaneously across a loop: more than the
 // sixteen-register ZMM file, so something must spill and the choice of what

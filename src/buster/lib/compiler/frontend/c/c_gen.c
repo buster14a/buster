@@ -2633,56 +2633,60 @@ BUSTER_C_INTERNAL CIrSimdBuiltin const c_ir_simd_builtins[] = {
       IR_SIMD_STORE_MASKED,
       { C_IR_SIMD_ARGUMENT_ADDRESS, C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_splat_byte"), IR_SIMD_SPLAT_BYTE, { C_IR_SIMD_ARGUMENT_BYTE }, 0 },
-    { S8_INITIALIZER("__builtin_buster_simd_equal_byte"),
-      IR_SIMD_COMPARE_EQUAL_BYTE,
+    { S8_INITIALIZER("__builtin_buster_simd_splat_u8"), IR_SIMD_SPLAT_U8, { C_IR_SIMD_ARGUMENT_U8 }, 0 },
+    { S8_INITIALIZER("__builtin_buster_simd_equal_u8"),
+      IR_SIMD_COMPARE_EQUAL_U8,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_less_byte"),
-      IR_SIMD_COMPARE_LESS_BYTE,
+    { S8_INITIALIZER("__builtin_buster_simd_less_u8"),
+      IR_SIMD_COMPARE_LESS_U8,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_sign_byte"), IR_SIMD_SIGN_MASK_BYTE, { C_IR_SIMD_ARGUMENT_VECTOR }, 0 },
-    { S8_INITIALIZER("__builtin_buster_simd_test_byte"),
-      IR_SIMD_TEST_MASK_BYTE,
+    { S8_INITIALIZER("__builtin_buster_simd_sign_u8"), IR_SIMD_SIGN_MASK_U8, { C_IR_SIMD_ARGUMENT_VECTOR }, 0 },
+    { S8_INITIALIZER("__builtin_buster_simd_test_u8"),
+      IR_SIMD_TEST_MASK_U8,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_permute2_byte"),
-      IR_SIMD_PERMUTE2_BYTE,
+    { S8_INITIALIZER("__builtin_buster_simd_permute2_u8"),
+      IR_SIMD_PERMUTE2_U8,
       { C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_byte"),
-      IR_SIMD_COMPRESS_BYTE,
+    { S8_INITIALIZER("__builtin_buster_simd_compress_u8"),
+      IR_SIMD_COMPRESS_U8,
       { C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_store_byte"),
-      IR_SIMD_COMPRESS_STORE_BYTE,
+    { S8_INITIALIZER("__builtin_buster_simd_compress_store_u8"),
+      IR_SIMD_COMPRESS_STORE_U8,
       { C_IR_SIMD_ARGUMENT_ADDRESS, C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_widen_byte"),
-      IR_SIMD_WIDEN_BYTE_TO_WORD,
+    { S8_INITIALIZER("__builtin_buster_simd_widen_u8"),
+      IR_SIMD_WIDEN_U8_TO_U32,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_IMMEDIATE },
       4 },
-    { S8_INITIALIZER("__builtin_buster_simd_shift_left_word"),
-      IR_SIMD_SHIFT_LEFT_WORD,
+    { S8_INITIALIZER("__builtin_buster_simd_shift_left_u32"),
+      IR_SIMD_SHIFT_LEFT_U32,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_IMMEDIATE },
       32 },
-    { S8_INITIALIZER("__builtin_buster_simd_ternary_word"),
-      IR_SIMD_TERNARY_WORD,
+    { S8_INITIALIZER("__builtin_buster_simd_ternary_u32"),
+      IR_SIMD_TERNARY_U32,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_IMMEDIATE },
       256 },
-    { S8_INITIALIZER("__builtin_buster_simd_equal_word"),
-      IR_SIMD_COMPARE_EQUAL_WORD,
+    { S8_INITIALIZER("__builtin_buster_simd_equal_u32"),
+      IR_SIMD_COMPARE_EQUAL_U32,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_splat_word"), IR_SIMD_SPLAT_WORD, { C_IR_SIMD_ARGUMENT_WORD }, 0 },
-    { S8_INITIALIZER("__builtin_buster_simd_less_word"),
-      IR_SIMD_COMPARE_LESS_WORD,
+    { S8_INITIALIZER("__builtin_buster_simd_splat_u32"), IR_SIMD_SPLAT_U32, { C_IR_SIMD_ARGUMENT_U32 }, 0 },
+    { S8_INITIALIZER("__builtin_buster_simd_less_u32"),
+      IR_SIMD_COMPARE_LESS_U32,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_word"),
-      IR_SIMD_COMPRESS_WORD,
+    { S8_INITIALIZER("__builtin_buster_simd_compress_u32"),
+      IR_SIMD_COMPRESS_U32,
       { C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_permute2_u32"),
+      IR_SIMD_PERMUTE2_U32,
+      { C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
 };
 
@@ -13935,7 +13939,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 del
             Simd512 chunk = simd512_load_masked(source + index, window);
             // Lanes past the window load as zero, which is not a backslash,
             // so the escape mask is confined to the window by construction.
-            Mask64 escapes = simd512_equal_byte(chunk, backslash);
+            Mask64 escapes = simd512_equal_u8(chunk, backslash);
             if (!escapes)
             {
                 u64 advance = BUSTER_MIN(remaining, UINT64_C(64));
@@ -13993,7 +13997,7 @@ BUSTER_C_INTERNAL bool c_ir_count_quoted(String8 spelling, u8 delimiter, u64* co
             u64 remaining = end - index;
             Mask64 window = mask64_prefix(remaining);
             Simd512 chunk = simd512_load_masked(source + index, window);
-            Mask64 escapes = simd512_equal_byte(chunk, backslash);
+            Mask64 escapes = simd512_equal_u8(chunk, backslash);
             if (!escapes)
             {
                 u64 advance = BUSTER_MIN(remaining, UINT64_C(64));
@@ -21763,11 +21767,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_simd_coerce_argument(CIntegerIrBuilder* builder
                 return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
                            ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG], source)
                            : IR_VALUE_ID_INVALID;
-            case C_IR_SIMD_ARGUMENT_BYTE:
+            case C_IR_SIMD_ARGUMENT_U8:
                 return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
                            ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_CHAR], source)
                            : IR_VALUE_ID_INVALID;
-            case C_IR_SIMD_ARGUMENT_WORD:
+            case C_IR_SIMD_ARGUMENT_U32:
                 return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
                            ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_INT], source)
                            : IR_VALUE_ID_INVALID;
