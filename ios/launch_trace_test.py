@@ -28,7 +28,7 @@ static int trace_cpu_failure(int who, struct rusage* value)
 #define clock_gettime trace_clock_failure
 #define getrusage trace_cpu_failure
 #endif
-#include <buster/lib/entry_point/ios_launch_trace.c>
+#include <buster/lib/entry_point_ios.c>
 int main(void)
 {
     buster_ios_launch_trace(S8("main"));

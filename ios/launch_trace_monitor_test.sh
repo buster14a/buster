@@ -31,8 +31,21 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir -p "$test_root/bin"
-export REAL_TEE
+export REAL_TEE REAL_GREP
 REAL_TEE=$(command -v tee)
+REAL_GREP=$(command -v grep)
+cat >"$test_root/bin/grep" <<'TOOL'
+#!/usr/bin/env bash
+set -eu
+# Model bytes arriving between the launcher's empty size check and its first
+# app-record scan. The fake producer owns the FIFO but emits its marker later.
+if [[ $FAKE_RESULT == receipt-race && ${1:-} == -q && ${2:-} == '^BUSTER_IOS_LAUNCH_V1 ' && ! -e $RUNNER_TEMP/trace-written ]]; then
+    sleep 2
+    printf 'BUSTER_IOS_LAUNCH_V1 stage=main pid=1 monotonic_us=1 wall_us=1 process_cpu_us=1 monotonic_status=0 wall_status=0 cpu_status=0\nTEST_FIXTURE_START_V1 kind=module module=probe fixture=body index=0\n' >>"$3"
+    : >"$RUNNER_TEMP/trace-written"
+fi
+exec "$REAL_GREP" "$@"
+TOOL
 cat >"$test_root/bin/tee" <<'TOOL'
 #!/usr/bin/env bash
 printf 'reader %s\n' "$$" >>"$FAKE_PIDS"
@@ -56,6 +69,7 @@ if [[ ${1:-} == simctl && ${2:-} == launch ]]; then
             printf 'TEST_FIXTURE_START_V1 kind=module module=probe fixture=body index=0\n'
             if [[ $FAKE_RESULT != trace-only ]]; then printf 'BUSTER_IOS_RESULT: SUCCESS\n'; fi ;;
         failure) printf 'BUSTER_IOS_RESULT: FAILURE\n' ;;
+        receipt-race) sleep 4; printf 'BUSTER_IOS_RESULT: SUCCESS\n' ;;
         hang) : ;;
     esac
     # The same process stays attached after its terminal marker.
@@ -63,7 +77,7 @@ if [[ ${1:-} == simctl && ${2:-} == launch ]]; then
 fi
 exit 0
 TOOL
-chmod +x "$test_root/bin/tee" "$test_root/bin/codesign" "$test_root/bin/xcrun"
+chmod +x "$test_root/bin/tee" "$test_root/bin/codesign" "$test_root/bin/xcrun" "$test_root/bin/grep"
 export PATH="$test_root/bin:$PATH"
 run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
@@ -72,8 +86,8 @@ run_case() {
     export RUNNER_TEMP="$state" FAKE_PIDS="$state/pids" FAKE_RESULT="$outcome"
     export BUSTER_IOS_SIMULATOR_UDID=FAKE-UDID
     export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=3
-    if [[ $outcome == delayed-success ]]; then
-        export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=6
+    if [[ $outcome == delayed-success || $outcome == receipt-race ]]; then
+        export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=7
     fi
     export BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
     local arguments=(--batch Debug "$state/Debug/ide.app")
@@ -100,10 +114,17 @@ run_case() {
         echo "unexpected status for $label: $status, expected $expected" >&2
         exit 1
     fi
-    if [[ $outcome == success || $outcome == delayed-success || $outcome == trace-only ]]; then
+    if [[ $outcome == success || $outcome == delayed-success || $outcome == trace-only || $outcome == receipt-race ]]; then
         [[ $(grep -c 'event=first-console ' "$state/output") -eq $bundles ]]
         [[ $(grep -c 'event=first-app-trace ' "$state/output") -eq $bundles ]]
         [[ $(grep -c 'event=first-fixture ' "$state/output") -eq $bundles ]]
+        awk '
+            /BUSTER_IOS_LAUNCH_OBSERVATION / {
+                for (i=1; i<=NF; i++) if ($i ~ /^observed_after_seconds=/) elapsed=substr($i,24)+0
+                if ($0 ~ /event=first-console /) { console=elapsed; seen=1 }
+                else if (!seen || console > elapsed) exit 1
+            }
+        ' "$state/output"
         if [[ $outcome == trace-only ]]; then
             grep -q 'this is a real launch timeout' "$state/output"
             ! grep -q 'iOS Debug tests passed.' "$state/output"
@@ -135,7 +156,12 @@ run_case() {
     rm -f "$state/pids"
     printf 'iOS monitor cleanup passed: %s\n' "$label"
 }
-run_case success success 0 0 1
-run_case batch success 0 0 2
-run_case delayed-success delayed-success 0 0 1
-run_case trace-only trace-only 1 0 1
+if [[ ${1:-} == --receipt-race-only ]]; then
+    run_case receipt-race receipt-race 0 0 1
+else
+    run_case success success 0 0 1
+    run_case batch success 0 0 2
+    run_case delayed-success delayed-success 0 0 1
+    run_case trace-only trace-only 1 0 1
+    run_case receipt-race receipt-race 0 0 1
+fi

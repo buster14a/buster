@@ -15,7 +15,7 @@ BUSTER_V_IMPL OsState os_state;
 
 #if BUSTER_LINK_LIBC
 #if BUSTER_IOS
-#include <buster/lib/entry_point/ios_launch_trace.c>
+#include <buster/lib/entry_point_ios.c>
 #endif
 BUSTER_GLOBAL_LOCAL s32 buster_entry_point_exit_code = 0;
 BUSTER_GLOBAL_LOCAL bool buster_entry_point_exit_code_is_set = false;
