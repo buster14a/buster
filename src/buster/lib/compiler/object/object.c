@@ -7735,6 +7735,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                                         : string_starts_with_sequence(name, S8("__data")) ? OBJECT_SECTION_DATA
                                                                                                              : OBJECT_SECTION_READ_ONLY_DATA;
                     }
+                    // A zero-fill kind with no zero-fill type flag (a `__bss`-named
+                    // S_REGULAR section) has no buffer yet claims file bytes: malformed.
+                    if (read_ok && !zero_fill && section_size && object_section_kind_is_zero_fill(output_kind))
+                    {
+                        read_ok = false;
+                    }
                     u32 alignment = 0;
                     if (read_ok)
                     {
@@ -7857,9 +7863,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             object_read_u32(bytes, section + 48, &offset);
             object_read_u32(bytes, section + 64, &flags);
             u32 section_type = flags & 0xff;
-            if (section_type != 1 && section_type != 0x12 && size && !compact_sections[section_index] && !(has_compact && eh_frame_sections[section_index]))
+            ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
+            // Gate on the resolved kind (the allocation decision), not the raw type
+            // flag: a `__bss`-named section is OBJECT_SECTION_ZERO and has no buffer.
+            if (section_type != 1 && section_type != 0x12 && !object_section_kind_is_zero_fill(kind) && size && !compact_sections[section_index] &&
+                !(has_compact && eh_frame_sections[section_index]))
             {
-                ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
                 memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
             }
         }

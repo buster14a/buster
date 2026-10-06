@@ -5347,6 +5347,46 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         memcpy(&mach_magic, mach.bytes.pointer, 4);
     }
     BUSTER_TEST(arguments, mach_magic == 0xfeedfacf);
+    // A `__bss`-named section whose type is rewritten from S_ZEROFILL to
+    // S_REGULAR has no buffer to copy into; the reader must refuse it, not
+    // write through a null pointer.
+    if (BUSTER_REQUIRE(arguments, mach.bytes.length >= 32 + 72))
+    {
+        TemporalArena bss_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice bss_mutation = {
+            .pointer = arena_allocate(arguments->arena, u8, mach.bytes.length),
+            .length = mach.bytes.length,
+        };
+        memcpy(bss_mutation.pointer, mach.bytes.pointer, mach.bytes.length);
+        u32 bss_section_count = 0;
+        memcpy(&bss_section_count, bss_mutation.pointer + 32 + 64, sizeof(bss_section_count));
+        u32 bss_flipped = 0;
+        for (u32 bss_index = 0; bss_index < bss_section_count && 32 + 72 + (u64)(bss_index + 1) * 80 <= bss_mutation.length; bss_index += 1)
+        {
+            u64 bss_section = 32 + 72 + (u64)bss_index * 80;
+            u32 bss_flags = 0;
+            memcpy(&bss_flags, bss_mutation.pointer + bss_section + 64, sizeof(bss_flags));
+            if (memcmp(bss_mutation.pointer + bss_section, "__bss", 5) == 0 && (bss_flags & 0xff) == 1)
+            {
+                bss_flags &= ~UINT32_C(0xff);
+                memcpy(bss_mutation.pointer + bss_section + 64, &bss_flags, sizeof(bss_flags));
+                // Keep the source bytes in bounds so only the name/flag split is wrong.
+                u64 bss_size = 4;
+                u32 bss_offset = 0;
+                memcpy(bss_mutation.pointer + bss_section + 40, &bss_size, sizeof(bss_size));
+                memcpy(bss_mutation.pointer + bss_section + 48, &bss_offset, sizeof(bss_offset));
+                bss_flipped += 1;
+            }
+        }
+        BUSTER_TEST(arguments, bss_flipped == 1);
+        ObjectFile bss_object = object_read(arguments->arena, bss_mutation,
+                                            (Target){
+                                                .cpu_arch = CPU_ARCH_X86_64,
+                                                .os = OPERATING_SYSTEM_MACOS,
+                                            });
+        BUSTER_TEST(arguments, bss_object.error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, bss_scope.position);
+    }
     sections[0].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text);
     object.target.cpu_arch = CPU_ARCH_AARCH64;
     relocation = (ObjectRelocation){
