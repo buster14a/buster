@@ -36,6 +36,7 @@ COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"
 SCALING_REQUEST = "benchmarks/9700x/scaling.request"
 WORKLOAD_FILE = re.compile(r"benchmarks/9700x/[^/]+\.(?:c|data)")
 FILE_PAGES = 30
+FILE_PAGE_SIZE = 100
 
 
 def identity(record: object) -> dict | None:
@@ -57,6 +58,46 @@ def plan(files: object) -> tuple[bool, bool]:
     workloads = any(WORKLOAD_FILE.fullmatch(row["filename"]) for row in rows)
     compare = any(row["filename"] in (COMPARE_REQUEST, SCALING_REQUEST) for row in rows)
     return workloads, compare
+
+
+def inventory(fetch_page, expected: object) -> tuple[list[dict], list[str]]:
+    """The pull request's complete changed-file rows, or why they are incomplete (#2939).
+
+    `fetch_page(n)` returns page n. Complete means every page and row was well
+    formed, no file repeated, and the row count equals the pull request's own
+    `changed_files`; a short or empty page, an exhausted page budget and a
+    count mismatch are all failures, never an empty or partial plan.
+    """
+    files: list[dict] = []
+    failures: list[str] = []
+    seen: set[str] = set()
+    if type(expected) is not int or expected < 0:
+        failures.append("changed-file count of the pull request")
+    for page in range(1, FILE_PAGES + 1) if not failures else ():
+        rows = fetch_page(page)
+        if not isinstance(rows, list):
+            failures.append(f"changed-file page {page} is malformed")
+            break
+        for row in rows:
+            name = row.get("filename") if isinstance(row, dict) else None
+            status = row.get("status") if isinstance(row, dict) else None
+            previous = row.get("previous_filename") if isinstance(row, dict) else None
+            if not isinstance(name, str) or not name or not isinstance(status, str) or \
+                    (previous is not None and not isinstance(previous, str)) or \
+                    (status == "renamed" and not previous):
+                failures.append(f"changed-file page {page} has a malformed row")
+                break
+            if name in seen:
+                failures.append(f"changed-file inventory repeats {name}")
+                break
+            seen.add(name)
+            files.append(row)
+        if failures or len(files) >= expected or len(rows) < FILE_PAGE_SIZE:
+            break
+    if not failures and len(files) != expected:
+        failures.append(f"changed-file inventory has {len(files)} of {expected} files "
+                        f"(page budget {FILE_PAGES} x {FILE_PAGE_SIZE})")
+    return files, failures
 
 
 def comparison(head: str, compared: object, head_commit: object) -> tuple[list[str], dict]:
@@ -149,12 +190,17 @@ def main() -> int:
     number = next(pull["number"] for pull in pulls if isinstance(pull, dict) and pull.get("state") == "open"
                   and isinstance(pull.get("head"), dict) and pull["head"].get("sha") == head) if not failures else 0
     files: list = []
-    for page in range(1, FILE_PAGES + 1) if not failures else ():
-        rows = fetch(f"/repos/{repository}/pulls/{number}/files?per_page=100&page={page}", token)
-        files.extend(rows if isinstance(rows, list) else [])
-        if not isinstance(rows, list) or len(rows) < 100:
-            break
-    workloads, compare = plan(files)
+    if not failures:
+        detail = fetch(f"/repos/{repository}/pulls/{number}", token)
+        if not (isinstance(detail, dict) and detail.get("number") == number
+                and isinstance(detail.get("head"), dict) and detail["head"].get("sha") == head):
+            failures.append("pull request record for the head commit")
+        else:
+            files, problems = inventory(
+                lambda page: fetch(f"/repos/{repository}/pulls/{number}/files?per_page={FILE_PAGE_SIZE}&page={page}",
+                                   token), detail.get("changed_files"))
+            failures.extend(problems)
+    workloads, compare = plan(files if not failures else [])
     extra = {"merge_base": "", "merge_base_tree": "", "head_tree": ""}
     if not failures and compare:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)

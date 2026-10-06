@@ -91,6 +91,71 @@ class AuthorizeTest(unittest.TestCase):
                 self.assertEqual(base, "")
 
 
+class InventoryTest(unittest.TestCase):
+    """The changed-file inventory is complete or the request fails closed (#2939)."""
+
+    @staticmethod
+    def rows(count: int, start: int = 0) -> list[dict]:
+        return [{"filename": f"src/f{start + index}.c", "status": "modified"} for index in range(count)]
+
+    def run_pages(self, pages: list[object], expected: object) -> tuple[list[dict], list[str], list[int]]:
+        asked: list[int] = []
+
+        def fetch_page(page: int) -> object:
+            asked.append(page)
+            return pages[page - 1] if page <= len(pages) else []
+        files, failures = authorize.inventory(fetch_page, expected)
+        return files, failures, asked
+
+    def test_complete_inventories(self) -> None:
+        for pages, count in (([[]], 0), ([self.rows(1)], 1), ([self.rows(37)], 37),
+                             ([self.rows(100), self.rows(100, 100), self.rows(5, 200)], 205),
+                             ([self.rows(100), self.rows(100, 100)], 200)):
+            with self.subTest(count=count):
+                files, failures, _ = self.run_pages(pages, count)
+                self.assertEqual((len(files), failures), (count, []))
+
+    def test_full_final_budget_page_is_complete_only_when_counted(self) -> None:
+        pages = [self.rows(100, 100 * page) for page in range(authorize.FILE_PAGES)]
+        full = authorize.FILE_PAGES * 100
+        files, failures, asked = self.run_pages(pages, full)
+        self.assertEqual((len(files), failures, asked[-1]), (full, [], authorize.FILE_PAGES))
+        files, failures, asked = self.run_pages(pages, full + 1)
+        self.assertTrue(failures)
+        self.assertEqual(len(asked), authorize.FILE_PAGES)
+
+    def test_incomplete_or_malformed_inventories_fail(self) -> None:
+        good = self.rows(100)
+        cases = {
+            "short of the count": ([self.rows(10)], 11),
+            "more than the count": ([self.rows(10)], 9),
+            "malformed after valid pages": ([good, {"message": "boom"}], 150),
+            "non-list first page": ([None], 1),
+            "bad row": ([[{"filename": "a.c"}]], 1),
+            "bad row type": ([["a.c"]], 1),
+            "empty name": ([[{"filename": "", "status": "added"}]], 1),
+            "rename without previous name": ([[{"filename": "a.c", "status": "renamed"}]], 1),
+            "duplicate rows": ([[good[0], dict(good[0])]], 2),
+            "duplicate across pages": ([good, self.rows(1)], 101),
+            "missing count": ([self.rows(1)], None),
+            "boolean count": ([self.rows(1)], True),
+            "negative count": ([[]], -1),
+            "premature empty page": ([good, []], 150),
+        }
+        for name, (pages, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.run_pages(pages, expected)[1])
+
+    def test_marker_outside_the_available_prefix_is_never_an_empty_plan(self) -> None:
+        # The comparison request lies on page 2, past what a truncated read keeps.
+        pages = [self.rows(100), self.rows(99, 100) + [{"filename": authorize.COMPARE_REQUEST, "status": "added"}]]
+        files, failures, _ = self.run_pages(pages, 200)
+        self.assertEqual(failures, [])
+        self.assertEqual(authorize.plan(files), (False, True))
+        files, failures, _ = self.run_pages(pages[:1], 200)
+        self.assertTrue(failures)
+
+
 class PlanTest(unittest.TestCase):
     def test_changed_files_select_workloads_and_comparison(self) -> None:
         def files(*names: str, status: str = "modified") -> list[dict]:
