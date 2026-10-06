@@ -191,6 +191,23 @@ statistics. COFF and Mach-O relocations also carry their addends in the
 section bytes, so those payload stores are real patches that the format makes
 necessary. Moving them onto a plan is a staged follow-up.
 
+The append writers check their conservative reservation sum before reading
+payloads or allocating an image. A reservation above `UINT32_MAX` is refused
+with `OBJECT_ERROR_CAPACITY`, even when a tighter future plan could fit the
+serialized bytes. Image and scratch tables must also fit the caller's arena.
+All narrowed file offsets, table sizes and COFF symbol values use checked
+32-bit conversion. Mach-O virtual section placement uses checked alignment
+and addition; any emission failure returns no bytes and releases allocations.
+
+Regular COFF refuses priority splitting past 65,279 sections; it does not
+emit bigobj. An original section size above 32 bits is rejected before the
+initializer entry census. Long section names use slash plus an ASCII decimal
+string-table offset in the eight-byte Name field, so offsets above 9,999,999
+are refused rather than truncated. The registered
+`object_test_32_writer_limits` covers both architectures at the section limit,
+fictitious oversized payload/name lengths without reading them, reservation
+boundaries, arena refusal, zero-fill extents and virtual-address overflow.
+
 ## Validation
 
 ```sh

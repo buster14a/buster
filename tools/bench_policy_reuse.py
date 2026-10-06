@@ -27,7 +27,6 @@ MAX_AGE = timedelta(hours=2)
 MAX_RECEIPT_BYTES = 32768
 WORK_STEPS = (
     "Prove the direct 9700X workflow gate",
-    "Replay Zen 5 qualification formats",
     "Replay micro-architecture lab formats",
 )
 CONTROL_STEP = "Test benchmark policy reuse"

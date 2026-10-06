@@ -95,6 +95,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed
   arena allocation clears only the dirty overlap. BSS and thread-local BSS
   keep their virtual sizes without allocating serialized storage (GitHub #303).
+- **AMD64 COFF TLS-index REL32 fields use the ordinary inline addend convention.**
+  The reader normalizes the signed inline displacement B to canonical A=B-4,
+  including references named `__tls_index`. The writer restores B=A+4 for
+  `OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32`, just as for ordinary PC32.
+  The registered object regression constructs raw COFF bytes independently,
+  checks both signed boundaries and a near-name ordinary-symbol control,
+  and inspects serialized fields across repeated read/write cycles. This
+  preserves addends within the current TLS model; platform TLS symbol spelling,
+  section conventions and runtime interoperability remain separate contracts
+  tracked by GitHub #1323.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
@@ -195,6 +205,23 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   marker attribute has no argument shape to recognise it by, and `weak` and
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
+- **LLVM weak linkage distinguishes definitions from imports.**
+  `llvm_bc_linkage` emits weak definitions as wire linkage 16 (`weak`) and
+  unresolved declarations as 7 (`extern_weak`), for both data and functions.
+  Ordinary external symbols keep linkage 0; internal definitions keep 3 and
+  default visibility. Hidden external symbols retain their separate visibility
+  operand. These encodings follow LLVM 23.1.2
+  [getEncodedLinkage](https://github.com/llvm/llvm-project/blob/85ac560262434c9ccfc0c183ec22d4138ed647fb/llvm/lib/Bitcode/Writer/BitcodeWriter.cpp#L1333-L1360),
+  whose legacy weak value 1 implies old COMDAT behavior and is not emitted.
+  Registered `llvm_bitcode_test_weak_records` checks both ELF target triples,
+  deterministic bytes, definition/import and visibility controls. On Linux
+  x86-64/AArch64, `llvm_bitcode_test_weak_consumers` requires independent Clang
+  O0/O2 consumers and llvm-readelf/readelf: missing and supplied optional data
+  and functions, direct/indirect guarded use, strong overrides, repeated weak
+  definitions, ordinary/internal controls, and required-import/duplicate-strong
+  negative controls. LLVM's inspected source is
+  [Apache-2.0 WITH LLVM-exception](https://github.com/llvm/llvm-project/blob/85ac560262434c9ccfc0c183ec22d4138ed647fb/llvm/LICENSE.TXT);
+  no LLVM implementation is copied into this serializer.
 - **`__attribute__((constructor))` and `__attribute__((destructor))`** run a
   function before and after `main`. They are read out of the declaration's
   attribute list by the same `c_declaration_binding` walk as `weak` and

@@ -58,14 +58,17 @@ def inventory_proof(path):
         measure.require(audit in (0, 1), "Inventory query has an invalid table-audit flag")
         measure.require(measure.number(row, "enabled") == 1 - audit and
                         measure.number(row, "selected") == 0, "Inventory query executed modules or changed audit policy")
-        owner = "driver" if row["module"] == "compiler_driver_tests" else "rest"
-        measure.require(row["group"] == owner, "Inventory query has an invalid module owner")
+        owner = row["group"]
+        measure.require(owner in {"primary", "rest"}, "Inventory query has an invalid module owner")
         rows.append({"index": index, "name": row["module"], "table_audit": bool(audit)})
     validated = measure.inventory_rows({"inventory": rows})
-    measure.require("compiler_driver_tests" in validated and
-                    not validated["compiler_driver_tests"]["table_audit"], "Inventory query lacks an enabled driver module")
-    measure.require(any(not row["table_audit"] and row["name"] != "compiler_driver_tests" for row in rows),
-                    "Inventory query lacks enabled rest modules")
+    primary = [row["module"] for row in declared if row["group"] == "primary"]
+    measure.require(len(primary) == 1 and primary[0] in {"c_frontend_tests", "compiler_driver_tests"},
+                    "Inventory query lacks one permitted primary module anchor")
+    measure.require(not validated[primary[0]]["table_audit"], "Primary module anchor is disabled")
+    measure.require(all(row["group"] == ("primary" if row["module"] == primary[0] else "rest") for row in declared),
+                    "Inventory query has foreign or duplicate primary ownership")
+
     batches = measure.native_records(lines, "CI_UNIT_BATCH_V1")
     measure.require(len(batches) == 1, "Inventory query lacks one terminal batch record")
     batch = batches[0]
@@ -80,7 +83,7 @@ def inventory_proof(path):
                     "Inventory query contains unexpected native proof records")
     terminals = measure.parse_terminals(lines, {}, len(rows), True)
     measure.require(terminals["External"]["total"] == 0, "Inventory query executed external tests")
-    return rows, profile
+    return rows, profile, primary[0]
 
 
 def inventory(path):
@@ -176,8 +179,9 @@ def assemble(directory, binary, platform, pairs, environment):
     measure.require(directory.is_dir(), "Campaign evidence directory does not exist")
     identities = provenance(directory, binary, platform, environment)
     baseline_jobs = baseline_workers(environment)
-    rows = inventory(directory / "inventory.log")
-    profile = host_profile(directory / "inventory.log")
+    rows, profile, inventory_primary = inventory_proof(directory / "inventory.log")
+    expected_primary = "c_frontend_tests" if platform == "windows" else "compiler_driver_tests"
+    measure.require(inventory_primary == expected_primary, "Inventory primary module differs from platform policy")
     if profile is not None:
         measure.require(profile["architecture"] == identities["architecture"], "Native host profile architecture differs")
         identities["native_host_profile"] = profile
@@ -193,6 +197,8 @@ def assemble(directory, binary, platform, pairs, environment):
                     "mode": "serial" if arm == "baseline" else "groups", "identity": identities,
                     "inventory": rows, "log": identifier + ".log", "exit_code": 0,
                     "elapsed_us": phase["elapsed_us"], "test_workers": test_workers, "native_phase": phase}
+        if arm == "candidate":
+            manifest["primary_module"] = inventory_primary
         path = directory / (identifier + ".json")
         write_json(path, manifest)
         measure.validate_sample(path)

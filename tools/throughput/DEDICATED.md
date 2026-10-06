@@ -158,9 +158,8 @@ statistical policy. Retain inconclusive and failed experiments, not just wins.
 
 ## Same-source cross-build controls
 
-The fixed 120-slot [`zen5_aa_noise.py`](../zen5_aa_noise.py) capture measures
-runtime noise with one immutable compiler copied to two paths. It cannot reveal
-build-root sensitivity. The #791 [matched-build audit](../../docs/performance-audits/2026-09-20T050606Z.md)
+An immutable-binary A/A capture, one compiler copied to two paths, measures
+runtime noise. It cannot reveal build-root sensitivity. The #791 [matched-build audit](../../docs/performance-audits/2026-09-20T050606Z.md)
 found an 80-byte `.text` placement shift and roughly 3% aggregate-ABI timing
 change between trusted builds of identical source in different roots. Therefore
 dedicated-host calibration also needs two **separate, predeclared** same-source
@@ -173,32 +172,19 @@ controls:
    roots with identical root-normalized commands. This checks the separate-root
    confound. Do not substitute its median as a correction to a candidate result.
 
-The admitted service must retain the complete raw compile-command manifests,
-build logs, build roots, source/tree and toolchain hashes, full compile/link
-argv, normalized-command digests, binary hashes, and `.text` offset, virtual
-address, size and content digest. Inspect relevant function placement when a
-small effect depends on layout. Each control uses the same two-round, four-swap-
-block, 120-pair schedule as immutable-binary A/A. Record the actual binary
-digest of both children in every slot; a logical label or path swap is not
-proof of which binary ran. Keep every invalid, interrupted and superseded slot.
-Freeze the control family, workloads, count and stopping rule before sampling.
+Retain the complete raw compile-command manifests, build logs, build roots,
+source/tree and toolchain hashes, full compile/link argv, binary hashes, and
+`.text` offset, virtual address, size and content digest. Inspect relevant
+function placement when a small effect depends on layout. Run each control
+with the same schedule as its immutable-binary A/A capture, and record the
+actual binary digest of both children in every slot; a logical label or path
+swap is not proof of which binary ran. Keep every invalid, interrupted and
+superseded slot. Freeze the control family, workloads, count and stopping rule
+before sampling.
 
-`tools/zen5_build_control.py validate CAPTURE.json` checks one versioned
-cross-build capture's internal consistency. `analyze CAPTURE.json --output
-MODEL.json` reproduces descriptive build, path, order, drift and section-
-placement summaries. Its `predeclared_family_sha256` records the claimed digest
-of the frozen statistical family for independent service-receipt matching;
-`control_kind` is `same-root-rebuild` or `cross-root`.
-`builds.A` and `builds.B` each record the immutable source, build timing, root,
-toolchain/environment, exact command argv and retained command/log digests,
-frozen binary identity and `.text` facts. `staging_paths` contains the two
-mutable execution paths. `observations` follow the A/A schedule and add
-`first_binary_sha256` and `second_binary_sha256`. All other schedule, output,
-metric, invalidity and no-optional-stopping fields follow the version-1 A/A
-capture. The reader is offline: it does not build, run, authenticate a service
-receipt, prove pre-sample publication, or issue a candidate verdict. Bind and
-independently replay the raw files through the protected service before using
-the observations for #426 completion.
+No repository tool currently produces or analyzes these captures. The
+`zen5-calibration-v1` producer and its `zen5_*` readers were removed with the
+benchmark service (#2708, #2741); tag `bench-service-final` retains them.
 
 ## Evidence and limits
 
@@ -229,8 +215,42 @@ CPU selection, optional-platform refusal and sealed metadata corruption. These
 are infrastructure tests, not compiler or physical-host performance results.
 Physical 9700X A/A and native platform CI must be reported separately when run.
 
-Further workload coverage stays under #346/#423; multicore CPU-set experiments
-under #424. Do not use this single-CPU admission path to claim multicore scaling.
+Further workload coverage stays under #346/#423. Do not use this single-CPU
+admission path to claim multicore scaling; use the `scale` series below.
+
+## Multi-TU scaling series
+
+`scale` ([contract](README.md#multi-tu-scaling-scale)) measures internal TU
+lanes on explicit CPU sets (#424). On the 8-core/16-thread 9700X, Linux
+normally numbers CPU N and N+8 as siblings; confirm this with
+`lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE` rather than assuming it.
+
+The routine way to run it there is the pull request route: add or change
+[`benchmarks/9700x/scaling.request`](../../benchmarks/9700x/scaling.request)
+in an owner pull request. The frozen `scaling-v1` profile
+(`compiler_receipt.SCALING_PROFILE`) runs two series on the pull request's
+candidate compiler, and the series do not depend on CPU numbering:
+
+| Series | Arguments | Points on the 9700X |
+|---|---|---|
+| `cores` | `--cpu-set auto --exclude-core 0 --workers 1,2,4,7 --allow-smt` | 1, 2, 4 and 7 whole cores, then 7C/14T |
+| `machine` | `--cpu-set auto --workers 8 --allow-smt`, equal/skewed/tiny shapes | 8 cores, then 8C/16T |
+
+In `cores`, CPU 0's physical core is left to the runner and other
+housekeeping. Each W runs on one logical CPU of each of the first W remaining
+cores; the siblings stay idle except at the SMT point. Report the two series
+separately: `machine` shares core 0 with housekeeping.
+
+To run one by hand on the host, build the tool while the host is idle, then:
+
+```sh
+build/throughput-tools/throughput scale --compiler /absolute/ide --output /absolute/new-scaling \
+  --cpu-set auto --exclude-core 0 --workers 1,2,4,7 --allow-smt --repeats 15
+```
+
+**Evidence.** The route's artifact keeps each bundle's reports, raw samples
+and logs beside the comparison receipt, with the observed CPU checked by the
+publisher. Hosted or container runs of `scale` are diagnostic only.
 
 ## Platform references
 
