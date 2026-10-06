@@ -1170,7 +1170,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_clear_cache(UnitTestArgumen
             arguments->show(arguments, S8("LLVM clear_cache fixture {S8}: {S8}\n"), frontends[frontend], emitted.diagnostic);
         }
         BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
-        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        // On Windows AArch64 the frontend lowers __builtin___clear_cache to a
+        // call of Buster's runtime routine (c_ir_emit_clear_cache_runtime_call)
+        // instead of the canonical operation, and a clang/lld-link consumer
+        // has no definition for it; the module is still emitted above.
+        bool consumer_links = !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);
+        if (compiler.length && consumer_links && emitted.error == COMPILER_DRIVER_ERROR_NONE)
         {
             for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
             {
