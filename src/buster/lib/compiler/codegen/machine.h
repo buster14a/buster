@@ -962,16 +962,9 @@ typedef enum MachineA64Condition
 // (0x0f 0x80+cc).
 typedef enum MachineX64Condition
 {
-    MACHINE_X64_CONDITION_BELOW = 0x2,
-    MACHINE_X64_CONDITION_ABOVE_EQUAL = 0x3,
-    MACHINE_X64_CONDITION_EQUAL = 0x4,
-    MACHINE_X64_CONDITION_NOT_EQUAL = 0x5,
-    MACHINE_X64_CONDITION_BELOW_EQUAL = 0x6,
-    MACHINE_X64_CONDITION_ABOVE = 0x7,
-    MACHINE_X64_CONDITION_LESS = 0xc,
-    MACHINE_X64_CONDITION_GREATER_EQUAL = 0xd,
-    MACHINE_X64_CONDITION_LESS_EQUAL = 0xe,
-    MACHINE_X64_CONDITION_GREATER = 0xf,
+#define BUSTER_X86_CONDITION(name, nibble, suffix, alias1, alias2, jump, set, move) MACHINE_X64_CONDITION_##name = nibble,
+#include <buster/lib/compiler/assembly/x86_64_conditions.inc>
+#undef BUSTER_X86_CONDITION
 } MachineX64Condition;
 
 typedef enum MachineOperandRole
@@ -1672,7 +1665,10 @@ struct MachineStackPlacement
     // pops them around the frame and the unwind actions record the pushes.
     u64 callee_saved_mask;
     bool valid;
-    u8 reserved[3];
+    // Capacity refusal is distinct from a malformed placement under strict
+    // verification; native dispatch preserves codegen.capacity diagnostics.
+    bool capacity_exceeded;
+    u8 reserved[2];
 };
 
 // Which field of a native thread-local sequence a call site names. The

@@ -73,6 +73,11 @@ struct JitProgram
     JitError error;
 };
 
+// Imported function PC32 references in text retain the call-thunk policy.
+// PC32 references in data/read-only sections use the explicit binding address,
+// like ABSOLUTE64 pointers, and fail with JIT_ERROR_CAPACITY when that signed
+// displacement cannot be represented. A call thunk is not a data address.
+//
 // Nonempty initializer/finalizer arrays are refused before image allocation:
 // this API has no initialization/finalization execution protocol. Empty arrays
 // without relocations are inert placeholders and remain admitted.

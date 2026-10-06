@@ -22842,6 +22842,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out canonical-combination test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
+    // Process partitioning is a test launcher choice, never an admitted
+    // artifact-fanout producer argument. ARM opts in only without fanout.
+    String8 partition_arguments[] = {
+        S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
+        S8("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
+    };
+    Generate partitioned = canonical;
+    partitioned.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(partition_arguments);
+    if (build_artifact_fanout_is_canonical(partitioned, release))
+    {
+        string_print(S8("error: artifact fan-out accepted a partitioned producer\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     if (!build_artifact_fanout_worker_quota_valid(S8("1")) || build_artifact_fanout_worker_quota_valid((String8){0}) ||
         build_artifact_fanout_worker_quota_valid(S8("0")) || build_artifact_fanout_worker_quota_valid(S8("2")) ||
         build_artifact_fanout_worker_quota_valid(S8("jobs")))
@@ -23678,7 +23691,7 @@ struct MatrixSuperbuildSelfHostPlan
 
 #define MATRIX_COVERAGE_MAX_ROWS 32
 #define MATRIX_COVERAGE_MAX_TREES (BUILD_COMPILER_COUNT * 2)
-#define MATRIX_COVERAGE_POLICY_VERSION 1
+#define MATRIX_COVERAGE_POLICY_VERSION 2
 typedef struct MatrixCoverageTarget MatrixCoverageTarget;
 struct MatrixCoverageTarget
 {
@@ -23743,6 +23756,9 @@ struct MatrixCoverageManifest
 // self-host/analysis/audit consumers. Sanitized and portability trees never
 // share that producer. Keep row IDs in the original full-matrix namespace so
 // the unsharded policy fingerprints remain independent anti-shrink anchors.
+// Policy v2 (#2657): sanitized Clang Release is the checks-enabled (#2656)
+// sanitizer runtime and fuzz owner; sanitized Clang Debug is compile-link
+// portability coverage. sanitized-debug is no longer a selectable owner.
 BUSTER_GLOBAL_LOCAL String8 matrix_coverage_shard_current(void)
 {
     String8 result = os_get_environment_variable(S8("BUSTER_MATRIX_SHARD"));
@@ -23755,7 +23771,7 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_shard_current(void)
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_shard_valid(String8 shard)
 {
     bool result = string_equal(shard, S8("combinations")) || string_equal(shard, S8("release")) || string_equal(shard, S8("checks")) ||
-                  string_equal(shard, S8("sanitized-debug")) || string_equal(shard, S8("sanitized-release")) || string_equal(shard, S8("portability"));
+                  string_equal(shard, S8("sanitized-release")) || string_equal(shard, S8("portability"));
     return result;
 }
 BUSTER_GLOBAL_LOCAL String8 matrix_coverage_row_shard(MatrixCoverageRow row)
@@ -23763,9 +23779,16 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_row_shard(MatrixCoverageRow row)
     String8 result = S8("portability");
     if (row.compiler == BUILD_COMPILER_CLANG)
     {
-        result = row.sanitize ? (row.optimize ? S8("sanitized-release") : S8("sanitized-debug")) :
-                               (row.optimize ? S8("release") : S8("portability"));
+        result = row.optimize ? (row.sanitize ? S8("sanitized-release") : S8("release")) : S8("portability");
     }
+    return result;
+}
+// Only optimized Clang trees execute the runtime suite. Every Debug row and
+// every non-Clang row is compile-and-link coverage; the sanitizer runtime
+// obligation belongs to the checks-enabled sanitized Release tree.
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_row_execution(BuildCompiler compiler, bool optimize)
+{
+    String8 result = compiler == BUILD_COMPILER_CLANG && optimize ? S8("runtime") : S8("compile-link");
     return result;
 }
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_row_selected(MatrixCoverageRow row, String8 shard)
@@ -23926,11 +23949,11 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_add_tree(Arena* arena, MatrixCover
     {
         bool optimize = first_optimize + optimize_i;
         String8 configuration = optimize ? S8("Release") : S8("Debug");
-        bool fuzz = fuzz_available && ((sanitize && !optimize) || (!sanitize && optimize));
+        bool fuzz = fuzz_available && optimize;
         bool unity = compiler == BUILD_COMPILER_CLANG && !sanitize && optimize;
         u32 row_index = plan->row_count;
         result = matrix_coverage_plan_add_row(arena, plan, lane, compiler, configuration, optimize, sanitize, fuzz, unity,
-                                              compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link"), S8(""));
+                                              matrix_coverage_row_execution(compiler, optimize), S8(""));
         if (result)
         {
             tree.row_indices[tree.row_count++] = row_index;
@@ -23982,7 +24005,7 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_sanitizer_runtime_reason(MatrixCover
 BUSTER_GLOBAL_LOCAL u64 matrix_coverage_policy_fingerprint(MatrixCoveragePlan* plan)
 {
     u64 hash = 1469598103934665603ULL;
-    hash = build_artifact_fanout_hash_string(hash, S8("matrix-policy-v1"));
+    hash = build_artifact_fanout_hash_string(hash, S8("matrix-policy-v2"));
     for (u32 row_i = 0; row_i < plan->row_count; row_i += 1)
     {
         MatrixCoverageRow row = plan->rows[row_i];
@@ -24057,7 +24080,9 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_build_for_target(Arena* arena, Mat
                 {
                     u32 tree_first_optimize = split_configs ? first_optimize + tree_i : first_optimize;
                     u32 tree_optimize_count = split_configs ? 1 : optimize_count;
-                    bool fuzz_available = fuzz_supported && ((sanitize && !tree_first_optimize) || (!sanitize && tree_first_optimize));
+                    // Fuzz-enabled binaries are built only where they run:
+                    // the unsanitized canonical and sanitized Release trees.
+                    bool fuzz_available = fuzz_supported && tree_first_optimize;
                     result = matrix_coverage_plan_add_tree(arena, plan, lane, compiler, sanitize, fuzz_available, tree_first_optimize, tree_optimize_count) && result;
                 }
             }
@@ -24087,7 +24112,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_validate(MatrixCoveragePlan* plan)
         for (u32 previous_i = 0; previous_i < row_i; previous_i += 1)
             result = result && !string_equal(row.id, plan->rows[previous_i].id);
         result = result && string_equal(row.execution, row.exclusion.length ? S8("none") :
-                                                      (row.compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link")));
+                                                      matrix_coverage_row_execution(row.compiler, row.optimize));
     }
     for (u32 tree_i = 0; tree_i < plan->tree_count; tree_i += 1)
     {
@@ -24097,11 +24122,11 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_validate(MatrixCoveragePlan* plan)
         {
             u32 row_index = tree.row_indices[tree_row_i];
             MatrixCoverageRow row = row_index < plan->row_count ? plan->rows[row_index] : (MatrixCoverageRow){0};
-            bool expected_fuzz = tree.fuzz_available && ((tree.sanitize && !row.optimize) || (!tree.sanitize && row.optimize));
+            bool expected_fuzz = tree.fuzz_available && row.optimize;
             result = result && row_index < plan->row_count && !row.exclusion.length && row.compiler == tree.compiler && row.sanitize == tree.sanitize &&
                      row.optimize == tree.first_optimize + tree_row_i && row.fuzz == expected_fuzz &&
                      row.unity == (row.compiler == BUILD_COMPILER_CLANG && !row.sanitize && row.optimize) &&
-                     string_equal(row.execution, row.compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link"));
+                     string_equal(row.execution, matrix_coverage_row_execution(row.compiler, row.optimize));
             result = result && row_index < BUSTER_ARRAY_LENGTH(scheduled) && !scheduled[row_index];
             if (row_index < BUSTER_ARRAY_LENGTH(scheduled))
                 scheduled[row_index] = true;
@@ -24246,8 +24271,8 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_policy_self_test(Arena* arena)
                 if (sanitize_supported)
                 {
                     expected_required += 2;
-                    family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, fuzz_supported, true, S8("")) &&
-                             matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), true, false, true, S8("")) && family;
+                    family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, false, true, S8("")) &&
+                             matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), true, fuzz_supported, true, S8("")) && family;
                 }
                 else
                 {
@@ -24280,8 +24305,25 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_policy_self_test(Arena* arena)
         {
             result = result && plan.trees[tree_i].row_count == 1 && plan.trees[tree_i].optimize_count == 1;
         }
-        result = result && matrix_coverage_selected_count(&plan, S8("sanitized-debug")) == (sanitize_supported ? 1u : 0u) &&
-                 matrix_coverage_selected_count(&plan, S8("sanitized-release")) == (sanitize_supported ? 1u : 0u);
+        // #2657: sanitized Debug is build-only portability coverage and the
+        // checks-enabled sanitized Release tree is the only sanitizer runtime.
+        u32 runtime_count = 0;
+        u32 sanitized_runtime_count = 0;
+        for (u32 row_i = 0; row_i < plan.row_count; row_i += 1)
+        {
+            MatrixCoverageRow row = plan.rows[row_i];
+            bool runtime = !row.exclusion.length && string_equal(row.execution, S8("runtime"));
+            runtime_count += runtime;
+            sanitized_runtime_count += runtime && row.sanitize;
+            result = result && (!runtime || (row.compiler == BUILD_COMPILER_CLANG && row.optimize));
+            result = result && (!(row.sanitize && !row.optimize && !row.exclusion.length) ||
+                                (string_equal(row.execution, S8("compile-link")) && !row.fuzz &&
+                                 string_equal(matrix_coverage_row_shard(row), S8("portability"))));
+        }
+        result = result && runtime_count == 1u + sanitize_supported && sanitized_runtime_count == (sanitize_supported ? 1u : 0u) &&
+                 !matrix_coverage_shard_valid(S8("sanitized-debug")) &&
+                 matrix_coverage_selected_count(&plan, S8("sanitized-release")) == (sanitize_supported ? 1u : 0u) &&
+                 matrix_coverage_selected_count(&plan, S8("portability")) == expected_required - 1u - sanitize_supported;
         MatrixCoveragePlan shared_tree = plan;
         for (u32 tree_i = 0; tree_i < shared_tree.tree_count; tree_i += 1)
         {
@@ -24292,6 +24334,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_policy_self_test(Arena* arena)
                 // shared Debug;Release tree has two owners and is rejected.
                 tree->row_indices[tree->row_count++] = shared_tree.trees[tree_i + 1].row_indices[0];
                 tree->optimize_count = 2;
+                tree->fuzz_available = shared_tree.trees[tree_i + 1].fuzz_available;
                 for (u32 move_i = tree_i + 1; move_i + 1 < shared_tree.tree_count; move_i += 1)
                 {
                     shared_tree.trees[move_i] = shared_tree.trees[move_i + 1];
@@ -24718,7 +24761,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_manifest_write(Arena* arena, MatrixCove
     String8 phase = complete ? S8("complete") : S8("planned");
     string8_list_push(arena, &lines, S8("{"));
     string8_list_push(arena, &lines, S8("  \"schema\": 1,"));
-    string8_list_push(arena, &lines, S8("  \"partition_version\": 2,"));
+    string8_list_push(arena, &lines, S8("  \"partition_version\": 3,"));
     string8_list_push(arena, &lines, string_format(arena, S8("  \"kind\": {S8},"), matrix_coverage_json_escape(arena, S8("desktop-matrix-coverage"))));
     string8_list_push(arena, &lines, S8("  \"hash_algorithm\": \"sha256\","));
     string8_list_push(arena, &lines, string_format(arena, S8("  \"mode\": {S8},"), matrix_coverage_json_escape(arena, manifest->mode)));
@@ -25735,10 +25778,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     BUSTER_GLOBAL_LOCAL String8 ci_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
     };
-    // Sanitized Clang trees own the serialized checks test phases. Their
-    // test_all uses the isolated-process runner, which partitions only at four
-    // or more test workers and otherwise runs the ordinary invocation unchanged
-    // (tools/ci_unit_tests.c). The unsanitized canonical Release producer keeps
+    // Sanitized Clang and Windows AArch64 Release trees use the existing
+    // isolated-process runner at four or more test workers. Smaller quotas
+    // retain the ordinary invocation (tools/ci_unit_tests.c). Windows AArch64
+    // has no artifact-fanout consumer; supported canonical producers retain
     // exactly the standard arguments (build_artifact_fanout_is_canonical).
     BUSTER_GLOBAL_LOCAL String8 ci_test_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
@@ -25789,7 +25832,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cmake_profile_set = cmake_profile,
             .cmake_profile_summary = cmake_profile,
             .cross_configs = !direct_matrix,
-            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && tree_plan.sanitize ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
+            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && (tree_plan.sanitize || (coverage_target.windows && coverage_target.aarch64)) ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
                 : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
@@ -25812,7 +25855,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                 .compiler = compiler,
                 .generate = generate,
                 .sanitize = row.sanitize,
-                .run_tests = compiler == BUILD_COMPILER_CLANG,
+                .run_tests = string_equal(row.execution, S8("runtime")),
             };
         }
     }
@@ -38549,7 +38592,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     String8 matrix_shard = matrix_coverage_shard_current();
     if (result == PROCESS_RESULT_SUCCESS && combination_matrix && !matrix_coverage_shard_valid(matrix_shard))
     {
-        string_print(S8("error: BUSTER_MATRIX_SHARD must be all, release, checks, sanitized-debug, sanitized-release or portability\n"));
+        string_print(S8("error: BUSTER_MATRIX_SHARD must be all, release, checks, sanitized-release or portability\n"));
         result = PROCESS_RESULT_FAILED;
     }
     if (result == PROCESS_RESULT_SUCCESS && combination_matrix)

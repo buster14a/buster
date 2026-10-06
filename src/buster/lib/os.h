@@ -449,8 +449,9 @@ BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor,
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL OsFileTransferResult os_file_write_checked(OsFileDescriptor* file_descriptor, ByteSlice buffer);
-// Flush is explicit: ordinary artifact writes promise completion, not crash
-// durability. Close always consumes the descriptor, including on failure.
+// Flush is explicit: ordinary artifact writes and file_publish_* / file_copy
+// publication promise completion, not crash durability, and never flush.
+// Close always consumes the descriptor, including on failure.
 BUSTER_F_DECL OsError os_file_flush(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL OsError os_file_close_checked(OsFileDescriptor* file_descriptor);
 // Legacy size convenience: UINT64_MAX denotes failure, never an empty file.

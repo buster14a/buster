@@ -53,17 +53,19 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-The `test` matrix retains five desktop runner labels, with eighteen internal combination
-jobs: four owners each on Linux x86-64/AArch64, macOS AArch64 and Windows
-x86-64, and two owners on Windows AArch64. Five independent `native` lanes
+The `test` matrix retains five desktop runner labels, with fourteen internal combination
+jobs: three owners (`release`, `sanitized-release`, `portability`) each on
+Linux x86-64/AArch64, macOS AArch64 and Windows x86-64, and two owners on
+Windows AArch64. Sanitized Debug is build-only `portability` coverage; the
+checks-enabled sanitized Release job owns sanitizer runtime (#2657). Five independent `native` lanes
 run the execution-mode suite. The three Unix
 lanes additionally run the configuration-differential suite, reusing their
 fresh Release compiler; the two Windows lanes report the mode gate
 independently. Mobile retains its two independent suite-level shards; lint,
 UEFI and the independent analyzer remain required. **Require `CI complete`**,
-which checks all groups and the exact 29-job inventory, including all eighteen
+which checks all groups and the exact 25-job inventory, including all fourteen
 desktop partitions and all five native jobs, for full executions. On a
-qualifying same-commit main push, twenty-seven native/mobile/UEFI, desktop and analyzer validation jobs are instead
+qualifying same-commit main push, twenty-three native/mobile/UEFI, desktop and analyzer validation jobs are instead
 proven by the exact queue run while desktop cache publication, lint and the analyzer receipt run on main;
 see [queue-to-main reuse](ci-main-reuse.md) for its admission and fallback.
 The old six names alone do not
@@ -82,14 +84,16 @@ documents the earlier split.
 | iOS shard | `macos-26` | `ios/test_ci.sh --all` |
 
 The native build driver still owns the complete compiler/configuration matrix,
-including sanitized Debug/Release, fuzz policy, static analysis and supported
-self-hosting. No configuration or test is removed. Both mobile entry points
+including sanitized Debug (compile-link) and Release (runtime), fuzz policy,
+static analysis and supported self-hosting. No configuration is removed; #2657
+deliberately moved the sanitizer runtime suite from sanitized Debug to the
+checks-enabled sanitized Release tree. Both mobile entry points
 are standalone and retain Debug and Release. The existing Intel iOS gate is
 compile/link/bundle-only; Apple Silicon retains simulator execution.
 
 The main workflow covers pull requests (including forks), main pushes, tags,
 merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix.
-The first attempt of a draft pull-request run defers the six macOS-runner
+The first attempt of a draft pull-request run defers the five macOS-runner
 jobs to named Linux no-ops, `<job> (deferred for draft PR)`; merge groups
 always run them, and `CI complete` rejects a deferral anywhere else. A
 "Re-run failed jobs" attempt of a draft run carries its attempt-1 deferrals
@@ -165,7 +169,12 @@ GitHub's normal approval requirements still apply. The trusted cancellation
 recovery workflow remains scoped to `Buster CI` and eligible same-repository
 PRs; this change does not broaden recovery or the source-free broker.
 
-`python3 tests/ci_tools_test.py -v` checks the shared event/concurrency contract,
+The maintained entry preserves every frozen CI/action test on the legacy topology.
+After the queue-lint transition it delegates to the full current policy suite;
+it rejects a runner-only substitute. The protected trusted writer uses this
+entry so the frozen support-file identities remain unchanged.
+
+`python3 tools/ci_workflow_policy_test.py -v` checks the shared event/concurrency contract,
 retained bootstrap command order, and the actual `CI complete` shell predicate
 under all 625 combinations of success, failure, cancellation, skip and missing
 results. These checks validate the checked-in policy; they are not evidence
@@ -291,7 +300,7 @@ unknown label, so keep the two in step when a runner changes.
 
 ## Helper validation and timing
 
-`python3 tests/ci_tools_test.py -v` exercises the archive installer, fail-closed
+`python3 tools/ci_workflow_policy_test.py -v` exercises the archive installer, fail-closed
 summaries, native evidence packer and timing collector on each desktop platform
 (`python` on Windows).
 `python3 tools/ci_artifact_upload_test.py -v` runs in required Workflow lint.
@@ -322,7 +331,7 @@ verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
 by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
 unpacked tree instead. See
 [native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
-The aggregate `CI complete` requires all eighteen desktop combination jobs, five
+The aggregate `CI complete` requires all fourteen desktop combination jobs, five
 native jobs, two mobile jobs, workflow lint, UEFI and the analyzer. Its
 read-only Actions inventory rejects missing shard identities even when a
 smaller surviving matrix group reports success. It selects each logical job's

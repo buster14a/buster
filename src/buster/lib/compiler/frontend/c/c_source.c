@@ -74,11 +74,12 @@
 //   c_integer_expression_evaluate              __has_* feature tests
 //   c_preprocess_pragma_*,                     pragmas: once, pack, push/pop
 //   c_preprocess_expansion_pragma              macro effects at the rescan cursor
-//   c_include_read .. c_include_name           include resolution and the
+//   CIncludeProbeTable, c_include_read ..      include resolution, its
+//   c_include_name                             per-TU probe cache, and the
 //                                              builtin resource headers,
 //                                              including stddef request guards
-//   CIncludeGuardState, CIncludeFileTable      shared #import, #pragma once,
-//                                              and #ifndef guard identity
+//   CIncludeGuardState, CIncludeFileTable,     shared #import, #pragma once,
+//   c_include_suppressed                       and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
 //                                              parsing
@@ -1806,7 +1807,7 @@ BUSTER_C_SHARED CSourceSite c_preprocess_token_site_cursor(CPreprocessResult con
         .map_offset_plus_one = token.offset + 1,
         .file = c_preprocess_token_source(preprocess, token, cursor),
     };
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
     // The source a region's key names is the source every position in that
     // region resolves to (TEXT regions answer region->source, STAMP regions a
     // stamp built with the same source), so the site agrees with the eager
@@ -4107,6 +4108,14 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_isinf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinff"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isfinite"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isnormal"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fpclassify"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isgreater"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isgreaterequal"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isless"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_islessequal"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_islessgreater"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isunordered"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_signbit"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_signbitf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_signbitl"), C_SYMBOL_BUILTIN_MATH },
@@ -7018,11 +7027,39 @@ struct CIncludeSearchOrigin
     u32 index;
 };
 
-BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, bool quoted, String8* path_out,
-                                           String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin* origin_out);
+// One translation unit's record of probing `directory`/`name`. Repeated
+// inclusions and __has_include queries consult it instead of the file system,
+// so each missing path is opened at most once per TU, and a hit is reopened
+// only by an inclusion that lexes it. A hit keeps the resolved spelling and the
+// identity captured from the descriptor that probed it.
+typedef struct CIncludeProbe CIncludeProbe;
+struct CIncludeProbe
+{
+    String8 directory;
+    String8 name;
+    String8 path;
+    CIncludeFileIdentity identity;
+    u64 hash;
+    bool found;
+};
 
-BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions options, String8 name, String8* path_out,
-                                                String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin origin,
+typedef struct CIncludeProbeTable CIncludeProbeTable;
+struct CIncludeProbeTable
+{
+    Arena* arena;
+    CIncludeProbe* entries;
+    u32 count;
+    u32 capacity;
+};
+
+#define C_INCLUDE_PROBE_INITIAL_CAPACITY 128
+
+BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CIncludeProbeTable* probes, CPreprocessOptions options, String8 including_path, String8 name,
+                                           bool quoted, String8* path_out, String8* source_out, FileMapRead* map_out, CIncludeProbe** cached_out,
+                                           CIncludeSearchOrigin* origin_out);
+
+BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CIncludeProbeTable* probes, CPreprocessOptions options, String8 name, String8* path_out,
+                                                String8* source_out, FileMapRead* map_out, CIncludeProbe** cached_out, CIncludeSearchOrigin origin,
                                                 CIncludeSearchOrigin* origin_out);
 
 BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* tokens, u32 token_count, bool preserve_characters,
@@ -7056,6 +7093,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_inff",          "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
+        "__builtin_isnormal",      "__builtin_fpclassify", "__builtin_isgreater", "__builtin_isgreaterequal",
+        "__builtin_isless",        "__builtin_islessequal", "__builtin_islessgreater", "__builtin_isunordered",
         "__builtin_signbit",       "__builtin_signbitf", "__builtin_signbitl",
         "__builtin_memcpy",        "__builtin_memmove",
         "__builtin_memset",        "__builtin_memcmp",
@@ -7192,8 +7231,8 @@ BUSTER_C_INTERNAL bool c_conditional_target_os_supported(OperatingSystem os, Str
 }
 
 BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
-                                                         CPreprocessTokenNode* first, CPreprocessOptions* options, String8 including_path,
-                                                         CIncludeSearchOrigin including_origin)
+                                                         CPreprocessTokenNode* first, CPreprocessOptions* options, CIncludeProbeTable* probes,
+                                                         String8 including_path, CIncludeSearchOrigin including_origin)
 {
     char8 const* base = space->base;
     for (CPreprocessTokenNode* node = first; node; node = node->next)
@@ -7290,8 +7329,10 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             String8 resolved_source = {0};
             supported = c_include_name(arena, base, arguments, argument_count, literal_header, &include_name, &quoted) &&
                         options &&
-                        (has_include_next ? c_include_resolve_next(arena, *options, include_name, &resolved_path, &resolved_source, 0, including_origin, 0)
-                                          : c_include_resolve(arena, *options, including_path, include_name, quoted, &resolved_path, &resolved_source, 0, 0));
+                        (has_include_next ? c_include_resolve_next(arena, probes, *options, include_name, &resolved_path, &resolved_source, 0, 0,
+                                                                   including_origin, 0)
+                                          : c_include_resolve(arena, probes, *options, including_path, include_name, quoted, &resolved_path,
+                                                              &resolved_source, 0, 0, 0));
         }
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
@@ -7346,7 +7387,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
 BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
                                                                      CPpStampTable* stamps, CPpToken* tokens, u32 token_count, u32 expansion_limit,
                                                                      bool preprocessor_arithmetic, CPreprocessResult* result,
-                                                                     CPreprocessOptions* options, String8 including_path,
+                                                                     CPreprocessOptions* options, CIncludeProbeTable* probes, String8 including_path,
                                                                      CIncludeSearchOrigin including_origin, u64* value_out)
 {
     IR_SEMANTIC_RECORD(PREPROCESSOR_EVALUATIONS, 1);
@@ -7399,7 +7440,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     }
     if (valid)
     {
-        valid = c_conditional_feature_operators(arena, space, symbols, first_macro, first_expanded, options, including_path, including_origin);
+        valid = c_conditional_feature_operators(arena, space, symbols, first_macro, first_expanded, options, probes, including_path, including_origin);
     }
     if (valid)
     {
@@ -7577,18 +7618,18 @@ BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* sp
             .token = tokens[token_index],
         };
     }
-    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, (String8){0},
+    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
                                                        (CIncludeSearchOrigin){0}, value_out);
 }
 
 BUSTER_C_INTERNAL bool c_conditional_evaluate(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro, CPpStampTable* stamps,
                                                 CPpToken* tokens, u32 token_count, u32 expansion_limit, CPreprocessResult* result, CPreprocessOptions options,
-                                                String8 including_path, CIncludeSearchOrigin including_origin, bool* value_out)
+                                                CIncludeProbeTable* probes, String8 including_path, CIncludeSearchOrigin including_origin, bool* value_out)
 {
     u64 value = 0;
     bool valid =
-        c_integer_expression_evaluate_with_features(arena, space, symbols, first_macro, stamps, tokens, token_count, expansion_limit, true, result, &options, including_path,
-                                                    including_origin, &value);
+        c_integer_expression_evaluate_with_features(arena, space, symbols, first_macro, stamps, tokens, token_count, expansion_limit, true, result, &options, probes,
+                                                    including_path, including_origin, &value);
     *value_out = value != 0;
     return valid;
 }
@@ -8089,6 +8130,21 @@ BUSTER_C_INTERNAL CIncludeFileStatus c_include_file_entry(CIncludeFileTable* tab
 }
 
 #undef C_INCLUDE_FILE_SLOT_HASH
+
+// Whether an inclusion of `entry` produces no tokens: #pragma once, a repeated
+// #import (the root is entered before the table exists, so it is compared
+// lazily), or a whole-file guard proven by an earlier lex whose macro is
+// defined. Reads only; the caller records the inclusion.
+BUSTER_C_INTERNAL bool c_include_suppressed(CIncludeFileEntry const* entry, bool is_import, CIncludeFileIdentity root_identity, CMacro* first_macro)
+{
+    bool result = entry->once || (is_import && (entry->included || c_include_file_identity_equal(entry, root_identity)));
+    if (!result && entry->guard_symbol)
+    {
+        CMacro* guard_macro = c_macro_find(first_macro, entry->guard_symbol);
+        result = guard_macro && guard_macro->definition.defined;
+    }
+    return result;
+}
 
 #if BUSTER_INCLUDE_TESTS
 CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeFileIdentity identity, String8 spelling,
@@ -8729,7 +8785,7 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
                                                           CMacro* first_macro, CPpStampTable* stamps, CPreprocessSourceFrame* source_frame,
                                                           CPreprocessConditionalDirective directive_kind, CToken directive, u64 token_index,
                                                           u64 line_end, u32 expansion_limit, CPreprocessResult* result, CPreprocessOptions options,
-                                                          CConditionalFrame** conditional_pointer)
+                                                          CIncludeProbeTable* probes, CConditionalFrame** conditional_pointer)
 {
     CConditionalFrame* conditional = *conditional_pointer;
     CLexResult lex = source_frame->lex;
@@ -8748,7 +8804,7 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
                 u32 expression_count = 0;
                 CPpToken* expression = c_frame_wrap_conditional_tokens(arena, stamps, source_frame, token_index, line_end, &expression_count);
                 valid = c_conditional_evaluate(arena, space, symbol_table, first_macro, stamps,
-                                               expression, expression_count, expansion_limit, result, options, source_frame->path,
+                                               expression, expression_count, expansion_limit, result, options, probes, source_frame->path,
                                                source_frame->include_origin, &condition_value);
             }
         }
@@ -8821,7 +8877,7 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
                 u32 expression_count = 0;
                 CPpToken* expression = c_frame_wrap_conditional_tokens(arena, stamps, source_frame, token_index, line_end, &expression_count);
                 valid = c_conditional_evaluate(arena, space, symbol_table, first_macro, stamps,
-                                               expression, expression_count, expansion_limit, result, options, source_frame->path,
+                                               expression, expression_count, expansion_limit, result, options, probes, source_frame->path,
                                                source_frame->include_origin, &condition_value);
             }
             if (!valid)
@@ -9098,37 +9154,154 @@ BUSTER_C_INTERNAL bool c_path_is_absolute(String8 path)
     return path.length && (path.pointer[0] == '/' || path.pointer[0] == '\\' || (path.length >= 2 && c_ascii_alpha(path.pointer[0]) && path.pointer[1] == ':'));
 }
 
-BUSTER_C_INTERNAL bool c_include_read(Arena* arena, String8 directory, String8 name, String8* path_out, String8* source_out, FileMapRead* map_out)
+BUSTER_C_INTERNAL u64 c_include_probe_hash(String8 directory, String8 name)
+{
+    u64 words[2] = {
+        buster_hash_64((u8*)directory.pointer, directory.length),
+        buster_hash_64((u8*)name.pointer, name.length),
+    };
+    u64 result = buster_hash_64((u8*)words, sizeof(words));
+    // Zero marks an empty slot.
+    return result ? result : 1;
+}
+
+BUSTER_C_INTERNAL CIncludeProbe* c_include_probe_find(CIncludeProbeTable const* table, String8 directory, String8 name, u64 hash)
+{
+    CIncludeProbe* result = 0;
+    if (table->capacity)
+    {
+        u32 slot = (u32)hash & (table->capacity - 1);
+        while (!result && table->entries[slot].hash)
+        {
+            CIncludeProbe* entry = table->entries + slot;
+            if (entry->hash == hash && string_equal(entry->name, name) && string_equal(entry->directory, directory))
+            {
+                result = entry;
+            }
+            slot = (slot + 1) & (table->capacity - 1);
+        }
+    }
+    return result;
+}
+
+// Insert a probe known to be absent. Allocation failure leaves the table
+// unchanged and returns null: the include is then simply probed again later.
+BUSTER_C_INTERNAL CIncludeProbe* c_include_probe_insert(CIncludeProbeTable* table, CIncludeProbe probe)
+{
+    CIncludeProbe* result = 0;
+    bool capacity_ready = table->capacity && table->count + 1 <= table->capacity / 2;
+    if (!capacity_ready)
+    {
+        // As in c_include_file_table_grow, prove the doubling and the arena's
+        // remaining reservation before allocating.
+        u32 capacity = C_INCLUDE_PROBE_INITIAL_CAPACITY;
+        if (table->capacity)
+        {
+            capacity = table->capacity <= UINT32_MAX / 2 ? table->capacity * 2 : 0;
+        }
+        u64 byte_count = (u64)capacity * sizeof(*table->entries);
+        u64 position = align_forward(table->arena->position, BUSTER_ALIGN_OF(CIncludeProbe));
+        bool allocation_fits = capacity && position <= table->arena->reserved_size && byte_count <= table->arena->reserved_size - position;
+        if (allocation_fits)
+        {
+            CIncludeProbe* entries = arena_allocate_zeroed(table->arena, CIncludeProbe, capacity);
+            for (u32 old_slot = 0; old_slot < table->capacity; old_slot += 1)
+            {
+                CIncludeProbe entry = table->entries[old_slot];
+                if (entry.hash)
+                {
+                    u32 slot = (u32)entry.hash & (capacity - 1);
+                    while (entries[slot].hash)
+                    {
+                        slot = (slot + 1) & (capacity - 1);
+                    }
+                    entries[slot] = entry;
+                }
+            }
+            table->entries = entries;
+            table->capacity = capacity;
+            capacity_ready = true;
+        }
+    }
+    if (capacity_ready)
+    {
+        u32 slot = (u32)probe.hash & (table->capacity - 1);
+        while (table->entries[slot].hash)
+        {
+            slot = (slot + 1) & (table->capacity - 1);
+        }
+        table->entries[slot] = probe;
+        table->count += 1;
+        result = table->entries + slot;
+    }
+    return result;
+}
+
+// Probe `directory`/`name`. A cached hit reports the path without opening the
+// file: `*cached_out` names its probe, `*map_out` stays empty, and a caller
+// that wants the bytes maps the path itself once it decides to lex it. Every
+// other hit transfers its mapping to `map_out`, or releases it when the caller
+// passes none (feature queries).
+BUSTER_C_INTERNAL bool c_include_read(Arena* arena, CIncludeProbeTable* probes, String8 directory, String8 name, String8* path_out, String8* source_out,
+                                        FileMapRead* map_out, CIncludeProbe** cached_out)
 {
     if (map_out)
     {
         *map_out = (FileMapRead){0};
     }
-    String8 path = c_path_is_absolute(name) ? string_format_z(arena, S8("{S8}"), name) : string_format_z(arena, S8("{S8}/{S8}"), directory, name);
-    // A mapping exists only when bytes do, so a miss owns nothing. A hit
-    // transfers the mapping to `map_out`; a probe without one (feature
-    // queries) releases it here and reports no source bytes.
-    FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
-    ByteSlice bytes = map.bytes;
-    bool result;
-    if (!bytes.pointer)
+    bool absolute = c_path_is_absolute(name);
+    if (absolute)
     {
-        result = false;
+        directory = S8(".");
+    }
+    u64 probe_hash = probes ? c_include_probe_hash(directory, name) : 0;
+    CIncludeProbe* cached = probes ? c_include_probe_find(probes, directory, name, probe_hash) : 0;
+    bool result;
+    if (cached)
+    {
+        result = cached->found;
+        if (result)
+        {
+            *path_out = cached->path;
+            *source_out = (String8){0};
+            if (cached_out)
+            {
+                *cached_out = cached;
+            }
+        }
     }
     else
     {
-        *path_out = path;
-        if (map_out)
+        String8 path = absolute ? string_format_z(arena, S8("{S8}"), name) : string_format_z(arena, S8("{S8}/{S8}"), directory, name);
+        // A mapping exists only when bytes do, so a miss owns nothing.
+        FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
+        ByteSlice bytes = map.bytes;
+        result = bytes.pointer != 0;
+        if (probes)
         {
-            *source_out = BYTE_SLICE_TO_STRING(8, bytes);
-            *map_out = map;
+            c_include_probe_insert(probes, (CIncludeProbe){
+                                               .directory = directory,
+                                               .name = name,
+                                               .path = result ? path : (String8){0},
+                                               .identity = c_include_file_identity(path, map.identity),
+                                               .hash = probe_hash,
+                                               .found = result,
+                                           });
         }
-        else
+        if (result)
         {
-            *source_out = (String8){0};
-            file_map_unmap(map);
+            *path_out = path;
+            if (map_out)
+            {
+                *source_out = BYTE_SLICE_TO_STRING(8, bytes);
+                *map_out = map;
+            }
+            else
+            {
+                *source_out = (String8){0};
+                file_map_unmap(map);
+            }
         }
-        result = true;
     }
 
     return result;
@@ -9373,12 +9546,17 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, bool quoted, String8* path_out,
-                                           String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin* origin_out)
+BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CIncludeProbeTable* probes, CPreprocessOptions options, String8 including_path, String8 name,
+                                           bool quoted, String8* path_out, String8* source_out, FileMapRead* map_out, CIncludeProbe** cached_out,
+                                           CIncludeSearchOrigin* origin_out)
 {
     if (map_out)
     {
         *map_out = (FileMapRead){0};
+    }
+    if (cached_out)
+    {
+        *cached_out = 0;
     }
     if (origin_out)
     {
@@ -9398,9 +9576,9 @@ BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CPreprocessOptions option
     }
     if (c_path_is_absolute(name))
     {
-        return c_include_read(arena, S8("."), name, path_out, source_out, map_out);
+        return c_include_read(arena, probes, S8("."), name, path_out, source_out, map_out, cached_out);
     }
-    if (quoted && c_include_read(arena, c_path_directory(including_path), name, path_out, source_out, map_out))
+    if (quoted && c_include_read(arena, probes, c_path_directory(including_path), name, path_out, source_out, map_out, cached_out))
     {
         if (origin_out)
         {
@@ -9410,7 +9588,7 @@ BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CPreprocessOptions option
     }
     for (u32 index = 0; index < options.include_path_count; index += 1)
     {
-        if (c_include_read(arena, options.include_paths[index], name, path_out, source_out, map_out))
+        if (c_include_read(arena, probes, options.include_paths[index], name, path_out, source_out, map_out, cached_out))
         {
             if (origin_out)
             {
@@ -9429,7 +9607,7 @@ BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CPreprocessOptions option
     }
     for (u32 index = 0; index < options.system_include_path_count; index += 1)
     {
-        if (c_include_read(arena, options.system_include_paths[index], name, path_out, source_out, map_out))
+        if (c_include_read(arena, probes, options.system_include_paths[index], name, path_out, source_out, map_out, cached_out))
         {
             if (origin_out)
             {
@@ -9441,13 +9619,17 @@ BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CPreprocessOptions option
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions options, String8 name, String8* path_out,
-                                                String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin origin,
+BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CIncludeProbeTable* probes, CPreprocessOptions options, String8 name, String8* path_out,
+                                                String8* source_out, FileMapRead* map_out, CIncludeProbe** cached_out, CIncludeSearchOrigin origin,
                                                 CIncludeSearchOrigin* origin_out)
 {
     if (map_out)
     {
         *map_out = (FileMapRead){0};
+    }
+    if (cached_out)
+    {
+        *cached_out = 0;
     }
     if (origin_out)
     {
@@ -9482,7 +9664,7 @@ BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions o
     }
     for (u32 index = include_start; index < options.include_path_count; index += 1)
     {
-        if (c_include_read(arena, options.include_paths[index], name, path_out, source_out, map_out))
+        if (c_include_read(arena, probes, options.include_paths[index], name, path_out, source_out, map_out, cached_out))
         {
             if (origin_out)
             {
@@ -9501,7 +9683,7 @@ BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions o
     }
     for (u32 index = system_start; index < options.system_include_path_count; index += 1)
     {
-        if (c_include_read(arena, options.system_include_paths[index], name, path_out, source_out, map_out))
+        if (c_include_read(arena, probes, options.system_include_paths[index], name, path_out, source_out, map_out, cached_out))
         {
             if (origin_out)
             {
@@ -10323,6 +10505,10 @@ void c_phase_arena_retire(Arena* arena)
     arena_retire(arena, C_PHASE_ARENA_RETAINED_SIZE);
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position);
+#endif
+
 BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String8 source, CPreprocessOptions options)
 {
     if (options.dialect >= C_PREPROCESS_DIALECT_COUNT)
@@ -10344,6 +10530,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // The detail block outlives this call in the caller's arena: the result is
     // returned and then copied by value all the way down the frontend, and
     // every copy shares this one block.
+#if BUSTER_INCLUDE_TESTS
+    u64 result_arena_start = result_arena->position;
+#endif
     result.detail = arena_allocate(result_arena, CPreprocessDetail, 1);
     *result.detail = (CPreprocessDetail){
         .data_layout = options.data_layout,
@@ -10421,6 +10610,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         .phase_arena = options.phase_arena,
     };
     result.recovery = recovery;
+#if BUSTER_INCLUDE_TESTS
+    c_test_unit_register(spelling_arena, token_arena, token_shape_arena, result_arena, result_arena_start);
+#endif
     result.spelling_base = space->base;
     memcpy(c_space_allocate(space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
     CSourceMap map = {
@@ -11177,6 +11369,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     CIncludeFileTable include_files = {
         .arena = arena,
     };
+    CIncludeProbeTable include_probes = {
+        .arena = arena,
+    };
     CPpStampTable stamps = {
         .arena = arena,
     };
@@ -11313,24 +11508,24 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 else if (is_if || is_ifdef || is_ifndef)
                 {
                     c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
-                                                       directive, token_index, line_end, expansion_limit, &result, options, &conditional);
+                                                       directive, token_index, line_end, expansion_limit, &result, options, &include_probes, &conditional);
                     token_index = line_end;
                 }
                 else if (is_elif)
                 {
                     c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
-                                                       directive, token_index, line_end, expansion_limit, &result, options, &conditional);
+                                                       directive, token_index, line_end, expansion_limit, &result, options, &include_probes, &conditional);
                     token_index = line_end;
                 }
                 else if (is_else)
                 {
                     c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
-                                                       directive, token_index, line_end, expansion_limit, &result, options, &conditional);
+                                                       directive, token_index, line_end, expansion_limit, &result, options, &include_probes, &conditional);
                 }
                 else if (is_endif)
                 {
                     c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
-                                                       directive, token_index, line_end, expansion_limit, &result, options, &conditional);
+                                                       directive, token_index, line_end, expansion_limit, &result, options, &include_probes, &conditional);
                 }
                 else if (active && (is_error || is_warning))
                 {
@@ -11473,12 +11668,43 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                         String8 include_path = {0};
                         String8 include_source = {0};
                         FileMapRead include_source_map = {0};
+                        CIncludeProbe* include_cached = 0;
                         CIncludeSearchOrigin include_origin = {0};
                         bool include_resolved =
-                            is_include_next ? c_include_resolve_next(arena, options, include_name, &include_path, &include_source, &include_source_map,
-                                                                      source_frame->include_origin, &include_origin)
-                                            : c_include_resolve(arena, options, source_frame->path, include_name, quoted, &include_path, &include_source,
-                                                                &include_source_map, &include_origin);
+                            is_include_next ? c_include_resolve_next(arena, &include_probes, options, include_name, &include_path, &include_source,
+                                                                      &include_source_map, &include_cached, source_frame->include_origin, &include_origin)
+                                            : c_include_resolve(arena, &include_probes, options, source_frame->path, include_name, quoted, &include_path,
+                                                                &include_source, &include_source_map, &include_cached, &include_origin);
+                        // Identity comes from the descriptor that supplied
+                        // these bytes; the resolved spelling remains separate for
+                        // diagnostics, source maps and per-path attribution. A
+                        // cached probe has not opened the file: the identity its
+                        // first probe captured decides suppression, so a
+                        // suppressed re-include makes no system call, and only
+                        // an inclusion that lexes maps the path again.
+                        CIncludeFileIdentity include_identity =
+                            include_cached ? include_cached->identity : c_include_file_identity(include_path, include_source_map.identity);
+                        CIncludeFileEntry* include_file = 0;
+                        CIncludeFileStatus include_file_status = include_resolved
+                                                                     ? c_include_file_entry(&include_files, include_identity, include_path, &include_file)
+                                                                     : C_INCLUDE_FILE_OK;
+                        bool include_once = include_file && c_include_suppressed(include_file, is_import, root_frame.identity, first_macro);
+                        if (include_file && include_cached && !include_once)
+                        {
+                            include_source_map = file_map_read(arena, include_path, (FileReadOptions){0});
+                            include_source = BYTE_SLICE_TO_STRING(8, include_source_map.bytes);
+                            include_resolved = include_source_map.bytes.pointer != 0;
+                            CIncludeFileIdentity mapped_identity = c_include_file_identity(include_path, include_source_map.identity);
+                            if (include_resolved && !c_include_file_identity_equal(include_file, mapped_identity))
+                            {
+                                // Replaced since its probe: the new descriptor's
+                                // identity governs, as for an uncached include.
+                                include_cached->identity = mapped_identity;
+                                include_identity = mapped_identity;
+                                include_file_status = c_include_file_entry(&include_files, include_identity, include_path, &include_file);
+                                include_once = include_file && c_include_suppressed(include_file, is_import, root_frame.identity, first_macro);
+                            }
+                        }
                         if (!include_resolved)
                         {
                             c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_INCLUDE_NOT_FOUND,
@@ -11486,13 +11712,6 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                         }
                         else
                         {
-                            // Identity comes from the descriptor that supplied
-                            // these bytes; the resolved spelling remains separate for
-                            // diagnostics, source maps and per-path attribution.
-                            CIncludeFileIdentity include_identity = c_include_file_identity(include_path, include_source_map.identity);
-                            CIncludeFileEntry* include_file = 0;
-                            CIncludeFileStatus include_file_status =
-                                c_include_file_entry(&include_files, include_identity, include_path, &include_file);
                             if (include_file_status != C_INCLUDE_FILE_OK)
                             {
                                 c_include_file_diagnostic(arena, &result, directive_location, include_file_status, include_path);
@@ -11500,27 +11719,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                             }
                             else
                             {
-                                // The root is entered before the table exists;
-                                // compare it lazily instead of allocating a
-                                // once table for every include-free source.
-                                bool include_once = include_file->once ||
-                                                    (is_import && (include_file->included || c_include_file_identity_equal(include_file, root_frame.identity)));
                                 if (is_import)
                                 {
                                     // Mark before descending so a recursive
                                     // #import of this identity is suppressed.
                                     include_file->once = true;
-                                }
-                                if (!include_once)
-                                {
-                                    // The multiple-include optimization: a file
-                                    // that proved the whole-file guard shape on
-                                    // an earlier lex produces no tokens while
-                                    // its guard macro is defined, so it shares
-                                    // the same identity lookup as once files.
-                                    u32 guard_symbol = include_file->guard_symbol;
-                                    CMacro* guard_macro = guard_symbol ? c_macro_find(first_macro, guard_symbol) : 0;
-                                    include_once = guard_macro && guard_macro->definition.defined;
                                 }
                                 include_file->included = true;
                                 CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source, trigraphs, options.dialect);
@@ -11729,7 +11932,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[directive_end].offset, directive_live);
                 first_macro->builtin_token_offset = directive.offset;
                 c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, directive_kind, directive,
-                                                   directive_index, directive_end, expansion_limit, &result, options, &conditional);
+                                                   directive_index, directive_end, expansion_limit, &result, options, &include_probes, &conditional);
                 first_macro->builtin_token_offset = token.offset;
                 logical_end = directive_end;
                 continue;
@@ -12042,6 +12245,170 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         c_phase_arena_retire(phase_arena);
     }
     return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+#define C_TEST_UNIT_REGISTRY_RESERVED_SIZE BUSTER_MB(64)
+// One unit this thread preprocessed and has not yet released: its three
+// private arenas, the arena its result lives in, and that arena's position
+// when preprocessing began (rewinding below it kills the result).
+typedef struct CTestUnitEntry CTestUnitEntry;
+struct CTestUnitEntry
+{
+    Arena* arenas[3];
+    Arena* owner;
+    u64 owner_position;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL Arena* c_test_unit_registry_arena;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registry;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
+
+BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
+{
+    if (!c_test_unit_registry_arena)
+    {
+        c_test_unit_registry_arena = arena_create((ArenaCreation){.reserved_size = C_TEST_UNIT_REGISTRY_RESERVED_SIZE, .flags = {.no_pool = 1}});
+    }
+    if (c_test_unit_registry_arena)
+    {
+        CTestUnitEntry* entry = arena_allocate(c_test_unit_registry_arena, CTestUnitEntry, 1);
+        if (!c_test_unit_registry)
+        {
+            c_test_unit_registry = entry;
+        }
+        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position};
+        c_test_unit_registry_count += 1;
+    }
+}
+
+// The address ranges c_preprocess_release returned on this thread since the
+// last reset. A result that still points into one holds released memory. The
+// log is per thread so concurrent tests cannot reset it or inject ranges (a
+// range another thread released may be unmapped and later remapped under this
+// thread's result). It therefore covers the compiles that run on the calling
+// thread: single inputs and serial multi-input compiles. Units a multi-input
+// compile runs on lane workers (compile_jobs above one) release on those
+// threads and are not seen; that only loses detections, never invents any.
+#define C_TEST_RELEASED_LOG_CAPACITY 256
+typedef struct CTestReleasedRange CTestReleasedRange;
+struct CTestReleasedRange
+{
+    u8 const* begin;
+    u64 size;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestReleasedRange c_test_released_log[C_TEST_RELEASED_LOG_CAPACITY];
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_released_log_count;
+
+BUSTER_GLOBAL_LOCAL void c_test_released_log_record(Arena const* arena)
+{
+    if (c_test_released_log_count < C_TEST_RELEASED_LOG_CAPACITY)
+    {
+        c_test_released_log[c_test_released_log_count] = (CTestReleasedRange){.begin = (u8 const*)arena, .size = arena->reserved_size};
+    }
+    c_test_released_log_count += 1;
+}
+
+void c_test_released_log_reset(void)
+{
+    c_test_released_log_count = 0;
+}
+
+bool c_test_released_log_contains(void const* pointer, u64 length)
+{
+    bool result = false;
+    u64 count = BUSTER_MIN(c_test_released_log_count, (u64)C_TEST_RELEASED_LOG_CAPACITY);
+    for (u64 index = 0; length != 0 && index < count; index += 1)
+    {
+        u8 const* address = (u8 const*)pointer;
+        CTestReleasedRange range = c_test_released_log[index];
+        result = result || (address >= range.begin && address < range.begin + range.size);
+    }
+    return result;
+}
+
+// Removes entry `index`, moving the last entry into its slot.
+BUSTER_GLOBAL_LOCAL void c_test_unit_remove(u64 index)
+{
+    c_test_unit_registry[index] = c_test_unit_registry[c_test_unit_registry_count - 1];
+    c_test_unit_registry_count -= 1;
+    arena_set_position(c_test_unit_registry_arena, c_test_unit_registry_arena->position - sizeof(CTestUnitEntry));
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_unit_unregister(Arena* spelling)
+{
+    for (u64 index = c_test_unit_registry_count; index > 0; index -= 1)
+    {
+        if (c_test_unit_registry[index - 1].arenas[0] == spelling)
+        {
+            c_test_unit_remove(index - 1);
+            break;
+        }
+    }
+}
+
+void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+{
+    u64 index = c_test_unit_registry_count;
+    while (index > 0)
+    {
+        index -= 1;
+        CTestUnitEntry entry = c_test_unit_registry[index];
+        if (!owner || (entry.owner == owner && entry.owner_position >= position))
+        {
+            c_test_unit_remove(index);
+            for (u32 arena_index = 0; arena_index < BUSTER_ARRAY_LENGTH(entry.arenas); arena_index += 1)
+            {
+                arena_retire(entry.arenas[arena_index], C_PHASE_ARENA_RETAINED_SIZE);
+            }
+        }
+    }
+}
+
+void c_test_release_preprocess_arenas(void)
+{
+    c_test_release_preprocess_arenas_from(0, 0);
+}
+
+void c_test_scratch_end(TemporalArena temporary)
+{
+    c_test_release_preprocess_arenas_from(temporary.arena, temporary.position);
+    scratch_end(temporary);
+}
+#endif
+
+void c_preprocess_release(CPreprocessResult* result)
+{
+    CSourceMapRecovery* recovery = result->recovery;
+    if (recovery)
+    {
+        // The record lives in the caller's arena and every copy of the result
+        // shares it, so clearing the arena pointers here makes a second
+        // release, through any copy, a no-op.
+        Arena* arenas[] = {recovery->token_shape_arena, recovery->token_arena, recovery->spelling_arena};
+#if BUSTER_INCLUDE_TESTS
+        if (recovery->spelling_arena)
+        {
+            c_test_unit_unregister(recovery->spelling_arena);
+        }
+#endif
+        recovery->token_shape_arena = 0;
+        recovery->token_arena = 0;
+        recovery->spelling_arena = 0;
+        recovery->token_shapes = 0;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(arenas); index += 1)
+        {
+            if (arenas[index])
+            {
+#if BUSTER_INCLUDE_TESTS
+                c_test_released_log_record(arenas[index]);
+#endif
+                arena_retire(arenas[index], C_PHASE_ARENA_RETAINED_SIZE);
+            }
+        }
+        result->tokens = 0;
+        result->token_count = 0;
+        result->spelling_base = 0;
+    }
 }
 
 CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)

@@ -1,9 +1,12 @@
 # Admission for the direct 9700X workload workflow
 
 The Ryzen 7 9700X is not a general Actions executor. Exactly one workflow may
-reach it: `.github/workflows/9700x-direct-bench.yml` (#2704), which compiles
-and runs the owner's own pull-request workloads. Its hosted marker,
-`.github/workflows/9700x-direct-request.yml`, never selects the runner. The queued benchmark service
+reach it: `.github/workflows/9700x-direct-bench.yml`. It compiles and runs the
+owner's own pull-request workloads (#2704). It compares the compiler of an
+owner pull request with its merge base on request (#2769), and the compiler
+of each commit that lands on main with its first parent's (#2752). Its hosted
+markers, `.github/workflows/9700x-direct-request.yml` and
+`.github/workflows/9700x-compiler-request.yml`, never select the runner. The queued benchmark service
 and its dispatch workflow are removed (#2708). No other workflow may select
 the runner, and `tools/bench_direct/workflow_policy_test.py` fails the required
 "Benchmark service workflow policy" check if one does. That check keeps its
@@ -50,9 +53,164 @@ the intended capability, and it is why the author gate is the whole control:
 there is no containment, host lease or sealed result. Do not widen the author
 list.
 
+`authorize` also reads the pull request's changed files. `bench` runs only
+when a workload or its `.data` file changed. `compare-pull` and `publish-pull`
+run only when `benchmarks/9700x/compiler-compare.request` was added or changed.
+For that comparison `authorize` resolves the merge base with the base branch
+and both trees from GitHub's records. `compare-pull` has the same
+restrictions as `bench`, but checks out the whole pull request head (full
+history, contents on demand), because it builds the compiler at the merge
+base and at the head. That executes the pull request's build as the runner
+account under the same owner-only gate. `start-pull` and `publish-pull` are
+hosted and are the only jobs of that path with `checks: write`. Its check
+name, `9700X compiler benchmark (pull request)`, and marker prefix,
+`buster-9700x-compiler-pr-v1:<head>`, differ from the main comparison's.
+
+Every compiler receipt must record the observed CPU model of the host that
+measured it. The harness refuses to measure, and the publisher refuses to
+accept, a receipt whose CPU is not the AMD Ryzen 7 9700X (#2761).
+
 The actor restriction governs who starts the workflow, not who edits its
 definition. Changes to the workflow, its harness or this policy test need
 owner review before they reach `main`.
+
+## Main compiler comparison
+
+`9700x-compiler-request.yml` runs on every push to `main`. Its `request` job
+is a hosted marker with no permissions and no checkout; its `announce` job
+creates the queued check (see [Check and commit report](#check-and-commit-report)).
+The run's completion starts the main jobs of the bench workflow from `main`,
+only while `BENCH_DIRECT_ENABLED` and `BENCH_COMPILER_ENABLED` are both `true`. The commit is measured after it
+landed, against its first parent, so merging never waits for the 9700X:
+
+- `authorize-compiler` (hosted, read-only) runs `authorize_compiler.py`. It
+  re-reads the request run (`push`, branch `main`, success, this repository),
+  the commit (one or two parents), its first parent, both trees, and that the
+  commit is still on main (main equals it or descends from it). Main is
+  trusted code, so there is no author gate: everything that lands is measured,
+  bot-authored catch-up pull requests included. A queue merge's second parent
+  and pull request number are recorded for the report (`0` for a direct push).
+- `compare` (the 9700X, no token capability) checks out `main`'s `tools` and the
+  commit with its parents, without persisted credentials, and runs
+  `compiler_compare.py --mode main`. It builds tests-off Clang Release `ide`
+  binaries of the first parent, then the commit, then the first parent again
+  for the frozen workload's generated closure, and runs `tools/uarch_lab.py
+  compare` with the frozen `compiler-compare-v1` profile
+  (`compiler_receipt.PROFILE`). The evidence artifact
+  `buster-9700x-compiler-<head>-<attempt>` keeps the receipt, the lab's raw
+  pairs, metadata and `summary.json`, and both CMake caches for 90 days. It
+  drops compiled outputs, per-run binary copies and perf data.
+- `publish-compiler` (hosted, `actions: read` and `checks: write`) runs
+  `compiler_publish.py`. It reads that artifact through the API as bounded
+  data, requires its identities to equal this attempt's authorization, and
+  re-derives validity from the lab's own `summary.json`. It then completes
+  the attempt's check run, `9700X compiler benchmark`, on the main commit
+  (external ID
+  `buster-9700x-compiler-main-v1:<head>:<request run>.<request attempt>:<attempt>`;
+  attempts before #2803 used `buster-9700x-compiler-main-v1:<head>`):
+  - `success`: a valid core measurement, faster, slower or not detectably
+    different.
+  - `failure`: missing, mismatched or invalid evidence; the commit was not
+    benchmarked.
+
+The performance verdict is report-only. Nothing gates merging on the check.
+`BENCH_COMPILER_REGRESSION_POLICY` is unset or `report-only`; any other
+value, including a future `enforce`, fails closed until regression thresholds
+are qualified and a separately reviewed rollout adds them.
+
+Host time is bounded, not every commit is guaranteed a measurement. All main
+comparisons share one concurrency group that never cancels a measurement in
+progress; GitHub keeps only the newest pending run in a group, so during a
+burst of merges the commits between the running and the newest one stay
+unmeasured. Their `9700X compiler benchmark` check is completed as **Not
+measured** (`skipped`) when the next main comparison starts, which is the
+visible gap. A comparison takes about 13 minutes (three builds of about 55 s, then
+about 10 minutes of pairs), so merges more often than that are sampled. The
+host runs one job at a time because the group holds one runner, so main
+comparisons, pull-request comparisons and workload runs never overlap.
+
+## Check and commit report
+
+The comparison is visible on the measured commit before it finishes (#2803)
+and leaves a readable report there (#2804). Every write is hosted, runs
+`main`'s code, and holds only the permission it needs; the 9700X never
+receives a token. The measured commit is always `BQ_HEAD_COMMIT`, the
+request's verified head, never the trusted harness revision `github.sha`.
+
+- **Queued.** `announce` in `9700x-compiler-request.yml` (`checks: write`)
+  runs `compiler_github.py announce` and creates the check on the pushed commit
+  before the bench run exists, so the wait for the main concurrency group is
+  visible. It never fails the request run (`continue-on-error`), so it never
+  decides whether the comparison starts. For a pull request, `start-pull`
+  creates the check after authorization; that path has no workflow-level
+  wait, because a new push cancels the older run.
+- **In progress.** `start-compiler` / `start-pull` (`actions: read`,
+  `checks: write`, plus `contents: read` or `pull-requests: read` for
+  reconciliation) share the host job's gate, so they run only after this
+  attempt's authorization. Each adopts the attempt's check, or creates it,
+  and polls this attempt's jobs through the Actions API. It marks the check
+  in progress with the 9700X job's own `started_at` and a link to its live
+  steps (preparation: checkouts and builds; then measurement). It stops
+  polling at the latest after 20 minutes and leaves the check queued if the
+  runner is still busy. These are the only display-only jobs; they never fail
+  the run.
+- **Completed.** `publish-compiler` / `publish-pull` complete the same check:
+  success for a valid measurement, failure for a refused authorization or
+  missing or invalid evidence, neutral for a superseded pull request head.
+  The check summary links the workflow attempt and the evidence artifact
+  explicitly, because GitHub may not honour `details_url` for checks written
+  with `GITHUB_TOKEN`.
+- **Ownership and retries.** A check is ours only when the GitHub Actions app,
+  the exact name, the exact head and the exact attempt marker
+  (`compiler_receipt.attempt_marker`) all match; a same-name check of another
+  app or attempt is never adopted. A lost create response is resolved by
+  looking up again before a second create. Statuses only move forward, and a
+  completed check is never rewritten, so a late or repeated older attempt
+  cannot replace a newer result. A deliberate re-run of either workflow is a
+  new attempt with its own check; GitHub shows the newest.
+- **Orphans.** Main runs are serialized, so when a main comparison starts,
+  `start-compiler` completes the open checks of up to 15 earlier first-parent
+  main commits. A check that never started is `skipped` / **Not measured**
+  (displaced while pending, or cancelled before any job ran). One whose host
+  job started but which no publisher completed is `cancelled`. `start-pull`
+  completes an open check of an earlier head of the same pull request as
+  superseded. An `always()` publisher already finishes a cancelled run that
+  started, so reconciliation is the backstop for runs that never ran. A
+  commit's check stays queued only until the next main comparison starts,
+  and it stays queued indefinitely only if `BENCH_COMPILER_ENABLED` is turned
+  off in between.
+- **Commit report.** `comment-compiler`, the only bench job with
+  `contents: write` (the permission of the commit-comment API), upserts one
+  general comment on the main commit with `compiler_comment.py`. It downloads
+  nothing: its input is the report entry that `publish-compiler` validated and
+  rendered (verdict, report-only policy, baseline and candidate, observed host,
+  `compiler-compare-v1` scope, wall B/A with its 95% CI, medians with units,
+  pair count, capture time, collapsed full tables, and links to the check,
+  the workflow attempt and the evidence). The comment is ours only when the
+  `github-actions[bot]` account wrote it on exactly that commit and its hidden
+  `buster-9700x-compiler-report-v1` marker names that head and mode. Human
+  comments and copied markers are never edited. It shows the newest attempt,
+  ordered by run and attempt; older attempts and republications stay in its
+  history table and never replace the newest report. Duplicates from
+  concurrent writers are merged into the oldest comment. Pull requests get no
+  comment.
+- **Evidence retention.** Artifacts expire after 90 days. The comment and
+  the check outlive them and say when the evidence expires; they do not make
+  it permanent.
+- **Publication-only recovery.** A failed `comment-compiler` can be re-run
+  alone ("Re-run failed jobs"), because it reuses `publish-compiler`'s
+  validated output and nothing is measured. For an older attempt the owner
+  dispatches `.github/workflows/9700x-compiler-report.yml` from `main` with
+  the bench run ID and attempt. Its read-only `validate` job re-derives that
+  attempt's identity from GitHub's records, as `authorize-compiler` does, and
+  reads the attempt's own authorization and compare job results. It then
+  re-validates the retained artifact with the same publisher. Expired or
+  unverifiable evidence is reported and not published. Its `comment` job
+  shares the per-commit concurrency group of `comment-compiler`. It writes no
+  check and starts no measurement. The backfill of `c5faf05e` is
+  `run_id=37486885378`, `run_attempt=1`; its comment records the original
+  measurement run and trusted harness, and the recovery run separately as a
+  publication.
 
 ## Administrator steps
 
@@ -68,8 +226,14 @@ None of these can be performed by a pull request.
    after the host step. Set it back to `false` on any drift.
 3. On the host, the runner account needs `clang` with a static C library,
    `python3` 3.9 or newer, `git`, CPU 2 in its allowed set and a writable work
-   directory. It needs no sudo rule.
-4. Confirm that workflows from fork pull requests still require approval.
+   directory. It needs no sudo rule. The compiler comparison additionally needs
+   `tcc`, `cmake`, `ninja`, `perf` usable by that account (a
+   `kernel.perf_event_paranoid` that permits user-space counting), `taskset`,
+   and anonymous HTTPS access to github.com for the queue-ref read.
+4. Create `BENCH_COMPILER_ENABLED` with value `false`. Set it to `true` only
+   after a pilot comparison on the host meets the 90-minute job bound. Leave
+   `BENCH_COMPILER_REGRESSION_POLICY` unset.
+5. Confirm that workflows from fork pull requests still require approval.
 
 Leftovers of the removed service that only an administrator can delete: the
 `benchmark-9700x` environment, the Actions requester policy that named

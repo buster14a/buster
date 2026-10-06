@@ -163,12 +163,19 @@ differential reference: with and without it, the published IR must be
 identical.
 
 After predecessor propagation finishes, parameter simplification reuses its
-block cursor for a stable list of blocks that still own parameters. Empty
-blocks leave the list after each sweep. Simplification never adds parameters,
-so they cannot become active again. Retain ascending block order and each
-block's parameter order: changing elimination order can change replacement
-representatives and canonical value IDs. The allocation diagnostic census
-counts initial list construction as well as subsequent block visits.
+block cursor for a stable list of blocks that still own parameters.
+`c_ir_ssa_simplify_parameters` reproduces the repeated block-order sweep
+without its repeated visits: each retained parameter is numbered in sweep
+order and filed as a user of the roots its incoming rows read, and it is
+evaluated again only when one of those roots is replaced, at the (sweep,
+position) key the full sweep would next reach it, drawn from a min-heap. A
+nested chain of N joins therefore costs O(N log N), not N sweeps (#2801).
+Retain ascending block order and each block's parameter order: changing
+elimination order can change replacement representatives and canonical value
+IDs, for example which member of a closed parameter cycle survives. The
+allocation diagnostic census counts the initial list construction and the one
+final unlink sweep as block visits, and `SSA_SIMPLIFY_PASSES` reports the
+sweeps the full sweep would have taken.
 
 Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
@@ -528,6 +535,12 @@ without facts for identical bitcode and diagnostics.
   zero, a shift count outside the promoted width) is final. An assertion
   decided at the declaration reports `static assertion failed: "<message>"`
   (GitHub #1238).
+  Immediate assertions belong to parsing; `c_lower_to_ir`'s translation-unit
+  deferred loop owns the remaining checks at every scope. Function-body walks
+  consume their declarations without evaluating or diagnosing them again.
+  `c_test_deferred_assert_diagnostic_ownership` pins one source-located
+  diagnostic per failed assertion, including nonconstant controls, nested
+  blocks and multiple failures, through both frontend SSA forms (GitHub #1783).
 - Compile-time integer arithmetic has one implementation, `ir_integer_*`
   (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
   the canonical operations, each result carrying its exact-value faults

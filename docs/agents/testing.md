@@ -212,6 +212,11 @@
   payloads cannot relaunch themselves, so they run only the in-process
   controls and report the children as `status=unsupported`. It never executes
   a false raw assumption.
+  It also requires `BUSTER_REFERENCE_CHECKS` (the reference-equivalence
+  checks once reached only in Debug) to equal that checked-contract
+  configuration. Routine CI runs this suite in the optimized sanitized
+  Release tree; sanitized Debug is compile-and-link coverage there
+  ([sanitizer execution policy](../ci-combination-shards.md#sanitizer-execution-policy-2657)).
 - **Adding a module** (`foo.c`/`foo.h` under `src/buster/lib/`) takes three
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;
@@ -230,7 +235,28 @@
   resolves safe `.` and `..` segments inside the rooted APK asset namespace so
   nested quoted includes consume the same fixture bytes as desktop tests;
   traversal above the asset root is rejected.
-- The iOS payload runs `test --verbose=1 --ci=1`. Failed launches report
+- The iOS payload runs `test --verbose=1 --ci=1`. Launches emit
+  opt-in `BUSTER_IOS_LAUNCH_V1` records, enabled by the launcher through
+  `SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE=1`, from native `main`, UIKit entry,
+  delegate entry, window readiness, worker creation/entry, runtime and argument
+  readiness, suite entry, compiler prewarm completion, fixture readiness and
+  entry completion. Each fixed-size direct stderr write carries PID, app
+  monotonic/wall microseconds, process CPU microseconds and separate clock/query
+  statuses; nonzero statuses make the corresponding measurement unavailable.
+  This path needs no arena or thread context. `BUSTER_IOS_LAUNCH_OBSERVATION`
+  records the host's first polled console, app trace and fixture receipt using
+  the existing Bash launch clock. Poll observations include scheduling and
+  scanning delay and are not native timestamps; missing events stay absent.
+  Compare app monotonic deltas to separate UIKit, worker/runtime and pre-fixture
+  preparation, process CPU deltas to distinguish CPU use from elapsed time,
+  and app wall time with host log receipt to investigate console delay (wall
+  clocks can adjust). No record proves a cause for a historical timeout or
+  changes marker acceptance, process ownership or the launch deadline.
+  `python3 ios/launch_trace_test.py -v` executes the native producer with
+  host POSIX clocks. `bash ios/launch_trace_monitor_test.sh` checks delayed
+  receipt and trace-only deadline rejection without modifying the frozen shared
+  fixtures; UIKit and actual simulator acceptance remain in mobile CI.
+  Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;
   `unavailable` means no such record arrived. The last observed module is
