@@ -10715,6 +10715,33 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     standard_replacement[1] = standard_version.length ? c_space_token(space, standard_version, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE) : (CToken){0};
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__BUSTER__"), standard_replacement, 1, 0, 0, false, false);
+    // Transitional word-idiom builtin spellings (#129). The frozen
+    // native-retirement fixtures still call these, and their bytes are pinned
+    // until a support-policy transition migrates them; delete these aliases in
+    // that change. Object-like macros keep the predefined-symbol range and the
+    // builtin table to the bit-width names only.
+    static char const* simd_word_idiom_aliases[][2] = {
+        {"__builtin_buster_simd_splat_byte", "__builtin_buster_simd_splat_u8"},
+        {"__builtin_buster_simd_equal_byte", "__builtin_buster_simd_equal_u8"},
+        {"__builtin_buster_simd_less_byte", "__builtin_buster_simd_less_u8"},
+        {"__builtin_buster_simd_sign_byte", "__builtin_buster_simd_sign_u8"},
+        {"__builtin_buster_simd_test_byte", "__builtin_buster_simd_test_u8"},
+        {"__builtin_buster_simd_permute2_byte", "__builtin_buster_simd_permute2_u8"},
+        {"__builtin_buster_simd_compress_byte", "__builtin_buster_simd_compress_u8"},
+        {"__builtin_buster_simd_compress_store_byte", "__builtin_buster_simd_compress_store_u8"},
+        {"__builtin_buster_simd_widen_byte", "__builtin_buster_simd_widen_u8"},
+        {"__builtin_buster_simd_shift_left_word", "__builtin_buster_simd_shift_left_u32"},
+        {"__builtin_buster_simd_ternary_word", "__builtin_buster_simd_ternary_u32"},
+        {"__builtin_buster_simd_equal_word", "__builtin_buster_simd_equal_u32"},
+        {"__builtin_buster_simd_splat_word", "__builtin_buster_simd_splat_u32"},
+        {"__builtin_buster_simd_less_word", "__builtin_buster_simd_less_u32"},
+        {"__builtin_buster_simd_compress_word", "__builtin_buster_simd_compress_u32"},
+    };
+    for (u32 alias_index = 0; alias_index < BUSTER_ARRAY_LENGTH(simd_word_idiom_aliases); alias_index += 1)
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)simd_word_idiom_aliases[alias_index][0]),
+                                   string_from_pointer((char8*)simd_word_idiom_aliases[alias_index][1]));
+    }
     // The GNU version macros are not a dialect switch.  Both reference
     // compilers predefine them in every standard mode -- `clang -std=c99
     // -dM -E` reports `__GNUC__ 4` beside `__STRICT_ANSI__ 1`, and gcc does

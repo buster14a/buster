@@ -163,6 +163,11 @@ speedup merely because a proxy improved.
   fallback. Do not move byte permute/compression across this boundary merely
   because a neighboring u32 form is available: `PERMUTE2_U8` requires
   VBMI, while `COMPRESS_U8` and `COMPRESS_STORE_U8` require VBMI2.
+
+  Lane widths are named by bits (`_u8`, `_u32`, `_u64`), never `_byte`,
+  `_word` or `_quad`. The old `_byte`/`_word` spellings survive only as
+  transitional aliases (`simd.h` and the `ide cc` predefined macros) for the
+  frozen native-retirement fixtures; do not use them in new code (#129).
 - **SIMD C lexing method: the Validark lineage.** `c_lex_compact` in
   `frontend/c/c_source.c` draws on Niles Salter's (Validark's) Accelerated Zig
   Parser — local checkout `~/dev/Accelerated-Zig-Parser`, upstream

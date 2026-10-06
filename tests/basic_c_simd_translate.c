@@ -16,14 +16,14 @@ _Static_assert(BUSTER_SIMD_512_BASE == 1, "F/BW selects the base SIMD tier");
 _Static_assert(BUSTER_SIMD_512 == 0, "VBMI/VBMI2 remain excluded from the base SIMD tier");
 #endif
 
-typedef union SimdTranslateU32Lanes SimdTranslateU32Lanes;
-union SimdTranslateU32Lanes
+typedef union SimdTranslateWordLanes SimdTranslateWordLanes;
+union SimdTranslateWordLanes
 {
     Simd512 vector;
-    u32 u32_lanes[16];
+    u32 words[16];
 };
 
-BUSTER_GLOBAL_LOCAL Mask64 u32_less_oracle(u32 const* left, u32 const* right)
+BUSTER_GLOBAL_LOCAL Mask64 word_less_oracle(u32 const* left, u32 const* right)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 16; lane += 1)
@@ -33,7 +33,7 @@ BUSTER_GLOBAL_LOCAL Mask64 u32_less_oracle(u32 const* left, u32 const* right)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL Mask64 u32_equal_oracle(u32 const* left, u32 const* right)
+BUSTER_GLOBAL_LOCAL Mask64 word_equal_oracle(u32 const* left, u32 const* right)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 16; lane += 1)
@@ -43,7 +43,7 @@ BUSTER_GLOBAL_LOCAL Mask64 u32_equal_oracle(u32 const* left, u32 const* right)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void u32_compress_oracle(u32* result, Mask64 mask, u32 const* source)
+BUSTER_GLOBAL_LOCAL void word_compress_oracle(u32* result, Mask64 mask, u32 const* source)
 {
     u32 count = 0;
     for (u32 lane = 0; lane < 16; lane += 1)
@@ -60,23 +60,12 @@ BUSTER_GLOBAL_LOCAL void u32_compress_oracle(u32* result, Mask64 mask, u32 const
     }
 }
 
-// vpermt2d: the low five index bits pick one of 32 u32 lanes across low then
-// high; lanes outside the low sixteen mask bits are zero.
-BUSTER_GLOBAL_LOCAL void u32_permute2_oracle(u32* result, Mask64 mask, u32 const* low, u32 const* indices, u32 const* high)
-{
-    for (u32 lane = 0; lane < 16; lane += 1)
-    {
-        u32 index = indices[lane] & 31;
-        result[lane] = (mask >> lane) & 1 ? (index < 16 ? low[index] : high[index - 16]) : 0;
-    }
-}
-
 u64 buster_simd_translate_block(u8* destination, u8 const* source, u64* newlines)
 {
     Simd512 chunk = simd512_load(source);
-    Mask64 carriage = simd512_equal_u8(chunk, simd512_splat('\r'));
-    Mask64 line_feed = simd512_equal_u8(chunk, simd512_splat('\n'));
-    Mask64 backslash = simd512_equal_u8(chunk, simd512_splat('\\'));
+    Mask64 carriage = simd512_equal_byte(chunk, simd512_splat('\r'));
+    Mask64 line_feed = simd512_equal_byte(chunk, simd512_splat('\n'));
+    Mask64 backslash = simd512_equal_byte(chunk, simd512_splat('\\'));
     *newlines = line_feed;
     simd512_store(destination, chunk);
     return carriage | (backslash & ((line_feed | carriage) >> 1)) | (backslash & (UINT64_C(1) << 63));
@@ -156,8 +145,8 @@ int main(void)
     u8 packed[64];
     Simd512 indices = simd512_splat(0);
     Simd512 letters = simd512_load(source);
-    Simd512 selected = simd512_permute2_u8(1, letters, indices, letters);
-    Simd512 compacted = simd512_compress_u8(1, selected);
+    Simd512 selected = simd512_permute2_byte(1, letters, indices, letters);
+    Simd512 compacted = simd512_compress_byte(1, selected);
     simd512_store(packed, compacted);
     failure |= packed[0] != 'a';
     for (u32 lane = 1; lane < 64; lane += 1)
@@ -168,69 +157,45 @@ int main(void)
     // This body never preprocesses away: baseline exercises the scalar
     // struct, skylake-avx512 the F/BW exact builtins, and znver5 the complete
     // vocabulary. Keep the expectations independent of the production header.
-    SimdTranslateU32Lanes u32_left;
-    SimdTranslateU32Lanes u32_right;
-    SimdTranslateU32Lanes u32_result;
-    u32 u32_values[] = {0, 1, 0x7fffffffU, 0x80000000U, 0xffffffffU};
+    SimdTranslateWordLanes word_left;
+    SimdTranslateWordLanes word_right;
+    SimdTranslateWordLanes word_result;
+    u32 word_values[] = {0, 1, 0x7fffffffU, 0x80000000U, 0xffffffffU};
     for (u32 lane = 0; lane < 16; lane += 1)
     {
-        u32_left.u32_lanes[lane] = lane < 5 ? u32_values[lane] : 0x9e3779b9U * lane;
-        u32_right.u32_lanes[lane] = u32_values[(lane * 3 + 1) % 5] ^ (0x01020408U * lane);
+        word_left.words[lane] = lane < 5 ? word_values[lane] : 0x9e3779b9U * lane;
+        word_right.words[lane] = word_values[(lane * 3 + 1) % 5] ^ (0x01020408U * lane);
     }
-    Mask64 observed = simd512_less_u32(u32_left.vector, u32_right.vector);
-    failure |= observed != u32_less_oracle(u32_left.u32_lanes, u32_right.u32_lanes);
+    Mask64 observed = simd512_less_word(word_left.vector, word_right.vector);
+    failure |= observed != word_less_oracle(word_left.words, word_right.words);
     failure |= (observed & ~0xffffULL) != 0;
-    SimdTranslateU32Lanes equal_right;
+    SimdTranslateWordLanes equal_right;
     for (u32 lane = 0; lane < 16; lane += 1)
     {
-        equal_right.u32_lanes[lane] = u32_left.u32_lanes[lane];
+        equal_right.words[lane] = word_left.words[lane];
         if (lane % 3 == 0)
         {
-            equal_right.u32_lanes[lane] ^= 0x80000001U;
+            equal_right.words[lane] ^= 0x80000001U;
         }
     }
-    observed = simd512_equal_u32(u32_left.vector, equal_right.vector);
-    failure |= observed != u32_equal_oracle(u32_left.u32_lanes, equal_right.u32_lanes);
+    observed = simd512_equal_word(word_left.vector, equal_right.vector);
+    failure |= observed != word_equal_oracle(word_left.words, equal_right.words);
     failure |= (observed & ~0xffffULL) != 0;
     for (u32 value = 0; value < 5; value += 1)
     {
-        u32_result.vector = simd512_splat_u32(u32_values[value]);
+        word_result.vector = simd512_splat_word(word_values[value]);
         for (u32 lane = 0; lane < 16; lane += 1)
         {
-            failure |= u32_result.u32_lanes[lane] != u32_values[value];
+            failure |= word_result.words[lane] != word_values[value];
         }
     }
     Mask64 compact_mask = 0xfedcba987654a5c3ULL;
     u32 expected_compacted[16];
-    u32_compress_oracle(expected_compacted, compact_mask, u32_left.u32_lanes);
-    u32_result.vector = simd512_compress_u32(compact_mask, u32_left.vector);
+    word_compress_oracle(expected_compacted, compact_mask, word_left.words);
+    word_result.vector = simd512_compress_word(compact_mask, word_left.vector);
     for (u32 lane = 0; lane < 16; lane += 1)
     {
-        failure |= u32_result.u32_lanes[lane] != expected_compacted[lane];
-    }
-    // Addition wraps per u32 lane and never carries into a neighbor.
-    u32_result.vector = simd512_add_u32(u32_left.vector, u32_right.vector);
-    for (u32 lane = 0; lane < 16; lane += 1)
-    {
-        failure |= u32_result.u32_lanes[lane] != u32_left.u32_lanes[lane] + u32_right.u32_lanes[lane];
-    }
-    // Indices carry junk above bit 4, which the permute must ignore; mask
-    // bits above lane 15 select nothing.
-    SimdTranslateU32Lanes permute_indices;
-    for (u32 lane = 0; lane < 16; lane += 1)
-    {
-        permute_indices.u32_lanes[lane] = (lane * 7 + 3) | (0x9e3779c0U * (lane + 1));
-    }
-    Mask64 permute_masks[] = {0xDB6DULL, 0x6DB6ULL, 0xB6DBULL, 0xffffULL, 0, 0xffff0000ULL | 0x8001ULL};
-    for (u32 mask_index = 0; mask_index < 6; mask_index += 1)
-    {
-        u32 expected_permuted[16];
-        u32_permute2_oracle(expected_permuted, permute_masks[mask_index], u32_left.u32_lanes, permute_indices.u32_lanes, u32_right.u32_lanes);
-        u32_result.vector = simd512_permute2_u32(permute_masks[mask_index], u32_left.vector, permute_indices.vector, u32_right.vector);
-        for (u32 lane = 0; lane < 16; lane += 1)
-        {
-            failure |= u32_result.u32_lanes[lane] != expected_permuted[lane];
-        }
+        failure |= word_result.words[lane] != expected_compacted[lane];
     }
     return failure;
 }

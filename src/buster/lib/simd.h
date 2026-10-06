@@ -698,3 +698,15 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_permute2_u32_fallback(Mas
 #endif
 
 #define simd512_zero() simd512_splat(0)
+
+// Transitional word-idiom spellings (#129). The frozen native-retirement
+// fixture tests/basic_c_simd_translate.c still spells these, and its bytes are
+// pinned until a support-policy transition migrates it; delete this block in
+// that change. New code uses the bit-width names above.
+#define simd512_equal_byte(left, right) simd512_equal_u8((left), (right))
+#define simd512_permute2_byte(mask, low, indices, high) simd512_permute2_u8((mask), (low), (indices), (high))
+#define simd512_compress_byte(mask, value) simd512_compress_u8((mask), (value))
+#define simd512_equal_word(left, right) simd512_equal_u32((left), (right))
+#define simd512_splat_word(value) simd512_splat_u32(value)
+#define simd512_less_word(left, right) simd512_less_u32((left), (right))
+#define simd512_compress_word(mask, value) simd512_compress_u32((mask), (value))

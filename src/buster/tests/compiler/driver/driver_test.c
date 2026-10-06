@@ -29923,6 +29923,54 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, (translate.codegen_statistics.simd_operation_count != 0) == (cpu_index != 0));
         scratch_end(translate_temporary);
     }
+    // The u32 add/permute pair behind the C lexer's row writer, through the
+    // same header: execute it under every allocator on this host, then check
+    // that each x86 tier compiles it and only the vector tiers emit SIMD.
+    String8 simd_u32_fixture = S8("src/buster/tests/compiler/driver/fixtures/simd_u32.c");
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(translate_allocators); allocator_index += 1)
+    {
+        TemporalArena simd_u32_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* simd_u32_arena = simd_u32_temporary.arena;
+        String8 simd_u32_path = buster_test_temporary_path(simd_u32_arena, S8("buster-c-simd-u32"),
+#if BUSTER_WINDOWS
+                                                           S8(".exe"));
+#else
+                                                           S8(""));
+#endif
+        String8 allocator = string_format(simd_u32_arena, S8("-fregister-allocator={S8}"), translate_allocators[allocator_index]);
+        String8 simd_u32_command_line[] = {S8("-Isrc"), allocator, S8("-o"), simd_u32_path, simd_u32_fixture};
+        CompilerDriverResult simd_u32 = compiler_driver_execute_invocation(
+            simd_u32_arena, compiler_driver_parse_arguments(simd_u32_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(simd_u32_command_line)));
+        BUSTER_TEST(arguments, simd_u32.error == COMPILER_DRIVER_ERROR_NONE);
+        if (simd_u32.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run_arguments[] = {simd_u32_path};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                          (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult waited = os_process_wait_sync(simd_u32_arena, spawned);
+                BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(simd_u32_temporary);
+    }
+    for (u32 cpu_index = 0; cpu_index < BUSTER_ARRAY_LENGTH(translate_cpus); cpu_index += 1)
+    {
+        TemporalArena simd_u32_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* simd_u32_arena = simd_u32_temporary.arena;
+        String8 simd_u32_path = buster_test_temporary_path(simd_u32_arena, S8("buster-c-simd-u32-tier"), S8(".o"));
+        String8 simd_u32_command_line[] = {
+            S8("-Isrc"), S8("-c"), S8("--target=x86_64-linux"), string_format(simd_u32_arena, S8("-march={S8}"), translate_cpus[cpu_index]),
+            S8("-o"), simd_u32_path, simd_u32_fixture,
+        };
+        CompilerDriverResult simd_u32 = compiler_driver_execute_invocation(
+            simd_u32_arena, compiler_driver_parse_arguments(simd_u32_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(simd_u32_command_line)));
+        BUSTER_TEST(arguments, simd_u32.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, (simd_u32.codegen_statistics.simd_operation_count != 0) == (cpu_index != 0));
+        scratch_end(simd_u32_temporary);
+    }
     // The 512-bit vocabulary. The fixture is self-contained and guards itself
     // on the predefined feature macros, so it builds for every target and
     // compiles its body out where the vocabulary is unavailable; that is what
