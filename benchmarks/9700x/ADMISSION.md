@@ -4,7 +4,8 @@ The Ryzen 7 9700X is not a general Actions executor. Exactly one workflow may
 reach it: `.github/workflows/9700x-direct-bench.yml`. It compiles and runs the
 owner's own pull-request workloads (#2704). It compares the compiler of an
 owner pull request with its merge base on request (#2769), and the compiler
-of each commit that lands on main with its first parent's (#2752). Its hosted
+of each commit that lands on main with its first parent's, or with the
+nearest earlier measured main commit's after a merge burst (#2752). Its hosted
 markers, `.github/workflows/9700x-direct-request.yml` and
 `.github/workflows/9700x-compiler-request.yml`, never select the runner. The queued benchmark service
 and its dispatch workflow are removed (#2708). No other workflow may select
@@ -81,19 +82,23 @@ is a hosted marker with no permissions and no checkout; its `announce` job
 creates the queued check (see [Check and commit report](#check-and-commit-report)).
 The run's completion starts the main jobs of the bench workflow from `main`,
 only while `BENCH_DIRECT_ENABLED` and `BENCH_COMPILER_ENABLED` are both `true`. The commit is measured after it
-landed, against its first parent, so merging never waits for the 9700X:
+landed, against its baseline (its first parent, or a range baseline; see
+[Range baseline](#range-baseline)), so merging never waits for the 9700X:
 
 - `authorize-compiler` (hosted, read-only) runs `authorize_compiler.py`. It
   re-reads the request run (`push`, branch `main`, success, this repository),
-  the commit (one or two parents), its first parent, both trees, and that the
+  the commit (one or two parents), its first-parent chain, the chosen
+  baseline on it, both trees, and that the
   commit is still on main (main equals it or descends from it). Main is
   trusted code, so there is no author gate: everything that lands is measured,
   bot-authored catch-up pull requests included. A queue merge's second parent
   and pull request number are recorded for the report (`0` for a direct push).
 - `compare` (the 9700X, no token capability) checks out `main`'s `tools` and the
-  commit with its parents, without persisted credentials, and runs
+  commit with its history but no blobs (`filter: blob:none`), without
+  persisted credentials, verifies the baseline is on the commit's first-parent
+  chain, and runs
   `compiler_compare.py --mode main`. It builds tests-off Clang Release `ide`
-  binaries of the first parent, then the commit, then the first parent again
+  binaries of the baseline, then the commit, then the baseline again
   for the frozen workload's generated closure, and runs `tools/uarch_lab.py
   compare` with the frozen `compiler-compare-v1` profile
   (`compiler_receipt.PROFILE`). The evidence artifact
@@ -128,6 +133,37 @@ visible gap. A comparison takes about 13 minutes (three builds of about 55 s, th
 about 10 minutes of pairs), so merges more often than that are sampled. The
 host runs one job at a time because the group holds one runner, so main
 comparisons, pull-request comparisons and workload runs never overlap.
+
+### Range baseline
+
+Sampling must not leave a landed change outside every comparison. So
+`authorize-compiler` (with `checks: read`) walks the commit's first-parent
+chain, at most 15 commits (`compiler_github.RECONCILE_DEPTH`), and takes the
+nearest commit whose own `9700X compiler benchmark` check completed `success`
+(`compiler_github.measured`, `authorize_compiler.choose_base`). Normally that
+is the first parent, and nothing changes. After a burst, or after a failed
+measurement, it is an older main commit, and the comparison spans the range
+between them. Every unmeasured commit in the range is then covered:
+
+- The check, the commit report and the receipt name the range: `range` is
+  the number of first-parent commits it spans (`1` is the first parent alone)
+  and `first_parent` the commit's own first parent
+  (`compiler_receipt.range_label`). The publisher shows the authorized range,
+  and refuses a receipt whose host-recorded `coverage` disagrees with it.
+- `start-compiler` names that comparison on each skipped commit inside the
+  range: its check still reads **Not measured**, because it has no
+  measurement of its own.
+- A range result covers the whole range and does not isolate which commit
+  caused a change. To attribute it, request a pull-request comparison or run
+  `tools/uarch_lab.py compare` on the commits in question.
+
+Without a measured commit within reach (the first comparison after enabling,
+a long outage, or a run of failures longer than the bound), or when the check
+listing cannot be read, the first parent is the baseline and the older
+commits stay uncovered. A forged check could only move the baseline to
+another main commit on the chain, which is trusted code. The authorizer, the
+host harness and publication-only recovery each require the baseline to be
+on the commit's first-parent chain, never on a merged pull request's side.
 
 ## Check and commit report
 

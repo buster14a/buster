@@ -463,13 +463,16 @@ captures (#2741).
   [`benchmarks/9700x/README.md`](../../benchmarks/9700x/README.md) and its
   [admission guide](../../benchmarks/9700x/ADMISSION.md). Once enabled, it
   also runs the routine `uarch_lab.py compare` of each commit after it lands
-  on main against its first parent (#2752; frozen `compiler-compare-v1`
+  on main against its first parent, or against the nearest earlier measured
+  main commit when a merge burst left the first parent unmeasured (#2752;
+  frozen `compiler-compare-v1`
   profile, report-only, merging never waits). Each comparison is published as
   the `9700X compiler benchmark` check on that main commit, queued before the
   run starts and in progress while the 9700X measures (#2803), plus one
   maintained report comment on the commit (#2804). During merge bursts only
   the newest pending commit is measured; the others' checks read
-  **Not measured**. See the
+  **Not measured** and name the range comparison that covers their change.
+  A range result does not isolate one commit. See the
   [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
   An owner pull request can request the same comparison of its head against
   its merge base before merging by changing
