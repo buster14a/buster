@@ -1,0 +1,41 @@
+name: Hosted CI timing history
+
+on:
+  pull_request:
+    paths:
+      - 'tools/ci_metrics*'
+      - 'docs/ci-timing-history.md'
+      - '.github/workflows/ci-timing-history.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/ci_metrics*'
+      - 'docs/ci-timing-history.md'
+      - '.github/workflows/ci-timing-history.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Native CI history controls
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Compile native collector with warnings and sanitizers
+        run: |
+          clang -std=c11 -Isrc -O1 -g -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined tools/ci_metrics.c -lm -o "$RUNNER_TEMP/ci-metrics"
+          "$RUNNER_TEMP/ci-metrics" --self-test
+          gcc -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/ci_metrics.c -lm -o "$RUNNER_TEMP/ci-metrics-gcc"
+          "$RUNNER_TEMP/ci-metrics-gcc" --self-test
+      - name: Native source-size report
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-metrics-build"
+          "$RUNNER_TEMP/buster-metrics-build" source_size --write-baseline
+          cat docs/source-size-baseline.txt
+          "$RUNNER_TEMP/buster-metrics-build" source_size --base HEAD^1

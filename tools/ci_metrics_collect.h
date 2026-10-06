@@ -1,0 +1,505 @@
+// Finalized REST execution inventory and exact-job startup/source log joins.
+// cm_jobs pages attempt-specific inventories and checks every API binding.
+// cm_machine proves the pinned startup precedes checkout in the executed job;
+// ambiguous schemas, workflow ownership or source records stay unavailable.
+// Logs are a bounded fallback for reports already emitted by #2758, not probes.
+#ifndef BUSTER_CI_METRICS_COLLECT_H
+#define BUSTER_CI_METRICS_COLLECT_H
+#include "ci_metrics_model.h"
+#include "ci_metrics_io.h"
+#define CM_MAX_ATTEMPTS 20u
+#define CM_MAX_JOBS 1000u
+typedef struct CmCollection CmCollection;
+struct CmCollection
+{
+    CmTransport *transport;
+    CmStore *store;
+    const char *observed;
+    uint64_t selected_job;
+    unsigned executions, machine_verified, source_verified, skipped, failed;
+};
+BUSTER_GLOBAL_LOCAL const char *cm_machine_value(const CmJson *j, const char *key)
+{
+    unsigned field = cm_member(j, 1, key);
+    const char *result = cm_equal(cm_get(j, field, "status"), "available") ? cm_get(j, field, "value") : "";
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int cm_machine_schema(const CmJson *j, const char *schema)
+{
+    int result = j->valid && cm_equal(cm_machine_value(j, "schema"), schema);
+    unsigned count = 0;
+    for (unsigned key = j->valid ? j->tokens[1].child : 0; result && key; )
+    {
+        unsigned value = j->tokens[key].next;
+        result = value && j->tokens[value].kind == 'o' && ++count <= 64 &&
+            strlen(cm_get(j, value, "value")) <= CM_FIELD && strlen(cm_get(j, value, "reason")) <= CM_FIELD;
+        const char *status = cm_get(j, value, "status");
+        result = result && (cm_equal(status, "available") || cm_equal(status, "unknown") ||
+            cm_equal(status, "unavailable") || cm_equal(status, "not_applicable") || cm_equal(status, "partial"));
+        key = value ? j->tokens[value].next : 0;
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int cm_bindings(const CmJson *j, const CmRow *row, int source)
+{
+    uint64_t run = 0, attempt = 0;
+    int result = cm_unsigned(cm_machine_value(j, "run_id"), &run) &&
+        cm_unsigned(cm_machine_value(j, "run_attempt"), &attempt) && run == row->run &&
+        attempt == row->origin_attempt && cm_sha(cm_machine_value(j, "workflow_sha")) &&
+        cm_sha(cm_machine_value(j, "event_sha"));
+    if (source) result &= cm_equal(cm_machine_value(j, "source_repository"), CM_REPO);
+    return result;
+}
+BUSTER_GLOBAL_LOCAL char *cm_steps(const CmJson *j, unsigned job)
+{
+    FILE *file = tmpfile();
+    char *result = NULL;
+    if (file)
+    {
+        fputc('[', file); unsigned count = 0;
+        unsigned array = cm_member(j, job, "steps");
+        int valid = array && j->tokens[array].kind == 'a';
+        const char *keys[] = {"name", "status", "conclusion", "started_at", "completed_at"};
+        for (unsigned step = valid ? j->tokens[array].child : 0; valid && step; step = j->tokens[step].next)
+        {
+            valid = j->tokens[step].kind == 'o' && ++count <= 256;
+            if (valid)
+            {
+                if (count > 1) fputc(',', file);
+                fputc('{', file);
+                for (unsigned k = 0; k < sizeof(keys) / sizeof(keys[0]); ++k)
+                {
+                    if (k) fputc(',', file);
+                    cm_quote(file, keys[k]); fputc(':', file);
+                    const char *value = cm_get(j, step, keys[k]);
+                    valid &= strlen(value) <= CM_FIELD;
+                    cm_quote(file, value);
+                }
+                fputc('}', file);
+            }
+        }
+        fputc(']', file);
+        if (valid) result = cm_memory(file);
+        fclose(file);
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int cm_log_interval(const char *stamp, const char *start, const char *end)
+{
+    int64_t time = cm_time(stamp), a = cm_time(start), b = cm_time(end);
+    // REST endpoints have one-second resolution. Keep that uncertainty explicit.
+    int result = time >= 0 && a >= 0 && b >= a && time >= a && time <= b + 1;
+    return result;
+}
+BUSTER_GLOBAL_LOCAL char *cm_log_record(char *log, const char *marker, const char *start, const char *end, unsigned *count)
+{
+    char *result = NULL;
+    *count = 0;
+    for (char *line = log; line && *line; )
+    {
+        char *next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        char *space = strchr(line, ' ');
+        if (space)
+        {
+            *space = 0;
+            char *message = space + 1;
+            size_t length = strlen(message);
+            if (length && message[length - 1] == '\r') message[--length] = 0;
+            if (strncmp(message, marker, strlen(marker)) == 0 && cm_log_interval(line, start, end))
+            {
+                ++*count;
+                if (*count == 1 && length <= 32768) result = strdup(message + strlen(marker));
+            }
+            *space = ' ';
+        }
+        line = next;
+    }
+    if (*count != 1) { free(result); result = NULL; }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int cm_job_key(const char *key)
+{
+    int valid = key && key[0] && strlen(key) <= 128;
+    for (size_t i = 0; valid && key[i]; ++i)
+        valid = (key[i] >= 'a' && key[i] <= 'z') || (key[i] >= 'A' && key[i] <= 'Z') ||
+            (key[i] >= '0' && key[i] <= '9') || key[i] == '_' || key[i] == '-';
+    return valid;
+}
+BUSTER_GLOBAL_LOCAL int cm_workflow_startup(const char *workflow, const char *key, int *matrix_static)
+{
+    // Restricted repository block-YAML contract: no aliases, containers, injected
+    // loader/compiler environment, or action-selection expressions are admitted.
+    int valid = workflow && cm_job_key(key), found = 0, in_job = 0, steps = 0, first = 0, pinned = 0;
+    *matrix_static = 1;
+    char *copy = valid ? strdup(workflow) : NULL;
+    valid = valid && copy;
+    char declaration[160];
+    snprintf(declaration, sizeof(declaration), "  %s:", key);
+    for (char *line = copy; valid && line && *line; )
+    {
+        char *next = strchr(line, '\n'); if (next) *next++ = 0;
+        size_t indent = strspn(line, " ");
+        const char *text = line + indent;
+        if (strchr(line, '\t') || strstr(text, "LD_PRELOAD:") || strstr(text, "DYLD_") ||
+            strncmp(text, "PATH:", 5) == 0 || strncmp(text, "container:", 10) == 0 ||
+            strncmp(text, "defaults:", 9) == 0 || strncmp(text, "environment:", 12) == 0 ||
+            strncmp(text, "BASH_ENV:", 9) == 0 || strncmp(text, "ENV:", 4) == 0)
+            valid = 0;
+        if (strncmp(line, declaration, strlen(declaration)) == 0 && line[strlen(declaration)] == 0)
+        {
+            ++found; in_job = 1; steps = 0; first = 0; pinned = 0;
+        }
+        else if (in_job && indent <= 2 && text[0] && text[0] != '#') in_job = 0;
+        if (in_job)
+        {
+            if (strstr(text, "fromJSON(") || strstr(text, "fromJson(") || strstr(text, "needs.")) *matrix_static = 0;
+            if (indent == 4 && cm_equal(text, "steps:")) steps = 1;
+            else if (steps && indent == 6 && strncmp(text, "- ", 2) == 0)
+            {
+                if (first) steps = 0;
+                else { first = 1; valid &= cm_equal(text, "- name: Machine specifications"); }
+            }
+            else if (steps && first && indent == 8)
+            {
+                if (cm_equal(text, "uses: buster14a/buster/.github/actions/machine-specifications@" CM_REPORTER)) pinned = 1;
+                else if (strncmp(text, "uses:", 5) == 0 || strncmp(text, "run:", 4) == 0 ||
+                         strncmp(text, "env:", 4) == 0 || strncmp(text, "if:", 3) == 0) valid = 0;
+            }
+            else if (steps && first && indent >= 10 && strncmp(text, "mode:", 5) == 0) valid = 0;
+        }
+        line = next;
+    }
+    valid = valid && found == 1 && first && pinned;
+    free(copy);
+    return valid;
+}
+BUSTER_GLOBAL_LOCAL int cm_workflow_path(char *out, size_t size, const char *ref)
+{
+    const char *prefix = CM_REPO "/";
+    int valid = strncmp(ref, prefix, strlen(prefix)) == 0;
+    const char *begin = ref + (valid ? strlen(prefix) : 0);
+    const char *at = strchr(begin, '@');
+    size_t length = at ? (size_t)(at - begin) : 0;
+    valid = valid && length > 0 && length < size;
+    if (valid)
+    {
+        memcpy(out, begin, length); out[length] = 0;
+        valid = cm_path(out) && strncmp(out, ".github/workflows/", 18) == 0 &&
+            strlen(out) >= 4 && cm_equal(out + strlen(out) - 4, ".yml");
+    }
+    return valid;
+}
+BUSTER_GLOBAL_LOCAL int cm_workflow_proof(CmCollection *c, const CmJson *machine, CmRow *row, char fields[CM_FIELD_COUNT][CM_FIELD + 1])
+{
+    char path[512], endpoint[1024];
+    const char *key = cm_machine_value(machine, "job"), *revision = cm_machine_value(machine, "workflow_sha");
+    int valid = cm_job_key(key) && cm_workflow_path(path, sizeof(path), cm_machine_value(machine, "workflow_ref")) && cm_sha(revision);
+    if (valid)
+    {
+        snprintf(endpoint, sizeof(endpoint), "contents/%s?ref=%s", path, revision);
+        CmJson content = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
+        const char *blob = cm_get(&content, 1, "sha");
+        char blob_sha[41]; cm_copy(blob_sha, sizeof(blob_sha), blob);
+        valid = content.valid && cm_sha(blob_sha); cm_json_free(&content);
+        char *workflow = NULL;
+        if (valid) valid = cm_api(c->transport, endpoint, "GET", NULL, 1, &workflow, NULL);
+        int static_matrix = 0;
+        valid = valid && cm_workflow_startup(workflow, key, &static_matrix);
+        if (valid)
+        {
+            cm_copy(fields[CM_WORKFLOW], CM_FIELD + 1, path);
+            cm_copy(fields[CM_JOB_KEY], CM_FIELD + 1, key);
+            cm_copy(fields[CM_WORKFLOW_SHA], CM_FIELD + 1, revision);
+            cm_copy(fields[CM_WORKFLOW_BLOB], CM_FIELD + 1, blob_sha);
+            const char *index = cm_machine_value(machine, "matrix_index");
+            unsigned field = cm_member(machine, 1, "matrix_index");
+            uint64_t ordinal = 0;
+            if (cm_unsigned(index, &ordinal) && ordinal < 256 && static_matrix)
+                snprintf(fields[CM_MATRIX], CM_FIELD + 1, "definition:%s/cell:%" PRIu64, blob_sha, ordinal);
+            else if (cm_equal(cm_get(machine, field, "status"), "not_applicable"))
+                cm_copy(fields[CM_MATRIX], CM_FIELD + 1, "non-matrix");
+            else cm_copy(fields[CM_MATRIX], CM_FIELD + 1, "unavailable-dynamic-or-reusable-matrix");
+            // Dynamic inputs and reusable invocation context cannot be guessed.
+            cm_copy(fields[CM_INVOCATION], CM_FIELD + 1, "unavailable-caller-context");
+            row->s[CM_HARDWARE] = "verified-startup";
+        }
+        free(workflow);
+    }
+    return valid;
+}
+BUSTER_GLOBAL_LOCAL int cm_machine(CmCollection *c, const CmJson *jobs, unsigned job, CmRow *row,
+    char fields[CM_FIELD_COUNT][CM_FIELD + 1])
+{
+    unsigned steps = cm_member(jobs, job, "steps"), startup = 0, source_step = 0, startup_count = 0;
+    unsigned step_index = 0;
+    for (unsigned step = steps ? jobs->tokens[steps].child : 0; step; step = jobs->tokens[step].next)
+    {
+        ++step_index;
+        if (cm_equal(cm_get(jobs, step, "name"), "Machine specifications"))
+        {
+            startup = step; ++startup_count;
+            if (step_index != 2) startup_count += 2;
+        }
+        if (cm_equal(cm_get(jobs, step, "name"), "Record actual checkout identity")) source_step = step;
+    }
+    int valid = startup_count == 1 && cm_equal(cm_get(jobs, startup, "conclusion"), "success");
+    char endpoint[256], *log = NULL;
+    if (valid)
+    {
+        snprintf(endpoint, sizeof(endpoint), "actions/jobs/%" PRIu64 "/logs", row->job);
+        valid = cm_api(c->transport, endpoint, "GET", NULL, 0, &log, NULL);
+    }
+    if (valid)
+    {
+        char *original_log = strdup(log);
+        unsigned count = 0;
+        char *record = cm_log_record(log, "MACHINE_SPECIFICATIONS_JSON ",
+            cm_get(jobs, startup, "started_at"), cm_get(jobs, startup, "completed_at"), &count);
+        CmJson machine = cm_json_parse(record ? record : "", record ? strlen(record) : 0);
+        valid = cm_machine_schema(&machine, "buster-machine-specifications-v1") && cm_bindings(&machine, row, 0);
+        if (valid) valid = cm_workflow_proof(c, &machine, row, fields);
+        if (valid)
+        {
+            const struct { unsigned to; const char *from; } mapping[] =
+            {
+                {CM_HOSTING, "runner_class"}, {CM_CPU_RAW, "cpu_model"}, {CM_OS, "os_name"},
+                {CM_OS_VERSION, "os_version"}, {CM_KERNEL, "kernel_release"}, {CM_ARCH, "machine_arch"},
+                {CM_PROCESS_ARCH, "process_arch"}, {CM_EFFECTIVE_CPU, "cpu_process_available"},
+                {CM_QUOTA, "cpu_quota"}, {CM_MEMORY, "memory_limit_bytes"}, {CM_IMAGE, "runner_image"},
+                {CM_IMAGE_VERSION, "runner_image_version"}, {CM_EXECUTION_CONTEXT, "execution_context"}
+            };
+            for (unsigned i = 0; i < sizeof(mapping) / sizeof(mapping[0]); ++i)
+                cm_copy(fields[mapping[i].to], CM_FIELD + 1, cm_machine_value(&machine, mapping[i].from));
+            cm_normalize(fields[CM_CPU], CM_FIELD + 1, fields[CM_CPU_RAW]);
+            if (strstr(fields[CM_LABELS], "self-hosted") && !cm_equal(fields[CM_HOSTING], "self-hosted")) fields[CM_CPU][0] = 0;
+            valid = fields[CM_CPU][0] && (cm_equal(fields[CM_HOSTING], "github-hosted") ||
+                cm_equal(fields[CM_HOSTING], "self-hosted"));
+            if (valid)
+            {
+                row->s[CM_MACHINE_JSON] = cm_keep(c->store, record);
+                valid = row->s[CM_MACHINE_JSON] != NULL;
+                ++c->machine_verified;
+                if (original_log && source_step)
+                {
+                    unsigned source_count = 0;
+                    char *source = cm_log_record(original_log, "MACHINE_SOURCE_IDENTITY_JSON ",
+                        cm_get(jobs, source_step, "started_at"), cm_get(jobs, source_step, "completed_at"), &source_count);
+                    CmJson identity = cm_json_parse(source ? source : "", source ? strlen(source) : 0);
+                    int source_valid = cm_machine_schema(&identity, "buster-machine-source-identity-v1") &&
+                        cm_bindings(&identity, row, 1) &&
+                        cm_equal(cm_machine_value(&identity, "job"), cm_machine_value(&machine, "job")) &&
+                        cm_equal(cm_machine_value(&identity, "workflow_sha"), cm_machine_value(&machine, "workflow_sha")) &&
+                        cm_sha(cm_machine_value(&identity, "tested_source_sha"));
+                    if (source_valid)
+                    {
+                        row->s[CM_SOURCE_JSON] = cm_keep(c->store, source);
+                        source_valid = row->s[CM_SOURCE_JSON] != NULL;
+                        cm_copy(fields[CM_TESTED_SHA], CM_FIELD + 1, cm_machine_value(&identity, "tested_source_sha"));
+                        snprintf(endpoint, sizeof(endpoint), "git/commits/%s", fields[CM_TESTED_SHA]);
+                        CmJson commit = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
+                        const char *tree = cm_get(&commit, cm_member(&commit, 1, "tree"), "sha");
+                        if (commit.valid && cm_sha(tree))
+                        {
+                            cm_copy(fields[CM_TESTED_TREE], CM_FIELD + 1, tree); ++c->source_verified;
+                        }
+                        cm_json_free(&commit);
+                    }
+                    cm_json_free(&identity); free(source);
+                }
+            }
+        }
+        if (!valid)
+        {
+            row->s[CM_HARDWARE] = "unavailable-or-conflicting-startup";
+            const unsigned clear[] = {CM_CPU_RAW, CM_CPU, CM_HOSTING, CM_OS, CM_OS_VERSION, CM_KERNEL,
+                CM_ARCH, CM_PROCESS_ARCH, CM_EFFECTIVE_CPU, CM_QUOTA, CM_MEMORY, CM_IMAGE, CM_IMAGE_VERSION, CM_EXECUTION_CONTEXT};
+            for (unsigned i = 0; i < sizeof(clear) / sizeof(clear[0]); ++i) fields[clear[i]][0] = 0;
+        }
+        cm_json_free(&machine); free(record); free(original_log);
+    }
+    free(log);
+    return valid;
+}
+BUSTER_GLOBAL_LOCAL int cm_seen_job(const CmStore *s, uint64_t run, uint64_t job, uint64_t attempt, int complete)
+{
+    int result = 0;
+    for (unsigned i = 0; i < s->count && !result; ++i)
+    {
+        const CmRow *r = &s->rows[i];
+        if (r->active && r->run == run && r->job == job && r->attempt == attempt)
+            result = !complete || !cm_equal(r->s[CM_KIND], "executed") || cm_equal(r->s[CM_HARDWARE], "verified-startup");
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int cm_collect_job(CmCollection *c, const CmJson *j, unsigned job, const CmJson *run, uint64_t attempt)
+{
+    CmRow row = {0};
+    char fields[CM_FIELD_COUNT][CM_FIELD + 1];
+    memset(fields, 0, sizeof(fields));
+    for (unsigned i = 0; i < CM_FIELD_COUNT; ++i) row.s[i] = fields[i];
+    row.run = cm_number(run, 1, "id"); row.job = cm_number(j, job, "id"); row.attempt = attempt;
+    row.origin_job = row.job; row.origin_attempt = attempt;
+    int valid = row.run && row.job && cm_number(j, job, "run_id") == row.run &&
+        cm_number(j, job, "run_attempt") == attempt && cm_equal(cm_get(j, job, "head_sha"), cm_get(run, 1, "head_sha")) &&
+        cm_equal(cm_get(j, job, "status"), "completed");
+    if (valid && (!c->selected_job || c->selected_job == row.job) &&
+        !cm_seen_job(c->store, row.run, row.job, attempt, 1))
+    {
+        const struct { unsigned to; const char *from; int in_run; } mapping[] =
+        {
+            {CM_NAME, "name", 0}, {CM_EVENT, "event", 1}, {CM_HEAD_BRANCH, "head_branch", 1},
+            {CM_EVENT_SHA, "head_sha", 1}, {CM_WORKFLOW, "path", 1}, {CM_CONCLUSION, "conclusion", 0},
+            {CM_STARTED, "started_at", 0}, {CM_COMPLETED, "completed_at", 0},
+            {CM_RUN_CONCLUSION, "conclusion", 1}, {CM_CREATED, "created_at", 1}
+        };
+        for (unsigned i = 0; valid && i < sizeof(mapping) / sizeof(mapping[0]); ++i)
+        {
+            const char *value = cm_get(mapping[i].in_run ? run : j, mapping[i].in_run ? 1 : job, mapping[i].from);
+            valid = strlen(value) <= CM_FIELD;
+            if (valid) cm_copy(fields[mapping[i].to], CM_FIELD + 1, value);
+        }
+        cm_copy(fields[CM_OBSERVED], CM_FIELD + 1, c->observed);
+        cm_copy(fields[CM_COLLECTOR], CM_FIELD + 1, c->transport->revision);
+        cm_copy(fields[CM_CONTEXT_STATUS], CM_FIELD + 1, "incomplete-producer-context");
+        cm_copy(fields[CM_KIND], CM_FIELD + 1, "executed");
+        cm_copy(fields[CM_HARDWARE], CM_FIELD + 1, "missing-startup-report");
+        cm_copy(fields[CM_ALIAS], CM_FIELD + 1, "physical-execution");
+        char *steps = valid ? cm_steps(j, job) : NULL;
+        valid = valid && steps && strlen(steps) <= 65536;
+        if (valid)
+        {
+            row.s[CM_STEPS] = steps;
+            unsigned labels = cm_member(j, job, "labels"); unsigned used = 0;
+            for (unsigned label = labels ? j->tokens[labels].child : 0; label; label = j->tokens[label].next)
+            {
+                const char *text = cm_value(j, label);
+                if (cm_equal(text, "self-hosted")) cm_copy(fields[CM_HOSTING], CM_FIELD + 1, "self-hosted");
+                size_t n = strlen(text);
+                if (n + used + 2 < CM_FIELD) { if (used) fields[CM_LABELS][used++] = ','; memcpy(fields[CM_LABELS] + used, text, n + 1); used += (unsigned)n; }
+                else valid = 0;
+            }
+            if (cm_equal(fields[CM_CONCLUSION], "skipped") && cm_number(j, job, "runner_id") == 0)
+            { cm_copy(fields[CM_KIND], CM_FIELD + 1, "skipped"); ++c->skipped; }
+            else if (!cm_number(j, job, "runner_id") && cm_equal(steps, "[]"))
+                cm_copy(fields[CM_KIND], CM_FIELD + 1, "controller-metadata");
+            else
+            {
+                unsigned array = cm_member(j, job, "steps");
+                for (unsigned step = array ? j->tokens[array].child : 0; step; step = j->tokens[step].next)
+                    if (cm_equal(cm_get(j, step, "name"), "Defer macOS runner lane for draft pull request") &&
+                        cm_equal(cm_get(j, step, "conclusion"), "success")) cm_copy(fields[CM_KIND], CM_FIELD + 1, "draft-deferral");
+                row.elapsed_available = cm_span(fields[CM_STARTED], fields[CM_COMPLETED], &row.seconds);
+                unsigned matches = 0; const CmRow *origin = NULL;
+                for (unsigned i = 0; i < c->store->count; ++i)
+                {
+                    const CmRow *earlier = &c->store->rows[i];
+                    if (earlier->active && earlier->job == earlier->origin_job && cm_alias(&row, earlier))
+                    { ++matches; origin = earlier; }
+                }
+                if (matches == 1)
+                {
+                    row.origin_job = origin->origin_job; row.origin_attempt = origin->origin_attempt;
+                    cm_copy(fields[CM_ALIAS], CM_FIELD + 1, "exact-carried-forward-fields");
+                    // Reuse the independently verified original receipt, never rejoin by display name.
+                    for (unsigned i = CM_JOB_KEY; i <= CM_WORKERS; ++i)
+                        if (i != CM_NAME && i != CM_EVENT && i != CM_HEAD_BRANCH && i != CM_EVENT_SHA)
+                            row.s[i] = origin->s[i];
+                }
+                else if (matches > 1)
+                {
+                    row.origin_job = 0; row.origin_attempt = 0; row.elapsed_available = 0;
+                    cm_copy(fields[CM_KIND], CM_FIELD + 1, "unresolved-alias");
+                    cm_copy(fields[CM_ALIAS], CM_FIELD + 1, "ambiguous-carried-forward-fields"); ++c->store->gaps;
+                }
+                else
+                {
+                    cm_machine(c, j, job, &row, fields);
+                    ++c->executions;
+                }
+            }
+            if (valid) valid = cm_add(c->store, &row) != 0;
+        }
+        free(steps);
+    }
+    return valid;
+}
+BUSTER_GLOBAL_LOCAL int cm_collect_run(CmCollection *c, uint64_t id)
+{
+    char endpoint[512];
+    snprintf(endpoint, sizeof(endpoint), "actions/runs/%" PRIu64, id);
+    CmJson run = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
+    uint64_t attempts = cm_number(&run, 1, "run_attempt");
+    int valid = run.valid && cm_number(&run, 1, "id") == id &&
+        cm_equal(cm_get(&run, cm_member(&run, 1, "repository"), "full_name"), CM_REPO) &&
+        cm_equal(cm_get(&run, 1, "status"), "completed") && attempts > 0 && attempts <= CM_MAX_ATTEMPTS;
+    for (uint64_t attempt = 1; valid && attempt <= attempts; ++attempt)
+    {
+        uint64_t total = UINT64_MAX, seen[CM_MAX_JOBS];
+        unsigned count = 0;
+        for (unsigned page = 1; valid && count < total; ++page)
+        {
+            snprintf(endpoint, sizeof(endpoint), "actions/runs/%" PRIu64 "/attempts/%" PRIu64 "/jobs?per_page=100&page=%u", id, attempt, page);
+            CmJson jobs = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
+            uint64_t declared = cm_number(&jobs, 1, "total_count");
+            unsigned array = cm_member(&jobs, 1, "jobs");
+            valid = jobs.valid && array && jobs.tokens[array].kind == 'a' && declared <= CM_MAX_JOBS &&
+                (total == UINT64_MAX || total == declared);
+            total = declared;
+            unsigned chunk = 0;
+            for (unsigned job = valid ? jobs.tokens[array].child : 0; valid && job; job = jobs.tokens[job].next)
+            {
+                uint64_t job_id = cm_number(&jobs, job, "id");
+                valid = job_id && count < total && count < CM_MAX_JOBS && ++chunk <= 100;
+                for (unsigned i = 0; valid && i < count; ++i) valid = seen[i] != job_id;
+                if (valid) { seen[count++] = job_id; valid = cm_collect_job(c, &jobs, job, &run, attempt); }
+            }
+            valid = valid && (count == total || chunk == 100);
+            cm_json_free(&jobs);
+        }
+    }
+    if (!valid) { ++c->store->gaps; ++c->store->incomplete_runs; ++c->failed; }
+    cm_json_free(&run);
+    return valid;
+}
+BUSTER_GLOBAL_LOCAL int cm_collect_recent(CmCollection *c, unsigned days, unsigned max_runs)
+{
+    time_t since = time(NULL) - (time_t)days * 86400;
+    struct tm utc; gmtime_r(&since, &utc);
+    char stamp[32]; strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    char endpoint[512];
+    unsigned count = 0;
+    uint64_t seen[1000];
+    int valid = 1;
+    uint64_t total = UINT64_MAX;
+    for (unsigned page = 1; valid && count < total && count < max_runs; ++page)
+    {
+        snprintf(endpoint, sizeof(endpoint), "actions/runs?status=completed&created=%%3E%%3D%s&per_page=100&page=%u", stamp, page);
+        CmJson runs = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
+        unsigned array = cm_member(&runs, 1, "workflow_runs");
+        uint64_t declared = cm_number(&runs, 1, "total_count");
+        valid = runs.valid && array && runs.tokens[array].kind == 'a' && declared <= 1000;
+        if (total != UINT64_MAX && total != declared) { ++c->store->gaps; valid = 0; }
+        total = declared;
+        unsigned chunk = 0;
+        for (unsigned run = valid ? runs.tokens[array].child : 0; valid && run && count < max_runs; run = runs.tokens[run].next)
+        {
+            uint64_t id = cm_number(&runs, run, "id");
+            valid = id && count < 1000 && ++chunk <= 100;
+            for (unsigned i = 0; valid && i < count; ++i) valid = seen[i] != id;
+            if (valid)
+            {
+                seen[count++] = id;
+                // All terminal workflows, including failures/cancellations; never dispatch workloads.
+                if (!cm_equal(cm_get(&runs, run, "name"), "Hosted CI timing history"))
+                    cm_collect_run(c, id);
+                if (cm_clock() >= c->transport->deadline) valid = 0;
+            }
+        }
+        if (count < total && count < max_runs && chunk != 100) valid = 0;
+        cm_json_free(&runs);
+    }
+    if (!valid || count < total) ++c->store->gaps;
+    return valid && count >= total;
+}
+#endif
