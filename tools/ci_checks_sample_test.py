@@ -130,7 +130,8 @@ class SampleTests(unittest.TestCase):
         self.assertEqual(manifest["mode"], "groups")
         self.assertEqual(manifest["test_workers"], 4)
         self.assertEqual(len(result["census"]), 2)
-        mismatched_inventory = inventory_path.read_bytes().replace(
+        original_inventory = inventory_path.read_bytes()
+        mismatched_inventory = original_inventory.replace(
             b"module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=primary",
             b"module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=rest").replace(
             b"module=compiler_driver_tests table_audit=0 enabled=1 selected=0 group=rest",
@@ -138,8 +139,14 @@ class SampleTests(unittest.TestCase):
         inventory_path.write_bytes(mismatched_inventory)
         observation["inventory_sha256"] = hashlib.sha256(mismatched_inventory).hexdigest()
         observation_path.write_text(json.dumps(observation) + "\n")
+        observation_reference = observation_path.relative_to(self.root).as_posix()
+        for evidence in generated["tests"]:
+            if evidence["observation"]["path"] == observation_reference:
+                evidence["observation"] = fixtures.reference(self.root, observation_reference, observation)
         with self.assertRaisesRegex(ValueError, "independent inventory primary"):
             self.validate(generated, condition)
+        inventory_path.write_bytes(original_inventory)
+        observation["inventory_sha256"] = hashlib.sha256(original_inventory).hexdigest()
         log_path.write_text("\n".join(lines[1:]) + "\n")
         observation["log_sha256"] = hashlib.sha256(log_path.read_bytes()).hexdigest()
         observation_path.write_text(json.dumps(observation) + "\n")
