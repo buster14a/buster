@@ -19,8 +19,10 @@ a complete format-conformance or bootability claim.
 and its module closure (see the [repository map](../agents/project.md)). On Linux
 it is a default target and a `test_all` dependency, so a source that stops
 compiling fails the normal build under Clang and GCC with warnings as errors.
-Windows and Apple configurations do not build it yet; their compile has never
-been checked. That only
+Fuzz-enabled trees (the Linux Release and sanitized Release CI shards) skip it,
+because `entry_point.c` then needs the libFuzzer driver that only Buster programs
+link; the Linux portability shard still compiles it. Windows and Apple
+configurations do not build it yet; their compile has never been checked. That only
 establishes that the source compiles: the tool is not run by CI and has no
 focused test. When run from the repository root it reads
 `build/minimal_fat32.img` as the reference image, writes `build/mine.img` and

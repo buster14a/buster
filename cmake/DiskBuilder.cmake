@@ -3,7 +3,10 @@
 # depends on it so the normal compiler-test route cannot go green with a source
 # that no longer builds. It is not run: it reads and writes build/*.img.
 # Only Linux hosts validate it today; Windows and Apple builds are unverified.
-if (BUSTER_LINK_LIBC AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# Fuzz-enabled trees are skipped: entry_point.c then references the libFuzzer
+# driver and buster_fuzz_test_input, which only Buster programs link; the
+# Linux portability trees (GCC, Zig, non-unity) still compile-check it.
+if (BUSTER_LINK_LIBC AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUSTER_FUZZ_AVAILABLE)
     # entry_point.c detects the CPU model through the architecture module.
     if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
         set(BUSTER_DISK_BUILDER_ARCHITECTURE_MODULE aarch64)
