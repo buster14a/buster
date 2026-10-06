@@ -56,6 +56,8 @@
 // unresolved half/quad helper calls after explicit library exports are known.
 // compiler_driver_publish_slices preserves atomic artifacts and write failures;
 // execute_invocation normalizes textual -o - before choosing a pipeline.
+// A lone `-` input is admitted by the parser only as C source; execute_c_single
+// reads its text from CompilerDriverInvocation.standard_input.
 
 // compiler_driver_elf_shared_is_incompatible keeps alien shared candidates
 // from hiding usable archives during that ordered search.
@@ -1383,10 +1385,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     // image, kept for the diagnostic on a target with no writer for one.
     String8 position_independent_image_option = {0};
     bool common_storage_requested = false;
+    bool static_link_requested = false;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
-        if (options_ended || !argument.length || argument.pointer[0] != '-')
+        // A lone `-` names standard input, as it does for GCC and Clang.
+        if (options_ended || !argument.length || argument.pointer[0] != '-' || argument.length == 1)
         {
             u32 input_index = invocation.input_count++;
             invocation.input_paths[input_index] = argument;
@@ -2012,6 +2016,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             architecture_option = value;
             continue;
         }
+        // -mtune selects a scheduling model without changing the ISA or the
+        // ABI. Instruction selection here has no per-CPU tuning, so every
+        // spelling, native included, already describes the code it emits.
+        if (compiler_driver_option_value(argument, S8("-mtune=")).length)
+        {
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-mattr=")))
         {
             value = string_slice(argument, S8("-mattr=").length, argument.length);
@@ -2151,6 +2162,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             position_independent_executable_model = false;
             continue;
         }
+        // A static executable would carry libc's archive members and their
+        // own startup in place of the dynamic loader, and no writer here
+        // produces one: hosted ELF links import libc.so.6. Compiling alone
+        // ignores the link option as GCC does; a link refuses it below.
+        if (string_equal(argument, S8("-static")))
+        {
+            static_link_requested = true;
+            continue;
+        }
         // The image a link produces. -shared outranks -pie wherever the two
         // meet, as it does for GCC; -no-pie returns to the fixed-address
         // executable only from -pie.
@@ -2196,6 +2216,34 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), argument);
         break;
     }
+    // Standard input has no suffix to classify, so, as for Clang, it needs an
+    // explicit C language or -E, which reads it as C source. It is one stream
+    // and can be consumed once.
+    u32 standard_input_count = 0;
+    for (u32 input_index = 0; input_index < invocation.input_count && invocation.error == COMPILER_DRIVER_ERROR_NONE; input_index += 1)
+    {
+        if (string_equal(invocation.input_paths[input_index], S8("-")))
+        {
+            standard_input_count += 1;
+            if (invocation.input_languages[input_index] == COMPILER_DRIVER_LANGUAGE_AUTOMATIC &&
+                invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+            {
+                invocation.input_languages[input_index] = COMPILER_DRIVER_LANGUAGE_C;
+            }
+            if (standard_input_count > 1)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("standard input {S8} can be named only once"), S8("-"));
+            }
+            else if (invocation.input_languages[input_index] == COMPILER_DRIVER_LANGUAGE_AUTOMATIC)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("-E or -x c is required when input is from standard input {S8}"), S8("-"));
+            }
+            else if (!compiler_driver_c_input(invocation.input_languages[input_index], S8("-")))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("standard input {S8} is supported only for C source"), S8("-"));
+            }
+        }
+    }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {
         if (invocation.has_gpu_target)
@@ -2226,6 +2274,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.dump_macros && invocation.has_gpu_target && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for a GPU target"), S8("-dM"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && static_link_requested && invocation.action == COMPILER_DRIVER_ACTION_LINK)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} (static executables are not linked; hosted links import libc dynamically)"),
+                                       S8("-static"));
     }
     compiler_driver_validate_spirv_invocation(&invocation);
     // Only the x86-64 Linux writer places a position-independent image. The
@@ -4516,7 +4569,15 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = S8("the C frontend currently requires exactly one C input");
         goto end;
     }
-    source_file = file_map_read(arena, invocation.input_paths[0], (FileReadOptions){0});
+    // The `-` input arrives already read; it has no file identity.
+    if (string_equal(invocation.input_paths[0], S8("-")))
+    {
+        source_file.bytes = (ByteSlice){.pointer = (u8*)invocation.standard_input.pointer, .length = invocation.standard_input.length};
+    }
+    else
+    {
+        source_file = file_map_read(arena, invocation.input_paths[0], (FileReadOptions){0});
+    }
     ByteSlice bytes = source_file.bytes;
     if (!bytes.pointer)
     {
