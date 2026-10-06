@@ -104,7 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 ios/gnu_timeout_test.py -v 2>&1 | tee "$RUNNER_TEMP/ios-gnu-timeout.log"
-          python3 tests/ios_launch_trace_test.py -v
+          python3 ios/launch_trace_test.py -v
+          /bin/bash ios/launch_trace_monitor_test.sh
           python3 ios/monitor_workflow_test.py -v 2>&1 | tee "$RUNNER_TEMP/ios-monitor-workflow.log"
       - name: Exercise mobile script and attached monitor lifecycles
         id: lifecycle

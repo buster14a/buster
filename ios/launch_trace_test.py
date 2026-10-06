@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -53,7 +54,11 @@ class LaunchTraceTests(unittest.TestCase):
         cls.binaries = {}
         for fault in (0, 1):
             binary = source.with_name(f"trace-{fault}")
+            # Darwin's sysctl headers expose BSD types used by system_headers;
+            # strict POSIX-only visibility hides them in this standalone harness.
+            platform_flags = ["-D_DARWIN_C_SOURCE"] if sys.platform == "darwin" else []
             subprocess.run([compiler, "-std=c11", "-D_POSIX_C_SOURCE=200809L",
+                            *platform_flags,
                             f"-DTRACE_CLOCK_FAILURE={fault}", "-Wall", "-Wextra", "-Werror",
                             "-Wno-unused-function", "-Wno-unused-variable", "-fwrapv",
                             "-fno-strict-aliasing", "-funsigned-char", f"-I{ROOT / 'src'}",

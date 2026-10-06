@@ -252,8 +252,10 @@
   and app wall time with host log receipt to investigate console delay (wall
   clocks can adjust). No record proves a cause for a historical timeout or
   changes marker acceptance, process ownership or the launch deadline.
-  `python3 tests/ios_launch_trace_test.py -v` executes the native producer with
-  host POSIX clocks; UIKit and actual simulator acceptance remain in mobile CI.
+  `python3 ios/launch_trace_test.py -v` executes the native producer with
+  host POSIX clocks. `bash ios/launch_trace_monitor_test.sh` checks delayed
+  receipt and trace-only deadline rejection without modifying the frozen shared
+  fixtures; UIKit and actual simulator acceptance remain in mobile CI.
   Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;

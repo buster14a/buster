@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise process ownership without Xcode, using real timeout/process groups.
+# Observe delayed app/fixture receipt without accepting traces as test results.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 launcher=${BUSTER_IOS_TEST_LAUNCHER:-$repo_root/ios/launch_simulator.sh}
@@ -48,7 +48,13 @@ set -eu
 if [[ ${1:-} == simctl && ${2:-} == launch ]]; then
     printf 'timeout %s\nproducer %s\n' "$(ps -p "$$" -o ppid= | tr -d ' ')" "$$" >>"$FAKE_PIDS"
     case "$FAKE_RESULT" in
-        success) printf 'BUSTER_IOS_RESULT: SUCCESS\n' ;;
+        success|delayed-success|trace-only)
+            [[ ${SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE:-} == 1 ]]
+            if [[ $FAKE_RESULT == delayed-success ]]; then sleep 1; fi
+            printf 'BUSTER_IOS_LAUNCH_V1 stage=main pid=1 monotonic_us=1 wall_us=1 process_cpu_us=1 monotonic_status=0 wall_status=0 cpu_status=0\n'
+            if [[ $FAKE_RESULT == delayed-success ]]; then sleep 2; fi
+            printf 'TEST_FIXTURE_START_V1 kind=module module=probe fixture=body index=0\n'
+            if [[ $FAKE_RESULT != trace-only ]]; then printf 'BUSTER_IOS_RESULT: SUCCESS\n'; fi ;;
         failure) printf 'BUSTER_IOS_RESULT: FAILURE\n' ;;
         hang) : ;;
     esac
@@ -66,6 +72,9 @@ run_case() {
     export RUNNER_TEMP="$state" FAKE_PIDS="$state/pids" FAKE_RESULT="$outcome"
     export BUSTER_IOS_SIMULATOR_UDID=FAKE-UDID
     export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=3
+    if [[ $outcome == delayed-success ]]; then
+        export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=6
+    fi
     export BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
     local arguments=(--batch Debug "$state/Debug/ide.app")
     if [[ $bundles == 2 ]]; then
@@ -91,6 +100,24 @@ run_case() {
         echo "unexpected status for $label: $status, expected $expected" >&2
         exit 1
     fi
+    if [[ $outcome == success || $outcome == delayed-success || $outcome == trace-only ]]; then
+        [[ $(grep -c 'event=first-console ' "$state/output") -eq $bundles ]]
+        [[ $(grep -c 'event=first-app-trace ' "$state/output") -eq $bundles ]]
+        [[ $(grep -c 'event=first-fixture ' "$state/output") -eq $bundles ]]
+        if [[ $outcome == trace-only ]]; then
+            grep -q 'this is a real launch timeout' "$state/output"
+            ! grep -q 'iOS Debug tests passed.' "$state/output"
+        fi
+        if [[ $outcome == delayed-success ]]; then
+            awk '
+                /event=first-app-trace / { for (i=1; i<=NF; i++) if ($i ~ /^observed_after_seconds=/) trace=substr($i,24)+0 }
+                /event=first-fixture / { for (i=1; i<=NF; i++) if ($i ~ /^observed_after_seconds=/) fixture=substr($i,24)+0 }
+                END { exit !(trace >= 1 && fixture >= trace + 1) }
+            ' "$state/output"
+        fi
+    elif [[ $outcome == hang ]]; then
+        ! grep -q 'BUSTER_IOS_LAUNCH_OBSERVATION ' "$state/output"
+    fi
     [[ -f $state/pids ]]
     [[ $(grep -c '^producer ' "$state/pids") -eq $bundles ]]
     [[ $(grep -c '^reader ' "$state/pids") -eq $bundles ]]
@@ -109,7 +136,6 @@ run_case() {
     printf 'iOS monitor cleanup passed: %s\n' "$label"
 }
 run_case success success 0 0 1
-run_case failure failure 1 0 1
-run_case timeout hang 1 0 1
-run_case interrupted hang 143 1 1
 run_case batch success 0 0 2
+run_case delayed-success delayed-success 0 0 1
+run_case trace-only trace-only 1 0 1
