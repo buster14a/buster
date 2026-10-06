@@ -33683,7 +33683,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // basic_c_complex_division.c adds the scaled division and its Annex G
     // recoveries, in static initializers and in run-time code, whose branches
     // and stack slots each allocator places differently.
-    String8 c_complex_fixtures[] = {S8("tests/basic_c_complex_arithmetic.c"), S8("tests/basic_c_complex_division.c")};
+    String8 c_complex_fixtures[] = {S8("tests/basic_c_complex_arithmetic.c"), S8("src/buster/tests/compiler/driver/fixtures/basic_c_complex_division.c")};
     for (u64 complex_case = 0; complex_case < BUSTER_ARRAY_LENGTH(c_complex_fixtures) * BUSTER_ARRAY_LENGTH(c_complex_allocators); complex_case += 1)
     {
         u64 fixture_index = complex_case / BUSTER_ARRAY_LENGTH(c_complex_allocators);

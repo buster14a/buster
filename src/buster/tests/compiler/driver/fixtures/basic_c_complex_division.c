@@ -98,7 +98,7 @@ typedef unsigned char Byte;
     } \
     static int P##_same(T first, T second) \
     { \
-        unsigned long used = sizeof(T) == 16 ? 10 : sizeof(T); \
+        unsigned long used = sizeof(T) == 16 && __LDBL_MANT_DIG__ == 64 ? 10 : sizeof(T); \
         int same = (first != first) && (second != second); \
         if (first == first && second == second) \
         { \
@@ -123,7 +123,7 @@ typedef unsigned char Byte;
 
 DEFINE_DIVISION(float_division, float, 3.0e38f, 1.5e-38f, (3.0e38f * 3.0e38f))
 DEFINE_DIVISION(double_division, double, 1e308, 1e-308, (1e308 * 1e308))
-DEFINE_DIVISION(long_double_division, long double, 1e4932L, 1e-4932L, (1e4932L * 1e4932L))
+DEFINE_DIVISION(long_double_division, long double, __LDBL_MAX__, __LDBL_MIN__, (__LDBL_MAX__ * __LDBL_MAX__))
 
 int main(void)
 {
