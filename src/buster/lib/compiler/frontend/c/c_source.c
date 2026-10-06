@@ -10656,6 +10656,52 @@ u64 c_test_preprocess_references_range(CPreprocessResult const* result, void con
 }
 #endif
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CFrontendReservationPhase c_test_reservation_phase;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_test_reservation_ordinal;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_lowering_reservation;
+
+void c_test_fail_frontend_reservation(CFrontendReservationPhase phase, u32 ordinal)
+{
+    c_test_reservation_phase = phase;
+    c_test_reservation_ordinal = ordinal;
+}
+
+bool c_test_frontend_reservation_pending(void)
+{
+    return c_test_reservation_ordinal != 0;
+}
+
+void c_test_lowering_initial_reservation(u64 size)
+{
+    c_test_lowering_reservation = size;
+}
+#endif
+
+Arena* c_frontend_arena_create(ArenaCreation creation, CFrontendReservationPhase phase)
+{
+#if BUSTER_INCLUDE_TESTS
+    if (phase == C_FRONTEND_RESERVATION_LOWERING && !creation.reserved_size && c_test_lowering_reservation)
+    {
+        creation.reserved_size = c_test_lowering_reservation;
+        creation.initial_size = BUSTER_MIN(c_test_lowering_reservation, BUSTER_KB(256));
+        creation.flags.no_pool = 1;
+    }
+    if (c_test_reservation_ordinal && c_test_reservation_phase == phase)
+    {
+        c_test_reservation_ordinal -= 1;
+        if (!c_test_reservation_ordinal)
+        {
+            creation.flags.no_pool = 1;
+            arena_test_fail_next_reserve();
+        }
+    }
+#else
+    BUSTER_UNUSED(phase);
+#endif
+    return arena_create(creation);
+}
+
 void c_phase_arena_retire(Arena* arena)
 {
     arena_retire(arena, C_PHASE_ARENA_RETAINED_SIZE);
@@ -10699,10 +10745,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // compiles many units can release it. The fixed prelude seeds the
     // well-known spellings, and its expansion entry gives synthesized-token
     // offsets the same all-zero location eagerly-built tokens used to carry.
-    Arena* spelling_arena = arena_create((ArenaCreation){
+    Arena* spelling_arena = c_frontend_arena_create((ArenaCreation){
         .reserved_size = BUSTER_GB(1),
         .flags = {.pool_reuse = 1},
-    });
+    }, C_FRONTEND_RESERVATION_PREPROCESS);
     // The output token stream gets the same private-arena treatment as the
     // spelling space, and for the same reason: the final token count is
     // unknown until the last line lands, and the caller's arena interleaves
@@ -10710,15 +10756,15 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // reservation keeps the stream contiguous, so every surviving token is
     // written into its final slot exactly once instead of staged per line
     // and copied at the end.
-    Arena* token_arena = spelling_arena ? arena_create((ArenaCreation){
+    Arena* token_arena = spelling_arena ? c_frontend_arena_create((ArenaCreation){
                                               .reserved_size = BUSTER_GB(1),
                                               .flags = {.pool_reuse = 1},
-                                          })
+                                          }, C_FRONTEND_RESERVATION_PREPROCESS)
                                         : 0;
-    Arena* token_shape_arena = token_arena ? arena_create((ArenaCreation){
+    Arena* token_shape_arena = token_arena ? c_frontend_arena_create((ArenaCreation){
                                                                .reserved_size = BUSTER_GB(1),
                                                                .flags = {.pool_reuse = 1},
-                                                           })
+                                                           }, C_FRONTEND_RESERVATION_PREPROCESS)
                                           : 0;
     // Everything below that names `arena` is phase-local: it is allocated in
     // the phase arena above its entry position, and what a later phase needs
@@ -10727,13 +10773,16 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     bool phase_arena_owned = !phase_arena && token_shape_arena;
     if (phase_arena_owned)
     {
-        phase_arena = arena_create((ArenaCreation){
+        phase_arena = c_frontend_arena_create((ArenaCreation){
             .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
             .flags = {.pool_reuse = 1},
-        });
+        }, C_FRONTEND_RESERVATION_PREPROCESS);
     }
     if (!token_shape_arena || !phase_arena)
     {
+        String8 storage = !spelling_arena ? S8("spelling") : !token_arena ? S8("token") :
+                          !token_shape_arena ? S8("token-shape") : S8("phase");
+        u64 requested_size = !token_shape_arena ? BUSTER_GB(1) : C_PHASE_ARENA_RESERVED_SIZE;
         if (token_shape_arena)
         {
             arena_destroy(token_shape_arena, 1);
@@ -10746,6 +10795,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         {
             arena_destroy(spelling_arena, 1);
         }
+        result.files = arena_allocate(result_arena, String8, 1);
+        result.files[0] = string_duplicate_arena(result_arena, options.source_path.length ? options.source_path : S8("."), false);
+        result.file_count = 1;
+        c_preprocess_diagnostic_push(result_arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                     string_format(result_arena, S8("could not reserve {u64} bytes for C preprocessing {S8} arena"), requested_size, storage));
         return result;
     }
     u64 phase_start = phase_arena->position;

@@ -1115,11 +1115,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* select
     {
         selected = machine_a64_select_float_to_i128(selector, instruction, source_type, cast_target_type);
     }
-    else if (source_type && cast_target_type && source_type->kind == IR_TYPE_INTEGER && cast_target_type->kind == IR_TYPE_INTEGER)
+    else if (source_type && cast_target_type && (source_type->kind == IR_TYPE_INTEGER ||
+              (source_type->kind == IR_TYPE_BOOLEAN && instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND)) &&
+             cast_target_type->kind == IR_TYPE_INTEGER)
     {
         bool source_integer128 = source_type->bit_width == 128;
         bool target_integer128 = cast_target_type->bit_width == 128;
-        u32 source_bits = source_type->bit_width;
+        u32 source_bits = machine_a64_scalar_bit_width(source_type);
         u32 source_slot = instruction->operands[0].value < function->value_count ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
         u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
         bool reinterpret_i128 = source_integer128 && target_integer128 &&

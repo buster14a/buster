@@ -1125,6 +1125,8 @@ struct CEntity
 };
 
 // One shadowed binding, restored when the scope that shadowed it closes.
+typedef struct CParseScopeCursor CParseScopeCursor;
+
 typedef struct CParseBindingUndo CParseBindingUndo;
 struct CParseBindingUndo
 {
@@ -1528,6 +1530,10 @@ struct CParseResult
     CEntityId* binding_by_symbol;
     CParseBindingUndo* binding_undo;
     CScopeId binding_scope;
+    // Borrowed while the lowering constraints are checked: the block-scope
+    // bindings of one path of the scope tree, which those passes reposition
+    // as they walk a body. See c_parse_scope_cursor_lookup.
+    CParseScopeCursor* scope_cursor;
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;

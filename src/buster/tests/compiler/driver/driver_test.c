@@ -12548,6 +12548,8 @@ struct CompilerDriverWasmNodeRun
     u64 wait_microseconds;
     u64 done_uptime_microseconds;
     u64 exit_uptime_microseconds;
+    u64 phase_uptime_microseconds;
+    String8 last_phase;
     u32 attempts;
     bool spawned;
     bool startup_ready;
@@ -12571,6 +12573,53 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_startup_marker(String8 o
             index += 1;
         }
         result = index > prefix.length && index < output.length && output.pointer[index] == '\n';
+    }
+    return result;
+}
+
+// Instrumented oracles write `WASM_NODE_PHASE <name> uptime_us=<digits> ...`
+// after each bounded step (#2194). The last complete phase line names the
+// step a timeout interrupted; phases are evidence only, never success.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_wasm_node_last_phase(String8 output, u64* uptime_microseconds)
+{
+    String8 prefix = S8("WASM_NODE_PHASE ");
+    String8 uptime = S8(" uptime_us=");
+    String8 result = S8("none");
+    u64 line_start = 0;
+    while (line_start < output.length)
+    {
+        u64 line_end = line_start;
+        while (line_end < output.length && output.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        if (line_end < output.length && line_end - line_start > prefix.length &&
+            memcmp(output.pointer + line_start, prefix.pointer, prefix.length) == 0)
+        {
+            u64 name_start = line_start + prefix.length;
+            u64 name_end = name_start;
+            while (name_end < line_end && output.pointer[name_end] != ' ')
+            {
+                name_end += 1;
+            }
+            u64 digits = name_end + uptime.length;
+            u64 value = 0;
+            u64 index = digits;
+            if (name_end > name_start && digits <= line_end && memcmp(output.pointer + name_end, uptime.pointer, uptime.length) == 0)
+            {
+                while (index < line_end && output.pointer[index] >= '0' && output.pointer[index] <= '9' && value <= (UINT64_MAX - 9) / 10)
+                {
+                    value = value * 10 + (u64)(output.pointer[index] - '0');
+                    index += 1;
+                }
+            }
+            if (index > digits && (index == line_end || output.pointer[index] == ' '))
+            {
+                result = (String8){.pointer = output.pointer + name_start, .length = name_end - name_start};
+                *uptime_microseconds = value;
+            }
+        }
+        line_start = line_end + 1;
     }
     return result;
 }
@@ -12804,6 +12853,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
                                                                          &result.done_uptime_microseconds);
     }
     result.terminal_marker = compiler_driver_test_wasm_node_terminal_marker(oracle_output, expected_marker);
+    result.last_phase = compiler_driver_test_wasm_node_last_phase(standard_output, &result.phase_uptime_microseconds);
     // Node uptime starts after spawn, so this bounds the time between the
     // oracle returning and the harness reaping (or killing) the process.
     u64 post_done_microseconds = result.node_done && result.elapsed_microseconds > result.done_uptime_microseconds
@@ -12814,14 +12864,16 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
                     S8("WASM_NODE_PROCESS oracle={S8} mode={S8} status={S8} spawned={u32} result={u32} "
                        "platform_status={u32:x} timed_out={u32} marker={u32} elapsed_us={u64} deadline_us={u64} "
                        "ready={u32} readiness_files_ok={u32} node_ready={u32} startup_us={u64} wait_us={u64} "
-                       "node_done={u32} done_uptime_us={u64} node_exit={u32} exit_uptime_us={u64} post_done_us={u64}\n"
+                       "node_done={u32} done_uptime_us={u64} node_exit={u32} exit_uptime_us={u64} post_done_us={u64} "
+                       "last_phase={S8} phase_uptime_us={u64}\n"
                        "stdout:\n{S8}stderr:\n{S8}\n"),
                     oracle, mode, status, (u32)result.spawned, (u32)result.wait.result, result.wait.platform_status,
                     (u32)result.wait.timed_out, (u32)result.terminal_marker, result.elapsed_microseconds,
                     result.deadline_microseconds, (u32)result.startup_ready, (u32)result.readiness_files_ok,
                     (u32)result.node_ready, result.startup_microseconds,
                     result.wait_microseconds, (u32)result.node_done, result.done_uptime_microseconds, (u32)result.node_exit,
-                    result.exit_uptime_microseconds, post_done_microseconds, standard_output,
+                    result.exit_uptime_microseconds, post_done_microseconds, result.last_phase,
+                    result.phase_uptime_microseconds, standard_output,
                     BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
     return result;
 }
@@ -13024,6 +13076,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
 #if BUSTER_WINDOWS
             BUSTER_TEST(arguments, !run.spawned);
 #endif
+        }
+        {
+            // #2194: the last complete phase line classifies where a timeout
+            // stopped; a torn or malformed trailing line does not count.
+            u64 uptime = 0;
+            String8 phases = S8("WASM_NODE_READY startup_ms=1\nWASM_NODE_PHASE ready uptime_us=40 node=v1\n"
+                                "WASM_NODE_PHASE read uptime_us=95 bytes=8\nWASM_NODE_PHASE module uptime_us=\n"
+                                "WASM_NODE_PHASE instance uptime_us=120");
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_wasm_node_last_phase(phases, &uptime), S8("read")) && uptime == 95);
+            uptime = 7;
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_wasm_node_last_phase(S8("WASM_NODE_READY startup_ms=1\n"), &uptime), S8("none")) &&
+                                       uptime == 7);
         }
         // The retry owns its deadline: a completing retry gets the completion
         // budget so slow hosts cannot misclassify it, while hanging retries
@@ -21540,6 +21604,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_defi
     return result;
 }
 
+// A failed bit-field Wasm oracle logs at most this many module bytes (#2194).
+#define BIT_FIELD_WASM_MODULE_RETAINED_BYTES 65536
+
 // #1612: LLVM, Wasm64 and eBPF each build brace-initialized bit-field structs
 // from the canonical aggregate value. Independent consumers (Clang, Node, the
 // eBPF test VM) prove every member reads back from its packed storage bits.
@@ -21575,15 +21642,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targ
         "\"use strict\";\n"
         "const fs = require(\"fs\");\n"
         "fs.writeSync(process.stdout.fd, `WASM_NODE_READY startup_ms=${Date.now()}\\n`);\n"
+        "const uptime_us = () => Math.round(process.uptime() * 1e6);\n"
+        "const phase = (name, details) => fs.writeSync(process.stdout.fd, `WASM_NODE_PHASE ${name} uptime_us=${uptime_us()} ${details}\\n`);\n"
+        "process.on(\"exit\", () => fs.writeSync(process.stdout.fd, `WASM_NODE_EXIT uptime_us=${uptime_us()}\\n`));\n"
+        "phase(\"ready\", `node=${process.version} v8=${process.versions.v8} arch=${process.arch} exec=${process.execPath}`);\n"
         "const bytes = fs.readFileSync(process.argv[2]);\n"
-        "const probe = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.probe;\n"
+        "phase(\"read\", `bytes=${bytes.length}`);\n"
+        "const wasm_module = new WebAssembly.Module(bytes);\n"
+        "phase(\"module\", \"\");\n"
+        "const probe = new WebAssembly.Instance(wasm_module).exports.probe;\n"
+        "phase(\"instance\", \"\");\n"
         "const values = [0n, 1n, 127n, 128n, -1n, -9223372036854775808n, 9223372036854775807n, 0x0123456789abcdefn];\n"
         "let checks = 0;\n"
         "for (const x of values) for (const y of values) {\n"
         "    if (probe(x, y) !== BigInt.asIntN(64, BigInt.asUintN(56, x))) throw new Error(`probe(${x}, ${y})`);\n"
         "    checks++;\n"
         "}\n"
-        "console.log(checks + \" independent Wasm bit-field aggregate executions passed\");\n");
+        "fs.writeSync(process.stdout.fd, checks + \" independent Wasm bit-field aggregate executions passed\\n\");\n"
+        "fs.writeSync(process.stdout.fd, `WASM_NODE_DONE uptime_us=${uptime_us()} resources=${process.getActiveResourcesInfo().join(\",\")}\\n`);\n");
     u64 values[] = {0, 1, 127, 128, UINT64_MAX, UINT64_C(1) << 63, (UINT64_C(1) << 63) - 1, UINT64_C(0x0123456789abcdef)};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
@@ -21644,12 +21720,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targ
                 String8 script_path = buster_test_temporary_path(arena, S8("buster-bit-field-aggregate"), S8(".js"));
                 if (node.length && BUSTER_REQUIRE(arguments, file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script))))
                 {
+                    // #2194: identify the exact module Node received, and keep
+                    // its bytes in the log if the oracle fails, before the
+                    // temporary path is reused by the next form.
+                    ByteSlice module_bytes = compiled.wasm64.bytes;
+                    char8 module_hash[SHA256_HEX_CAPACITY];
+                    Sha256 hash;
+                    sha256_init(&hash);
+                    sha256_add(&hash, module_bytes.pointer, module_bytes.length);
+                    sha256_finish_hex(&hash, module_hash);
+                    arguments->show(arguments, S8("WASM_NODE_MODULE oracle=bit-field-aggregate form={S8} bytes={u64} sha256={S8}\n"),
+                                    forms[form], module_bytes.length, (String8){module_hash, 64});
                     String8 node_arguments[] = {node, script_path, output};
                     u64 deadline = compiler_driver_test_wasm_node_deadline_microseconds();
                     CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
                         arguments, arena, S8("bit-field-aggregate"), forms[form], forms[form], (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
                         S8("64 independent Wasm bit-field aggregate executions passed"), deadline, deadline);
-                    BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+                    bool node_succeeded = compiler_driver_test_wasm_node_succeeded(node_run);
+                    if (!node_succeeded)
+                    {
+                        u64 retained = module_bytes.length < BIT_FIELD_WASM_MODULE_RETAINED_BYTES ? module_bytes.length : BIT_FIELD_WASM_MODULE_RETAINED_BYTES;
+                        char8* hex = arena_allocate(arena, char8, retained * 2);
+                        String8 digits = S8("0123456789abcdef");
+                        for (u64 index = 0; index < retained; index += 1)
+                        {
+                            hex[index * 2] = digits.pointer[module_bytes.pointer[index] >> 4];
+                            hex[index * 2 + 1] = digits.pointer[module_bytes.pointer[index] & 15];
+                        }
+                        arguments->show(arguments, S8("WASM_NODE_MODULE_BYTES form={S8} retained={u64}/{u64} hex={S8}\n"), forms[form], retained,
+                                        module_bytes.length, (String8){hex, retained * 2});
+                    }
+                    BUSTER_TEST(arguments, node_succeeded);
                 }
                 else if (!node.length)
                 {
@@ -23442,11 +23543,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_identifier_list_definiti
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_failures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-reservation-failure"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-reservation-failure"), S8(".o"));
+    String8 parts[66];
+    parts[0] = S8("int main(void){int x=0;");
+    for (u32 index = 1; index <= 64; index += 1)
+    {
+        parts[index] = S8("x += 1;");
+    }
+    parts[65] = S8("return x;}");
+    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
+        u32 counts[] = {4, 2, 2};
+        String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
+        String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 syntax_only = 0; syntax_only < 2; syntax_only += 1)
+            {
+                for (u32 phase = 0; phase < BUSTER_ARRAY_LENGTH(phases); phase += 1)
+                {
+                    if (syntax_only && phases[phase] == C_FRONTEND_RESERVATION_LOWERING)
+                    {
+                        continue;
+                    }
+                    for (u32 ordinal = 1; ordinal <= counts[phase]; ordinal += 1)
+                    {
+                        String8 command[] = {S8("-g0"), forms[form], syntax_only ? S8("-fsyntax-only") : S8("-c"), S8("-o"), output, input};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        c_test_lowering_initial_reservation(phase == 2 && ordinal == 2 ? BUSTER_KB(64) : 0);
+                        c_test_fail_frontend_reservation(phases[phase], ordinal);
+                        CompilerDriverResult failed = compiler_driver_execute_invocation(arena, invocation);
+                        bool pending = c_test_frontend_reservation_pending();
+                        c_test_fail_frontend_reservation(phases[phase], 0);
+                        c_test_lowering_initial_reservation(0);
+                        BUSTER_TEST(arguments, !pending);
+                        BUSTER_TEST(arguments, failed.error == (phase == 0 ? COMPILER_DRIVER_ERROR_TOKENIZE : COMPILER_DRIVER_ERROR_ANALYSIS));
+                        BUSTER_TEST(arguments, failed.diagnostic.length != 0 && failed.diagnostic_count != 0);
+                        BUSTER_TEST(arguments, string_first_sequence(failed.diagnostic, names[phase]) != BUSTER_STRING_NO_MATCH);
+                        BUSTER_TEST(arguments, !failed.has_object && failed.output.length == 0);
+                        CompilerDriverResult recovered = compiler_driver_execute_invocation(arena, invocation);
+                        BUSTER_TEST_RAW(arguments, recovered.error == COMPILER_DRIVER_ERROR_NONE, recovered.diagnostic);
+                        BUSTER_TEST(arguments, recovered.diagnostic_count == 0);
+                        if (!syntax_only)
+                        {
+                            BUSTER_TEST(arguments, recovered.has_object);
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cached_plan_lanes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_output_paths);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frontend_reservation_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
@@ -25080,12 +25246,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     };
     CompilerDriverResult assembly_file = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_file_command_line)));
-    BUSTER_TEST(arguments, assembly_file.error == COMPILER_DRIVER_ERROR_NONE);
-    ByteSlice assembly_file_bytes = file_read(arguments->arena, assembly_output_path, (FileReadOptions){0});
-    BUSTER_TEST(arguments, assembly_file_bytes.length == assembly_file.output.length);
-    if (assembly_file_bytes.length == assembly_file.output.length)
+    if (BUSTER_REQUIRE(arguments, assembly_file.error == COMPILER_DRIVER_ERROR_NONE))
     {
-        BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
+        ByteSlice assembly_file_bytes = file_read(arguments->arena, assembly_output_path, (FileReadOptions){0});
+        if (BUSTER_REQUIRE(arguments, assembly_file_bytes.length != 0 && assembly_file_bytes.length == assembly_file.output.length))
+        {
+            BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
+        }
     }
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("retired_buster_path"), false);

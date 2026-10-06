@@ -91,6 +91,8 @@
 //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
 //                                                 entity lookup
+//   c_parse_scope_cursor_lookup                   post-binding lookups of the
+//                                                 lowering-constraint passes
 //   c_parse_local_declarations                    block-scope declarations,
 //                                                 auto inference, local
 //                                                 linkage redeclarations
@@ -3996,7 +3998,7 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
                     u32 capacity = BUSTER_MIN(after - first, doubled);
                     if (!attribute_arena && capacity > attribute_group_count)
                     {
-                        attribute_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+                        attribute_arena = c_frontend_arena_create((ArenaCreation){.flags = {.no_pool = 1}}, C_FRONTEND_RESERVATION_ANALYSIS);
                     }
                     if (attribute_arena && capacity > attribute_group_count)
                     {
@@ -4007,7 +4009,7 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
                     }
                     else
                     {
-                        result.message = S8("could not allocate GNU attribute-role frames");
+                        result.message = S8("could not reserve the C semantic analysis GNU attribute-role arena");
                         result.token_index = index;
                     }
                 }
@@ -5828,6 +5830,45 @@ BUSTER_GLOBAL_LOCAL void c_parse_expression_query_publish(CTypeParseMachine* mac
     machine->expression_query_flags[slot] = (u8)flags;
 }
 
+// The first top-level `?` of [start, end) and the `:` that returns its
+// nesting to zero, as the operator scan in c_type_parse_sizeof_step records
+// them. The scan stops at that `:`, so locating the next level of a
+// conditional chain costs its condition and true arm, not the rest of the
+// chain (GitHub #2715).
+BUSTER_C_INTERNAL bool c_parse_expression_next_conditional(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* question_out,
+                                                           u32* colon_out)
+{
+    u32 question = end;
+    u32 colon = end;
+    u32 nested_questions = 0;
+    bool balanced = true;
+    for (u32 index = start; balanced && colon == end && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            balanced = close < end;
+            index = balanced ? close : index;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            question = question == end ? index : question;
+            nested_questions += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) && nested_questions)
+        {
+            nested_questions -= 1;
+            colon = nested_questions ? colon : index;
+        }
+    }
+    bool found = question != end && colon != end;
+    *question_out = question;
+    *colon_out = colon;
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -5924,6 +5965,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start += 1;
                     task->end -= 1;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                     stripped = true;
                 }
             }
@@ -5991,6 +6033,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start = tail_start;
                     task->end = tail_end;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                 }
                 else
                 {
@@ -6032,6 +6075,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start = identity->result_start;
                     task->end = identity->result_end;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                 }
                 else
                 {
@@ -6046,7 +6090,21 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             u32 colon = task->end;
             u32 nested_questions = 0;
             u32 cast_prefix_close = UINT32_MAX;
-            for (u32 index = task->start; !task->operators_checked && index < task->end; index += 1)
+            // Every top-level operator at the loosest left-associative
+            // precedence, recorded downward from the top of this frame's
+            // free task slots (operator i at tasks[capacity - 1 - i]) so the
+            // split below can push the whole chain's nested prefixes at once
+            // instead of rescanning each prefix (GitHub #2715). A chain that
+            // would reach the live stack is dropped and the prefix scans.
+            u32 chain_count = 0;
+            bool chain_fits = true;
+            bool hinted = task->conditional_hinted && task->split >= task->start && task->colon < task->end;
+            if (hinted)
+            {
+                question = task->split;
+                colon = task->colon;
+            }
+            for (u32 index = task->start; !hinted && !task->operators_checked && index < task->end; index += 1)
             {
                 CToken token = preprocess.tokens[index];
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
@@ -6119,6 +6177,14 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 bool right_associative = precedence == 2;
                 if (binary && (precedence < best_precedence || (precedence == best_precedence && !right_associative)))
                 {
+                    bool loosened = precedence < best_precedence;
+                    chain_count = loosened ? 0 : chain_count;
+                    chain_fits = (loosened || chain_fits) && task_count + chain_count < capacity;
+                    if (chain_fits)
+                    {
+                        tasks[capacity - 1 - chain_count].start = index;
+                        chain_count += 1;
+                    }
                     best_precedence = precedence;
                     best_operator = index;
                 }
@@ -6164,9 +6230,33 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     last = C_TYPE_ID_INVALID;
                     break;
                 }
+                // `o0 op o1 op ... op ok` splits at its last operator, and the
+                // prefix ending before operator i splits at operator i - 1: a
+                // scan of that prefix reaches the same state at each of its
+                // tokens. Push those already-split prefixes outermost first,
+                // then the first operand, so each operand is scanned once.
+                // Operator i is read before the push into slot task_count + i
+                // can overwrite it, because the chain was kept below the
+                // live stack.
+                u32 chain_start = task->start;
+                CParseExpressionTypeOperation chain_operation = task->operation;
+                u32 prefix_count = chain_fits && best_precedence != 2 && chain_count ? chain_count - 1 : 0;
+                for (u32 prefix = prefix_count; prefix != 0; prefix -= 1)
+                {
+                    u32 prefix_end = tasks[capacity - 1 - prefix].start;
+                    u32 prefix_split = tasks[capacity - prefix].start;
+                    tasks[task_count++] = (CParseExpressionTypeTask){
+                        .start = chain_start,
+                        .end = prefix_end,
+                        .split = prefix_split,
+                        .operation = chain_operation,
+                        .state = 1,
+                    };
+                }
+                u32 first_operand_end = prefix_count ? tasks[capacity - 1].start : best_operator;
                 tasks[task_count++] = (CParseExpressionTypeTask){
-                    .start = task->start,
-                    .end = best_operator,
+                    .start = chain_start,
+                    .end = first_operand_end,
                 };
                 continue;
             }
@@ -6452,9 +6542,20 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 last = C_TYPE_ID_INVALID;
                 break;
             }
+            // A conditional's false arm is the rest of its chain. The arm
+            // chooses a conditional exactly when it has a top-level `?` and
+            // `:`, because the enclosing range already did and the arm's
+            // loosest binary operator cannot be looser than the range's.
+            u32 next_question = UINT32_MAX;
+            u32 next_colon = UINT32_MAX;
+            bool next_conditional = task->operation == C_PARSE_EXPRESSION_TYPE_CONDITIONAL &&
+                c_parse_expression_next_conditional(result, preprocess, right_start, task->end, &next_question, &next_colon);
             tasks[task_count++] = (CParseExpressionTypeTask){
                 .start = right_start,
                 .end = task->operation == C_PARSE_EXPRESSION_TYPE_SUBSCRIPT ? task->end - 1 : task->end,
+                .split = next_conditional ? next_question : 0,
+                .colon = next_conditional ? next_colon : 0,
+                .conditional_hinted = next_conditional,
             };
             continue;
         }
@@ -6953,6 +7054,16 @@ BUSTER_C_INTERNAL u32 c_parse_identity_separator(CParseResult* result, CPreproce
     return found;
 }
 
+#define C_GENERIC_LOCAL_ASSOCIATIONS 16
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_generic_association_scratch_bytes;
+
+u64 c_test_generic_association_scratch_bytes(void)
+{
+    return c_generic_association_scratch_bytes;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                      CParseResult* result, CScopeId scope, u32 start, u32 end,
                                                      String8* message, u32* location)
@@ -6974,7 +7085,11 @@ BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine,
         if (!valid) *message = S8("could not determine the type of the _Generic controlling expression");
     }
     u64 mark = machine->scratch_arena->position;
-    CTypeId* associations = valid ? arena_allocate(machine->scratch_arena, CTypeId, close - controller_end) : 0;
+    // Only typed associations occupy this list; their expression token spans
+    // do not contribute storage. Nothing in the list escapes this query.
+    CTypeId local_associations[C_GENERIC_LOCAL_ASSOCIATIONS];
+    CTypeId* associations = local_associations;
+    u32 association_capacity = BUSTER_ARRAY_LENGTH(local_associations);
     u32 association_count = 0;
     u32 match_count = 0;
     CTypeIdentityQuery answer = {.token_start = start, .token_end = close + 1, .result_start = UINT32_MAX};
@@ -7013,6 +7128,26 @@ BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine,
                 {
                     *message = S8("_Generic selection has multiple compatible type associations");
                     valid = false;
+                }
+            }
+            if (valid)
+            {
+                if (association_count == association_capacity)
+                {
+                    u32 capacity = association_capacity * 2;
+                    valid = capacity > association_capacity;
+                    CTypeId* grown = valid ? arena_allocate(machine->scratch_arena, CTypeId, capacity) : 0;
+                    valid &= grown != 0;
+                    if (valid)
+                    {
+                        memcpy(grown, associations, association_count * sizeof(*grown));
+                        associations = grown;
+                        association_capacity = capacity;
+#if BUSTER_INCLUDE_TESTS
+                        c_generic_association_scratch_bytes += (u64)capacity * sizeof(*grown);
+#endif
+                    }
+                    else *message = S8("could not allocate _Generic association workspace");
                 }
             }
             if (valid)
@@ -18353,6 +18488,174 @@ void c_test_parse_binding_unwind(CParseResult* result, u32 mark)
 }
 #endif
 
+// The lowering-constraint passes ask about every scope of a body after the
+// binder has closed them all, so the binding array stands for the file scope
+// alone and each of their lookups would walk the parent chain: one hash and
+// bucket probe per enclosing scope, which made a reference at block depth d
+// cost d probes (#2809). The cursor gives those passes their own binding
+// array instead, standing for one scope and the root-to-scope path above it:
+//
+//   by_symbol[s]  the innermost block-scope entity on the path bound to s,
+//                 or invalid when only the file scope (or nothing) binds it;
+//   shadowed[e]   what by_symbol held for e's symbol before e was bound;
+//   stack         every bound entity in bind order, popped to a path mark
+//                 when a scope leaves the path;
+//   position_plus_one[scope]  the scope's index on the path plus one, or 0.
+//
+// A lookup from another scope first seeks it: the path is cut back to the
+// nearest ancestor on it and the scopes below are pushed with their
+// entities, oldest first, so the newest in each scope wins as it does in the
+// bucket chain. The answer is then one load. A pass walking a body in token
+// order pushes and pops each scope a bounded number of times, so its lookups
+// cost the scopes and entities of the body, not the scopes enclosing each
+// reference. The file scope is never pushed: the binding array or its one
+// bucket chain answers it.
+//
+// The cursor is reached through a pointer, so a rollback of the result by
+// value leaves it alone; any entity added or rolled back since it was built
+// (an entity count it was not built against, or an add marking it stale)
+// empties it before the next lookup.
+struct CParseScopeCursor
+{
+    CEntityId* by_symbol;
+    CEntityId* shadowed;
+    CEntityId* stack;
+    CScopeId* path;
+    u32* path_mark;
+    u32* position_plus_one;
+    CScopeId* pending;
+    u32 symbol_capacity;
+    u32 entity_capacity;
+    u32 scope_capacity;
+    u32 stack_count;
+    u32 path_count;
+    u32 entity_count;
+    bool stale;
+};
+
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name);
+
+BUSTER_C_INTERNAL CParseScopeCursor* c_parse_scope_cursor_create(Arena* arena, CParseResult* result)
+{
+    CParseScopeCursor* cursor = 0;
+    if (result->binding_by_symbol && result->binding_capacity)
+    {
+        cursor = arena_allocate(arena, CParseScopeCursor, 1);
+        *cursor = (CParseScopeCursor){
+            .symbol_capacity = result->binding_capacity,
+            .entity_capacity = result->entity_capacity,
+            .scope_capacity = result->scope_capacity,
+            .entity_count = result->entity_count,
+        };
+        cursor->by_symbol = arena_allocate(arena, CEntityId, cursor->symbol_capacity);
+        memset(cursor->by_symbol, 0xff, sizeof(*cursor->by_symbol) * cursor->symbol_capacity);
+        cursor->shadowed = arena_allocate(arena, CEntityId, cursor->entity_capacity);
+        cursor->stack = arena_allocate(arena, CEntityId, cursor->entity_capacity);
+        cursor->path = arena_allocate(arena, CScopeId, cursor->scope_capacity);
+        cursor->path_mark = arena_allocate(arena, u32, cursor->scope_capacity);
+        cursor->position_plus_one = arena_allocate_zeroed(arena, u32, cursor->scope_capacity);
+        cursor->pending = arena_allocate(arena, CScopeId, cursor->scope_capacity);
+    }
+    return cursor;
+}
+
+// Leaves the first `count` scopes on the path and unbinds the rest.
+BUSTER_C_INTERNAL void c_parse_scope_cursor_cut(CParseResult* result, CParseScopeCursor* cursor, u32 count)
+{
+    while (cursor->path_count > count)
+    {
+        cursor->path_count -= 1;
+        cursor->position_plus_one[cursor->path[cursor->path_count].value] = 0;
+        u32 mark = cursor->path_mark[cursor->path_count];
+        while (cursor->stack_count > mark)
+        {
+            CEntityId entity = cursor->stack[--cursor->stack_count];
+            cursor->by_symbol[result->entities[entity.value].symbol] = cursor->shadowed[entity.value];
+        }
+    }
+}
+
+// Makes `scope` the end of the path: cuts it back to the nearest ancestor on
+// it and pushes the scopes below that one. False, with the path unchanged,
+// when the parent chain ends somewhere other than the file scope; the bucket
+// chain answers such a scope.
+BUSTER_C_INTERNAL bool c_parse_scope_cursor_seek(CParseResult* result, CParseScopeCursor* cursor, CScopeId scope)
+{
+    bool rooted = cursor->path_count && cursor->path[cursor->path_count - 1].value == scope.value;
+    if (!rooted)
+    {
+        u32 pending_count = 0;
+        CScopeId walk = scope;
+        bool walking = true;
+        while (walking)
+        {
+            rooted = walk.value == 0 || (walk.value < cursor->scope_capacity && cursor->position_plus_one[walk.value]);
+            walking = !rooted && walk.value < result->scope_count && pending_count < cursor->scope_capacity;
+            if (walking)
+            {
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, 1);
+                cursor->pending[pending_count++] = walk;
+                CScopeId parent = result->scopes[walk.value].parent;
+                walking = parent.value != walk.value;
+                walk = parent;
+            }
+        }
+        if (rooted)
+        {
+            c_parse_scope_cursor_cut(result, cursor, walk.value ? cursor->position_plus_one[walk.value] : 0);
+            while (pending_count)
+            {
+                CScopeId pushed = cursor->pending[--pending_count];
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, 1);
+                cursor->path_mark[cursor->path_count] = cursor->stack_count;
+                cursor->path[cursor->path_count++] = pushed;
+                cursor->position_plus_one[pushed.value] = cursor->path_count;
+                for (CEntityId entity = result->scopes[pushed.value].first_entity; entity.value != C_ID_UNDERLYING_INVALID;
+                     entity = result->entities[entity.value].next_in_scope)
+                {
+                    u32 symbol = result->entities[entity.value].symbol;
+                    if (symbol && symbol < cursor->symbol_capacity && entity.value < cursor->entity_capacity &&
+                        result->entities[entity.value].scope.value == pushed.value)
+                    {
+                        BUSTER_VALIDATE(cursor->stack_count < cursor->entity_capacity);
+                        cursor->shadowed[entity.value] = cursor->by_symbol[symbol];
+                        cursor->stack[cursor->stack_count++] = entity;
+                        cursor->by_symbol[symbol] = entity;
+                    }
+                }
+            }
+        }
+    }
+    return rooted;
+}
+
+// What the bucket chain answers for `symbol` from `scope`, when the cursor
+// can answer it; see CParseScopeCursor.
+BUSTER_C_INTERNAL bool c_parse_scope_cursor_lookup(CParseResult* result, CScopeId scope, u32 symbol, String8 name, CEntityId* found)
+{
+    CParseScopeCursor* cursor = result->scope_cursor;
+    if (cursor->stale || cursor->entity_count != result->entity_count)
+    {
+        c_parse_scope_cursor_cut(result, cursor, 0);
+        cursor->stale = false;
+        cursor->entity_count = result->entity_count;
+    }
+    bool answered = symbol && symbol < cursor->symbol_capacity && scope.value && scope.value < result->scope_count &&
+                    scope.value < cursor->scope_capacity && result->entity_count <= cursor->entity_capacity;
+    answered = answered && c_parse_scope_cursor_seek(result, cursor, scope);
+    if (answered)
+    {
+        CEntityId entity = cursor->by_symbol[symbol];
+        if (entity.value == C_ID_UNDERLYING_INVALID)
+        {
+            entity = result->binding_by_symbol && result->binding_scope.value == 0 ? result->binding_by_symbol[symbol]
+                                                      : c_parse_lookup_entity_in_scope_chain(result, (CScopeId){.value = 0}, symbol, name);
+        }
+        *found = entity;
+    }
+    return answered;
+}
+
 BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
 {
     CScope* value = &result->scopes[scope.value];
@@ -18390,14 +18693,20 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
         result->typedef_lookup_buckets[name_bucket] = entity;
     }
     c_parse_binding_bind(result, scope, entity, added->symbol);
+    if (result->scope_cursor)
+    {
+        result->scope_cursor->stale = true;
+    }
 }
 
 // The scope-and-symbol chains, walked from `scope` outwards: the definition
 // of what a name resolves to, and what every lookup outside the scope the
 // binding array stands for still asks.
-BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
+// `hops` receives the scopes walked, which only the work counters read.
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name, u32* hops)
 {
     CEntityId found = C_ENTITY_ID_INVALID;
+    *hops = 0;
     while (scope.value != C_ID_UNDERLYING_INVALID && found.value == C_ID_UNDERLYING_INVALID)
     {
         u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
@@ -18412,6 +18721,7 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
             entity = found.value == C_ID_UNDERLYING_INVALID ? candidate->next_in_lookup : entity;
         }
         scope = result->scopes[scope.value].parent;
+        *hops += 1;
     }
     return found;
 }
@@ -18423,16 +18733,24 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
 {
     CEntityId found;
+    u32 hops = 0;
     if (result->binding_by_symbol && symbol && symbol < result->binding_capacity && scope.value == result->binding_scope.value)
     {
         found = result->binding_by_symbol[symbol];
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name).value);
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
+#endif
+    }
+    else if (result->scope_cursor && c_parse_scope_cursor_lookup(result, scope, symbol, name, &found))
+    {
+#if BUSTER_REFERENCE_CHECKS
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
 #endif
     }
     else
     {
-        found = c_parse_lookup_entity_chain(result, scope, symbol, name);
+        found = c_parse_lookup_entity_chain(result, scope, symbol, name, &hops);
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, hops);
     }
     return found;
 }
@@ -18479,6 +18797,13 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope(CParseResult* result,
         CEntityId innermost = result->binding_by_symbol[symbol];
         found = innermost.value != C_ID_UNDERLYING_INVALID && result->entities[innermost.value].scope.value == scope.value ? innermost
                                                                                                                           : C_ENTITY_ID_INVALID;
+#if BUSTER_REFERENCE_CHECKS
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
+#endif
+    }
+    else if (result->scope_cursor && c_parse_scope_cursor_lookup(result, scope, symbol, name, &found))
+    {
+        found = found.value != C_ID_UNDERLYING_INVALID && result->entities[found.value].scope.value == scope.value ? found : C_ENTITY_ID_INVALID;
 #if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
 #endif
@@ -22935,7 +23260,12 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
 {
     CParserResult result = {0};
     CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
-    if (arena && preprocess.tokens && preprocess.token_count && preprocess.token_count <= (UINT32_MAX - 1) / 2)
+    if (preprocess.error_count && preprocess.diagnostic_count)
+    {
+        result.diagnostics = preprocess.diagnostics;
+        result.diagnostic_count = (u32)BUSTER_MIN(preprocess.diagnostic_count, UINT32_MAX);
+    }
+    else if (arena && preprocess.tokens && preprocess.token_count && preprocess.token_count <= (UINT32_MAX - 1) / 2)
     {
         u32 token_count = (u32)preprocess.token_count;
         result.declaration_capacity = token_count + 1;
@@ -23250,6 +23580,12 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 continuation = true;
             }
         }
+    }
+    else if (arena)
+    {
+        result.diagnostic_capacity = 1;
+        c_parser_diagnostic(arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                            S8("C parsing requires a complete preprocessing result within its token capacity"));
     }
 
     return result;
@@ -29767,6 +30103,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     {
         if (kind != C_TYPE_VA_LIST) c_parse_expression_scalar_type(result, (CTypeKind)kind);
     }
+    // Every family below walks bodies whose scopes the binder has closed.
+    result->scope_cursor = c_parse_scope_cursor_create(machine->scratch_arena, result);
     u32* first_local = arena_allocate(machine->scratch_arena, u32, result->declaration_count);
     u32* next_local = arena_allocate(machine->scratch_arena, u32, result->entity_count);
     memset(first_local, 0xff, sizeof(*first_local) * result->declaration_count);
@@ -29967,6 +30305,19 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     // declarations were bound; inspect the final member table before lowering.
     c_parse_validate_member_types(machine, result, preprocess);
     result->expression_scalar_types = 0;
+    result->scope_cursor = 0;
+}
+
+// Early resource failures precede the ordinary token-sized diagnostic table.
+// Keep their row and message in the caller's result arena, never phase scratch.
+BUSTER_C_INTERNAL void c_analysis_failure(CAnalysisResult* result, String8 message)
+{
+    if (result->arena)
+    {
+        result->diagnostics = arena_allocate(result->arena, CDiagnostic, 1);
+        result->diagnostic_capacity = 1;
+        c_parse_diagnostic(result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+    }
 }
 
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPreprocessResult preprocess, CParserResult syntax,
@@ -29986,10 +30337,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     if (!arena || !preprocess.tokens || !preprocess.token_count)
     {
+        c_analysis_failure(&result, S8("C semantic analysis requires a complete preprocessing result"));
         return result;
     }
     if (preprocess.token_count > (UINT32_MAX - 1) / 2)
     {
+        c_analysis_failure(&result, S8("C semantic analysis token capacity exceeded"));
         return result;
     }
     u32 token_count = (u32)preprocess.token_count;
@@ -30010,6 +30363,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     u32 maximum_delimiter_depth = census.maximum_delimiter_depth;
     if (maximum_delimiter_depth > (UINT32_MAX - 64) / 8 || token_count == UINT32_MAX)
     {
+        c_analysis_failure(&result, S8("C semantic analysis delimiter capacity exceeded"));
         return result;
     }
     u32 type_frame_capacity = maximum_delimiter_depth * 4 + 32;
@@ -30018,6 +30372,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     u64 promoted_member_capacity_u64 = (u64)token_count * 2 + 1;
     if (promoted_member_capacity_u64 > UINT32_MAX)
     {
+        c_analysis_failure(&result, S8("C semantic analysis member capacity exceeded"));
         return result;
     }
     u32 promoted_member_capacity = (u32)promoted_member_capacity_u64;
@@ -30034,29 +30389,35 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         !c_type_parse_buffer_size_add(&machine_buffer_size, incomplete_array_chain_capacity, sizeof(CTypeId), BUSTER_ALIGN_OF(CTypeId)) ||
         machine_buffer_size > UINT64_MAX - (BUSTER_KB(64) - 1))
     {
+        c_analysis_failure(&result, S8("C semantic analysis workspace size overflow"));
         return result;
     }
     machine_buffer_size = (machine_buffer_size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
-    Arena* machine_buffer_arena = arena_create((ArenaCreation){
+    Arena* machine_buffer_arena = c_frontend_arena_create((ArenaCreation){
         .reserved_size = machine_buffer_size,
         .granularity = BUSTER_KB(64),
         .initial_size = BUSTER_MIN(machine_buffer_size, BUSTER_KB(256)),
-    });
-    if (!machine_buffer_arena)
-    {
-        return result;
-    }
-    // Query-local state goes to the unit's phase arena, or to a private one
-    // when the caller has none; without either the queries keep today's
-    // arenas, so a failed reservation costs memory, never the analysis.
+    }, C_FRONTEND_RESERVATION_ANALYSIS);
+    // Query-local state belongs to a supplied phase arena or a private one.
     Arena* phase_arena = preprocess.recovery ? preprocess.recovery->phase_arena : 0;
     bool phase_arena_owned = !phase_arena;
-    if (phase_arena_owned)
+    if (machine_buffer_arena && phase_arena_owned)
     {
-        phase_arena = arena_create((ArenaCreation){
+        phase_arena = c_frontend_arena_create((ArenaCreation){
             .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
             .flags = {.pool_reuse = 1},
-        });
+        }, C_FRONTEND_RESERVATION_ANALYSIS);
+    }
+    if (!machine_buffer_arena || !phase_arena)
+    {
+        u64 requested_size = !machine_buffer_arena ? machine_buffer_size : C_PHASE_ARENA_RESERVED_SIZE;
+        c_analysis_failure(&result, string_format(arena, S8("could not reserve {u64} bytes for C semantic analysis {S8} arena"),
+                                                 requested_size, !machine_buffer_arena ? S8("machine") : S8("phase")));
+        if (machine_buffer_arena)
+        {
+            arena_destroy(machine_buffer_arena, 1);
+        }
+        return result;
     }
     u64 phase_start = phase_arena ? phase_arena->position : 0;
     Arena* machine_conflicts[] = {

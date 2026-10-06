@@ -11,6 +11,7 @@
  */
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
@@ -1080,7 +1081,10 @@ struct CParseExpressionTypeTask
     u8 state;
     // A unary child reuses the top-level operator scan until a group opens.
     bool operators_checked;
-    u8 reserved[2];
+    // The false arm of a conditional whose own top-level `?` and `:` its
+    // parent already found sits in `split` and `colon`; it skips the scan.
+    bool conditional_hinted;
+    u8 reserved[1];
 };
 
 struct CTypeParseFrame
