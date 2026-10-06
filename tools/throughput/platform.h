@@ -27,8 +27,10 @@
 
 #define TP_PATH_CAP 4096
 #define TP_COUNTERS 6
+#ifndef TP_PROCESS_DESCRIPTOR_ONLY
 static char const* const tp_counter_names[TP_COUNTERS] = {
     "cycles", "instructions", "branches", "branch_misses", "cache_references", "cache_misses"};
+#endif
 
 typedef enum TpDiagnostic
 {
@@ -39,6 +41,43 @@ typedef enum TpDiagnostic
     TP_DIAGNOSTICS
 } TpDiagnostic;
 
+/* Child-side failures are distinct from a program that legitimately exits 125. */
+typedef enum TpLaunchStage
+{
+    TP_LAUNCH_NONE,
+    TP_LAUNCH_GROUP,
+    TP_LAUNCH_STDOUT,
+    TP_LAUNCH_STDERR,
+    TP_LAUNCH_DIRECTORY,
+    TP_LAUNCH_CPU,
+    TP_LAUNCH_READY,
+    TP_LAUNCH_SIGNAL,
+    TP_LAUNCH_EXEC,
+    TP_LAUNCH_REPORT
+} TpLaunchStage;
+
+#ifndef TP_PROCESS_DESCRIPTOR_ONLY
+static char const* tp_launch_stage_name(TpLaunchStage stage)
+{
+    char const* result = "unknown";
+    switch (stage)
+    {
+    case TP_LAUNCH_NONE: result = "none"; break;
+    case TP_LAUNCH_GROUP: result = "process-group"; break;
+    case TP_LAUNCH_STDOUT: result = "stdout"; break;
+    case TP_LAUNCH_STDERR: result = "stderr"; break;
+    case TP_LAUNCH_DIRECTORY: result = "working-directory"; break;
+    case TP_LAUNCH_CPU: result = "cpu-affinity"; break;
+    case TP_LAUNCH_READY: result = "ready-pipe"; break;
+    case TP_LAUNCH_SIGNAL: result = "restore-signal"; break;
+    case TP_LAUNCH_EXEC: result = "exec"; break;
+    case TP_LAUNCH_REPORT: result = "error-pipe"; break;
+    }
+    return result;
+}
+
+#endif
+
 typedef struct TpProcess
 {
     double wall_seconds, user_seconds, system_seconds, peak_rss_bytes;
@@ -47,8 +86,10 @@ typedef struct TpProcess
     uint64_t diagnostics[TP_DIAGNOSTICS];
     unsigned diagnostics_available;
     int exit_code, signal_number, timed_out, launch_error;
+    TpLaunchStage launch_stage;
 } TpProcess;
 
+#ifndef TP_PROCESS_DESCRIPTOR_ONLY
 static int tp_mkdir(char const* path)
 {
     return os_make_directory_attempt(string_from_pointer(path));
@@ -63,6 +104,8 @@ static int tp_absolute(char const* path, char out[TP_PATH_CAP])
     scratch_end(temp);
     return ok;
 }
+
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -205,6 +248,12 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
 #include <linux/perf_event.h>
 #include <sched.h>
 #include <sys/syscall.h>
+#include <sys/prctl.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <linux/audit.h>
+#include <linux/close_range.h>
+#include <stddef.h>
 #endif
 
 /* Only the orchestration tool installs this handler, never the compiler.
@@ -223,6 +272,7 @@ static void tp_alarm_handler(int signal_number)
     }
 }
 
+#ifndef TP_PROCESS_DESCRIPTOR_ONLY
 static int tp_first_allowed_cpu(void)
 {
     int cpu = -1;
@@ -238,6 +288,8 @@ static int tp_first_allowed_cpu(void)
     return cpu;
 }
 
+#endif
+
 static void tp_cancel_handler(int signal_number)
 {
     if (tp_active_pid > 0)
@@ -249,8 +301,27 @@ static void tp_cancel_handler(int signal_number)
     _exit(128 + signal_number);
 }
 
-static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
-                            unsigned timeout_seconds, int cpu, int counters)
+static int tp_process_group_self_error(int status, int error)
+{
+    int result = status == 0 ? 0 : error;
+    /* The parent may already have installed this exact child's private group.
+     * EPERM also refuses a session leader whose group already equals its PID.
+     * Validate the required kernel state; do not retry or accept another group. */
+    if (result == EPERM && getpgrp() == getpid()) result = 0;
+    return result;
+}
+
+/* Descriptor launches share the existing timing/wait4 collector. Trusted
+ * callers verify an immutable executable before timing, supply an open log,
+ * and keep result records outside the payload write surface. */
+typedef struct TpDescriptorLaunch
+{
+    int executable, log;
+    unsigned file_limit;
+} TpDescriptorLaunch;
+
+static TpProcess tp_process_internal(char* const* args, char const* directory, char const* log_path,
+                            unsigned timeout_seconds, int cpu, int counters, TpDescriptorLaunch const* descriptor)
 {
     TpProcess result = {0};
     result.exit_code = -1;
@@ -263,9 +334,16 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
         result.running_fraction[i] = NAN;
         result.counter_errors[i] = counters ? ENOSYS : 0;
     }
-    int ready[2] = {-1, -1};
-    int log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    int ok = log >= 0 && pipe(ready) == 0;
+    int ready[2] = {-1, -1}, launch[2] = {-1, -1};
+    int log = descriptor ? fcntl(descriptor->log, F_DUPFD_CLOEXEC, 3) :
+              open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    /* The child reports one small packet before exec. CLOEXEC distinguishes
+     * a real exit 125; nonblocking reads cannot inherit a descendant wait. */
+    int ok = log >= 0 && pipe(ready) == 0 && pipe(launch) == 0 &&
+             fcntl(launch[0], F_SETFL, O_NONBLOCK) == 0 &&
+             fcntl(launch[1], F_SETFL, O_NONBLOCK) == 0 &&
+             fcntl(launch[0], F_SETFD, FD_CLOEXEC) == 0 &&
+             fcntl(launch[1], F_SETFD, FD_CLOEXEC) == 0;
     struct sigaction handler, previous, ignore_pipe, previous_pipe, cancel, previous_int, previous_term;
     memset(&cancel, 0, sizeof(cancel));
     cancel.sa_handler = tp_cancel_handler;
@@ -291,28 +369,49 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     if (pid == 0)
     {
         close(ready[1]);
-        int child_ok = setpgid(0, 0) == 0 && dup2(log, STDOUT_FILENO) >= 0 && dup2(log, STDERR_FILENO) >= 0;
-        close(log);
-        if (child_ok && directory)
+        close(launch[0]);
+        struct { int stage, error; } failure = {TP_LAUNCH_NONE, 0};
+        int group_status = setpgid(0, 0);
+        int group_error = group_status == 0 ? 0 : errno;
+        group_error = tp_process_group_self_error(group_status, group_error);
+        if (group_error)
         {
-            child_ok = chdir(directory) == 0;
+            failure.stage = TP_LAUNCH_GROUP;
+            failure.error = group_error;
         }
-        if (child_ok && cpu >= 0)
+        if (!failure.error && dup2(log, STDOUT_FILENO) < 0)
         {
+            failure.stage = TP_LAUNCH_STDOUT;
+            failure.error = errno;
+        }
+        if (!failure.error && dup2(log, STDERR_FILENO) < 0)
+        {
+            failure.stage = TP_LAUNCH_STDERR;
+            failure.error = errno;
+        }
+        close(log);
+        if (!failure.error && directory && chdir(directory) != 0)
+        {
+            failure.stage = TP_LAUNCH_DIRECTORY;
+            failure.error = errno;
+        }
+        if (!failure.error && cpu >= 0)
+        {
+            failure.stage = TP_LAUNCH_CPU;
 #ifdef __linux__
             cpu_set_t set;
             CPU_ZERO(&set);
             if (cpu >= CPU_SETSIZE)
             {
-                child_ok = 0;
+                failure.error = EINVAL;
             }
             else
             {
                 CPU_SET(cpu, &set);
-                child_ok = sched_setaffinity(0, sizeof(set), &set) == 0;
+                if (sched_setaffinity(0, sizeof(set), &set) != 0) failure.error = errno;
             }
 #else
-            child_ok = 0;
+            failure.error = ENOSYS;
 #endif
         }
         char byte;
@@ -321,17 +420,79 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
         {
             received = read(ready[0], &byte, 1);
         } while (received < 0 && errno == EINTR);
-        close(ready[0]);
-        if (child_ok && received == 1)
+        if (!failure.error && received != 1)
         {
-            sigaction(SIGPIPE, &previous_pipe, NULL);
-            execv(args[0], args);
+            failure.stage = TP_LAUNCH_READY;
+            failure.error = received < 0 ? errno : EIO;
         }
-        /* No buffered parent streams are flushed after a failed exec. */
+        close(ready[0]);
+        if (!failure.error && sigaction(SIGPIPE, &previous_pipe, NULL) != 0)
+        {
+            failure.stage = TP_LAUNCH_SIGNAL;
+            failure.error = errno;
+        }
+        if (!failure.error && descriptor)
+        {
+#ifdef __linux__
+            struct rlimit limit = {descriptor->file_limit, descriptor->file_limit};
+            struct rlimit core = {0, 0};
+            int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+            int confined = input >= 0 && dup2(input, STDIN_FILENO) >= 0 &&
+                           setrlimit(RLIMIT_FSIZE, &limit) == 0 && setrlimit(RLIMIT_CORE, &core) == 0 &&
+                           syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) == 0;
+            if (input >= 0) close(input);
+            /* Descendants stay in the collector's group until cleanup. The
+             * fixed helper installs its own process group before this filter. */
+            struct sock_filter policy[] = {
+                BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+                BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+                BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+                BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, 0x40000000u, 0, 1),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+                BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_setpgid, 0, 1),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+                BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_setsid, 0, 1),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)};
+            struct sock_fprog program = {(unsigned short)(sizeof(policy) / sizeof(policy[0])), policy};
+            confined = confined && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
+                       prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0;
+            if (!confined) { failure.stage = TP_LAUNCH_EXEC; failure.error = errno ? errno : EIO; }
+#else
+            failure.stage = TP_LAUNCH_EXEC; failure.error = ENOSYS;
+#endif
+        }
+        if (!failure.error)
+        {
+#ifdef __linux__
+            /* Descriptor launches exist only on Linux; elsewhere the block
+             * above already failed the launch with ENOSYS. */
+            if (descriptor)
+            {
+                char* const environment[] = {"PATH=/usr/bin:/bin", "LC_ALL=C", NULL};
+                fexecve(descriptor->executable, args, environment);
+            }
+            else
+#endif
+            execv(args[0], args);
+            failure.stage = TP_LAUNCH_EXEC;
+            failure.error = errno;
+        }
+        /* No allocation or buffered streams after fork. The packet is below
+         * PIPE_BUF and its empty pipe is nonblocking; interrupted writes retry. */
+        ssize_t reported;
+        do
+        {
+            reported = write(launch[1], &failure, sizeof(failure));
+        } while (reported < 0 && errno == EINTR);
+        close(launch[1]);
         _exit(125);
     }
     if (ok)
     {
+        close(launch[1]);
+        launch[1] = -1;
         tp_active_pid = (sig_atomic_t)pid;
         close(ready[0]);
         ready[0] = -1;
@@ -418,9 +579,48 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
             result.peak_rss_bytes = (double)usage.ru_maxrss * 1024.0;
 #endif
         }
+        if (waited == pid)
+        {
+            struct { int stage, error; } failure = {0, 0};
+            ssize_t received;
+            do
+            {
+                received = read(launch[0], &failure, sizeof(failure));
+            } while (received < 0 && errno == EINTR);
+            if (received == (ssize_t)sizeof(failure) && failure.stage > TP_LAUNCH_NONE &&
+                failure.stage < TP_LAUNCH_REPORT && failure.error > 0)
+            {
+                result.launch_stage = (TpLaunchStage)failure.stage;
+                result.launch_error = failure.error;
+            }
+            else if (received != 0)
+            {
+                result.launch_stage = TP_LAUNCH_REPORT;
+                result.launch_error = received < 0 ? errno : EIO;
+            }
+        }
         /* Clean any helper that outlived the compiler (including failures).
          * All measured compiler work is required to have finished at exit. */
         (void)kill(-pid, SIGKILL);
+        if (descriptor)
+        {
+            /* The descriptor sampler is a subreaper. No descendant may
+             * overlap the next sample, including a leader-exit background
+             * child. Group escape was denied before payload exec. Cleanup is
+             * outside the declared wall interval and bounded independently. */
+            TimeDataType cleanup = timestamp_take();
+            int complete = 0, outlived = 0;
+            for (int cleaning = 1; cleaning;)
+            {
+                pid_t reaped = waitpid(-pid, NULL, WNOHANG);
+                if (reaped >= 0) outlived = 1;
+                if (reaped < 0 && errno == ECHILD) { complete = 1; cleaning = 0; }
+                else if (reaped < 0 && errno != EINTR) cleaning = 0;
+                else if (timestamp_ns_between(cleanup, timestamp_take()) >= 1000000000u) cleaning = 0;
+                else if (reaped == 0) usleep(1000);
+            }
+            if (!complete || outlived) { result.launch_stage = TP_LAUNCH_GROUP; result.launch_error = EBUSY; }
+        }
         for (unsigned i = 0; i < TP_COUNTERS; ++i)
         {
             if (counter_fds[i] >= 0)
@@ -463,6 +663,8 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     {
         close(ready[1]);
     }
+    if (launch[0] >= 0) close(launch[0]);
+    if (launch[1] >= 0) close(launch[1]);
     if (int_set) sigaction(SIGINT, &previous_int, NULL);
     if (term_set) sigaction(SIGTERM, &previous_term, NULL);
     if (pipe_handler_set)
@@ -475,5 +677,14 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     }
     return result;
 }
+#ifndef TP_PROCESS_DESCRIPTOR_ONLY
+static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
+                            unsigned timeout_seconds, int cpu, int counters)
+{
+    TpProcess result = tp_process_internal(args, directory, log_path, timeout_seconds, cpu, counters, NULL);
+    return result;
+}
+#endif
+
 #endif
 #endif

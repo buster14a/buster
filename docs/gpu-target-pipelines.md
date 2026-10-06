@@ -4,12 +4,15 @@ The `ide cc` driver supports external GPU compiler pipelines for SPIR-V,
 NVIDIA PTX, AMDGCN/HSA code objects, Apple Metal AIR/metallib, and Microsoft
 DXIL. The orchestration code lives in
 `src/buster/lib/compiler/gpu/gpu.{c,h}` and is shared by unity and non-unity
-builds.
+builds. The distinct `spirv-vulkan1.2-compute` target implements a bounded
+[direct C compute path](spirv-compute.md) through canonical IR and emits the
+binary itself. It does not use this external orchestration.
 
-This support deliberately does not route ordinary Buster or C source through
-the native compiler frontend. The canonical IR does not yet model GPU address
-spaces, kernels, resources, execution scopes, barriers, or shader interfaces.
-GPU targets therefore consume the source or intermediate language expected by
+These external routes do not use Buster's C frontend. Canonical IR has no
+general shader address-space, resource, execution-scope, or barrier model.
+The direct compute slice maps one explicit interface at the backend boundary;
+it does not advertise those broader features. The external targets consume
+the source or intermediate language expected by
 the corresponding vendor toolchain and preserve that toolchain's semantics.
 The buster executable remains dependency-free; the selected external compiler
 must be installed only when a GPU pipeline is executed.
@@ -196,13 +199,39 @@ binary artifacts are checked for their expected container signature:
 - `DXBC` container signature for DXIL;
 - a textual PTX header for PTX.
 
-Every execution exclusively creates an owner-only sibling directory named
-`.buster-gpu-<pid>-<counter>.temps/` beside the explicit output, or beside the
-first input when no output was named. Every compiler-generated intermediate,
-including the final artifact before validation, is placed inside that
-directory. Concurrent identical invocations therefore have disjoint
-namespaces, and cleanup removes only the directory whose creation this
-invocation successfully claimed.
+Every execution selects a parent scratch root independently of its source and
+named output. A nonempty API `GpuPipelineOptions.temporary_directory` selects
+that parent; direct `gpu_pipeline_plan` callers continue to pass a directory
+whose ownership they already established. With no execution override, use the
+captured process environment and platform defaults:
+
+| Platform | Scratch-root selection |
+|---|---|
+| Windows | Nonempty `TEMP`, then nonempty `TMP`; missing both is a structured error |
+| Linux/macOS desktop | Nonempty `TMPDIR`, otherwise `/tmp` |
+| Android | Nonempty `TMPDIR`, otherwise the native activity's existing `internalDataPath` |
+| iOS | Nonempty `TMPDIR`, otherwise `tmp` beneath captured `HOME`; missing both is a structured error |
+
+The selected root must already exist and be writable. A creation failure does
+not silently select another root. Source/output directories are never implicit
+scratch defaults. Execution first builds the existing pure plan against a
+proposed `.buster-gpu-<pid>-<counter>.temps/` child, then exclusively creates
+that owned child only if planning succeeds. A name collision chooses
+another child and rebuilds its plan; it never adopts an existing entry. Every
+compiler-generated intermediate, including the final artifact before
+validation, stays inside the claimed child. Cleanup removes only that child
+and preserves the selected parent and unrelated entries.
+
+Syntax-only and captured preprocessing/assembly can therefore read sources
+in a non-writable directory when scratch storage is available. Named outputs
+retain their existing destinations and source-derived default names: a default
+named output beside a read-only input can still fail publication. The existing
+same-directory final staging remains independent of private scratch placement.
+The registered desktop POSIX permission fixture requires a nonzero effective
+UID, verifies denied creation in the source directory, and runs a first-party
+external-tool script that reads the source and records each invocation.
+Portable execution controls cover explicit root ownership and the actual
+platform default; mobile does not substitute an explicit root for that default.
 
 The concurrent ownership regression shares its input and parent directory while
 assigning one final output to each invocation. Both outputs must be valid and
@@ -217,6 +246,17 @@ temporary files: <path>`, and the API returns the same path in
 `GpuPipelineResult.temporary_directory`. A process killed outside the executor
 can leave a recognizable `.buster-gpu-*.temps` directory, but a later run
 never adopts or deletes it.
+
+`GpuPipelineResult.published` records that named output replacement committed.
+`cleanup_failed` separately records failure to remove the owned workspace;
+its path remains available in `temporary_directory` for remediation. A cleanup
+failure keeps the primary error, or reports `GPU_PIPELINE_ERROR_FILE_WRITE`
+when compilation and publication otherwise succeeded. After publication it
+preserves the complete artifact bytes and public path despite that error.
+The driver also preserves `gpu`/`has_gpu` on this error path and reports that
+the output was published together with the failed cleanup path. The CLI still
+exits unsuccessfully, so callers must inspect the publication fact before
+retrying; cleanup failure does not roll back or delete a committed output.
 
 A named final artifact is copied from the private directory to an exclusively
 created same-directory `.buster-staging-<pid>-<counter>.tmp` only after format

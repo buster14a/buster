@@ -34,6 +34,36 @@ the sanitizer module's clean controls, fatal undefined-behavior child and the
 supported LeakSanitizer children. A compile-only GCC row or a successful focused
 object build is not a substitute.
 
+## Release string fixtures
+
+String implementation, header and fixture changes also run a focused
+`GCC 13 Release string_tests` job automatically. It builds the complete
+unsanitized, non-fuzz Release `ide` with GCC 13 and warnings as errors,
+then executes only the registered `string_tests` module. GCC uses split
+translation units under the native build policy; ordinary platform CI retains
+the Clang unity, Debug/Release, sanitizer, Zig and MSVC coverage.
+
+This preserves the optimized fixture compilation that exposed #1837. Its
+backslash cases retain both initial quote states, both following-quote states
+and every slash count from 0 through 65 (264 combinations). The command line
+needs at most 71 UTF-16 slots including its NUL; expected output reaches at
+most 68 bytes. The expected slash span uses explicit indices so GCC sees
+its bound without a loop-carried append count or a warning suppression.
+
+After bootstrapping the same hosted driver above:
+
+```sh
+/tmp/buster-build generate --build-directory build-gcc13-string --cc gcc \
+  --no-sanitize --no-fuzz --ci --linker DEFAULT -- \
+  -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+/tmp/buster-build build --build-directory build-gcc13-string --config Release -t ide -- -j4
+build-gcc13-string/Release/ide test --module=string_tests --verbose=1 --ci=1
+```
+
+The focused job retains the exact source revision, compiler versions, build
+diagnostics and module result in its log. It does not claim full GCC runtime
+or sanitizer acceptance.
+
 ## ELF data alias control
 
 The workflow also retains the failure-first boundary behind #594. Its generated
@@ -51,8 +81,9 @@ green with every existing shape, count and Buster-side `reference=0` assertion.
 ## Workflow boundary
 
 The workflow has read-only repository permissions, retains its exact checkout
-SHA, compiler versions, complete suite log and alias-control files, and never
-cancels an active acceptance attempt. It runs automatically only for the
-issue-scoped implementation branch; after integration it is available by
-manual dispatch. Ordinary `CI complete`, self-host and review requirements
-remain independent merge gates.
+SHA, compiler versions, logs and alias-control files, and never cancels an
+active acceptance attempt. The complete sanitized suite runs automatically
+only for its issue-scoped implementation branch and remains available by
+manual dispatch. The focused Release string job runs for the scoped file
+changes listed above and on manual dispatch. Ordinary `CI complete`, self-host
+and review requirements remain independent merge gates.

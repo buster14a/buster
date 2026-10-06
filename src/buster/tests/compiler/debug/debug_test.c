@@ -376,9 +376,56 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_function_seed_index(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_type_name_ownership(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    char8 type_name[] = {'N', 'o', 'd', 'e'};
+    char8 overridden_name[] = {'B', 'a', 's', 'e'};
+    char8 declaration_name[] = {'A', 'l', 'i', 'a', 's'};
+    IrType types[] = {
+        {.name = {.pointer = type_name, .length = sizeof(type_name)}, .id = {.value = 0}, .kind = IR_TYPE_STRUCT},
+        {.name = {.pointer = overridden_name, .length = sizeof(overridden_name)}, .id = {.value = 1}, .kind = IR_TYPE_STRUCT},
+        {.name = {.pointer = type_name}, .id = {.value = 2}, .kind = IR_TYPE_VOID},
+        {.id = {.value = 3}, .kind = IR_TYPE_VOID},
+    };
+    IrSymbol symbol = {
+        .name = {.pointer = declaration_name, .length = sizeof(declaration_name)},
+        .id = {.value = 0}, .type = {.value = 1}, .kind = IR_SYMBOL_TYPE,
+    };
+    IrProgram program = {
+        .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)},
+        .symbols = {.symbols = &symbol, .count = 1},
+    };
+    DebugModel model = debug_model_build(arguments->arena, (DebugModelInput){.program = &program});
+    if (BUSTER_REQUIRE(arguments, model.valid && model.type_count == BUSTER_ARRAY_LENGTH(types)))
+    {
+        // The two initial names share one owned payload. A declaration symbol
+        // can replace its field without changing the canonical type name.
+        BUSTER_TEST(arguments, model.types[0].name.pointer == model.types[0].declaration_name.pointer);
+        BUSTER_TEST(arguments, model.types[0].name.pointer != type_name);
+        BUSTER_TEST(arguments, model.types[1].name.pointer != overridden_name);
+        BUSTER_TEST(arguments, model.types[1].declaration_name.pointer != declaration_name);
+        BUSTER_TEST(arguments, !model.types[2].name.pointer && !model.types[2].name.length &&
+                               !model.types[2].declaration_name.pointer && !model.types[2].declaration_name.length);
+        BUSTER_TEST(arguments, !model.types[3].name.pointer && !model.types[3].name.length &&
+                               !model.types[3].declaration_name.pointer && !model.types[3].declaration_name.length);
+        memset(type_name, 'x', sizeof(type_name));
+        memset(overridden_name, 'x', sizeof(overridden_name));
+        memset(declaration_name, 'x', sizeof(declaration_name));
+        BUSTER_TEST(arguments, string_equal(model.types[0].name, S8("Node")));
+        BUSTER_TEST(arguments, string_equal(model.types[0].declaration_name, S8("Node")));
+        BUSTER_TEST(arguments, string_equal(model.types[1].name, S8("Base")));
+        BUSTER_TEST(arguments, string_equal(model.types[1].declaration_name, S8("Alias")));
+    }
+    return result;
+}
+
 UnitTestResult debug_model_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = debug_test_location_index_validation(arguments);
+    UnitTestResult type_name_ownership = debug_test_type_name_ownership(arguments);
+    result.succeeded_test_count += type_name_ownership.succeeded_test_count;
+    result.test_count += type_name_ownership.test_count;
     UnitTestResult seed_index = debug_test_function_seed_index(arguments);
     result.succeeded_test_count += seed_index.succeeded_test_count;
     result.test_count += seed_index.test_count;

@@ -18,6 +18,7 @@ the conflict kept both sides' lines without knowing which was newer.  The index
 is now closed at the id in its heading: a new audit writes its own file and
 nothing else, and since timestamp ids sort chronologically, the directory is
 the index past that id.  `--list` merges the two into one history.
+Output consumers may stop early without a broken-pipe traceback.
 
 Usage:
     tools/new_audit.py --platform "Linux x86_64, Zen 4 7940HS" "the headline"
@@ -31,7 +32,9 @@ import argparse
 import datetime
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import textwrap
 
 INDEX_NAME = "PERFORMANCE_AUDITS.md"
@@ -172,6 +175,46 @@ def check(root):
     return problems
 
 
+def closed_output_self_test():
+    # Exercise the script entry point with a consumer that is already closed,
+    # so the check does not depend on a race with head or on pipe capacity.
+    with tempfile.TemporaryDirectory() as root:
+        script = os.path.join(root, "new_audit.py")
+        with open(__file__, "rb") as source, open(script, "wb") as target:
+            target.write(source.read())
+        audit_id = "2026-08-22T140351Z"
+        index = os.path.join(root, INDEX_NAME)
+        with open(index, "w", encoding="utf-8") as handle:
+            handle.write(f"## Audits through `{audit_id}`, newest first\n\n"
+                         f"- [`{audit_id}`](docs/performance-audits/{audit_id}.md) — closed consumer\n")
+        os.makedirs(os.path.join(root, AUDIT_DIRECTORY))
+        with open(os.path.join(root, AUDIT_DIRECTORY, audit_id + ".md"), "w", encoding="utf-8") as handle:
+            handle.write(entry_text(audit_id, "self-test", "closed consumer"))
+        expected = {"--list": f"{audit_id}  closed consumer\n", "--check": "0 problems\n"}
+        for option, output in expected.items():
+            completed = subprocess.run([sys.executable, script, option], stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, timeout=10)
+            assert completed.returncode == 0 and completed.stdout == output and not completed.stderr, completed
+            # One short row stays buffered until shutdown; -u instead exercises
+            # a write failure while main is still producing output.
+            for buffering in ([], ["-u"]):
+                reader, writer = os.pipe()
+                os.close(reader)
+                try:
+                    completed = subprocess.run([sys.executable, *buffering, script, option], stdout=writer,
+                                               stderr=subprocess.PIPE, text=True, timeout=10)
+                finally:
+                    os.close(writer)
+                assert completed.returncode == 0 and not completed.stderr, completed
+        # An unrelated input I/O failure must still propagate, rather than
+        # being mistaken for a closed output consumer.
+        os.remove(index)
+        os.mkdir(index)
+        completed = subprocess.run([sys.executable, script, "--list"], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, timeout=10)
+        assert completed.returncode != 0 and "Traceback" in completed.stderr and "BrokenPipeError" not in completed.stderr, completed
+
+
 def self_test():
     now = datetime.datetime(2026, 8, 22, 14, 3, 51, tzinfo=datetime.timezone.utc)
     assert mint_id(now) == "2026-08-22T140351Z"
@@ -212,6 +255,7 @@ def self_test():
         ("2026-08-22a", "letter a"),
     ], rows
     assert newest(openings) == "2026-08-23T000000Z"
+    closed_output_self_test()
     print("self-test passed")
     return 0
 
@@ -254,4 +298,13 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_code = 0
+    try:
+        exit_code = main()
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Prevent another broken-pipe report during the interpreter's final
+        # flush. Keep a returned status; other I/O exceptions still propagate.
+        with open(os.devnull, "wb") as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+    sys.exit(exit_code)

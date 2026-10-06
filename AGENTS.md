@@ -104,7 +104,7 @@ existing configured tree, use `build` for incremental work. `--sanitize`,
 | Sanitized validation | With the build directory idle: `./build.sh generate --sanitize`, then `./build.sh build -t test_all`. |
 | Full local compiler/configuration matrix | `./build.sh test_all_combinations`. |
 | External compatibility work | Read the [harness index](docs/agents/compatibility.md); use its pristine pinned inputs and affected harness. |
-| Documentation only | Check commands against their implementation, local links, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. |
+| Documentation only | Check commands against their implementation, `python3 tools/check_markdown_links.py`, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. Raw audit evidence is byte-exact and [exempt from the whitespace check](docs/agents/benchmarking.md#performance-audit-notes); audit prose is not. |
 
 Preserve Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and supported
 platform coverage. Routine Apple CI validates AArch64 only; Apple x86-64
@@ -131,6 +131,8 @@ history), then the relevant methods in
 Clang-built compiler; self-built stages validate the fixed point. Compare the
 same inputs, flags, target, and machine. Report compile time and useful work,
 not just a proxy or generated-program runtime.
+For a compiler change, run `tools/uarch_lab.py compare` (A/B; `run`
+profiles one binary) and read the verdict in its `summary.json`.
 
 Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed
@@ -155,10 +157,25 @@ branch/PR, exact revision, actual validation, unresolved findings and next actio
 on the issue/PR. Keep live progress out of PROJECTS.md and preserve the existing
 [research lifecycle](docs/agents/research.md).
 
+Before editing, read the owning issue's latest comments and all-state matching
+PRs, then record the planned branch and bounded scope on the issue. Parallel
+sessions use those claims or an existing shared ledger to reserve independent
+work; an idle session is not evidence that its branch is abandoned. Keep one
+writer per branch. Resolve overlapping ownership before creating a competing
+fix, and record an intentional merge order when separate branches touch the
+same contract.
+
+After publishing, continue watching the exact-head checks and reviews through
+integration within the authorized task. Before pausing or ending with an open
+PR, leave a handoff on the issue/PR naming its next owner, exact revision,
+completed validation, outstanding gates and next action. If no successor has
+accepted ownership, say so explicitly; publishing a PR does not complete a bug.
+
 Use the repository/host the user names; for a GitHub URL, work on that GitHub
-repository. Otherwise inspect the current remote. The project also retains
-Forgejo workflows and a source-free GitHub runner broker; their infrastructure
-rules are in [workflow.md](docs/agents/workflow.md) and [testing.md](docs/agents/testing.md).
+repository. Otherwise inspect the current remote. Historical Forgejo issue
+records and the retired source-free runner broker design remain available;
+active GitHub infrastructure rules are in [workflow.md](docs/agents/workflow.md)
+and [testing.md](docs/agents/testing.md).
 Check live CI for the submitted commit instead of relying on old reports.
 
 Historical issue references may use Forgejo numbers. Resolve those through
