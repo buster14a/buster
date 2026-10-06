@@ -8572,6 +8572,210 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArgument
     return result;
 }
 
+// C17 6.7.9p17: after a designator, positional initializers continue with the
+// member after the designated one in the innermost aggregate that contains it.
+// When the designator names a member promoted out of anonymous structs/unions,
+// that aggregate is the anonymous one, not the root record. Static
+// initialization resumed at the root's next member (`{ .x = 6, 7 }` stored 7 in
+// `b`, not in the anonymous union's first member); an inferred array size was
+// counted the same way. Each shape is checked at static storage, at automatic
+// storage and through an incomplete array, with a value that reaches the bytes
+// at run time. The source is inline so the frozen tests/ census is unchanged.
+BUSTER_GLOBAL_LOCAL String8 const c_test_promoted_designator_continuation_types =
+    S8_INITIALIZER("struct S\n"
+       "{\n"
+       "    int a;\n"
+       "    struct\n"
+       "    {\n"
+       "        int x;\n"
+       "        union\n"
+       "        {\n"
+       "            int u;\n"
+       "            float f;\n"
+       "        };\n"
+       "    };\n"
+       "    int b;\n"
+       "};\n"
+       "\n"
+       "struct T\n"
+       "{\n"
+       "    int a;\n"
+       "    struct\n"
+       "    {\n"
+       "        struct\n"
+       "        {\n"
+       "            int deep;\n"
+       "            int e;\n"
+       "        };\n"
+       "    };\n"
+       "    int z;\n"
+       "};\n"
+       "\n"
+       "struct U\n"
+       "{\n"
+       "    int a;\n"
+       "    union\n"
+       "    {\n"
+       "        struct\n"
+       "        {\n"
+       "            int p;\n"
+       "            int q;\n"
+       "        };\n"
+       "        int w;\n"
+       "    };\n"
+       "    int c;\n"
+       "    int d;\n"
+       "};\n"
+       "\n"
+       "struct V\n"
+       "{\n"
+       "    int a;\n"
+       "    struct\n"
+       "    {\n"
+       "        int m;\n"
+       "        struct\n"
+       "        {\n"
+       "            int n;\n"
+       "            int o;\n"
+       "        };\n"
+       "        int r;\n"
+       "    };\n"
+       "    int z;\n"
+       "};\n"
+       "\n"
+       "struct W\n"
+       "{\n"
+       "    struct S s;\n"
+       "    int k;\n"
+       "};\n"
+       "\n"
+       "static struct S s_x = {.x = 6, 7};\n"
+       "static struct S s_u = {.u = 7, 8};\n"
+       "static struct S s_f = {.f = 1.0f, 8};\n"
+       "static struct S s_after = {.a = 1, .x = 6, 7, 9};\n"
+       "static struct T t_deep = {.deep = 10, 11, 12};\n"
+       "static struct T t_last = {.e = 1, 2};\n"
+       "static struct U u_p = {.p = 1, 2, 3, 4};\n"
+       "static struct U u_q = {.q = 1, 2, 3};\n"
+       "static struct U u_w = {.w = 1, 2, 3};\n"
+       "static struct V v_n = {.n = 1, 2, 3, 4};\n"
+       "static struct V v_o = {.o = 1, 2, 3};\n"
+       "static struct V v_m = {.m = 1, 2, 3, 4, 5};\n"
+       "static struct W w_braced = {.s = {.x = 6, 7}, 9};\n"
+       "static struct W w_chain = {.s.x = 6, 7, 8, 9};\n"
+       "static struct S s_array[] = {{.x = 6, 7}, {.x = 1, 2, 3}};\n"
+       "static struct S s_sized[] = {[1].x = 6, 7, 8};\n"
+       "\n");
+
+BUSTER_GLOBAL_LOCAL String8 const c_test_promoted_designator_continuation_checks =
+    S8_INITIALIZER("static int fail_count;\n"
+       "\n"
+       "static void check(int condition)\n"
+       "{\n"
+       "    fail_count += !condition;\n"
+       "}\n"
+       "\n"
+       "static int automatic(int n)\n"
+       "{\n"
+       "    struct S s_x = {.x = n, n + 1};\n"
+       "    struct S s_u = {.u = n, n + 1};\n"
+       "    struct S s_after = {.a = 1, .x = n, n + 1, n + 3};\n"
+       "    struct T t_deep = {.deep = n, n + 1, n + 2};\n"
+       "    struct T t_last = {.e = n, n + 1};\n"
+       "    struct U u_p = {.p = n, n + 1, n + 2, n + 3};\n"
+       "    struct U u_q = {.q = n, n + 1, n + 2};\n"
+       "    struct U u_w = {.w = n, n + 1, n + 2};\n"
+       "    struct V v_n = {.n = n, n + 1, n + 2, n + 3};\n"
+       "    struct V v_o = {.o = n, n + 1, n + 2};\n"
+       "    struct V v_m = {.m = n, n + 1, n + 2, n + 3, n + 4};\n"
+       "    struct W w_braced = {.s = {.x = n, n + 1}, n + 2};\n"
+       "    struct W w_chain = {.s.x = n, n + 1, n + 2, n + 3};\n"
+       "    struct S s_sized[] = {[1].x = n, n + 1, n + 2};\n"
+       "    struct T* literal = &(struct T){.deep = n, n + 1, n + 2};\n"
+       "\n"
+       "    check(s_x.a == 0 && s_x.x == n && s_x.u == n + 1 && s_x.b == 0);\n"
+       "    check(s_u.x == 0 && s_u.u == n && s_u.b == n + 1);\n"
+       "    check(s_after.a == 1 && s_after.x == n && s_after.u == n + 1 && s_after.b == n + 3);\n"
+       "    check(t_deep.a == 0 && t_deep.deep == n && t_deep.e == n + 1 && t_deep.z == n + 2);\n"
+       "    check(t_last.deep == 0 && t_last.e == n && t_last.z == n + 1);\n"
+       "    check(u_p.a == 0 && u_p.p == n && u_p.q == n + 1 && u_p.c == n + 2 && u_p.d == n + 3);\n"
+       "    check(u_q.p == 0 && u_q.q == n && u_q.c == n + 1 && u_q.d == n + 2);\n"
+       "    check(u_w.w == n && u_w.c == n + 1 && u_w.d == n + 2);\n"
+       "    check(v_n.m == 0 && v_n.n == n && v_n.o == n + 1 && v_n.r == n + 2 && v_n.z == n + 3);\n"
+       "    check(v_o.m == 0 && v_o.n == 0 && v_o.o == n && v_o.r == n + 1 && v_o.z == n + 2);\n"
+       "    check(v_m.m == n && v_m.n == n + 1 && v_m.o == n + 2 && v_m.r == n + 3 && v_m.z == n + 4);\n"
+       "    check(w_braced.s.x == n && w_braced.s.u == n + 1 && w_braced.s.b == 0 && w_braced.k == n + 2);\n"
+       "    check(w_chain.s.x == n && w_chain.s.u == n + 1 && w_chain.s.b == n + 2 && w_chain.k == n + 3);\n"
+       "    check(sizeof s_sized / sizeof s_sized[0] == 2 && s_sized[1].x == n && s_sized[1].u == n + 1 && s_sized[1].b == n + 2);\n"
+       "    check(literal->a == 0 && literal->deep == n && literal->e == n + 1 && literal->z == n + 2);\n"
+       "    return fail_count;\n"
+       "}\n"
+       "\n"
+       "int main(void)\n"
+       "{\n"
+       "    check(s_x.a == 0 && s_x.x == 6 && s_x.u == 7 && s_x.b == 0);\n"
+       "    check(s_u.x == 0 && s_u.u == 7 && s_u.b == 8);\n"
+       "    check(s_f.x == 0 && s_f.f == 1.0f && s_f.b == 8);\n"
+       "    check(s_after.a == 1 && s_after.x == 6 && s_after.u == 7 && s_after.b == 9);\n"
+       "    check(t_deep.a == 0 && t_deep.deep == 10 && t_deep.e == 11 && t_deep.z == 12);\n"
+       "    check(t_last.deep == 0 && t_last.e == 1 && t_last.z == 2);\n"
+       "    check(u_p.a == 0 && u_p.p == 1 && u_p.q == 2 && u_p.c == 3 && u_p.d == 4);\n"
+       "    check(u_q.p == 0 && u_q.q == 1 && u_q.c == 2 && u_q.d == 3);\n"
+       "    check(u_w.w == 1 && u_w.c == 2 && u_w.d == 3);\n"
+       "    check(v_n.m == 0 && v_n.n == 1 && v_n.o == 2 && v_n.r == 3 && v_n.z == 4);\n"
+       "    check(v_o.m == 0 && v_o.n == 0 && v_o.o == 1 && v_o.r == 2 && v_o.z == 3);\n"
+       "    check(v_m.m == 1 && v_m.n == 2 && v_m.o == 3 && v_m.r == 4 && v_m.z == 5);\n"
+       "    check(w_braced.s.x == 6 && w_braced.s.u == 7 && w_braced.s.b == 0 && w_braced.k == 9);\n"
+       "    check(w_chain.s.x == 6 && w_chain.s.u == 7 && w_chain.s.b == 8 && w_chain.k == 9);\n"
+       "    check(sizeof s_array / sizeof s_array[0] == 2 && s_array[0].u == 7 && s_array[0].b == 0 && s_array[1].u == 2 && s_array[1].b == 3);\n"
+       "    check(sizeof s_sized / sizeof s_sized[0] == 2 && s_sized[1].x == 6 && s_sized[1].u == 7 && s_sized[1].b == 8);\n"
+       "    return automatic(5) != 0;\n"
+       "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_designator_continuation_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    // Two literals: the program exceeds the 4095-byte ISO C string literal limit.
+    String8 program = string_format(arguments->arena, S8("{S8}{S8}"), c_test_promoted_designator_continuation_types,
+        c_test_promoted_designator_continuation_checks);
+    String8 source = buster_test_temporary_path(arguments->arena, S8("promoted-designator-continuation"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("promoted-designator-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], S8("-fverify-codegen"), S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = mode != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(temporary.arena, S8("promoted designator continuation {S8}: status={u32} timed_out={u32}"),
+                            modes[mode], execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_array_declarators(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -46398,6 +46602,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_pp_class_masks);
     C_TEST_FIXTURE(arguments, c_test_pragma_pack_explicit_alignment);
     C_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
+    C_TEST_FIXTURE(arguments, c_test_promoted_designator_continuation_runtime);
     C_TEST_FIXTURE(arguments, c_test_promoted_member_search);
     C_TEST_FIXTURE(arguments, c_test_promoted_union_initializer_overrides);
     C_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
