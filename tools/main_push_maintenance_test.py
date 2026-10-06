@@ -264,16 +264,18 @@ class IntegrationTests(unittest.TestCase):
 class WorkflowTests(unittest.TestCase):
     def test_exact_sha_policy_ordering_and_trust_pin(self):
         api = (ROOT / ".github/workflows/api-migration-policy.yml").read_text()
+        native = (ROOT / ".github/workflows/native-retirement-admission.yml").read_text()
         preflight = (ROOT / ".github/workflows/merge-conflict-preflight.yml").read_text()
         regression = (
             ROOT / ".github/workflows/merge-conflict-preflight-regression.yml"
         ).read_text()
-        for workflow in (api, preflight):
+        for workflow in (api, native, preflight):
             self.assertIn("github.event_name == 'push' && github.sha", workflow)
             self.assertIn(
                 "cancel-in-progress: ${{ github.event_name != 'push' }}", workflow
             )
-        self.assertIn('--predecessor-job "Native retirement merge admission"', api)
+        self.assertIn('--predecessor-job "Native retirement merge admission"', native)
+        self.assertIn('--workflow "native-retirement-admission.yml"', native)
         self.assertIn('--predecessor-job "Exact merge-tree preflight"', preflight)
         self.assertIn("actions: read", preflight)
         self.assertIn(

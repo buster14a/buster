@@ -18,6 +18,31 @@ foreach(test_file IN LISTS BUSTER_ANDROID_TEST_FILES)
         list(APPEND BUSTER_ANDROID_TEST_FIXTURES "${test_file}")
     endif()
 endforeach()
+# Preserve repository-relative paths for the direct SPIR-V runtime fixture.
+file(GLOB_RECURSE BUSTER_ANDROID_SPIRV_FIXTURES
+    LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/spirv/fixtures/*")
+list(APPEND BUSTER_ANDROID_TEST_FIXTURES ${BUSTER_ANDROID_SPIRV_FIXTURES})
+# Registered codegen sources (inline-assembly fixtures) also live outside the
+# frozen root test inventory and are read by repository-relative path.
+file(GLOB_RECURSE BUSTER_ANDROID_CODEGEN_FIXTURES
+    LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/codegen/fixtures/*")
+list(APPEND BUSTER_ANDROID_TEST_FIXTURES ${BUSTER_ANDROID_CODEGEN_FIXTURES})
+set(BUSTER_ANDROID_CODEGEN_ASSET_COMMANDS)
+if (BUSTER_ANDROID_CODEGEN_FIXTURES)
+    list(APPEND BUSTER_ANDROID_CODEGEN_ASSET_COMMANDS
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/codegen/fixtures"
+            "${CMAKE_BINARY_DIR}/assets/src/buster/tests/compiler/codegen/fixtures")
+endif()
+set(BUSTER_ANDROID_SPIRV_ASSET_COMMANDS)
+if (BUSTER_ANDROID_SPIRV_FIXTURES)
+    list(APPEND BUSTER_ANDROID_SPIRV_ASSET_COMMANDS
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/spirv/fixtures"
+            "${CMAKE_BINARY_DIR}/assets/src/buster/tests/compiler/spirv/fixtures")
+endif()
 set(BUSTER_ANDROID_TEST_INVENTORY "${CMAKE_BINARY_DIR}/android-test-fixtures.txt")
 string(REPLACE ";" "\n" BUSTER_ANDROID_TEST_INVENTORY_CONTENT "${BUSTER_ANDROID_TEST_FIXTURES}")
 file(GENERATE OUTPUT "${BUSTER_ANDROID_TEST_INVENTORY}"
@@ -37,6 +62,8 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E rm -rf "${CMAKE_BINARY_DIR}/assets"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/tests" "${CMAKE_BINARY_DIR}/assets/tests"
     ${BUSTER_ANDROID_TEST_FILTER_COMMANDS}
+    ${BUSTER_ANDROID_SPIRV_ASSET_COMMANDS}
+    ${BUSTER_ANDROID_CODEGEN_ASSET_COMMANDS}
     ${BUSTER_ANDROID_SHADER_ASSET_COMMANDS}
     # 1. Compile the manifest + assets into a base APK (binary manifest + resources.arsc).
     COMMAND "${BUSTER_AAPT2}" link

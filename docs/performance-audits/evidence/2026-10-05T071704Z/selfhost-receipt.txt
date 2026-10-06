@@ -1,0 +1,5 @@
+SELF_HOST fixed_point bytes=37510936 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+SELF_HOST stage 1 throughput
+SELF_HOST stage 2 throughput
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=31354534 median_ns=33439045 throughput_mb_s=0
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=62293707 median_ns=66451132 throughput_mb_s=0

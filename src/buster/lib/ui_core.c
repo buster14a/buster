@@ -7,6 +7,14 @@
 
 BUSTER_V_IMPL UI_State* ui_state;
 
+// The key-lookup index starts at 4096 chain heads and doubles whenever the
+// keyed box count exceeds its size, keeping the average chain at or below one
+// box. Keys are multiplied by an odd constant and the top bits select the
+// chain, so keys that agree in their low bits still spread out.
+#define UI_BOX_INDEX_INITIAL_SIZE_LOG2 12u
+#define UI_BOX_INDEX_INITIAL_SIZE (1ull << UI_BOX_INDEX_INITIAL_SIZE_LOG2)
+#define UI_BOX_INDEX_MULTIPLIER 0x9e3779b97f4a7c15ull
+
 BUSTER_GLOBAL_LOCAL void ui_prune_focus_keys(void);
 BUSTER_GLOBAL_LOCAL bool ui_box_is_current(UI_Box* box);
 BUSTER_GLOBAL_LOCAL void ui_prune_active_keys(void);
@@ -192,6 +200,7 @@ BUSTER_GLOBAL_LOCAL u64 ui_utf8_columns_for_byte_offset(String8 string, u64 byte
         }
         position += sequence_length;
         result += 1;
+        ui_state->utf8_column_decodes += 1;
     }
     return result;
 }
@@ -500,6 +509,7 @@ void ui_eat_event_node(UI_EventList* list, UI_EventNode* node)
 {
     if (node)
     {
+        node->eaten = true;
         if (node->prev)
         {
             node->prev->next = node->next;
@@ -762,6 +772,9 @@ UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* w
     state->rendering_window = window;
     state->box_table_size = 4096;
     state->box_table = arena_allocate(arena, UI_BoxHashSlot, state->box_table_size);
+    state->box_index_size = UI_BOX_INDEX_INITIAL_SIZE;
+    state->box_index_shift = 64 - UI_BOX_INDEX_INITIAL_SIZE_LOG2;
+    state->box_index = arena_allocate_zeroed(arena, UI_Box*, state->box_index_size);
     state->active_box_capacity = state->box_table_size;
     state->active_boxes = arena_allocate(arena, UI_Box*, state->active_box_capacity);
 
@@ -827,14 +840,20 @@ BUSTER_GLOBAL_LOCAL u64 ui_box_slot_from_key(UI_Key key)
     return key.value & (ui_state->box_table_size - 1);
 }
 
+BUSTER_GLOBAL_LOCAL u64 ui_box_index_slot_from_key(UI_Key key)
+{
+    return (key.value * UI_BOX_INDEX_MULTIPLIER) >> ui_state->box_index_shift;
+}
+
 UI_Box* ui_box_from_key(UI_Key key)
 {
     UI_Box* result = 0;
     if (!ui_key_match(key, ui_key_zero()))
     {
-        u64 slot_index = ui_box_slot_from_key(key);
-        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        ui_state->box_key_lookups += 1;
+        for (UI_Box* box = ui_state->box_index[ui_box_index_slot_from_key(key)]; box; box = box->index_next)
         {
+            ui_state->box_key_probes += 1;
             if (ui_key_match(box->key, key))
             {
                 result = box;
@@ -843,6 +862,41 @@ UI_Box* ui_box_from_key(UI_Key key)
         }
     }
     return result;
+}
+
+// Doubles the lookup index until it covers the keyed population and rehashes
+// the present boxes into it. Box addresses and the ordering table are not
+// touched, so neither stable identity nor the active-list order can change.
+// The superseded array stays in the state arena; doubling bounds the waste to
+// the final array's size.
+BUSTER_GLOBAL_LOCAL void ui_box_index_grow(void)
+{
+    UI_Box** old_index = ui_state->box_index;
+    u64 old_size = ui_state->box_index_size;
+    u64 size = old_size;
+    u64 shift = ui_state->box_index_shift;
+    while (size < ui_state->box_count)
+    {
+        BUSTER_CHECK(shift > 1);
+        size *= 2;
+        shift -= 1;
+    }
+    UI_Box** index = arena_allocate_zeroed(ui_state->arena, UI_Box*, size);
+    ui_state->box_index = index;
+    ui_state->box_index_size = size;
+    ui_state->box_index_shift = shift;
+    ui_state->box_index_grows += 1;
+    for (u64 slot = 0; slot < old_size; slot += 1)
+    {
+        for (UI_Box *box = old_index[slot], *next = 0; box; box = next)
+        {
+            next = box->index_next;
+            u64 new_slot = ui_box_index_slot_from_key(box->key);
+            box->index_next = index[new_slot];
+            index[new_slot] = box;
+            ui_state->box_index_moves += 1;
+        }
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void ui_box_hash_push(UI_Box* box)
@@ -861,6 +915,13 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_push(UI_Box* box)
     }
     BUSTER_CHECK(ui_state->box_count != UINT64_MAX);
     ui_state->box_count += 1;
+    if (ui_state->box_count > ui_state->box_index_size)
+    {
+        ui_box_index_grow();
+    }
+    u64 index_slot = ui_box_index_slot_from_key(box->key);
+    box->index_next = ui_state->box_index[index_slot];
+    ui_state->box_index[index_slot] = box;
 }
 
 BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
@@ -884,6 +945,14 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
     }
     box->hash_next = 0;
     box->hash_prev = 0;
+    UI_Box** link = &ui_state->box_index[ui_box_index_slot_from_key(box->key)];
+    while (*link && *link != box)
+    {
+        link = &(*link)->index_next;
+    }
+    BUSTER_CHECK(*link == box);
+    *link = box->index_next;
+    box->index_next = 0;
     BUSTER_CHECK(ui_state->box_count != 0);
     ui_state->box_count -= 1;
 }
@@ -961,6 +1030,7 @@ UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key)
 
     UI_Box* hash_next = (box_is_new && key_is_zero) ? 0 : box->hash_next;
     UI_Box* hash_prev = (box_is_new && key_is_zero) ? 0 : box->hash_prev;
+    UI_Box* index_next = (box_is_new && key_is_zero) ? 0 : box->index_next;
     UI_Key old_key = box_is_new ? key : box->key;
     u64 first_touched = box_is_new ? ui_state->build_index : (box->first_touched_build_index ? box->first_touched_build_index : ui_state->build_index);
     f32 hot_t = box_is_new ? 0.0f : box->hot_t;
@@ -978,6 +1048,7 @@ UI_Box* ui_build_box_from_key(UI_BoxFlags flags, UI_Key key)
 
     box->hash_next = hash_next;
     box->hash_prev = hash_prev;
+    box->index_next = index_next;
     box->key = key_is_zero ? ui_key_zero() : old_key;
     box->first_touched_build_index = first_touched;
     box->last_touched_build_index = ui_state->build_index;
@@ -2258,6 +2329,101 @@ BUSTER_GLOBAL_LOCAL bool ui_focus_navigation_event(UI_Event* event, UI_BoxFlags*
     return result;
 }
 
+// Slot index of an owner key in a table of 1 << bits slots.
+BUSTER_GLOBAL_LOCAL u64 ui_event_owner_slot_start(u64 key, u64 bits)
+{
+    return (key * 0x9e3779b97f4a7c15ull) >> (64 - bits);
+}
+
+// Links the live, routed events that carry a nonzero owner key into one
+// chronological chain per owner. Only such events can reach a box signal: every
+// signal branch that consumes an event requires owner_assigned && owner_key ==
+// box key (a routed event is always owner_assigned for the kinds the signal
+// accepts), and a box with the zero key never matches. Events pushed after
+// routing are not chained; ui_signal_from_box finds them at the list tail. If
+// the table cannot be reserved the chains stay invalid and signals fall back to
+// scanning the whole list.
+BUSTER_GLOBAL_LOCAL void ui_event_owner_chains_build(void)
+{
+    u64 owned_count = 0;
+    for (UI_EventNode* node = ui_state->events.first; node; node = node->next)
+    {
+        if (node->v.owner_assigned && node->v.owner_key != 0)
+        {
+            owned_count += 1;
+        }
+    }
+    ui_state->event_owner_slots = 0;
+    ui_state->event_owner_slot_count = 0;
+    ui_state->event_owner_slot_bits = 0;
+    ui_state->event_owner_chains_build_index = 0;
+    if (owned_count == 0)
+    {
+        ui_state->event_owner_chains_build_index = ui_state->build_index;
+    }
+    else if (owned_count <= (u64)1 << 40)
+    {
+        u64 bits = 1;
+        while (((u64)1 << bits) < owned_count * 2)
+        {
+            bits += 1;
+        }
+        u64 slot_count = (u64)1 << bits;
+        Arena* arena = ui_build_arena();
+        u64 position = arena->position;
+        if (ui_arena_try_advance(arena, &position, slot_count * sizeof(UI_EventOwnerSlot), BUSTER_ALIGN_OF(UI_EventOwnerSlot)))
+        {
+            UI_EventOwnerSlot* slots = arena_allocate(arena, UI_EventOwnerSlot, slot_count);
+            memset(slots, 0, slot_count * sizeof(UI_EventOwnerSlot));
+            for (UI_EventNode* node = ui_state->events.first; node; node = node->next)
+            {
+                if (node->v.owner_assigned && node->v.owner_key != 0)
+                {
+                    u64 slot_index = ui_event_owner_slot_start(node->v.owner_key, bits);
+                    while (slots[slot_index].key != 0 && slots[slot_index].key != node->v.owner_key)
+                    {
+                        slot_index = (slot_index + 1) & (slot_count - 1);
+                    }
+                    UI_EventOwnerSlot* slot = &slots[slot_index];
+                    if (slot->key == 0)
+                    {
+                        slot->key = node->v.owner_key;
+                        slot->first = node;
+                    }
+                    else
+                    {
+                        slot->last->owner_next = node;
+                    }
+                    slot->last = node;
+                }
+            }
+            ui_state->event_owner_slots = slots;
+            ui_state->event_owner_slot_count = slot_count;
+            ui_state->event_owner_slot_bits = bits;
+            ui_state->event_owner_chains_build_index = ui_state->build_index;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL UI_EventNode* ui_event_owner_chain_first(u64 key)
+{
+    UI_EventNode* result = 0;
+    u64 slot_count = ui_state->event_owner_slot_count;
+    if (key != 0 && slot_count != 0)
+    {
+        u64 slot_index = ui_event_owner_slot_start(key, ui_state->event_owner_slot_bits);
+        while (ui_state->event_owner_slots[slot_index].key != 0 && ui_state->event_owner_slots[slot_index].key != key)
+        {
+            slot_index = (slot_index + 1) & (slot_count - 1);
+        }
+        if (ui_state->event_owner_slots[slot_index].key == key)
+        {
+            result = ui_state->event_owner_slots[slot_index].first;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
 {
     u64 previous_build_index = ui_state->build_index ? ui_state->build_index - 1 : 0;
@@ -2285,6 +2451,9 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
     for (UI_EventNode* node = ui_state->events.first; node; node = node->next)
     {
         UI_Event* event = &node->v;
+        node->owner_next = 0;
+        node->routed_build_index = ui_state->build_index;
+        node->eaten = false;
         event->owner_key = 0;
         event->owner_assigned = 0;
         event->route_flags = UI_EventRouteFlag_None;
@@ -2413,6 +2582,7 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
     {
         ui_state->active_box_key[i] = provisional_active[i];
     }
+    ui_event_owner_chains_build();
 }
 
 BUSTER_GLOBAL_LOCAL bool ui_box_focusable(UI_Box* box, bool active)
@@ -2467,6 +2637,98 @@ BUSTER_GLOBAL_LOCAL void ui_signal_add_focus_state(UI_Signal* signal, UI_Box* bo
     }
 }
 
+// Applies one event to the signal of `box`; consumed events leave the list.
+BUSTER_GLOBAL_LOCAL void ui_signal_apply_event(UI_Box* box, UI_Signal* signal, UI_Event* event, bool disabled)
+{
+    UI_Signal sig = *signal;
+    bool is_mouse = false;
+    UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);
+    bool event_in_bounds = ui_box_contains_point(box, event->pos);
+    bool event_owned = event->owner_assigned && event->owner_key == box->key.value;
+    if (event->kind == UI_EventKind_Text && (box->flags & UI_BoxFlag_DrawTextFastpathCodepoint) && box->fastpath_codepoint != 0 && !disabled &&
+        (ui_key_match(ui_state->focus_hot_key, box->key) || event_owned) && ui_box_focusable(box, false) && ui_utf8_codepoint_count(event->string) == 1 &&
+        ui_utf8_codepoint_at(event->string, 0) == box->fastpath_codepoint && (!event->owner_assigned || event_owned))
+    {
+        sig.f |= UI_SignalFlag_KeyboardPressed;
+        sig.clicked_left = 1;
+        sig.activation_count += 1;
+        sig.key = event->key;
+        sig.modifiers = event->modifiers;
+        ui_eat_event(event);
+    }
+    else if (event->kind == UI_EventKind_Scroll && (box->flags & UI_BoxFlag_Scroll) && event_in_bounds && !disabled &&
+        ui_event_belongs_to_box(event, box, UI_BoxFlag_Scroll))
+    {
+        float2 delta = float2_make(float2_element(event->delta, AXIS2_X) * 32.0f, float2_element(event->delta, AXIS2_Y) * 32.0f);
+        if (!(box->flags & UI_BoxFlag_ViewScrollX))
+        {
+            float2_element(delta, AXIS2_X) = 0.0f;
+        }
+        if (!(box->flags & UI_BoxFlag_ViewScrollY))
+        {
+            float2_element(delta, AXIS2_Y) = 0.0f;
+        }
+        ui_box_scroll_by(box, delta);
+        sig.f |= UI_SignalFlag_Scrolled;
+        sig.scrolled = 1;
+        sig.scroll_delta = delta;
+        ui_eat_event(event);
+    }
+    else if (event->kind == UI_EventKind_FileDrop && (box->flags & UI_BoxFlag_DropSite) && event_in_bounds && !disabled &&
+             ui_event_belongs_to_box(event, box, UI_BoxFlag_DropSite))
+    {
+        sig.f |= UI_SignalFlag_Dropped;
+        sig.dropped = 1;
+        sig.drop_paths = ui_copy_drop_paths(event->paths);
+        ui_eat_event(event);
+    }
+    else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Press && event_in_bounds && !disabled &&
+             ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+    {
+        if (button == UI_MouseButtonKind_Left)
+        {
+            sig.f |= UI_SignalFlag_LeftPressed;
+            sig.pressed_left = 1;
+        }
+        if (event->route_flags & UI_EventRouteFlag_FocusChanged)
+        {
+            sig.f |= UI_SignalFlag_FocusChanged;
+            sig.focus_changed = 1;
+        }
+        ui_eat_event(event);
+    }
+    else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Release &&
+             !disabled && ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+    {
+        if (button == UI_MouseButtonKind_Left)
+        {
+            sig.f |= UI_SignalFlag_LeftReleased;
+            sig.released_left = 1;
+            if (event_in_bounds)
+            {
+                sig.f |= UI_SignalFlag_LeftClicked;
+                sig.clicked_left = 1;
+                sig.activation_count += 1;
+                sig.left_click_position = event->pos;
+            }
+        }
+        ui_eat_event(event);
+    }
+    else if ((box->flags & UI_BoxFlag_KeyboardClickable) && event->kind == UI_EventKind_Press &&
+             (event->key == WM_KEY_RETURN || event->key == WM_KEY_SPACE) &&
+             !disabled && ui_box_focusable(box, true) &&
+             (event->owner_assigned ? event->owner_key == box->key.value : ui_key_match(ui_state->focus_active_key, box->key)))
+    {
+        sig.f |= UI_SignalFlag_KeyboardPressed;
+        sig.clicked_left = 1;
+        sig.activation_count += 1;
+        sig.key = event->key;
+        sig.modifiers = event->modifiers;
+        ui_eat_event(event);
+    }
+    *signal = sig;
+}
+
 UI_Signal ui_signal_from_box(UI_Box* box)
 {
     UI_Signal sig = {.box = box};
@@ -2505,91 +2767,46 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         return sig;
     }
 
-    UI_EventIterator iterator = ui_event_iterator_initialize(ui_state);
-    UI_Event* event;
-    while ((event = ui_next_event(&iterator)))
+    // A box can only act on events it owns, so with the router's per-owner
+    // chains the scan visits those (in chronological order) instead of every
+    // event in the frame. Events pushed after routing are unrouted and visible
+    // to every box, as before; they sit at the list tail. Without valid chains
+    // the whole list is scanned.
+    if (ui_state->event_owner_chains_build_index == ui_state->build_index)
     {
-        bool is_mouse = false;
-        UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);
-        bool event_in_bounds = ui_box_contains_point(box, event->pos);
-        bool event_owned = event->owner_assigned && event->owner_key == box->key.value;
-        if (event->kind == UI_EventKind_Text && (box->flags & UI_BoxFlag_DrawTextFastpathCodepoint) && box->fastpath_codepoint != 0 && !disabled &&
-            (ui_key_match(ui_state->focus_hot_key, box->key) || event_owned) && ui_box_focusable(box, false) && ui_utf8_codepoint_count(event->string) == 1 &&
-            ui_utf8_codepoint_at(event->string, 0) == box->fastpath_codepoint && (!event->owner_assigned || event_owned))
+        UI_EventNode* node = ui_event_owner_chain_first(box->key.value);
+        while (node)
         {
-            sig.f |= UI_SignalFlag_KeyboardPressed;
-            sig.clicked_left = 1;
-            sig.key = event->key;
-            sig.modifiers = event->modifiers;
-            ui_eat_event(event);
-        }
-        else if (event->kind == UI_EventKind_Scroll && (box->flags & UI_BoxFlag_Scroll) && event_in_bounds && !disabled &&
-            ui_event_belongs_to_box(event, box, UI_BoxFlag_Scroll))
-        {
-            float2 delta = float2_make(float2_element(event->delta, AXIS2_X) * 32.0f, float2_element(event->delta, AXIS2_Y) * 32.0f);
-            if (!(box->flags & UI_BoxFlag_ViewScrollX))
+            UI_EventNode* next = node->owner_next;
+            if (!node->eaten)
             {
-                float2_element(delta, AXIS2_X) = 0.0f;
+                ui_state->signal_event_inspections += 1;
+                ui_signal_apply_event(box, &sig, &node->v, disabled);
             }
-            if (!(box->flags & UI_BoxFlag_ViewScrollY))
-            {
-                float2_element(delta, AXIS2_Y) = 0.0f;
-            }
-            ui_box_scroll_by(box, delta);
-            sig.f |= UI_SignalFlag_Scrolled;
-            sig.scrolled = 1;
-            sig.scroll_delta = delta;
-            ui_eat_event(event);
+            node = next;
         }
-        else if (event->kind == UI_EventKind_FileDrop && (box->flags & UI_BoxFlag_DropSite) && event_in_bounds && !disabled &&
-                 ui_event_belongs_to_box(event, box, UI_BoxFlag_DropSite))
+        UI_EventNode* tail_start = 0;
+        for (UI_EventNode* tail = ui_state->events.last; tail && tail->routed_build_index != ui_state->build_index; tail = tail->prev)
         {
-            sig.f |= UI_SignalFlag_Dropped;
-            sig.dropped = 1;
-            sig.drop_paths = ui_copy_drop_paths(event->paths);
-            ui_eat_event(event);
+            tail_start = tail;
         }
-        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Press && event_in_bounds && !disabled &&
-                 ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+        node = tail_start;
+        while (node)
         {
-            if (button == UI_MouseButtonKind_Left)
-            {
-                sig.f |= UI_SignalFlag_LeftPressed;
-                sig.pressed_left = 1;
-            }
-            if (event->route_flags & UI_EventRouteFlag_FocusChanged)
-            {
-                sig.f |= UI_SignalFlag_FocusChanged;
-                sig.focus_changed = 1;
-            }
-            ui_eat_event(event);
+            UI_EventNode* next = node->next;
+            ui_state->signal_event_inspections += 1;
+            ui_signal_apply_event(box, &sig, &node->v, disabled);
+            node = next;
         }
-        else if ((box->flags & UI_BoxFlag_MouseClickable) && is_mouse && event->kind == UI_EventKind_Release &&
-                 !disabled && ui_event_belongs_to_box(event, box, UI_BoxFlag_MouseClickable))
+    }
+    else
+    {
+        UI_EventIterator iterator = ui_event_iterator_initialize(ui_state);
+        UI_Event* event;
+        while ((event = ui_next_event(&iterator)))
         {
-            if (button == UI_MouseButtonKind_Left)
-            {
-                sig.f |= UI_SignalFlag_LeftReleased;
-                sig.released_left = 1;
-                if (event_in_bounds)
-                {
-                    sig.f |= UI_SignalFlag_LeftClicked;
-                    sig.clicked_left = 1;
-                    sig.left_click_position = event->pos;
-                }
-            }
-            ui_eat_event(event);
-        }
-        else if ((box->flags & UI_BoxFlag_KeyboardClickable) && event->kind == UI_EventKind_Press &&
-                 (event->key == WM_KEY_RETURN || event->key == WM_KEY_SPACE) &&
-                 !disabled && ui_box_focusable(box, true) &&
-                 (event->owner_assigned ? event->owner_key == box->key.value : ui_key_match(ui_state->focus_active_key, box->key)))
-        {
-            sig.f |= UI_SignalFlag_KeyboardPressed;
-            sig.clicked_left = 1;
-            sig.key = event->key;
-            sig.modifiers = event->modifiers;
-            ui_eat_event(event);
+            ui_state->signal_event_inspections += 1;
+            ui_signal_apply_event(box, &sig, event, disabled);
         }
     }
 
@@ -2613,6 +2830,7 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_scope_from_box(UI_Box* box, UI_Box* root)
     UI_Box* result = box ? box->parent : root;
     for (UI_Box* parent = box ? box->parent : root; parent; parent = parent->parent)
     {
+        ui_state->focus_scope_steps += 1;
         if (parent != root && (parent->flags & (UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY)))
         {
             result = parent;
@@ -2622,26 +2840,36 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_scope_from_box(UI_Box* box, UI_Box* root)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ui_box_in_focus_scope(UI_Box* box, UI_Box* scope)
+// Stamps every strict descendant of `scope` with a fresh value and returns it,
+// so scope membership is one compare per candidate instead of a parent-chain
+// walk (which made a request quadratic in tree depth). The walk is one
+// iterative pre-order pass over the scope's subtree, linear in its size. A
+// box is a strict descendant exactly when the per-build child links reach it
+// from `scope`, which is the same set the parent chain reaches. `scope` itself
+// is never stamped, and an absent scope stamps nothing.
+BUSTER_GLOBAL_LOCAL u64 ui_focus_scope_mark(UI_Box* scope)
 {
-    if (box && scope && box != scope)
+    ui_state->focus_scope_stamp += 1;
+    u64 stamp = ui_state->focus_scope_stamp;
+    if (scope)
     {
-        for (UI_Box* parent = box->parent; parent; parent = parent->parent)
+        UI_BoxRec rec = ui_box_rec_df_pre(scope, scope);
+        while (rec.next)
         {
-            if (parent == scope)
-            {
-                return true;
-            }
+            UI_Box* box = rec.next;
+            box->focus_scope_stamp = stamp;
+            rec = ui_box_rec_df_pre(box, scope);
+            ui_state->focus_scope_steps += 1 + (u64)rec.pop_count;
         }
     }
-
-    return false;
+    return stamp;
 }
 
 BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI_BoxFlags axis_flag, UI_FocusDirection direction, u64 build_index, UI_Box* root)
 {
     UI_Box* first = 0;
     UI_Box* last = 0;
+    ui_state->focus_navigation_calls += 1;
     UI_Box* current = ui_box_from_key(current_key);
     bool current_found = current && current->last_touched_build_index == build_index;
     if (!current_found)
@@ -2649,12 +2877,13 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
         current = 0;
     }
     UI_Box* scope = ui_focus_scope_from_box(current, root);
+    u64 scope_stamp = ui_focus_scope_mark(scope);
     UI_Box* directional = 0;
     f32 directional_score = 0.0f;
     for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
         UI_Box* box = ui_state->active_boxes[active_box_index];
-        if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true))
+        if (box->last_touched_build_index != build_index || !(box->flags & axis_flag) || box->focus_scope_stamp != scope_stamp || !ui_box_focusable(box, true))
         {
             continue;
         }
@@ -2712,7 +2941,7 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
         for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
         {
             UI_Box* box = ui_state->active_boxes[active_box_index];
-            if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true) || ui_key_match(box->key, current_key))
+            if (box->last_touched_build_index != build_index || !(box->flags & axis_flag) || box->focus_scope_stamp != scope_stamp || !ui_box_focusable(box, true) || ui_key_match(box->key, current_key))
             {
                 continue;
             }
@@ -2751,7 +2980,7 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
         for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
         {
             UI_Box* box = ui_state->active_boxes[active_box_index];
-            if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order < current->build_order &&
+            if (box->last_touched_build_index == build_index && (box->flags & axis_flag) && box->focus_scope_stamp == scope_stamp && ui_box_focusable(box, true) && box->build_order < current->build_order &&
                 (!before || box->build_order > before->build_order))
             {
                 before = box;
@@ -2763,7 +2992,7 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
     for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
         UI_Box* box = ui_state->active_boxes[active_box_index];
-        if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order > current->build_order &&
+        if (box->last_touched_build_index == build_index && (box->flags & axis_flag) && box->focus_scope_stamp == scope_stamp && ui_box_focusable(box, true) && box->build_order > current->build_order &&
             (!after || box->build_order < after->build_order))
         {
             after = box;
@@ -3161,6 +3390,79 @@ BUSTER_GLOBAL_LOCAL void ui_draw_text_unclipped(UI_Box* box, String8 text, float
     ui_draw_text_clipped(box, text, color, &position, clip_rect);
 }
 
+// Draws the box's fuzzy-match highlights in range order. Each range endpoint
+// is a byte offset; ui_utf8_columns_for_byte_offset answers it by decoding from
+// byte zero, which made R ranges cost O(R x L). The columns of every byte
+// offset up to the largest drawable endpoint are decoded once into a build
+// arena table (same sequence boundaries and the same floor-to-sequence-start
+// answer for an offset inside a multibyte sequence), so the work is O(R + L).
+// The text origin is hoisted too: it only depends on the box.
+BUSTER_GLOBAL_LOCAL void ui_draw_fuzzy_match_ranges(UI_Box* box, F32Interval2 rect)
+{
+    u64 limit = 0;
+    for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
+    {
+        UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
+        u64 first_byte = BUSTER_MIN(range.first, box->text_visible_length);
+        u64 last_byte = BUSTER_MIN(range.one_past_last, box->text_visible_length);
+        if (last_byte > first_byte)
+        {
+            limit = BUSTER_MAX(limit, last_byte);
+        }
+    }
+    limit = BUSTER_MIN(limit, box->string.length);
+    if (limit != 0)
+    {
+        Arena* arena = ui_build_arena();
+        u64 position = arena->position;
+        u64 table_bytes = limit < (u64)-1 / sizeof(u64) ? (limit + 1) * sizeof(u64) : (u64)-1;
+        if (ui_arena_try_advance(arena, &position, table_bytes, BUSTER_ALIGN_OF(u64)))
+        {
+            u64* columns = arena_allocate(arena, u64, limit + 1);
+            u64 column = 0;
+            position = 0;
+            while (position < limit)
+            {
+                u64 sequence_length = ui_utf8_sequence_length(box->string, position);
+                sequence_length = sequence_length ? sequence_length : 1;
+                u64 end = BUSTER_MIN(position + sequence_length, limit + 1);
+                for (u64 offset = position; offset < end; offset += 1)
+                {
+                    columns[offset] = column;
+                }
+                position += sequence_length;
+                column += 1;
+                ui_state->utf8_column_decodes += 1;
+            }
+            if (position == limit)
+            {
+                columns[limit] = column;
+            }
+
+            float2 text_position = ui_box_text_position(box);
+            for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
+            {
+                UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
+                u64 first_byte = BUSTER_MIN(BUSTER_MIN(range.first, box->text_visible_length), limit);
+                u64 last_byte = BUSTER_MIN(BUSTER_MIN(range.one_past_last, box->text_visible_length), limit);
+                u64 first = columns[first_byte];
+                u64 last = columns[last_byte];
+                if (last > first)
+                {
+                    f32 x0 = float2_element(text_position, AXIS2_X) + (f32)first * box->font_size * 0.60f;
+                    f32 x1 = float2_element(text_position, AXIS2_X) + (f32)last * box->font_size * 0.60f;
+                    F32Interval2 highlight = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x1, rect.y1));
+                    ui_draw_rect(highlight, box->border_color);
+                }
+            }
+        }
+        else
+        {
+            ui_state->draw_commands_complete = false;
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
 {
     if (box && box->visible && ui_rect_has_area(box->rect))
@@ -3269,22 +3571,7 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
 
         if ((box->flags & UI_BoxFlag_HasFuzzyMatchRanges) && box->fuzzy_match_ranges)
         {
-            for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
-            {
-                UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
-                u64 first_byte = BUSTER_MIN(range.first, box->text_visible_length);
-                u64 last_byte = BUSTER_MIN(range.one_past_last, box->text_visible_length);
-                u64 first = ui_utf8_columns_for_byte_offset(box->string, first_byte);
-                u64 last = ui_utf8_columns_for_byte_offset(box->string, last_byte);
-                if (last > first)
-                {
-                    float2 text_position = ui_box_text_position(box);
-                    f32 x0 = float2_element(text_position, AXIS2_X) + (f32)first * box->font_size * 0.60f;
-                    f32 x1 = float2_element(text_position, AXIS2_X) + (f32)last * box->font_size * 0.60f;
-                    F32Interval2 highlight = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x1, rect.y1));
-                    ui_draw_rect(highlight, box->border_color);
-                }
-            }
+            ui_draw_fuzzy_match_ranges(box, rect);
         }
 
         if (box->flags & UI_BoxFlag_DrawBorder)

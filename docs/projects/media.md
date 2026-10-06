@@ -44,8 +44,9 @@ decoding.
 
 Exif orientation, when present in a supported source, is reported as metadata
 and leaves the decoded sample grid unchanged. Callers that need display order use
-`image_apply_orientation`; orientations 5 through 8 exchange output width and
-height. The helper produces a new image and does not mutate its source.
+`image_apply_orientation`, or sample the reported orientation at presentation;
+orientations 5 through 8 exchange display width and height. The copy helper
+produces a new image and does not mutate its source.
 
 Source channel count, maximum stored channel precision, color model, alpha
 presence, frame/image summary, orientation and the presence of recognized color
@@ -121,7 +122,7 @@ All zero-valued public numeric options select these defaults:
 | `max_height` | 16,384 | Maximum decoded height in pixels. |
 | `max_pixels` | 67,108,864 | Maximum `width * height`. |
 | `max_decoded_bytes` | 268,435,456 | Maximum canonical RGBA8 output size. |
-| `max_work` | 1,073,741,824 | Maximum codec-charged work units; this is deterministic accounting, not elapsed time. |
+| `max_work` | 2,684,354,560 | Maximum codec-charged work units (`max_pixels` x 40, `BUSTER_IMAGE_MAX_WORK`); this is deterministic accounting, not elapsed time. The factor admits the worst valid PNG (16-bit RGBA with stored deflate, 36 units per pixel); see `image.h`. |
 | `max_frames` | 4,096 | Maximum declared or encountered image/frame records. |
 | `max_chunks` | 16,384 | Maximum PNG chunks. |
 | `max_segments` | 16,384 | Maximum JPEG marker segments. |
@@ -183,3 +184,13 @@ capability. Shared bounded-parser primitives are tracked in
 animation-frame/timeline APIs, multi-image selection, color transforms and
 decoders for the recognized-only families remain separate capability additions;
 signature recognition is not a commitment to ship those features together.
+
+## Native application consumer
+
+The separately registered [image browser](image-browser.md) opens files and
+flat directories, loads immutable bounded source copies on a persistent worker,
+and presents decoded RGBA through the XCB CPU raster component. It uses lower
+application byte/work caps and samples reported orientation without allocating
+an oriented copy. The decoder remains an in-memory component; filesystem,
+supersession, result ownership and native lifecycle policy belong to the app.
+This consumer does not add unused media/UI modules to the headless compiler.
