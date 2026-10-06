@@ -100,7 +100,8 @@ BUSTER_GLOBAL_LOCAL int cm_process(char *const *args, char **output, size_t limi
                     strstr(message, "authentication") ? "authentication-failed" :
                     strstr(message, "rate limit") ? "rate-limited" :
                     strstr(message, "TLS") ? "tls-error" : strstr(message, "timeout") ? "timeout" :
-                    strstr(message, "redirect") ? "redirect-error" : "transport-or-response-error";
+                    strstr(message, "redirect") ? "redirect-error" :
+                    strstr(message, "escape sequences") ? "terminal-escape-sequences" : "transport-or-response-error";
                 fprintf(stderr, "CI history transport: exit=%d http=%d reason=%s\n",
                     status != -1 && WIFEXITED(status) ? WEXITSTATUS(status) : -1, code, reason);
             }
@@ -135,10 +136,15 @@ BUSTER_GLOBAL_LOCAL int cm_api(CmTransport *t, const char *path, const char *met
         else
         {
             free(*output); *output = NULL;
-            char *args[16] = {"/usr/bin/gh", "api", "--hostname", "github.com", endpoint,
+            char *args[18] = {"/usr/bin/gh", "api", "--hostname", "github.com", endpoint,
                 "-X", (char *)method, "-H", raw ? "Accept: application/vnd.github.raw+json" : "Accept: application/vnd.github+json",
                 "-H", "X-GitHub-Api-Version: 2022-11-28", NULL, NULL, NULL};
             if (body) { args[11] = "--input"; args[12] = temporary; }
+            // Recent gh versions reject ANSI bytes even when stdout is a file.
+            // Job logs are untrusted parser input, never sent to a terminal.
+            size_t path_length = strlen(path);
+            if (cm_equal(method, "GET") && path_length >= 5 && cm_equal(path + path_length - 5, "/logs"))
+                args[11] = "--allow-escape-sequences";
             int absent = 0; ++t->requests;
             if (t->fixture)
             {
