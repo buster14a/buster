@@ -1,0 +1,134 @@
+[
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33075200,
+  "identical": true,
+  "maxrss_bytes": 959303680,
+  "order": "AB",
+  "pair": 1,
+  "span_s": 2.827869,
+  "variant": "a",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33075200,
+  "identical": true,
+  "maxrss_bytes": 959389696,
+  "order": "AB",
+  "pair": 1,
+  "span_s": 3.468411,
+  "variant": "b",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33075200,
+  "identical": true,
+  "maxrss_bytes": 959197184,
+  "order": "BA",
+  "pair": 2,
+  "span_s": 3.379404,
+  "variant": "b",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33075200,
+  "identical": true,
+  "maxrss_bytes": 959483904,
+  "order": "BA",
+  "pair": 2,
+  "span_s": 3.348851,
+  "variant": "a",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33075200,
+  "identical": true,
+  "maxrss_bytes": 958300160,
+  "order": "AB",
+  "pair": 3,
+  "span_s": 3.320596,
+  "variant": "a",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33079296,
+  "identical": true,
+  "maxrss_bytes": 958418944,
+  "order": "AB",
+  "pair": 3,
+  "span_s": 3.307816,
+  "variant": "b",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33079296,
+  "identical": true,
+  "maxrss_bytes": 958459904,
+  "order": "BA",
+  "pair": 4,
+  "span_s": 3.311573,
+  "variant": "b",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33079296,
+  "identical": true,
+  "maxrss_bytes": 958951424,
+  "order": "BA",
+  "pair": 4,
+  "span_s": 3.292757,
+  "variant": "a",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33079296,
+  "identical": true,
+  "maxrss_bytes": 958418944,
+  "order": "AB",
+  "pair": 5,
+  "span_s": 3.275746,
+  "variant": "a",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33079296,
+  "identical": true,
+  "maxrss_bytes": 958451712,
+  "order": "AB",
+  "pair": 5,
+  "span_s": 3.329897,
+  "variant": "b",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33087488,
+  "identical": true,
+  "maxrss_bytes": 959373312,
+  "order": "BA",
+  "pair": 6,
+  "span_s": 3.356194,
+  "variant": "b",
+  "wrapper_rss_bytes": 34766848
+ },
+ {
+  "exit": 0,
+  "harness_rss_bytes": 33091584,
+  "identical": true,
+  "maxrss_bytes": 958410752,
+  "order": "BA",
+  "pair": 6,
+  "span_s": 3.27765,
+  "variant": "a",
+  "wrapper_rss_bytes": 34766848
+ }
+]
