@@ -15,11 +15,23 @@
 // production_profile_training_contract puts the mode in the fingerprint,
 // production_profile_seal repeats it in the manifest, and CMake rejects a
 // PGO-use tree whose BUSTER_LTO differs.
+//
+// Phase accounting: production_profile_command records each labelled child
+// as a ProductionProfilePhase in the ProductionProfileLedger;
+// production_profile_ledger_record rewrites evidence/phases.tsv and
+// evidence/phases.md (production_profile_ledger_tsv/_markdown) after every
+// phase, and production_profile_main fails unless the count matches
+// production_profile_phase_expected.
 #define BUSTER_PRODUCTION_PROFILE_TIMEOUT_SECONDS_DEFAULT 3600ull
 #define BUSTER_PRODUCTION_PROFILE_TRAINING_PAIRS 1ull
 #define BUSTER_PRODUCTION_PROFILE_TRAINING_WARMUPS 1ull
 #define BUSTER_PRODUCTION_PROFILE_MANIFEST_VERSION "BUSTER_PGO_PROFILE_V2"
 #define BUSTER_PRODUCTION_PROFILE_CONTRACT_VERSION "BUSTER_PGO_TRAINING_V2"
+#define BUSTER_PRODUCTION_PROFILE_LEDGER_VERSION "BUSTER_PGO_PHASES_V1"
+// Three toolchain identity probes, generate+build for seven trees, train+merge
+// for two profiles, section inspection, test_all, and run+compare for four
+// comparisons. production_profile_phase_expected owns the exact count.
+#define BUSTER_PRODUCTION_PROFILE_PHASE_CAPACITY 32ull
 
 typedef struct ProductionProfileOptions ProductionProfileOptions;
 struct ProductionProfileOptions
@@ -46,6 +58,37 @@ struct ProductionProfileCommandResult
     bool success;
 };
 
+// Phase accounting (#2790). Every evidence-labelled child process is one
+// phase: its monotonic start/duration relative to the run origin, outcome and
+// wait4/job resource usage. production_profile_ledger_record rewrites the TSV
+// and Markdown ledgers after each phase, so a failed or cancelled run still
+// retains every phase that finished before it stopped.
+typedef struct ProductionProfilePhase ProductionProfilePhase;
+struct ProductionProfilePhase
+{
+    String8 label;
+    String8 kind;
+    String8 variant;
+    u64 start_us;
+    u64 duration_us;
+    ProcessResourceUsage resources;
+    bool success;
+    bool timed_out;
+};
+
+typedef struct ProductionProfileLedger ProductionProfileLedger;
+struct ProductionProfileLedger
+{
+    String8 tsv_path;
+    String8 markdown_path;
+    String8 identity;
+    u64 origin_us;
+    u64 expected;
+    u64 count;
+    bool complete;
+    ProductionProfilePhase phases[BUSTER_PRODUCTION_PROFILE_PHASE_CAPACITY];
+};
+
 typedef struct ProductionProfileContext ProductionProfileContext;
 struct ProductionProfileContext
 {
@@ -60,6 +103,7 @@ struct ProductionProfileContext
     String8 llvm_readobj;
     String8 revision;
     String8 tree;
+    ProductionProfileLedger* ledger;
 };
 
 // One instrumented tree, its training run and the profile it seals. A use
@@ -261,8 +305,170 @@ BUSTER_GLOBAL_LOCAL bool production_profile_environment_merge(
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL u64 production_profile_phase_expected(bool benchmark)
+{
+    u64 toolchain_probes = 3;
+    u64 trees = 7;
+    u64 trainings = 2;
+    u64 validation = 2;
+    u64 comparisons = benchmark ? 4 : 0;
+    return toolchain_probes + trees * 2 + trainings * 2 + validation + comparisons * 2;
+}
+
+// Whole seconds and one truncated decimal, so ledgers need no floating point.
+BUSTER_GLOBAL_LOCAL String8 production_profile_seconds_text(Arena* arena, u64 microseconds)
+{
+    return string_format(arena, S8("{u64}.{u64}"), microseconds / 1000000, (microseconds % 1000000) / 100000);
+}
+
+BUSTER_GLOBAL_LOCAL String8 production_profile_phase_outcome(ProductionProfilePhase const* phase)
+{
+    return phase->timed_out ? S8("timed_out") : phase->success ? S8("passed") : S8("failed");
+}
+
+BUSTER_GLOBAL_LOCAL u64 production_profile_ledger_elapsed(ProductionProfileLedger const* ledger)
+{
+    u64 result = 0;
+    for (u64 index = 0; index < ledger->count; index += 1)
+    {
+        ProductionProfilePhase const* phase = ledger->phases + index;
+        result = BUSTER_MAX(result, phase->start_us + phase->duration_us);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_tsv(Arena* arena, ProductionProfileLedger const* ledger)
+{
+    String8List lines = {0};
+    string8_list_push(arena, &lines, string_format(arena, S8(BUSTER_PRODUCTION_PROFILE_LEDGER_VERSION "\tcomplete={u32}\tphases={u64}\texpected={u64}\n"),
+        (u32)ledger->complete, ledger->count, ledger->expected));
+    string8_list_push(arena, &lines, S8("index\tlabel\tkind\tvariant\tstart_us\tduration_us\toutcome\tuser_cpu_us\tsystem_cpu_us\tpeak_memory_bytes\n"));
+    for (u64 index = 0; index < ledger->count; index += 1)
+    {
+        ProductionProfilePhase const* phase = ledger->phases + index;
+        bool cpu = phase->resources.cpu_status == PROCESS_RESOURCE_OBSERVED;
+        bool memory = phase->resources.memory_status == PROCESS_RESOURCE_OBSERVED;
+        string8_list_push(arena, &lines, string_format(arena, S8("{u64}\t{S8}\t{S8}\t{S8}\t{u64}\t{u64}\t{S8}\t{S8}\t{S8}\t{S8}\n"),
+            index + 1, phase->label, phase->kind, phase->variant.length ? phase->variant : S8("-"),
+            phase->start_us, phase->duration_us, production_profile_phase_outcome(phase),
+            cpu ? string_format(arena, S8("{u64}"), phase->resources.user_cpu_us) : S8("-"),
+            cpu ? string_format(arena, S8("{u64}"), phase->resources.system_cpu_us) : S8("-"),
+            memory ? string_format(arena, S8("{u64}"), phase->resources.peak_memory_bytes) : S8("-")));
+    }
+    return string_join_arena(arena, string8_list_to_slice(arena, lines), false);
+}
+
+// The Actions step summary: identity, per-kind totals in first-run order, then
+// every phase. Shares are of the elapsed span covered by recorded phases.
+BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_markdown(Arena* arena, ProductionProfileLedger const* ledger)
+{
+    u64 elapsed = production_profile_ledger_elapsed(ledger);
+    String8List lines = {0};
+    string8_list_push(arena, &lines, string_format(arena, S8(
+        "## Production PGO/LTO phase accounting\n\n"
+        "Result: **{S8}** ({u64} of {u64} phases recorded, {S8} s elapsed).\n\n"
+        "```text\n{S8}```\n\n"
+        "### By kind\n\n"
+        "| Kind | Phases | Wall s | Share | CPU s |\n"
+        "| --- | ---: | ---: | ---: | ---: |\n"),
+        ledger->complete ? S8("complete") : S8("incomplete"), ledger->count, ledger->expected,
+        production_profile_seconds_text(arena, elapsed), ledger->identity));
+
+    String8 kinds[BUSTER_PRODUCTION_PROFILE_PHASE_CAPACITY];
+    u64 kind_count = 0;
+    for (u64 index = 0; index < ledger->count; index += 1)
+    {
+        String8 kind = ledger->phases[index].kind;
+        bool seen = false;
+        for (u64 kind_index = 0; kind_index < kind_count; kind_index += 1)
+        {
+            seen |= string_equal(kinds[kind_index], kind);
+        }
+        if (!seen)
+        {
+            kinds[kind_count] = kind;
+            kind_count += 1;
+        }
+    }
+
+    for (u64 kind_index = 0; kind_index < kind_count; kind_index += 1)
+    {
+        u64 phases = 0;
+        u64 wall = 0;
+        u64 cpu = 0;
+        bool cpu_complete = true;
+        for (u64 index = 0; index < ledger->count; index += 1)
+        {
+            ProductionProfilePhase const* phase = ledger->phases + index;
+            if (string_equal(phase->kind, kinds[kind_index]))
+            {
+                phases += 1;
+                wall += phase->duration_us;
+                cpu_complete &= phase->resources.cpu_status == PROCESS_RESOURCE_OBSERVED;
+                cpu += phase->resources.user_cpu_us + phase->resources.system_cpu_us;
+            }
+        }
+        u64 share_tenths = elapsed ? (wall * 1000 + elapsed / 2) / elapsed : 0;
+        string8_list_push(arena, &lines, string_format(arena, S8("| {S8} | {u64} | {S8} | {u64}.{u64}% | {S8} |\n"),
+            kinds[kind_index], phases, production_profile_seconds_text(arena, wall), share_tenths / 10, share_tenths % 10,
+            cpu_complete ? production_profile_seconds_text(arena, cpu) : S8("-")));
+    }
+
+    string8_list_push(arena, &lines, S8(
+        "\n### Phases\n\n"
+        "| # | Phase | Kind | Variant | Start s | Wall s | Outcome | CPU s | Peak RSS MiB |\n"
+        "| ---: | --- | --- | --- | ---: | ---: | --- | ---: | ---: |\n"));
+    for (u64 index = 0; index < ledger->count; index += 1)
+    {
+        ProductionProfilePhase const* phase = ledger->phases + index;
+        bool cpu = phase->resources.cpu_status == PROCESS_RESOURCE_OBSERVED;
+        bool memory = phase->resources.memory_status == PROCESS_RESOURCE_OBSERVED;
+        string8_list_push(arena, &lines, string_format(arena, S8("| {u64} | `{S8}` | {S8} | {S8} | {S8} | {S8} | {S8} | {S8} | {S8} |\n"),
+            index + 1, phase->label, phase->kind, phase->variant.length ? phase->variant : S8("-"),
+            production_profile_seconds_text(arena, phase->start_us), production_profile_seconds_text(arena, phase->duration_us),
+            production_profile_phase_outcome(phase),
+            cpu ? production_profile_seconds_text(arena, phase->resources.user_cpu_us + phase->resources.system_cpu_us) : S8("-"),
+            memory ? string_format(arena, S8("{u64}"), phase->resources.peak_memory_bytes >> 20) : S8("-")));
+    }
+    return string_join_arena(arena, string8_list_to_slice(arena, lines), false);
+}
+
+BUSTER_GLOBAL_LOCAL bool production_profile_ledger_flush(Arena* arena, ProductionProfileLedger const* ledger)
+{
+    bool result = production_profile_write(ledger->tsv_path, production_profile_ledger_tsv(arena, ledger)) &&
+                  production_profile_write(ledger->markdown_path, production_profile_ledger_markdown(arena, ledger));
+    if (!result)
+    {
+        fprintf(stderr, "error: could not write the production-profile phase ledger\n");
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool production_profile_ledger_record(Arena* arena, ProductionProfileLedger* ledger, ProductionProfilePhase phase)
+{
+    bool result = ledger->count < BUSTER_PRODUCTION_PROFILE_PHASE_CAPACITY;
+    if (!result)
+    {
+        fprintf(stderr, "error: production-profile phase ledger capacity exceeded\n");
+    }
+    else
+    {
+        ledger->phases[ledger->count] = phase;
+        ledger->count += 1;
+        string_print(S8("PRODUCTION_PROFILE_PHASE {u64}/{u64} end label={S8} outcome={S8} wall_s={S8} elapsed_s={S8}\n"),
+            ledger->count, ledger->expected, phase.label, production_profile_phase_outcome(&phase),
+            production_profile_seconds_text(arena, phase.duration_us),
+            production_profile_seconds_text(arena, phase.start_us + phase.duration_us));
+        result = !ledger->tsv_path.length || production_profile_ledger_flush(arena, ledger);
+    }
+    return result;
+}
+
+// A nonzero ledger records this command as one phase of the given kind and
+// variant; its outcome includes evidence-write failures.
 BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
     Arena* arena, SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values,
+    ProductionProfileLedger* ledger, String8 kind, String8 variant,
     String8 evidence, String8 label, u64 timeout_seconds, bool capture)
 {
     ProductionProfileCommandResult result = {0};
@@ -290,7 +496,12 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
         return result;
     }
 
+    if (ledger)
+    {
+        string_print(S8("PRODUCTION_PROFILE_PHASE {u64}/{u64} start label={S8}\n"), ledger->count + 1, ledger->expected, label);
+    }
     command_print(arguments);
+    u64 start_us = os_now_microseconds();
     u64 capture_mask = capture ? (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR) : 0;
     ProcessSpawnResult spawn = os_process_spawn(arguments, child_environment_keys, child_environment_values,
         (ProcessSpawnOptions){.capture = capture_mask, .use_process_environment = use_process_environment,
@@ -313,14 +524,19 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
         .length = result.wait.streams[STANDARD_STREAM_ERROR].length,
     };
     result.success = result.wait.result == PROCESS_RESULT_SUCCESS && result.wait.platform_status == 0 && !result.wait.timed_out;
+    u64 duration_us = os_now_microseconds() - start_us;
+    ProcessResourceUsage resources = result.wait.resources;
 
     if (evidence.length)
     {
         String8 status_path = path_join(arena, evidence, string_format(arena, S8("{S8}.status.txt"), label));
         String8 status = string_format(arena, S8("result={u32}\nplatform_status={u32}\ntimed_out={u32}\nsuccess={u32}\n"
-            "spawn_failure={u32}\nspawn_error={u32}\n"),
+            "spawn_failure={u32}\nspawn_error={u32}\nduration_us={u64}\n"
+            "cpu_status={u32}\nuser_cpu_us={u64}\nsystem_cpu_us={u64}\nmemory_status={u32}\npeak_memory_bytes={u64}\n"),
             (u32)result.wait.result, result.wait.platform_status, (u32)result.wait.timed_out, (u32)result.success,
-            (u32)spawn.failure, spawn.error.v);
+            (u32)spawn.failure, spawn.error.v, duration_us,
+            (u32)resources.cpu_status, resources.user_cpu_us, resources.system_cpu_us,
+            (u32)resources.memory_status, resources.peak_memory_bytes);
         bool wrote = production_profile_write(status_path, status);
         if (capture)
         {
@@ -332,6 +548,21 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
             fprintf(stderr, "error: could not write production-profile process evidence\n");
             result.success = false;
         }
+    }
+
+    if (ledger)
+    {
+        ProductionProfilePhase phase = {
+            .label = label,
+            .kind = kind,
+            .variant = variant,
+            .start_us = start_us >= ledger->origin_us ? start_us - ledger->origin_us : 0,
+            .duration_us = duration_us,
+            .resources = resources,
+            .success = result.success,
+            .timed_out = result.wait.timed_out != 0,
+        };
+        result.success &= production_profile_ledger_record(arena, ledger, phase);
     }
 
     if (!result.success && capture)
@@ -350,7 +581,8 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
 
 BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_capture(Arena* arena, SliceString8 arguments)
 {
-    return production_profile_command(arena, arguments, (SliceString8){0}, (SliceString8){0}, (String8){0}, (String8){0}, 120, true);
+    return production_profile_command(arena, arguments, (SliceString8){0}, (SliceString8){0},
+        0, (String8){0}, (String8){0}, (String8){0}, (String8){0}, 120, true);
 }
 
 BUSTER_GLOBAL_LOCAL bool production_profile_path_is_child(String8 parent, String8 child)
@@ -610,7 +842,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_build_variant(ProductionProfileConte
     String8 label = string_format(arena, S8("generate-{S8}"), variant.name);
     ProductionProfileCommandResult generated = production_profile_command(
         arena, (SliceString8){.pointer = generate, .length = count}, (SliceString8){0}, (SliceString8){0},
-        context->evidence, label, context->options.timeout_seconds, false);
+        context->ledger, S8("configure"), variant.name, context->evidence, label, context->options.timeout_seconds, false);
     if (!generated.success)
     {
         return false;
@@ -624,7 +856,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_build_variant(ProductionProfileConte
     label = string_format(arena, S8("build-{S8}"), variant.name);
     ProductionProfileCommandResult built = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build), (SliceString8){0}, (SliceString8){0},
-        context->evidence, label, context->options.timeout_seconds, false);
+        context->ledger, S8("build"), variant.name, context->evidence, label, context->options.timeout_seconds, false);
     return built.success && path_exists(arena, production_profile_binary(arena, directory));
 }
 
@@ -652,7 +884,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_train(ProductionProfileContext* cont
     ProductionProfileCommandResult trained = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
         (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values),
-        context->evidence, label, context->options.timeout_seconds, false);
+        context->ledger, S8("train"), profile_training->instrumented, context->evidence, label, context->options.timeout_seconds, false);
     return trained.success;
 }
 
@@ -725,7 +957,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_merge(ProductionProfileContext* cont
     String8 label = string_format(arena, S8("merge-profile-{S8}"), training->label);
     ProductionProfileCommandResult merged = production_profile_command(
         arena, (SliceString8){.pointer = command, .length = file_count + 3}, (SliceString8){0}, (SliceString8){0},
-        context->evidence, label, context->options.timeout_seconds, true);
+        context->ledger, S8("merge"), training->instrumented, context->evidence, label, context->options.timeout_seconds, true);
     return merged.success && path_exists(arena, training->profile);
 #else
     BUSTER_UNUSED(context);
@@ -740,7 +972,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_validate_binary(ProductionProfileCon
     String8 command[] = {context->llvm_readobj, S8("--sections"), binary};
     ProductionProfileCommandResult inspected = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
-        context->evidence, S8("inspect-production-sections"), 300, true);
+        context->ledger, S8("inspect"), S8("pgo-lto"), context->evidence, S8("inspect-production-sections"), 300, true);
     if (!inspected.success)
     {
         return false;
@@ -759,7 +991,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_validate_binary(ProductionProfileCon
     };
     ProductionProfileCommandResult tested = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_test), (SliceString8){0}, (SliceString8){0},
-        context->evidence, S8("test-production"), context->options.timeout_seconds, false);
+        context->ledger, S8("test"), S8("pgo-lto"), context->evidence, S8("test-production"), context->options.timeout_seconds, false);
     return tested.success;
 }
 
@@ -784,7 +1016,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_benchmark_one(
     String8 label = string_format(arena, S8("benchmark-{S8}"), name);
     ProductionProfileCommandResult measured = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-        context->evidence, label, context->options.timeout_seconds, false);
+        context->ledger, S8("benchmark"), name, context->evidence, label, context->options.timeout_seconds, false);
     if (!measured.success)
     {
         return false;
@@ -794,7 +1026,7 @@ BUSTER_GLOBAL_LOCAL bool production_profile_benchmark_one(
     label = string_format(arena, S8("compare-{S8}"), name);
     return production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compare), (SliceString8){0}, (SliceString8){0},
-        context->evidence, label, context->options.timeout_seconds, false).success;
+        context->ledger, S8("compare"), name, context->evidence, label, context->options.timeout_seconds, false).success;
 }
 
 // The shared identity/workload contract plus the one policy line that differs
@@ -928,18 +1160,46 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
     context.evidence = path_join(arena, context.output, S8("evidence"));
     make_directory_recursive(arena, context.evidence);
 
+    // Host facts are the visible machine, not effective cgroup/runner limits
+    // (#2758 owns those); the workload knobs explain the worker budget.
+    ProductionProfileLedger ledger = {
+        .tsv_path = path_join(arena, context.evidence, S8("phases.tsv")),
+        .markdown_path = path_join(arena, context.evidence, S8("phases.md")),
+        .origin_us = os_now_microseconds(),
+        .expected = production_profile_phase_expected(options.benchmark),
+    };
+    String8 run_identity = string_format(arena, S8(
+        "source_revision={S8}\n"
+        "source_tree={S8}\n"
+        "jobs={u64}\n"
+        "benchmark={S8}\n"
+        "benchmark_profile={S8}\n"
+        "pairs={u64}\n"
+        "warmups={u64}\n"
+        "host_logical_threads={u32}\n"
+        "host_physical_memory_mib={u64}\n"),
+        context.revision, context.tree, options.jobs, options.benchmark ? S8("on") : S8("off"),
+        options.benchmark_profile, options.pairs, options.warmups,
+        os_get_logical_thread_count(), os_get_physical_memory_size() >> 20);
+    ledger.identity = run_identity;
+    context.ledger = &ledger;
+    if (!production_profile_ledger_flush(arena, &ledger))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
     String8 clang_version_command[] = {context.clang, S8("--version")};
     String8 clang_target_command[] = {context.clang, S8("-dumpmachine")};
     String8 profdata_version_command[] = {context.llvm_profdata, S8("--version")};
     ProductionProfileCommandResult clang_version = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_version_command), (SliceString8){0}, (SliceString8){0},
-        context.evidence, S8("clang-version"), 120, true);
+        context.ledger, S8("toolchain"), (String8){0}, context.evidence, S8("clang-version"), 120, true);
     ProductionProfileCommandResult clang_target = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_target_command), (SliceString8){0}, (SliceString8){0},
-        context.evidence, S8("clang-target"), 120, true);
+        context.ledger, S8("toolchain"), (String8){0}, context.evidence, S8("clang-target"), 120, true);
     ProductionProfileCommandResult profdata_version = production_profile_command(
         arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(profdata_version_command), (SliceString8){0}, (SliceString8){0},
-        context.evidence, S8("llvm-profdata-version"), 120, true);
+        context.ledger, S8("toolchain"), (String8){0}, context.evidence, S8("llvm-profdata-version"), 120, true);
 
     String8 clang_sha = production_profile_sha256_file(arena, context.clang);
     String8 profdata_sha = production_profile_sha256_file(arena, context.llvm_profdata);
@@ -952,6 +1212,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
         string_print(S8("error: could not seal the LLVM toolchain identity\n"));
         return PROCESS_RESULT_FAILED;
     }
+    ledger.identity = string_format(arena, S8("{S8}clang_sha256={S8}\nclang_target={S8}\nllvm_profdata_sha256={S8}\n"),
+        run_identity, clang_sha, production_profile_trim(clang_target.output), profdata_sha);
 
     String8 shared_contract = string_format(arena, S8(
         BUSTER_PRODUCTION_PROFILE_CONTRACT_VERSION "\n"
@@ -1080,13 +1342,26 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
         "debug_sections=absent\n"
         "correctness=test_all\n"
         "deterministic_outputs=throughput-require-identical-output\n"
-        "benchmarks={S8}\n"),
+        "benchmarks={S8}\n"
+        "phase_ledger={S8}\n"),
         context.revision, context.tree, training_lto->fingerprint, training_lto->profile,
         production_profile_sha256_file(arena, training_lto->profile), training_lto->manifest,
-        training_no_lto->profile, training_no_lto->manifest, pgo_lto, final_sha, options.benchmark ? S8("complete") : S8("skipped"));
+        training_no_lto->profile, training_no_lto->manifest, pgo_lto, final_sha, options.benchmark ? S8("complete") : S8("skipped"),
+        ledger.tsv_path);
+    // Every expected phase must have run; a skipped phase is never success.
+    if (ledger.count != ledger.expected)
+    {
+        string_print(S8("error: production-profile recorded {u64} of {u64} expected phases\n"), ledger.count, ledger.expected);
+        return PROCESS_RESULT_FAILED;
+    }
     if (!production_profile_write(path_join(arena, context.output, S8("summary.txt")), summary))
     {
         string_print(S8("error: could not write the production-profile summary\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ledger.complete = true;
+    if (!production_profile_ledger_flush(arena, &ledger))
+    {
         return PROCESS_RESULT_FAILED;
     }
 
@@ -1165,6 +1440,47 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_self_test(Arena* arena)
                 !options.clean || options.benchmark;
     String8 invalid_arguments[] = {S8("--pairs"), S8("0")};
     failures += production_profile_options(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_arguments), &options);
+
+    failures += production_profile_phase_expected(true) != 31 || production_profile_phase_expected(false) != 23;
+    failures += production_profile_phase_expected(true) > BUSTER_PRODUCTION_PROFILE_PHASE_CAPACITY;
+    failures += !string_equal(production_profile_seconds_text(arena, 1599999), S8("1.5"));
+    failures += !string_equal(production_profile_seconds_text(arena, 0), S8("0.0"));
+
+    // Phases are retained in order, a failure or deadline stays visible, and
+    // an unfinished ledger reports itself incomplete. An empty tsv_path keeps
+    // the self-test from writing files.
+    ProductionProfileLedger ledger = {.identity = S8("source_revision=abc\n"), .expected = 4};
+    ProductionProfilePhase observed = {
+        .label = S8("build-release"), .kind = S8("build"), .variant = S8("release"), .start_us = 0, .duration_us = 3000000,
+        .resources = {.user_cpu_us = 4000000, .system_cpu_us = 1000000, .peak_memory_bytes = 3ull << 20,
+                      .cpu_status = PROCESS_RESOURCE_OBSERVED, .memory_status = PROCESS_RESOURCE_OBSERVED},
+        .success = true,
+    };
+    ProductionProfilePhase failed = {
+        .label = S8("build-g0"), .kind = S8("build"), .variant = S8("g0"), .start_us = 3000000, .duration_us = 1000000,
+    };
+    ProductionProfilePhase timed_out = {
+        .label = S8("train-lto"), .kind = S8("train"), .start_us = 4000000, .duration_us = 4000000, .timed_out = true,
+    };
+    failures += !production_profile_ledger_record(arena, &ledger, observed);
+    failures += !production_profile_ledger_record(arena, &ledger, failed);
+    failures += !production_profile_ledger_record(arena, &ledger, timed_out);
+    failures += ledger.count != 3 || production_profile_ledger_elapsed(&ledger) != 8000000;
+    String8 tsv = production_profile_ledger_tsv(arena, &ledger);
+    failures += !string_starts_with_sequence(tsv, S8(BUSTER_PRODUCTION_PROFILE_LEDGER_VERSION "\tcomplete=0\tphases=3\texpected=4\n"));
+    failures += !production_profile_contains(tsv, S8("\n1\tbuild-release\tbuild\trelease\t0\t3000000\tpassed\t4000000\t1000000\t3145728\n"));
+    failures += !production_profile_contains(tsv, S8("\n2\tbuild-g0\tbuild\tg0\t3000000\t1000000\tfailed\t-\t-\t-\n"));
+    failures += !production_profile_contains(tsv, S8("\n3\ttrain-lto\ttrain\t-\t4000000\t4000000\ttimed_out\t-\t-\t-\n"));
+    String8 markdown = production_profile_ledger_markdown(arena, &ledger);
+    failures += !production_profile_contains(markdown, S8("Result: **incomplete** (3 of 4 phases recorded, 8.0 s elapsed)."));
+    failures += !production_profile_contains(markdown, S8("source_revision=abc\n```"));
+    failures += !production_profile_contains(markdown, S8("| build | 2 | 4.0 | 50.0% | - |\n| train | 1 | 4.0 | 50.0% | - |\n"));
+    failures += !production_profile_contains(markdown, S8("| 1 | `build-release` | build | release | 0.0 | 3.0 | passed | 5.0 | 3 |\n"));
+    failures += !production_profile_contains(markdown, S8("| 3 | `train-lto` | train | - | 4.0 | 4.0 | timed_out | - | - |\n"));
+    ledger.complete = true;
+    failures += !production_profile_contains(production_profile_ledger_markdown(arena, &ledger), S8("Result: **complete**"));
+    ledger.count = BUSTER_PRODUCTION_PROFILE_PHASE_CAPACITY;
+    failures += production_profile_ledger_record(arena, &ledger, observed);
 
     string_print(S8("PRODUCTION_PROFILE_SELF_TEST failures={u64} result={S8}\n"), failures, failures ? S8("fail") : S8("pass"));
     return failures ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;

@@ -115,6 +115,32 @@ output root). The workflow:
 - writes the final paths, hashes, validation status, and benchmark status to
   `summary.txt`.
 
+## Phase accounting
+
+Every evidence-labelled child process is one phase: the three toolchain
+identity probes, `configure` and `build` for each of the seven trees, `train`
+and `merge` per profile, `inspect` and `test` for the production compiler, and
+`benchmark` and `compare` per comparison (31 phases, or 23 with
+`--no-benchmark`). Each `<label>.status.txt` records the monotonic
+`duration_us` and the child's CPU time and peak RSS as reported by the wait
+(`wait4` covers waited-for descendants; peak RSS is the largest single
+process, not the sum of overlapping ones).
+
+`evidence/phases.tsv` (`BUSTER_PGO_PHASES_V1`) and `evidence/phases.md` are
+rewritten after every phase with the start offset, wall time, outcome, CPU and
+peak RSS of each phase, so a failed, timed-out or cancelled run keeps every
+phase that finished. The Markdown form adds the run identity (revision, tree,
+toolchain hashes, `--jobs`, benchmark settings, visible host threads and
+memory) and per-kind totals; the workflow appends it to the Actions step
+summary even when an earlier step fails. Host facts describe the visible
+machine, not effective runner limits (#2758). The run fails unless every
+expected phase was recorded, and only then marks the ledger `complete=1`.
+Logs carry one `PRODUCTION_PROFILE_PHASE <n>/<expected> start|end` line per
+phase.
+
+Hosted phase timings are diagnostic: they locate the dominant operations but
+do not validate a performance change (#2761).
+
 For a longer measurement use `--benchmark-profile ci` or
 `--benchmark-profile full` and increase `--pairs`. Keep training unchanged so
 profiles from separate runs have the same declared workload contract.
@@ -126,5 +152,6 @@ profiles from separate runs have the same declared workload contract.
 ```
 
 This checks strict integer parsing, output containment, command option
-validation, training fingerprint stability, and debug-section detection
-without performing expensive compiler builds.
+validation, training fingerprint stability, debug-section detection, and the
+phase ledger's ordering, failure/timeout retention, per-kind totals and
+capacity bound without performing expensive compiler builds.
