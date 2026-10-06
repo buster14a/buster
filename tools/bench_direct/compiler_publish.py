@@ -54,9 +54,9 @@ from datetime import datetime
 
 from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
-                             owned_checks, run_url)
+                             owned_checks, parse_chain, run_url)
 from compiler_receipt import (DECIMAL, IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
-                              check_name, classify, host_problem, number, regression_policy, render)
+                              check_name, classify, host_problem, number, range_label, regression_policy, render)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
@@ -89,6 +89,10 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                 reasons.append(f"receipt {key} {identity.get(key)!r} does not match {expected.get(key)!r}")
         if receipt.get("mode") != expected.get("mode"):
             reasons.append(f"receipt mode {receipt.get('mode')!r} is not {expected.get('mode')!r}")
+        # Receipts before range baselines (#2752) carry no coverage.
+        coverage = {"first_parent": expected.get("first_parent"), "range": expected.get("range")}
+        if "coverage" in receipt and receipt.get("coverage") != coverage:
+            reasons.append(f"receipt coverage {receipt.get('coverage')!r} does not match {coverage!r}")
         if receipt.get("profile") != PROFILE:
             reasons.append("receipt profile is not the frozen comparison profile")
         if host_problem(receipt):
@@ -183,6 +187,8 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
     profile = shown.get("profile") if isinstance(shown.get("profile"), dict) else {}
     timings = shown.get("timings") if isinstance(shown.get("timings"), dict) else {}
     unit = wall.get("unit") if isinstance(wall.get("unit"), str) else "s"
+    coverage = shown.get("coverage") if isinstance(shown.get("coverage"), dict) else {}
+    baseline = range_label(coverage.get("range"), coverage.get("first_parent")) or "first parent or range baseline"
     lines = [
         f"### {check_name(shown.get('mode', 'main'))}: {conclusion}, {title}", "",
         (verdict.get("text") if isinstance(verdict.get("text"), str) else
@@ -191,7 +197,7 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
         "itself a speedup or an equivalence.", "",
         "| | |", "| --- | --- |",
         f"| Candidate | `{identity.get('head', 'NA')}` (this commit) |",
-        f"| Baseline | `{identity.get('base', 'NA')}` (first parent) |",
+        f"| Baseline | `{identity.get('base', 'NA')}` ({baseline}) |",
         "| Wall time B/A | %s, 95%% CI [%s, %s], %s |" % (
             number(verdict.get("ratio"), "%.4f"), number(verdict.get("ci_low"), "%.4f"),
             number(verdict.get("ci_high"), "%.4f"), verdict.get("outcome", "NA")),
@@ -253,17 +259,18 @@ def bind_request(api: Api, expected: dict, receipt: object) -> list[str]:
     """Fill expected from the receipt's request run, re-verified exactly as authorize-compiler does."""
     identity = receipt.get("identity") if isinstance(receipt, dict) and isinstance(receipt.get("identity"), dict) else {}
     request_run, head, repository = identity.get("request_run_id", ""), expected["head"], expected["repository"]
+    # The baseline the attempt measured: it must still be on head's first-parent chain.
+    base = identity.get("base", "")
     problems = []
     if not (isinstance(request_run, str) and DECIMAL.fullmatch(request_run) and SHA.fullmatch(head)):
         problems.append("the receipt names no request run")
     else:
         commit = api.request(f"/commits/{head}")
-        parents = commit.get("parents") if isinstance(commit, dict) else None
-        base = parents[0].get("sha") if isinstance(parents, list) and parents and isinstance(parents[0], dict) else ""
         failures, result = verify_main(
             repository, int(request_run), head, api.request(f"/actions/runs/{request_run}"), commit,
             api.request(f"/commits/{base}") if isinstance(base, str) and SHA.fullmatch(base) else None,
-            api.request(f"/compare/{head}...main"), api.request(f"/commits/{head}/pulls?per_page=10"))
+            api.request(f"/compare/{head}...main"), api.request(f"/commits/{head}/pulls?per_page=10"),
+            parse_chain(api.request(f"/commits?sha={head}&per_page=100"), head))
         problems.extend(f"request re-verification failed: {item}" for item in failures)
         expected.update(result, request_run_id=request_run)
     return problems
@@ -311,6 +318,8 @@ def main() -> int:
                         "base_tree": get("BQ_BASE_TREE"), "head": head, "head_tree": get("BQ_HEAD_TREE"),
                         "trusted_revision": get("BQ_TRUSTED_REVISION"), "request_run_id": get("BQ_REQUEST_RUN_ID"),
                         "run_id": run_id, "run_attempt": attempt}
+            if mode == "main":
+                expected.update(first_parent=get("BQ_FIRST_PARENT"), range=get("BQ_RANGE"))
             compare_result, problems = get("BQ_COMPARE_RESULT"), []
             authorized = get("BQ_AUTHORIZE_RESULT") == "success" and get("BQ_AUTHORIZED_ATTEMPT") == attempt
         notes.extend(problems)
@@ -327,6 +336,10 @@ def main() -> int:
         conclusion, title, reasons = decide(expected, authorized, compare_result, receipt, summary,
                                             get("BQ_REGRESSION_POLICY"))
         shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
+        # The authorized range, never the host's own account of it.
+        shown.pop("coverage", None)
+        if mode == "main" and expected.get("range"):
+            shown["coverage"] = {"first_parent": expected.get("first_parent"), "range": expected.get("range")}
         shown["reasons"] = reasons
         if isinstance(shown.get("timings"), dict):
             shown["timings"] = dict(shown["timings"], queue_delay_seconds=queue_delay(api, run_id, attempt, mode))

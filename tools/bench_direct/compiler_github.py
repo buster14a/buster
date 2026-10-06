@@ -28,10 +28,19 @@ completes earlier main commits' open checks as "skipped" / "Not measured". A
 pull request head's open checks are completed as superseded by the next
 requested head of the same pull request.
 
+Range baseline (#2752): a main commit is compared with the nearest
+first-parent ancestor, at most RECONCILE_DEPTH back, whose own main check
+holds a valid measurement (measured); normally that is its first parent. So
+the change of every unmeasured commit in between is inside a measured range
+(baseline_label), and its "Not measured" check names the comparison that
+covers it. A forged check can only move the baseline to another main
+ancestor, which is trusted code; authorize_compiler verifies the ancestry.
+
 Map: Api (bounded GET with retries, POST/PATCH/DELETE, pages, download),
-owns, owned_checks, write_check, ensure_check, advance, complete_check,
-queued_output, reconcile_main, reconcile_pull, wait_for_host, announce, start,
-main.
+owns, owned_checks, measured, write_check, ensure_check, advance,
+complete_check, queued_output, parse_chain, first_parent_chain,
+baseline_label, reconcile_main, reconcile_pull, wait_for_host, announce,
+start, main.
 """
 
 from __future__ import annotations
@@ -44,7 +53,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from compiler_receipt import DECIMAL, MODES, SHA, attempt_marker, check_marker, check_name
+from compiler_receipt import DECIMAL, MODES, SHA, attempt_marker, check_marker, check_name, range_label
 
 API = "https://api.github.com"
 SERVER = "https://github.com"
@@ -57,7 +66,8 @@ STATUS_ORDER = {"queued": 0, "in_progress": 1, "completed": 2}
 COMPARE_JOBS = {"main": "Compare the main commit compiler", "pull": "Compare the pull request compiler"}
 BENCH_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
 # How many earlier first-parent main commits, or earlier heads of the same
-# pull request, a start job reconciles. Bounded reads; older orphans stay.
+# pull request, a start job reconciles, and how far back the authorizer looks
+# for a measured range baseline. Bounded reads; older orphans stay.
 RECONCILE_DEPTH = 15
 # The start job's display-only wait for the 9700X job: bounded, and it exits
 # as soon as that job starts. A longer runner wait leaves the check queued
@@ -148,6 +158,12 @@ def owns(row: object, head: str, mode: str, marker: str) -> bool:
         and row.get("status") in STATUS_ORDER
 
 
+def measured(row: object, sha: str) -> bool:
+    """Whether a check-run row is a completed, valid main measurement of sha (any attempt, or pre-#2803)."""
+    return (owns(row, sha, "main", "") or owns(row, sha, "main", check_marker(sha, "main"))) and \
+        row.get("status") == "completed" and row.get("conclusion") == "success"
+
+
 def owned_checks(api: Api, head: str, mode: str, marker: str) -> list[dict]:
     """This publisher's checks on head: one attempt's, or (marker '') every attempt's; oldest first."""
     query = urllib.parse.urlencode({"check_name": check_name(mode), "filter": "all", "app_id": GITHUB_ACTIONS_APP_ID})
@@ -218,9 +234,8 @@ def queued_output(mode: str, head: str, lines: list[str]) -> dict:
                                   f"Candidate `{head}`.", *lines])[:TEXT_LIMIT]}
 
 
-def first_parent_chain(api: Api, head: str) -> list[str]:
-    """Up to RECONCILE_DEPTH first-parent ancestors of head, nearest first, from one listing."""
-    rows = api.request(f"/commits?sha={head}&per_page=100")
+def parse_chain(rows: object, head: str) -> list[str]:
+    """Up to RECONCILE_DEPTH first-parent ancestors of head, nearest first, from one commit listing."""
     parents = {}
     for row in rows if isinstance(rows, list) else []:
         listed = row.get("parents") if isinstance(row, dict) else None
@@ -228,10 +243,20 @@ def first_parent_chain(api: Api, head: str) -> list[str]:
             parents[row["sha"]] = listed[0].get("sha")
     chain: list[str] = []
     current = parents.get(head)
-    while isinstance(current, str) and SHA.fullmatch(current) and len(chain) < RECONCILE_DEPTH:
+    while isinstance(current, str) and SHA.fullmatch(current) and current not in chain and \
+            len(chain) < RECONCILE_DEPTH:
         chain.append(current)
         current = parents.get(current)
     return chain
+
+
+def first_parent_chain(api: Api, head: str) -> list[str]:
+    return parse_chain(api.request(f"/commits?sha={head}&per_page=100"), head)
+
+
+def baseline_label(chain: list[str], base: str) -> str:
+    """How base relates to the head whose first-parent chain is chain."""
+    return range_label(str(chain.index(base) + 1) if base in chain else "", chain[0] if chain else "")
 
 
 def close_orphans(api: Api, commits: list[str], mode: str, fields_for) -> list[int]:
@@ -245,20 +270,31 @@ def close_orphans(api: Api, commits: list[str], mode: str, fields_for) -> list[i
     return closed
 
 
-def reconcile_main(api: Api, head: str, reconciler: str, now: str) -> list[int]:
-    """Close earlier main commits' open checks: no other main attempt can still advance them."""
+def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, chain: list[str] | None = None) \
+        -> list[int]:
+    """Close earlier main commits' open checks: no other main attempt can still advance them.
+
+    A closed commit strictly between base and head is named as covered by
+    this attempt's range comparison; it still has no measurement of its own.
+    """
+    chain = first_parent_chain(api, head) if chain is None else chain
+    covered = chain[:chain.index(base)] if base in chain else []
+
     def fields(row: dict) -> dict:
         started = row["status"] == "in_progress"
         cause = ("its 9700X job started but no publisher completed this attempt (cancelled, timed out or "
                  "failed); its workflow run has the details") if started else \
             ("its comparison never started: a newer main commit displaced the pending run under the sampling "
              "policy (only the newest pending main commit is kept), or the run was cancelled before any job ran")
+        cover = (f" Its change is inside the range comparison of `{head}` against `{base}`, which started now; "
+                 "that result covers the whole range and does not isolate this commit.") \
+            if row["head_sha"] in covered else ""
         return {"status": "completed", "conclusion": "cancelled" if started else "skipped", "completed_at": now,
                 "output": {"title": "Not measured", "summary": (
                     f"**{check_name('main')}: not measured.** This commit has no 9700X compiler measurement: "
-                    f"{cause}. This is not a performance result. Closed while starting the comparison of "
+                    f"{cause}. This is not a performance result.{cover} Closed while starting the comparison of "
                     f"`{head}`: {reconciler}")[:TEXT_LIMIT]}}
-    return close_orphans(api, first_parent_chain(api, head), "main", fields)
+    return close_orphans(api, chain, "main", fields)
 
 
 def reconcile_pull(api: Api, pull: str, head: str, reconciler: str, now: str) -> list[int]:
@@ -307,7 +343,9 @@ def announce(api: Api, environment: dict) -> list[dict]:
     marker = attempt_marker(head, "main", request_run, request_attempt, "1")
     bench = f"{SERVER}/{api.repository}/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"
     lines = [
-        "Baseline: its first parent, the main commit it landed on. Mode: main, profile `compiler-compare-v1`.",
+        "Baseline: its first parent, the main commit it landed on, or, when that commit has no valid "
+        "measurement, the nearest earlier main commit with one (a range comparison). Mode: main, profile "
+        "`compiler-compare-v1`.",
         f"Request run {request_run} attempt {request_attempt}: {run_url(api.repository, request_run, request_attempt)}",
         "",
         "Waiting for the main comparison's concurrency group: one main comparison runs at a time and GitHub "
@@ -325,17 +363,21 @@ def start(api: Api, environment: dict, clock=time.monotonic, sleep=time.sleep) -
     marker = attempt_marker(head, mode, get("BQ_REQUEST_RUN_ID"), get("BQ_REQUEST_ATTEMPT"), attempt)
     deadline = clock() + START_SECONDS
     here = run_url(api.repository, run_id, attempt)
+    relation = "first parent or nearest measured first-parent ancestor" if mode == "main" else \
+        f"merge base of pull request #{get('BQ_PULL')}"
     try:
-        closed = reconcile_main(api, head, here, stamp()) if mode == "main" else \
-            reconcile_pull(api, get("BQ_PULL"), head, here, stamp())
+        if mode == "main":
+            chain = first_parent_chain(api, head)
+            relation = baseline_label(chain, get("BQ_BASE_COMMIT")) or relation
+            closed = reconcile_main(api, head, get("BQ_BASE_COMMIT"), here, stamp(), chain)
+        else:
+            closed = reconcile_pull(api, get("BQ_PULL"), head, here, stamp())
         if closed:
             print(f"BENCH_COMPILER_RECONCILED {mode} check_runs={closed}")
     except (OSError, ValueError) as error:
         print(f"BENCH_COMPILER_RECONCILE_FAIL {error}", file=sys.stderr)
     lines = [
-        f"Baseline `{get('BQ_BASE_COMMIT')}` ("
-        + ("first parent" if mode == "main" else f"merge base of pull request #{get('BQ_PULL')}")
-        + f"). Mode: {mode}, profile `compiler-compare-v1`.",
+        f"Baseline `{get('BQ_BASE_COMMIT')}` ({relation}). Mode: {mode}, profile `compiler-compare-v1`.",
         f"Workflow run {run_id} attempt {attempt}: {here}",
         f"Request run {get('BQ_REQUEST_RUN_ID')} attempt {get('BQ_REQUEST_ATTEMPT')}; trusted harness "
         f"`{get('BQ_TRUSTED_REVISION')}`.",

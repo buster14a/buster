@@ -168,7 +168,7 @@ TRUSTED_TOOLS_CHECKOUT = (
 COMPILER_AUTHORIZE_BLOCKS = (
     ("    runs-on: ubuntu-24.04",),
     ("    permissions:", "      contents: read", "      pull-requests: read", "      actions: read",
-     "    timeout-minutes: 5"),
+     "      checks: read", "    timeout-minutes: 5"),
     TRUSTED_TOOLS_CHECKOUT,
     (
         "        id: verify",
@@ -213,7 +213,8 @@ COMPILER_CHECKOUTS = (
         "        with:",
         "          ref: ${{ github.event.workflow_run.head_sha }}",
         "          path: candidate",
-        "          fetch-depth: 2",
+        "          fetch-depth: 0",
+        "          filter: blob:none",
         "          persist-credentials: false",
     ),
     (

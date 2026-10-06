@@ -220,7 +220,8 @@ tracked on #1807.
 ## 9700X compiler comparison (#2752)
 
 The 9700X compiler comparison is not part of queue admission. It measures each
-commit after it lands on main, against its first parent, and publishes the
+commit after it lands on main, against its first parent (or, after a merge
+burst, the nearest earlier measured main commit), and publishes the
 report-only `9700X compiler benchmark` check on that main commit; see the
 [9700X admission guide](../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
 A brief queue-gated rollout (#2754) made every merge wait about 13 minutes for

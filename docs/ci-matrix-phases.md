@@ -194,6 +194,19 @@ unchanged source/images/toolchains/cache and census, at least 10% median Windows
 checks improvement, and at most 5% growth in total workflow runner seconds.
 The accepted overlapping policy remains the production default.
 
+The real admission-graph regression in `ci_matrix_phases_test.py` configures
+both policies and queries their actual Ninja dependencies. It resolves one
+Ninja executable for both CMake's `CMAKE_MAKE_PROGRAM` and those queries.
+Each configure runs under the existing native phase observer with a 90-second
+deadline (the full-project fixture allowance used by
+`build_configuration_test.py`); the enclosing capture has 10 seconds of
+cleanup/publication headroom. Timeout and nonzero status still fail the required
+workflow-tools suite. `MATRIX_ADMISSION_CONFIGURE` retains admission, argv,
+deadline, native terminal/termination facts, elapsed child time and CMake
+stdout/stderr for each attempt, including successful ones. The configure uses
+a compiler-free outer project; these timings are CI diagnostics, not compiler
+performance validation or a diagnosis of historical timeouts.
+
 The three qualification dispatch refs enable `BUSTER_CI_CHECKS_EVIDENCE=1`
 only in their desktop combination steps. For each runtime task the native
 observer queries the same binary's independent inventory, captures its actual
