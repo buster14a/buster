@@ -524,6 +524,18 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+For x86-64 ELF, `-S` text states what the `-c` object carries so that
+reassembling it (here or with GNU as/llvm-mc) gives the same symbol bindings,
+initializer order and calls (#1281, partial): a weak definition or undefined
+reference prints `.weak`, constructor and destructor priority prints one
+`.section .init_array.NNNNN,"aw",@init_array` / `.fini_array.NNNNN` group per
+priority (the unsuffixed section last), and an external call prints
+`call f@PLT`. A `@init_array`/`@fini_array` section keeps its ELF section type
+in this assembler, so priority names reach the linker. A call to a symbol the
+unit defines is `R_X86_64_PC32` in `-c` but an assembler always makes it
+`R_X86_64_PLT32`; hidden binding, TLS, `-g`/`-fPIC` and `-masm=att` are not yet
+preserved.
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and

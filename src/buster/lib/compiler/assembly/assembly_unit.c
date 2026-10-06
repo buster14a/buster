@@ -596,8 +596,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
             executable = executable || flags.pointer[index] == 'x';
         }
         bool no_bits = part_count > 2 && string_ends_with_sequence(parts[2], S8("nobits"));
+        bool init_array = part_count > 2 && string_ends_with_sequence(parts[2], S8("init_array"));
+        bool fini_array = part_count > 2 && string_ends_with_sequence(parts[2], S8("fini_array"));
         kind = executable    ? ASSEMBLY_UNIT_SECTION_TEXT
                : no_bits     ? ASSEMBLY_UNIT_SECTION_ZERO
+               : init_array  ? ASSEMBLY_UNIT_SECTION_INIT_ARRAY
+               : fini_array  ? ASSEMBLY_UNIT_SECTION_FINI_ARRAY
                : writable    ? ASSEMBLY_UNIT_SECTION_DATA
                              : ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
         classified = true;

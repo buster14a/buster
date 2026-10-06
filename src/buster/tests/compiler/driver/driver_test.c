@@ -35,6 +35,7 @@
 // compiler_driver_test_aarch64_assembly_round_trip reassembles AArch64 -S listings.
 // compiler_driver_test_assembly_private_labels checks ELF .L drops and NOTYPE labels.
 // compiler_driver_test_assembly_section_start_round_trip checks -S/-c leaves no undefined `.text`.
+// compiler_driver_test_assembly_x86_64_object_semantics compares -c with -S then -c: weak, priority, PLT.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
 // compiler_driver_test_static_literal_addresses checks original literal bytes
@@ -5538,6 +5539,159 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_section_start_r
     os_file_delete(source);
     os_file_delete(listing);
     os_file_delete(object);
+    scratch_end(temporary);
+    return result;
+}
+
+// GitHub #1281 (x86-64 ELF slice): -S text states weak binding, constructor and
+// destructor priority, and PLT calls, so assembling it yields the symbol
+// bindings, initializer order and relocations the -c object for the same source
+// has. The -c object is compared with the object Buster's own assembler builds
+// from the listing, symbol by symbol and relocation by relocation.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_object_section_is_unwind(ObjectFile* object, u32 section)
+{
+    return section < object->section_count && object->sections[section].kind == OBJECT_SECTION_UNWIND;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_object_has_relocation(ObjectFile* object, ObjectFile* expected, ObjectRelocation const* relocation)
+{
+    bool found = false;
+    String8 symbol_name = expected->symbols[relocation->symbol].name;
+    for (u32 index = 0; index < object->relocation_count && !found; index += 1)
+    {
+        ObjectRelocation const* candidate = object->relocations + index;
+        found = candidate->kind == relocation->kind && candidate->offset == relocation->offset && candidate->addend == relocation->addend &&
+                candidate->section < object->section_count && relocation->section < expected->section_count &&
+                object->sections[candidate->section].kind == expected->sections[relocation->section].kind &&
+                candidate->symbol < object->symbol_count && string_equal(object->symbols[candidate->symbol].name, symbol_name);
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_object_semantics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("object-semantics-source"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("object-semantics-listing"), S8(".s"));
+    String8 direct = buster_test_temporary_path(arena, S8("object-semantics-direct"), S8(".o"));
+    String8 reassembled = buster_test_temporary_path(arena, S8("object-semantics-reassembled"), S8(".o"));
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(
+        S8("int puts(const char*);\n"
+           "extern int object_weak_data __attribute__((weak));\n"
+           "void object_weak_call(void) __attribute__((weak));\n"
+           "__attribute__((weak)) int object_weak_value = 3;\n"
+           "__attribute__((weak)) int object_weak_function(void) { return 1; }\n"
+           "__attribute__((constructor(101))) static void object_early(void) { puts(\"early\"); }\n"
+           "__attribute__((constructor(101))) static void object_early_second(void) { puts(\"early2\"); }\n"
+           "__attribute__((constructor(500))) static void object_late(void) { puts(\"late\"); }\n"
+           "__attribute__((constructor)) static void object_default(void) { puts(\"default\"); }\n"
+           "__attribute__((destructor(65535))) static void object_last(void) { puts(\"last\"); }\n"
+           "__attribute__((destructor(200))) void object_first(void) { puts(\"first\"); }\n"
+           "__attribute__((destructor)) static void object_unprioritized(void) { puts(\"none\"); }\n"
+           "int object_entry(void) { object_weak_call(); puts(\"entry\"); return object_weak_data; }\n")))))
+    {
+        String8 direct_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g0"), S8("-c"), source, S8("-o"), direct};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_command)));
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        String8 print_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g0"), S8("-S"), source, S8("-o"), listing};
+        CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print_command)));
+        BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE && printed.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.weak object_weak_function\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.weak object_weak_value\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.weak object_weak_call\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.weak object_weak_data\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.globl object_weak")) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.section .init_array.00101,\"aw\",@init_array\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.section .init_array.00500,\"aw\",@init_array\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.section .init_array,\"aw\",@init_array\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.section .fini_array.00200,\"aw\",@fini_array\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.section .fini_array.65535,\"aw\",@fini_array\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.section .fini_array,\"aw\",@fini_array\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("call \"puts\"@PLT\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("call \"object_weak_call\"@PLT\n")) != BUSTER_STRING_NO_MATCH);
+            String8 assemble_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), listing, S8("-o"), reassembled};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_command)));
+            BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+            if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+            {
+                FileMapRead direct_map = file_map_read(arena, direct, (FileReadOptions){0});
+                FileMapRead round_map = file_map_read(arena, reassembled, (FileReadOptions){0});
+                ObjectFile expected = object_read(arena, direct_map.bytes, target);
+                ObjectFile actual = object_read(arena, round_map.bytes, target);
+                if (BUSTER_REQUIRE(arguments, expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE))
+                {
+                    u32 weak_symbols = 0;
+                    for (u32 index = 0; index < expected.symbol_count; index += 1)
+                    {
+                        ObjectSymbol const* want = expected.symbols + index;
+                        bool section_symbol = string_equal(want->name, S8(".text"));
+                        ObjectSymbol const* got = section_symbol ? 0 : compiler_driver_test_object_symbol(&actual, want->name);
+                        if (!section_symbol && BUSTER_REQUIRE(arguments, got))
+                        {
+                            weak_symbols += want->weak ? 1 : 0;
+                            BUSTER_TEST(arguments, got->global == want->global && got->weak == want->weak && got->hidden == want->hidden);
+                            BUSTER_TEST(arguments, (got->section == OBJECT_SECTION_UNDEFINED) == (want->section == OBJECT_SECTION_UNDEFINED));
+                            if (want->section != OBJECT_SECTION_UNDEFINED && got->section != OBJECT_SECTION_UNDEFINED)
+                            {
+                                BUSTER_TEST(arguments, actual.sections[got->section].kind == expected.sections[want->section].kind &&
+                                                           got->value == want->value);
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, weak_symbols == 4);
+                    u32 expected_relocations = 0;
+                    u32 plt_relocations = 0;
+                    for (u32 index = 0; index < expected.relocation_count; index += 1)
+                    {
+                        ObjectRelocation const* relocation = expected.relocations + index;
+                        if (!compiler_driver_test_object_section_is_unwind(&expected, relocation->section))
+                        {
+                            expected_relocations += 1;
+                            plt_relocations += relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ? 1 : 0;
+                            BUSTER_TEST(arguments, compiler_driver_test_object_has_relocation(&actual, &expected, relocation));
+                        }
+                    }
+                    u32 actual_relocations = 0;
+                    for (u32 index = 0; index < actual.relocation_count; index += 1)
+                    {
+                        actual_relocations += compiler_driver_test_object_section_is_unwind(&actual, actual.relocations[index].section) ? 0 : 1;
+                    }
+                    BUSTER_TEST(arguments, expected_relocations == actual_relocations && plt_relocations > 0);
+                    // The order a linker sorts by: the same priority for every
+                    // entry of both arrays, and nothing lost.
+                    for (u32 slot = 0; slot < 2; slot += 1)
+                    {
+                        ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+                        u64 entries = expected.sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+                        BUSTER_TEST(arguments, entries && actual.sections[kind].data.length == expected.sections[kind].data.length);
+                        if (entries && actual.sections[kind].data.length == expected.sections[kind].data.length &&
+                            BUSTER_REQUIRE(arguments, expected.initializer_priorities[slot] && actual.initializer_priorities[slot]))
+                        {
+                            for (u64 entry = 0; entry < entries; entry += 1)
+                            {
+                                BUSTER_TEST(arguments, expected.initializer_priorities[slot][entry] == actual.initializer_priorities[slot][entry]);
+                            }
+                        }
+                    }
+                }
+                file_map_unmap(direct_map);
+                file_map_unmap(round_map);
+            }
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(direct);
+    os_file_delete(reassembled);
     scratch_end(temporary);
     return result;
 }
@@ -24076,6 +24230,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_private_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_section_start_round_trip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_x86_64_object_semantics);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integers);

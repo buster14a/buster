@@ -30,6 +30,10 @@ typedef enum AssemblyUnitSectionKind
     ASSEMBLY_UNIT_SECTION_DEBUG_LINE_STR,
     ASSEMBLY_UNIT_SECTION_DEBUG_RNGLISTS,
     ASSEMBLY_UNIT_SECTION_DEBUG_LOCLISTS,
+    // `@init_array`/`@fini_array` sections keep their ELF section type, which
+    // is how a linker finds constructors; the name carries any priority.
+    ASSEMBLY_UNIT_SECTION_INIT_ARRAY,
+    ASSEMBLY_UNIT_SECTION_FINI_ARRAY,
     ASSEMBLY_UNIT_SECTION_KIND_COUNT,
 } AssemblyUnitSectionKind;
 
