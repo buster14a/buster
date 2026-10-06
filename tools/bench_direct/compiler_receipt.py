@@ -4,15 +4,15 @@
 Ownership: `tools/bench_direct`, trusted `main` only. The host harness
 (`compiler_compare.py`) writes a receipt; the hosted publisher
 (`compiler_publish.py`) re-validates it as data and publishes one exact-head
-check run; `tools/merge_queue_admission.py` can require the queue check. All
-three share the names and rules below.
+check run. Both share the names and rules below. Nothing gates merging on
+these checks: they are report-only evidence.
 
 Two modes measure the same way and differ only in what they compare:
-    queue  a main merge-queue group head against its first parent (#2752)
+    main   a commit after it landed on main against its first parent, the
+           main commit it landed on (#2752); merging never waits for it
     pull   an owner pull request head against its merge base with the base
            branch, on request and without merging (#2769)
-Each mode publishes its own check name and marker, so a pull-request
-measurement can never satisfy queue admission.
+Each mode publishes its own check name and marker.
 
 Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
@@ -32,10 +32,10 @@ RECEIPT_SCHEMA = "buster-9700x-compiler-receipt-v1"
 LAB_SCHEMA = "buster-uarch-lab-compare-v2"
 # mode: (check name, external-ID marker prefix).
 MODES = {
-    "queue": ("9700X compiler benchmark", "buster-9700x-compiler-bench-v1"),
+    "main": ("9700X compiler benchmark", "buster-9700x-compiler-main-v1"),
     "pull": ("9700X compiler benchmark (pull request)", "buster-9700x-compiler-pr-v1"),
 }
-CHECK_NAME, MARKER = MODES["queue"]
+CHECK_NAME, MARKER = MODES["main"]
 # The approved Zen 5 host (#2761): the observed CPU model, never a runner
 # label or target flag, must name the Ryzen 7 9700X.
 APPROVED_HOST = re.compile(r"AMD Ryzen 7 9700X\b")
@@ -50,7 +50,7 @@ PROFILE = {
     "name": "compiler-compare-v1",
     "workload": "uarch_lab compare default: stage-1 self-host compile of the unity "
                 "src/buster/apps/ide/ide.c on the configured base tree",
-    "frozen_source": "the base revision: a queue group's first parent or a pull request's merge base",
+    "frozen_source": "the base revision: a main commit's first parent or a pull request's merge base",
     "build": "./build.sh generate --cc clang --no-include-tests; ./build.sh build --config Release -t ide",
     "cpu": 2,
     "target_minutes": 10,
@@ -72,11 +72,11 @@ IDENTITY_KEYS = ("mode", "repository", "ref", "pull", "pull_head", "base", "base
                  "trusted_revision", "request_run_id", "run_id", "run_attempt")
 
 
-def check_name(mode: str = "queue") -> str:
+def check_name(mode: str = "main") -> str:
     return MODES[mode][0]
 
 
-def check_marker(head: str, mode: str = "queue") -> str:
+def check_marker(head: str, mode: str = "main") -> str:
     if not (isinstance(head, str) and SHA.fullmatch(head)):
         raise ValueError("check marker needs an exact 40-hex head")
     return MODES[mode][1] + ":" + head
@@ -146,7 +146,7 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
     timings = receipt.get("timings", {}) if isinstance(receipt, dict) else {}
     summary = summary if isinstance(summary, dict) else {}
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
-    mode = receipt.get("mode") if isinstance(receipt, dict) and receipt.get("mode") in MODES else "queue"
+    mode = receipt.get("mode") if isinstance(receipt, dict) and receipt.get("mode") in MODES else "main"
     lines = [
         f"**{check_name(mode)}: {conclusion}** (performance policy: report-only; a slow result does not block)",
         "",

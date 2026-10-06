@@ -32,7 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = ROOT / "docs" / "performance-validation-v1.json"
 BENCH_WORKFLOW = ROOT / ".github" / "workflows" / "9700x-direct-bench.yml"
-ROUTE_JOBS = {"queue-compare": "  compare:", "pull-compare": "  compare-pull:", "direct-workload": "  bench:"}
+ROUTE_JOBS = {"main-compare": "  compare:", "pull-compare": "  compare-pull:", "direct-workload": "  bench:"}
 VALIDATIONS = ("performance", "diagnostic", "policy")
 BUILD_COMMAND = re.compile(r"bench|throughput|^production_profile$")
 TOOL = re.compile(r"bench|benchmark|scaling|survey|performance")
@@ -130,7 +130,7 @@ def main() -> int:
         ("covered row passes", synthetic, {"tool:x.py", }, True),
         ("unregistered entry fails", synthetic, {"tool:x.py", "tool:y.py"}, False),
         ("stale row fails", synthetic, set(), False),
-        ("route to a missing job fails", {**synthetic, "entries": [dict(row, zen5=dict(row["zen5"], route="queue-compare"))]},
+        ("route to a missing job fails", {**synthetic, "entries": [dict(row, zen5=dict(row["zen5"], route="main-compare"))]},
          {"tool:x.py"}, False),
         ("unrouted covered claim fails", {**synthetic, "entries": [dict(row, zen5={"route": "none", "status": "covered"})]},
          {"tool:x.py"}, False),

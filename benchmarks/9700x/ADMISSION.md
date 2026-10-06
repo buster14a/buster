@@ -4,7 +4,7 @@ The Ryzen 7 9700X is not a general Actions executor. Exactly one workflow may
 reach it: `.github/workflows/9700x-direct-bench.yml`. It compiles and runs the
 owner's own pull-request workloads (#2704). It compares the compiler of an
 owner pull request with its merge base on request (#2769), and the compiler
-of each main merge-queue candidate with its predecessor's (#2752). Its hosted
+of each commit that lands on main with its first parent's (#2752). Its hosted
 markers, `.github/workflows/9700x-direct-request.yml` and
 `.github/workflows/9700x-compiler-request.yml`, never select the runner. The queued benchmark service
 and its dispatch workflow are removed (#2708). No other workflow may select
@@ -64,8 +64,7 @@ base and at the head. That executes the pull request's build as the runner
 account under the same owner-only gate. `publish-pull` is hosted and is the
 only job of that path with `checks: write`. Its check name,
 `9700X compiler benchmark (pull request)`, and marker,
-`buster-9700x-compiler-pr-v1:<head>`, differ from the queue's, so admission
-never reads it.
+`buster-9700x-compiler-pr-v1:<head>`, differ from the main comparison's.
 
 Every compiler receipt must record the observed CPU model of the host that
 measured it. The harness refuses to measure, and the publisher refuses to
@@ -75,65 +74,56 @@ The actor restriction governs who starts the workflow, not who edits its
 definition. Changes to the workflow, its harness or this policy test need
 owner review before they reach `main`.
 
-## Merge-group compiler comparison
+## Main compiler comparison
 
-`9700x-compiler-request.yml` runs on `merge_group: checks_requested` for every
-main queue candidate, without a path filter. It is a hosted marker with no
-permissions and no checkout; its completion starts three jobs of the bench
-workflow from `main`, only while `BENCH_DIRECT_ENABLED` and
-`BENCH_COMPILER_ENABLED` are both `true`:
+`9700x-compiler-request.yml` runs on every push to `main`. It is a hosted
+marker with no permissions and no checkout; its completion starts three jobs
+of the bench workflow from `main`, only while `BENCH_DIRECT_ENABLED` and
+`BENCH_COMPILER_ENABLED` are both `true`. The commit is measured after it
+landed, against its first parent, so merging never waits for the 9700X:
 
-- `authorize-compiler` (hosted, read-only) runs `authorize_compiler.py`. The
-  queue starts merge-group events, so the run's actor is not the authority.
-  The authorizer re-reads the request run (`merge_group`, success, this
-  repository, the queue branch), the live queue ref (it must still name the
-  head), the group commit (exactly two parents: the queue base, then the pull
-  request head), the base commit and both trees. It also re-reads the pull
-  request named by the queue branch: open, targeting `main`, head and base in
-  this repository, head equal to the second parent, and authored by `davidgmbb`
-  by login and numeric ID. Any other author or a fork is refused before the
-  runner. That keeps the direct path's trust boundary: only the owner's code
-  runs on the host.
+- `authorize-compiler` (hosted, read-only) runs `authorize_compiler.py`. It
+  re-reads the request run (`push`, branch `main`, success, this repository),
+  the commit (one or two parents), its first parent, both trees, and that the
+  commit is still on main (main equals it or descends from it). Main is
+  trusted code, so there is no author gate: everything that lands is measured,
+  bot-authored catch-up pull requests included. A queue merge's second parent
+  and pull request number are recorded for the report (`0` for a direct push).
 - `compare` (the 9700X, no token capability) checks out `main`'s `tools` and the
-  group head with both parents, without persisted credentials. It then runs
-  `compiler_compare.py`. That harness reads the queue ref anonymously first and
-  marks a replaced or removed group as superseded without building. Otherwise
-  it builds tests-off Clang Release `ide` binaries of the base, then the head,
-  then the base again for the frozen workload's generated closure. Finally it
-  runs `tools/uarch_lab.py compare` with the frozen `compiler-compare-v1` profile
+  commit with its parents, without persisted credentials, and runs
+  `compiler_compare.py --mode main`. It builds tests-off Clang Release `ide`
+  binaries of the first parent, then the commit, then the first parent again
+  for the frozen workload's generated closure, and runs `tools/uarch_lab.py
+  compare` with the frozen `compiler-compare-v1` profile
   (`compiler_receipt.PROFILE`). The evidence artifact
   `buster-9700x-compiler-<head>-<attempt>` keeps the receipt, the lab's raw
   pairs, metadata and `summary.json`, and both CMake caches for 90 days. It
-  drops compiled outputs, per-run binary copies and perf data. The candidate's
-  build runs as the runner account before measurement. The receipt is
-  therefore evidence produced under the owner-only boundary, not a sealed
-  result.
+  drops compiled outputs, per-run binary copies and perf data.
 - `publish-compiler` (hosted, `actions: read` and `checks: write`) runs
   `compiler_publish.py`. It reads that artifact through the API as bounded
   data, requires its identities to equal this attempt's authorization, and
   re-derives validity from the lab's own `summary.json`. It then creates one
   completed check run, `9700X compiler benchmark`, with external ID
-  `buster-9700x-compiler-bench-v1:<head>` on the group head:
+  `buster-9700x-compiler-main-v1:<head>` on the main commit:
   - `success`: a valid core measurement, faster, slower or not detectably
     different.
-  - `neutral`: superseded before measurement.
-  - `failure`: refused, missing, mismatched or invalid evidence. A failure
-    means the candidate was not benchmarked.
+  - `failure`: missing, mismatched or invalid evidence; the commit was not
+    benchmarked.
 
-  It also publishes after a refusal, so a non-owner candidate shows an explicit
-  coverage gap.
+The performance verdict is report-only. Nothing gates merging on the check.
+`BENCH_COMPILER_REGRESSION_POLICY` is unset or `report-only`; any other
+value, including a future `enforce`, fails closed until regression thresholds
+are qualified and a separately reviewed rollout adds them.
 
-The performance verdict is report-only. `BENCH_COMPILER_REGRESSION_POLICY` is
-unset or `report-only`; any other value, including a future `enforce`, fails
-closed until regression thresholds are qualified and a separately reviewed
-rollout adds them. Whether admission waits for the check is a separate
-setting, `BENCH_COMPILER_ADMISSION` (see
-[merge-queue admission](../../docs/merge-queue-admission.md#9700x-compiler-comparison-2752)).
-
-The host runs one job at a time because the group holds one runner, so the
-compiler comparison and the workload runs never overlap. Each merge group has
-its own concurrency group, so no pending comparison replaces another. The
-queue's build limit bounds how many are pending at once.
+Host time is bounded, not every commit is guaranteed a measurement. All main
+comparisons share one concurrency group that never cancels a measurement in
+progress; GitHub keeps only the newest pending run in a group, so during a
+burst of merges the commits between the running and the newest one stay
+unmeasured. Their absence of a `9700X compiler benchmark` check is the visible
+gap. A comparison takes about 13 minutes (three builds of about 55 s, then
+about 10 minutes of pairs), so merges more often than that are sampled. The
+host runs one job at a time because the group holds one runner, so main
+comparisons, pull-request comparisons and workload runs never overlap.
 
 ## Administrator steps
 

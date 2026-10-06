@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 HARNESS = Path(__file__).resolve().with_name("run_workloads.py")
 COMPILER = shutil.which("clang") or shutil.which("cc")
@@ -20,7 +22,10 @@ FAILING = "int main(void) { return 3; }\n"
 def git(repository: Path, *arguments: str) -> str:
     environment = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
-    return subprocess.run(["git", "-C", str(repository), *arguments], check=True,
+    # These disposable repositories have no housekeeping work worth detaching.
+    # A completed commit must leave no Git worker racing strict fixture cleanup.
+    return subprocess.run(["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+                           "-C", str(repository), *arguments], check=True,
                           capture_output=True, text=True, env=environment).stdout.strip()
 
 
@@ -102,6 +107,26 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("big.data is larger than", result.stdout)
         self.assertNotIn("| sample ", result.stdout)
+        self.assertFalse((self.root / "work").exists())
+
+    def test_fixture_git_does_not_launch_automatic_maintenance(self) -> None:
+        # Force housekeeping even for this tiny repository. Git's trace records
+        # child launches before detachment, so this needs no scheduling race.
+        git(self.repository, "config", "maintenance.auto", "true")
+        git(self.repository, "config", "maintenance.geometric-repack.auto", "-1")
+        git(self.repository, "config", "maintenance.loose-objects.enabled", "true")
+        git(self.repository, "config", "maintenance.loose-objects.auto", "1")
+        git(self.repository, "config", "gc.auto", "1")
+        trace = self.root / "git-trace.jsonl"
+        with patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(trace)}):
+            head = self.commit({"benchmarks/9700x/check.c": PASSING})
+        events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(event.get("event") == "start" for event in events))
+        children = [event for event in events if event.get("event") == "child_start"]
+        housekeeping = [event for event in children
+                        if "maintenance" in event.get("argv", []) or "gc" in event.get("argv", [])]
+        self.assertEqual(housekeeping, [])
+        self.assertEqual(git(self.repository, "show", f"{head}:benchmarks/9700x/check.c"), PASSING.strip())
 
     def test_compile_error_fails_without_running(self) -> None:
         result = self.run_harness(self.commit({"benchmarks/9700x/bad.c": "int main(void) { return x; }\n"}))

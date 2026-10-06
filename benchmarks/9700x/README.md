@@ -84,8 +84,8 @@ gate applies, and these jobs follow `authorize`:
   the host time spent. The run's artifact `buster-9700x-compiler-<head>-<attempt>`
   holds `receipt.json` and the lab's `summary.json` and raw pairs.
 
-The verdict is report-only, and the check cannot satisfy merge-queue
-admission, which reads only the queue's own check. A comparison takes a pilot
+The verdict is report-only and blocks nothing; the comparison of each commit
+after it lands on main publishes under a different name. A comparison takes a pilot
 plus about ten minutes of pairs after three builds, so request it once per
 head you intend to report.
 
