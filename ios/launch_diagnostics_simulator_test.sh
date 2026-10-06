@@ -3,6 +3,55 @@
 # No compiler build or installed test app is needed to check probe availability.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+check_probe_receipt() {
+    local status_log=$1 output_log=$2 run_log=$3 probe=$4 seconds=$5 native_commands=$6 command
+    case "$probe" in
+        process-table) command=ps ;;
+        unified-log) command=log ;;
+        crash-reports) command=sh ;;
+        *) return 1 ;;
+    esac
+    grep -qE "^command: xcrun simctl spawn [[:xdigit:]-]+ $command " "$status_log" || return 1
+    grep -qE "^BUSTER_IOS_PHASE phase=diagnostic-$probe label=probe-control outcome=[a-z-]+ status=[0-9]+ native_status=([0-9]+|unavailable) capture_status=(0|124) " "$status_log" || return 1
+    grep -qF "deadline_seconds=$seconds output_limit_bytes=65536" "$status_log" || return 1
+    if grep -qF 'capture_receipt=complete' "$status_log"; then
+        grep -qE 'status=[0-9]+ native_status=([0-9]+|unavailable) capture_status=0 ' "$status_log" || return 1
+        [[ -f $output_log ]] || return 1
+    else
+        # Only the actual caller capture-clock expiry can substitute for a
+        # complete snapshot. Missing/malformed protocol evidence still fails.
+        grep -qF 'outcome=evidence-failure status=125 native_status=unavailable capture_status=124 ' "$status_log" || return 1
+        grep -qF 'capture_receipt=incomplete' "$status_log" || return 1
+        grep -qE '^BUSTER_IOS_CALLER_GATE monitor_status=(124|137) admission=0 invocation_status=unavailable generation=[A-Za-z0-9]{8,64} reason=starting$' "$status_log" || return 1
+        grep -qF 'BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt' "$status_log" || return 1
+    fi
+    if ! grep -qE "^simctl spawn [[:xdigit:]-]+ $command " "$native_commands" 2>/dev/null; then
+        # A command/capture clock may expire before argv admission. Require the
+        # explicit expiry receipt; a missing native attempt is never probe success.
+        if grep -qF 'capture_receipt=complete' "$status_log"; then
+            grep -qF 'outcome=timeout status=124 native_status=unavailable capture_status=0 ' "$status_log" || return 1
+            grep -qF 'supervisor_valid=1 deadline_reached=1 cleanup_status=0' "$status_log" || return 1
+            grep -qE '(^| )native_launch=0( |$)' "$status_log" || return 1
+        fi
+    fi
+    if ! grep -qF 'outcome=success status=0 native_status=0 capture_status=0 ' "$status_log"; then
+        grep -qF "warning: iOS diagnostic unavailable name=$probe " "$run_log" || return 1
+    fi
+    if grep -qF 'Traceback (most recent call last):' "$run_log"; then
+        return 1
+    fi
+    if [[ -f $output_log ]]; then
+        [[ $(wc -c <"$output_log") -le 65536 ]] || return 1
+    fi
+}
+
+# Receipt controls run on POSIX hosts without booting a simulator.
+if [[ ${1:-} == --check-probe-receipt ]]; then
+    shift
+    check_probe_receipt "$@"
+    exit $?
+fi
+
 if [[ $(uname -s) != Darwin || $(uname -m) != arm64 ]]; then
     echo "error: native iOS launch-probe control requires macOS ARM64" >&2
     exit 1
@@ -85,6 +134,10 @@ unset BUSTER_IOS_SIMULATOR_UDID
 export BUSTER_IOS_SIMULATOR_DEVICE="buster-probe-control-$$"
 export BUSTER_IOS_CONSOLE_LOG="$BUSTER_IOS_NATIVE_CONTROL_ROOT/console.log"
 export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=3
+# Probes provide optional evidence, not readiness. #2742 observed a 42-second
+# hosted phase with no snapshot, beyond this 10-second command budget and its
+# separate 30-second caller cap (command + 10-second grace + capture allowance).
+# Keep those bounds; record an expired optional probe instead of waiting longer.
 export BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=10
 
 /bin/bash "$repo_root/ios/launch_simulator.sh" --batch probe-control \
@@ -101,15 +154,10 @@ grep -qE 'shutdown_disposition=(direct-success|verified-shutdown-after-timeout) 
 for probe in process-table unified-log crash-reports; do
     status_log="${BUSTER_IOS_CONSOLE_LOG%.log}.probe-control.log.diagnostic-$probe.status.log"
     output_log="${BUSTER_IOS_CONSOLE_LOG%.log}.probe-control.log.diagnostic-$probe.log"
-    grep -qF 'capture_receipt=complete' "$status_log"
-    grep -qF 'deadline_seconds=10 output_limit_bytes=65536' "$status_log"
-    grep -qE 'status=[0-9]+ native_status=([0-9]+|unavailable) capture_status=0' "$status_log"
-    [[ $(wc -c <"$output_log") -le 65536 ]]
+    check_probe_receipt "$status_log" "$output_log" "$BUSTER_IOS_NATIVE_CONTROL_ROOT/run.log" \
+        "$probe" "$BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS" "$BUSTER_IOS_NATIVE_CONTROL_ROOT/native-commands.log"
     # The retained receipt and raw stderr state availability, rather than
     # requiring simulator images to ship optional ps/log/sh tools.
     cat "$status_log"
-done
-for command in ps log sh; do
-    grep -qE "^simctl spawn [[:xdigit:]-]+ $command " "$BUSTER_IOS_NATIVE_CONTROL_ROOT/native-commands.log"
 done
 echo "Native simulator launch-probe control passed; availability is recorded per probe."
