@@ -12240,11 +12240,12 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
 BUSTER_C_INTERNAL void c_ir_ext80_integer_open(CIrExt80Value value, bool* negative_out, u64* magnitude_out)
 {
     u64 magnitude = 0;
-    if (value.significand)
+    u32 exponent = value.exponent_sign & C_IR_EXT80_SPECIAL_EXPONENT;
+    // An integer-rank value is an exact integer below 2^64, so its unbiased
+    // exponent lies in [0, 63]; anything else is not an opened integer.
+    if (value.significand && exponent >= 16383 && exponent - 16383 <= 63)
     {
-        u32 exponent = value.exponent_sign & C_IR_EXT80_SPECIAL_EXPONENT;
-        u32 shift = 63 - (exponent - 16383);
-        magnitude = value.significand >> shift;
+        magnitude = value.significand >> (63 - (exponent - 16383));
     }
     *magnitude_out = magnitude;
     *negative_out = magnitude && (value.exponent_sign & C_IR_EXT80_SIGN);
