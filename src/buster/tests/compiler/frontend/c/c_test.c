@@ -5790,13 +5790,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_typedef_scopes(UnitTestArgume
 // nested `(`, so a valid call through a few tens of thousands of dereference
 // groups overflowed the stack (the driver crashed with SIGSEGV at 64000
 // levels while -fsyntax-only succeeded).  The depth here is far below the
-// crashing one only to keep the quadratic expression scans cheap; the shallow
-// cases pin the answers the loops must keep giving.
+// crashing one because lowering such a callee is still quadratic in its depth
+// (#2740): 16,000 levels cost 26 s in a Debug build and pushed the iOS Debug
+// payload past its launch deadline.  4,000 levels still drive both loops far
+// past any static bound; the shallow cases pin the answers they must give.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_group_nesting(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(0, 0);
-    u32 depth = 16000;
+    u32 depth = 4000;
     String8 head = S8("int g(void);\nint f(void) { int (*p)(void) = g; return ");
     String8 open = S8("(*");
     String8 tail = S8("p");
