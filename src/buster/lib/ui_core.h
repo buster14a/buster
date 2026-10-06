@@ -673,6 +673,12 @@ struct UI_State
     u64 focus_scope_stamp;
     u64 utf8_column_decodes;
     u64 signal_event_inspections;
+    // Pointer hit testing: boxes visited by topmost-box queries, candidate
+    // indexes built, and a test seam that forces the linear scan (the oracle).
+    u64 hit_test_candidates;
+    u64 hit_index_builds;
+    bool hit_index_disabled;
+    u8 reserved_hit_index[7];
     // Per-owner chains of the routed events, so a box's signal visits only the
     // events it owns. They are valid for the build named by
     // event_owner_chains_build_index; otherwise signals scan the whole list.

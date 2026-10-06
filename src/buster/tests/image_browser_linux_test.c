@@ -7,6 +7,7 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/string.h>
 #include <buster/apps/image_browser/image_browser_linux.h>
+#include <buster/apps/image_browser/image_browser_linux_internal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -345,6 +346,196 @@ BUSTER_GLOBAL_LOCAL void image_browser_linux_worker_checks(ImageBrowserCatalog* 
     }
 }
 
+// Comparison-counting oracle: the former halving-gap Shell sort, kept here so
+// the merge sort is checked against the exact order the old code produced.
+BUSTER_GLOBAL_LOCAL u64 image_browser_linux_oracle_comparisons;
+
+BUSTER_GLOBAL_LOCAL s32 image_browser_linux_oracle_compare(String8 left, String8 right)
+{
+    image_browser_linux_oracle_comparisons += 1;
+    u64 common = left.length < right.length ? left.length : right.length;
+    s32 result = (s32)memcmp(left.pointer, right.pointer, (size_t)common);
+    if (!result && left.length != right.length)
+    {
+        result = left.length < right.length ? -1 : 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void image_browser_linux_oracle_sort(String8* paths, u64 count)
+{
+    for (u64 gap = count / 2; gap; gap /= 2)
+    {
+        for (u64 index = gap; index < count; index += 1)
+        {
+            String8 value = paths[index];
+            u64 position = index;
+            while (position >= gap && image_browser_linux_oracle_compare(paths[position - gap], value) > 0)
+            {
+                paths[position] = paths[position - gap];
+                position -= gap;
+            }
+            paths[position] = value;
+        }
+    }
+}
+
+typedef enum ImageBrowserSortShape
+{
+    IMAGE_BROWSER_SORT_SHAPE_SHELL_WORST,
+    IMAGE_BROWSER_SORT_SHAPE_SORTED,
+    IMAGE_BROWSER_SORT_SHAPE_REVERSE,
+    IMAGE_BROWSER_SORT_SHAPE_RANDOM,
+    IMAGE_BROWSER_SORT_SHAPE_EQUAL,
+    IMAGE_BROWSER_SORT_SHAPE_COMMON_PREFIX,
+    IMAGE_BROWSER_SORT_SHAPE_PREFIX_CHAIN,
+    IMAGE_BROWSER_SORT_SHAPE_COUNT,
+} ImageBrowserSortShape;
+
+BUSTER_GLOBAL_LOCAL u32 image_browser_linux_sort_rank(ImageBrowserSortShape shape, u64 count, u64 index, u32* state)
+{
+    u32 result = (u32)index;
+    if (shape == IMAGE_BROWSER_SORT_SHAPE_SHELL_WORST)
+    {
+        // For count = 2m: m, 0, m+1, 1, ..., 2m-1, m-1. Every halving-gap pass
+        // before the last leaves the final pass m(m+1)/2 shifts.
+        u64 m = count / 2;
+        result = (u32)((index & 1) ? index / 2 : m + index / 2);
+    }
+    else if (shape == IMAGE_BROWSER_SORT_SHAPE_REVERSE)
+    {
+        result = (u32)(count - 1 - index);
+    }
+    else if (shape == IMAGE_BROWSER_SORT_SHAPE_RANDOM || shape == IMAGE_BROWSER_SORT_SHAPE_PREFIX_CHAIN)
+    {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        result = *state % (u32)(count * 4);
+    }
+    else if (shape == IMAGE_BROWSER_SORT_SHAPE_EQUAL)
+    {
+        result = 7;
+    }
+    return result;
+}
+
+// Builds `count` paths of the given shape into one malloc'd pool.
+BUSTER_GLOBAL_LOCAL bool image_browser_linux_sort_paths_build(ImageBrowserSortShape shape, u64 count, String8** paths, char** pool)
+{
+    u64 prefix_length = shape == IMAGE_BROWSER_SORT_SHAPE_COMMON_PREFIX ? 300 : 3;
+    u64 stride = prefix_length + 16 + (shape == IMAGE_BROWSER_SORT_SHAPE_PREFIX_CHAIN ? count : 0);
+    *paths = (String8*)malloc((size_t)(count * sizeof(String8)));
+    *pool = (char*)malloc((size_t)(count * stride));
+    bool result = *paths && *pool;
+    u32 state = 0x9e3779b9u ^ (u32)count;
+    for (u64 index = 0; result && index < count; index += 1)
+    {
+        char* text = *pool + index * stride;
+        u32 rank = image_browser_linux_sort_rank(shape, count, index, &state);
+        u64 length = 0;
+        if (shape == IMAGE_BROWSER_SORT_SHAPE_PREFIX_CHAIN)
+        {
+            // Every path is a prefix of every longer one.
+            length = 1 + rank % count;
+            memset(text, 'a', (size_t)length);
+        }
+        else
+        {
+            memset(text, shape == IMAGE_BROWSER_SORT_SHAPE_COMMON_PREFIX ? 'p' : 'd', (size_t)prefix_length);
+            int digits = snprintf(text + prefix_length, 16, "%08u", (unsigned)rank);
+            result = digits == 8;
+            length = prefix_length + 8;
+        }
+        (*paths)[index] = (String8){.pointer = (char8*)text, .length = length};
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool image_browser_linux_sort_matches(String8 const* left, String8 const* right, u64 count)
+{
+    bool result = true;
+    for (u64 index = 0; result && index < count; index += 1)
+    {
+        result = left[index].length == right[index].length &&
+                 memcmp(left[index].pointer, right[index].pointer, (size_t)left[index].length) == 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 image_browser_linux_sort_log2_ceiling(u64 count)
+{
+    u64 result = 0;
+    while (((u64)1 << result) < count)
+    {
+        result += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void image_browser_linux_sort_checks(void)
+{
+    // Merge sort must match the old sort's final order and stay within
+    // count * ceil(log2 count) comparisons for every shape and size.
+    u64 const sizes[] = {0, 1, 2, 3, 5, 100, 1024, 2048, 4095, 4096};
+    u64 shell_worst_oracle = 0;
+    u64 shell_worst_merge = 0;
+    for (u32 shape_index = 0; shape_index < IMAGE_BROWSER_SORT_SHAPE_COUNT; shape_index += 1)
+    {
+        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+        {
+            u64 count = sizes[size_index];
+            ImageBrowserSortShape shape = (ImageBrowserSortShape)shape_index;
+            if (shape == IMAGE_BROWSER_SORT_SHAPE_SHELL_WORST && (count & 1))
+            {
+                continue;
+            }
+            String8* actual = 0;
+            char* actual_pool = 0;
+            String8* expected = 0;
+            char* expected_pool = 0;
+            String8* scratch = (String8*)malloc((size_t)((count ? count : 1) * sizeof(String8)));
+            bool built = image_browser_linux_sort_paths_build(shape, count, &actual, &actual_pool) &&
+                         image_browser_linux_sort_paths_build(shape, count, &expected, &expected_pool) && scratch;
+            image_browser_linux_check(built, "sort fixture built");
+            if (built)
+            {
+                image_browser_linux_oracle_comparisons = 0;
+                image_browser_linux_oracle_sort(expected, count);
+                u64 comparisons = image_browser_linux_test_sort(actual, scratch, count);
+                image_browser_linux_check(image_browser_linux_sort_matches(actual, expected, count),
+                                          "merge sort final order matches the old sort");
+                bool ordered = true;
+                for (u64 index = 1; ordered && index < count; index += 1)
+                {
+                    u64 common = actual[index - 1].length < actual[index].length ? actual[index - 1].length : actual[index].length;
+                    int order = memcmp(actual[index - 1].pointer, actual[index].pointer, (size_t)common);
+                    ordered = order < 0 || (order == 0 && actual[index - 1].length <= actual[index].length);
+                }
+                image_browser_linux_check(ordered, "merge sort output is bytewise lexical order");
+                image_browser_linux_check(comparisons <= count * image_browser_linux_sort_log2_ceiling(count),
+                                          "merge sort comparisons stay within count * ceil(log2 count)");
+                if (shape == IMAGE_BROWSER_SORT_SHAPE_SHELL_WORST && count == 4096)
+                {
+                    shell_worst_oracle = image_browser_linux_oracle_comparisons;
+                    shell_worst_merge = comparisons;
+                }
+            }
+            free(actual);
+            free(actual_pool);
+            free(expected);
+            free(expected_pool);
+            free(scratch);
+        }
+    }
+    // The constructed family drives the old sort to m(m+1)/2 shifts in its
+    // last pass (2,098,176 at 4096); the merge sort stays near n log n.
+    image_browser_linux_check(shell_worst_oracle > 2000000, "constructed family is quadratic for the halving-gap sort");
+    image_browser_linux_check(shell_worst_merge && shell_worst_merge <= 4096u * 12u, "merge sort is bounded on the constructed family");
+    fprintf(stderr, "image_browser_linux_sort: 4096-path Shell-worst family: old sort %llu comparisons, merge sort %llu\n",
+            (unsigned long long)shell_worst_oracle, (unsigned long long)shell_worst_merge);
+}
+
 bool image_browser_run_linux_tests(void)
 {
     image_browser_linux_assertions = 0;
@@ -424,6 +615,7 @@ bool image_browser_run_linux_tests(void)
         image_browser_linux_check(rmdir(directory) == 0, "owned fixture directory removed");
     }
     os_resource_test_clear();
+    image_browser_linux_sort_checks();
     fprintf(stderr, "image_browser_linux_tests: %u/%u assertions passed\n",
             (unsigned)(image_browser_linux_assertions - image_browser_linux_failures), (unsigned)image_browser_linux_assertions);
     return image_browser_linux_failures == 0;
