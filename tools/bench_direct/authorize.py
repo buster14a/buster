@@ -9,7 +9,7 @@ API and fails closed unless both name the owner. It emits the current run
 attempt and the pull request's base commit only after every check holds.
 
 It also reads the pull request's changed files (plan) and says what was
-requested: workloads (changed `benchmarks/9700x/*.c` or `*.data`) and a
+requested: workloads (the selection contract of workload_selection.py) and a
 compiler comparison (an added or modified COMPARE_REQUEST, #2769, or
 SCALING_REQUEST, #424, whose scaling leg runs inside the comparison). For a
 comparison it resolves the merge base with the base branch and both trees from
@@ -25,6 +25,8 @@ import sys
 import urllib.parse
 import urllib.request
 
+from workload_selection import api_changes, select
+
 MAINTAINER = {"login": "davidgmbb", "id": 39247043}
 REQUEST_WORKFLOW = ".github/workflows/9700x-direct-request.yml"
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -34,7 +36,6 @@ API = "https://api.github.com"
 COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"
 # Kept equal to compiler_receipt.SCALING_REQUEST; this file imports nothing local.
 SCALING_REQUEST = "benchmarks/9700x/scaling.request"
-WORKLOAD_FILE = re.compile(r"benchmarks/9700x/[^/]+\.(?:c|data)")
 FILE_PAGES = 30
 FILE_PAGE_SIZE = 100
 
@@ -51,13 +52,18 @@ def full_name(record: object) -> object:
     return record.get("full_name") if isinstance(record, dict) else None
 
 
-def plan(files: object) -> tuple[bool, bool]:
-    """(workloads, compare) requested by the pull request's changed files."""
+def plan(files: object) -> tuple[bool, bool, list[str]]:
+    """(workloads, compare, refusals) requested by the changed files.
+
+    Workload selection is shared with the executor (workload_selection, #2924);
+    any refusal means no host work may start.
+    """
     rows = [row for row in (files if isinstance(files, list) else [])
-            if isinstance(row, dict) and isinstance(row.get("filename"), str) and row.get("status") != "removed"]
-    workloads = any(WORKLOAD_FILE.fullmatch(row["filename"]) for row in rows)
-    compare = any(row["filename"] in (COMPARE_REQUEST, SCALING_REQUEST) for row in rows)
-    return workloads, compare
+            if isinstance(row, dict) and isinstance(row.get("filename"), str) and isinstance(row.get("status"), str)]
+    workloads, problems = select(api_changes(rows))
+    compare = any(row["filename"] in (COMPARE_REQUEST, SCALING_REQUEST) and row["status"] != "removed"
+                  for row in rows)
+    return bool(workloads), compare, problems
 
 
 def inventory(fetch_page, expected: object) -> tuple[list[dict], list[str]]:
@@ -200,7 +206,8 @@ def main() -> int:
                 lambda page: fetch(f"/repos/{repository}/pulls/{number}/files?per_page={FILE_PAGE_SIZE}&page={page}",
                                    token), detail.get("changed_files"))
             failures.extend(problems)
-    workloads, compare = plan(files if not failures else [])
+    workloads, compare, problems = plan(files if not failures else [])
+    failures.extend(problems)
     extra = {"merge_base": "", "merge_base_tree": "", "head_tree": ""}
     if not failures and compare:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)

@@ -42,10 +42,8 @@ import time
 from pathlib import Path
 
 from compiler_receipt import APPROVED_HOST, observed_cpu_model
+from workload_selection import WORKLOAD_DIRECTORY, WORKLOAD_NAME, git_changes, select
 
-WORKLOAD_DIRECTORY = "benchmarks/9700x"
-WORKLOAD_NAME = re.compile(r"benchmarks/9700x/[a-z0-9][a-z0-9_-]{0,47}\.c")
-WORKLOAD_LIMIT = 4
 SOURCE_LIMIT = 256 * 1024
 DATA_LIMIT = 8 * 1024 * 1024
 DATA_NAME = "input.data"
@@ -62,15 +60,13 @@ COMPILE_FLAGS = (
 RUN_ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 
 
-def changed_workloads(candidate: Path, base: str, head: str) -> list[str]:
-    """Workload sources the pull request added or modified, in sorted order."""
+def changed_workloads(candidate: Path, base: str, head: str) -> tuple[list[str], list[str]]:
+    """Workload sources to measure and refusal reasons (see workload_selection)."""
     listing = subprocess.run(
-        ["git", "-C", str(candidate), "diff", "--name-only", "--diff-filter=AM", "-z",
+        ["git", "-C", str(candidate), "diff", "--name-status", "--no-renames", "-z",
          f"{base}...{head}", "--", WORKLOAD_DIRECTORY],
         check=True, capture_output=True, timeout=60).stdout.decode("utf-8")
-    names = {name.removesuffix(".data") + ".c" if name.endswith(".data") else name
-             for name in listing.split("\0") if name}
-    return sorted(name for name in names if WORKLOAD_NAME.fullmatch(name))
+    return select(git_changes(listing))
 
 
 def source_problem(candidate: Path, name: str) -> str:
@@ -216,11 +212,10 @@ def main() -> int:
         failures.append(f"--summary directory does not exist: {arguments.summary.parent}")
     if arguments.cpu not in os.sched_getaffinity(0):
         failures.append(f"CPU {arguments.cpu} is not available to this process")
-    workloads = [] if failures else changed_workloads(arguments.candidate, arguments.base, arguments.head)
+    workloads, problems = ([], []) if failures else changed_workloads(arguments.candidate, arguments.base, arguments.head)
+    failures.extend(problems)
     if not failures and not workloads:
         failures.append(f"the pull request adds or modifies no workload matching {WORKLOAD_NAME.pattern}")
-    if len(workloads) > WORKLOAD_LIMIT:
-        failures.append(f"more than {WORKLOAD_LIMIT} workloads changed: {len(workloads)}")
 
     lines = ["## 9700X direct workload run", "",
              f"head `{arguments.head}`, base `{arguments.base}`, CPU {arguments.cpu}, "

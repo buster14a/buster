@@ -151,7 +151,7 @@ class InventoryTest(unittest.TestCase):
         pages = [self.rows(100), self.rows(99, 100) + [{"filename": authorize.COMPARE_REQUEST, "status": "added"}]]
         files, failures, _ = self.run_pages(pages, 200)
         self.assertEqual(failures, [])
-        self.assertEqual(authorize.plan(files), (False, True))
+        self.assertEqual(authorize.plan(files), (False, True, []))
         files, failures, _ = self.run_pages(pages[:1], 200)
         self.assertTrue(failures)
 
@@ -160,17 +160,41 @@ class PlanTest(unittest.TestCase):
     def test_changed_files_select_workloads_and_comparison(self) -> None:
         def files(*names: str, status: str = "modified") -> list[dict]:
             return [{"filename": name, "status": status} for name in names]
-        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.c")), (True, False))
-        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.data")), (True, False))
-        self.assertEqual(authorize.plan(files(authorize.COMPARE_REQUEST)), (False, True))
-        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.c", authorize.COMPARE_REQUEST)), (True, True))
-        self.assertEqual(authorize.plan(files(authorize.COMPARE_REQUEST, status="removed")), (False, False))
-        self.assertEqual(authorize.plan(files("benchmarks/9700x/nested/a.c", "src/x.c")), (False, False))
-        self.assertEqual(authorize.plan(None), (False, False))
+        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.c")), (True, False, []))
+        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.data")), (True, False, []))
+        self.assertEqual(authorize.plan(files(authorize.COMPARE_REQUEST)), (False, True, []))
+        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.c", authorize.COMPARE_REQUEST)), (True, True, []))
+        self.assertEqual(authorize.plan(files(authorize.COMPARE_REQUEST, status="removed")), (False, False, []))
+        self.assertEqual(authorize.plan(files("benchmarks/9700x/nested/a.c", "src/x.c")), (False, False, []))
+        self.assertEqual(authorize.plan(None), (False, False, []))
         # A scaling request runs inside a compiler comparison (#424).
-        self.assertEqual(authorize.plan(files(authorize.SCALING_REQUEST)), (False, True))
-        self.assertEqual(authorize.plan(files(authorize.SCALING_REQUEST, status="removed")), (False, False))
+        self.assertEqual(authorize.plan(files(authorize.SCALING_REQUEST)), (False, True, []))
+        self.assertEqual(authorize.plan(files(authorize.SCALING_REQUEST, status="removed")), (False, False, []))
         self.assertEqual(authorize.SCALING_REQUEST, compiler_receipt.SCALING_REQUEST)
+
+    def test_selection_matches_the_executor_contract(self) -> None:
+        def plan(*rows: tuple) -> tuple[bool, bool, list[str]]:
+            return authorize.plan([{"filename": name, "status": status, **({"previous_filename": old} if old else {})}
+                                   for status, name, old in rows])
+        a, b = "benchmarks/9700x/first.c", "benchmarks/9700x/second.c"
+        self.assertEqual(plan(("removed", "benchmarks/9700x/a.data", "")), (True, False, []))
+        self.assertEqual(plan(("renamed", b, a)), (True, False, []))
+        self.assertEqual(plan(("removed", a, "")), (False, False, []))
+        self.assertEqual(plan(("removed", a, ""), ("modified", "benchmarks/9700x/first.data", "")), (False, False, []))
+        self.assertEqual(plan(("renamed", "benchmarks/9700x/b.data", "benchmarks/9700x/a.data")), (True, False, []))
+        self.assertEqual(plan(("modified", "benchmarks/9700x/a.data", "")), (True, False, []))
+        self.assertEqual(plan(("added", a, ""), ("removed", "benchmarks/9700x/x.c", "")), (True, False, []))
+        for bad in ("benchmarks/9700x/Upper.c", "benchmarks/9700x/has space.c", "benchmarks/9700x/.c",
+                    "benchmarks/9700x/" + "a" * 49 + ".c", "benchmarks/9700x/Bad.data"):
+            with self.subTest(name=bad):
+                workloads, compare, problems = plan(("added", bad, ""))
+                self.assertEqual((workloads, compare, len(problems)), (False, False, 1))
+        self.assertEqual(plan(("removed", "benchmarks/9700x/Upper.c", ""))[2], [])
+        self.assertEqual(plan(("renamed", a, "benchmarks/9700x/Upper.c"))[2], [])
+        self.assertEqual(len(plan(("renamed", "benchmarks/9700x/x.c", "benchmarks/9700x/Upper.c"),
+                                  ("added", "benchmarks/9700x/Bad.c", ""))[2]), 1)
+        self.assertEqual(len(plan(("weird", a, ""))[2]), 1)
+        self.assertEqual(len(plan(*[("added", f"benchmarks/9700x/w{index}.c", "") for index in range(5)])[2]), 1)
 
     def test_comparison_needs_a_merge_base_and_both_trees(self) -> None:
         compared = {"merge_base_commit": {"sha": BASE, "commit": {"tree": {"sha": "e" * 40}}}}

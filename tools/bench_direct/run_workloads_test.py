@@ -195,6 +195,56 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertNotIn("| sample ", result.stdout)
         self.assertFalse((self.root / "work").exists())
 
+    def selection(self, head: str) -> tuple[list[str], list[str]]:
+        import run_workloads
+        return run_workloads.changed_workloads(self.repository, self.base, head)
+
+    def advance(self, *, remove: tuple[str, ...] = (), rename: tuple[tuple[str, str], ...] = (),
+                write: dict[str, str] | None = None) -> str:
+        """Commit a change on top of the current checkout."""
+        for name in remove:
+            git(self.repository, "rm", "-q", name)
+        for old, new in rename:
+            git(self.repository, "mv", old, new)
+        return self.commit(write or {})
+
+    def test_selection_covers_every_change_kind(self) -> None:
+        directory = "benchmarks/9700x/"
+        self.base = self.commit({directory + "first.c": PASSING, directory + "first.data": "A",
+                                 directory + "other.c": PASSING})
+        cases = {
+            "modified source": (dict(write={directory + "first.c": PASSING + "\n"}), (["benchmarks/9700x/first.c"], False)),
+            "deleted sidecar": (dict(remove=(directory + "first.data",)), (["benchmarks/9700x/first.c"], False)),
+            "renamed source": (dict(rename=((directory + "first.c", directory + "second.c"),)),
+                               (["benchmarks/9700x/second.c"], False)),
+            "renamed data": (dict(rename=((directory + "first.data", directory + "other.data"),)),
+                             (["benchmarks/9700x/first.c", "benchmarks/9700x/other.c"], False)),
+            "deleted source": (dict(remove=(directory + "other.c",)), ([], False)),
+            "deleted source and its sidecar edit": (dict(remove=(directory + "first.c",),
+                                                         write={directory + "first.data": "B"}), ([], False)),
+            "data only": (dict(write={directory + "first.data": "B"}), (["benchmarks/9700x/first.c"], False)),
+            "mixed": (dict(remove=(directory + "other.c",), write={directory + "new.c": PASSING,
+                                                                    directory + "first.data": "B"}),
+                      (["benchmarks/9700x/first.c", "benchmarks/9700x/new.c"], False)),
+            "invalid added name": (dict(write={directory + "Bad.c": PASSING}), ([], True)),
+            "invalid renamed-to name": (dict(rename=((directory + "other.c", directory + "Other.c"),)), ([], True)),
+        }
+        for name, (change, (workloads, refused)) in cases.items():
+            with self.subTest(case=name):
+                git(self.repository, "checkout", "-q", "--detach", self.base)
+                found, problems = self.selection(self.advance(**change))
+                self.assertEqual((found, bool(problems)), (workloads, refused))
+                if refused:
+                    self.assertIn("unsupported workload filename", problems[0])
+
+    def test_invalid_name_is_refused_before_building(self) -> None:
+        result = self.run_harness(self.commit({"benchmarks/9700x/Bad.c": PASSING,
+                                               "benchmarks/9700x/good.c": PASSING}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Bad.c: unsupported workload filename", result.stdout)
+        self.assertNotIn("| sample ", result.stdout)
+        self.assertFalse((self.root / "work").exists())
+
     def test_fixture_git_does_not_launch_automatic_maintenance(self) -> None:
         # Force housekeeping even for this tiny repository. Git's trace records
         # child launches before detachment, so this needs no scheduling race.
