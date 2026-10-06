@@ -2,7 +2,8 @@
 // freestanding variants, argument processing into buster_entry_point,
 // crash-signal reporting, the fuzzer entry, and — for freestanding links —
 // the minimal libc surface (memset/memcpy/strlen/abort/...) the compiler
-// may emit calls to.
+// may emit calls to. Opt-in buster_ios_launch_trace native observations span
+// main/worker and runtime setup before ordinary output is initialized.
 
 #include <buster/lib/entry_point.h>
 #include <buster/lib/system_headers.h>
@@ -13,6 +14,9 @@
 BUSTER_V_IMPL OsState os_state;
 
 #if BUSTER_LINK_LIBC
+#if BUSTER_IOS
+#include <buster/lib/entry_point/ios_launch_trace.c>
+#endif
 BUSTER_GLOBAL_LOCAL s32 buster_entry_point_exit_code = 0;
 BUSTER_GLOBAL_LOCAL bool buster_entry_point_exit_code_is_set = false;
 
@@ -310,7 +314,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     arena_benchmark_report_enable(string_equal(os_get_environment_variable(S8("BUSTER_ALLOCATION_CENSUS")), S8("1")));
 #endif
 
+#if BUSTER_IOS
+    buster_ios_launch_trace(S8("runtime-ready"));
+#endif
     ProcessResult result = process_arguments();
+#if BUSTER_IOS
+    buster_ios_launch_trace(S8("arguments-ready"));
+#endif
 
     if (result == PROCESS_RESULT_SUCCESS)
     {
@@ -375,6 +385,7 @@ int main(int argc, char* argv[], char* envp[])
         FreeEnvironmentStringsW(environment);
     }
 #elif BUSTER_IOS
+    buster_ios_launch_trace(S8("main"));
     // UIApplicationMain owns the main thread/run loop and never returns; the
     // compiler/test runner runs on a worker started from the app delegate.
     buster_ios_argv = argv;
@@ -401,12 +412,14 @@ int main(int argc, char* argv[], char* envp[])
 // exits and CI can read the test result.
 ProcessResult buster_ios_worker_entry(void)
 {
+    buster_ios_launch_trace(S8("worker-entry"));
     char* fallback_argv[] = {(char*)"buster-ide", 0};
     char* fallback_envp[] = {0};
     char** ios_argv = buster_ios_argv ? buster_ios_argv : fallback_argv;
     char** ios_envp = buster_ios_envp ? buster_ios_envp : fallback_envp;
 
     ProcessResult result = buster_entry_point((StringOsList)ios_argv, (StringOsList)ios_envp);
+    buster_ios_launch_trace(S8("entry-complete"));
     // Deterministic marker the simulator launch script greps for (the app's exit
     // code is not reliably observable through simctl).
     string_print(result == PROCESS_RESULT_SUCCESS ? S8("BUSTER_IOS_RESULT: SUCCESS\n") : S8("BUSTER_IOS_RESULT: FAILURE\n"));
