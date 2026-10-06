@@ -1,7 +1,7 @@
 # Independent Unix CI suites
 
 > Historical suite-level design/evidence. The subsequent internal desktop
-> partition and current 29-job completion contract are documented in
+> partition and current 25-job completion contract are documented in
 > [Desktop combination shards](ci-combination-shards.md). Historical timings
 > below are not matched before/after evidence for #333.
 

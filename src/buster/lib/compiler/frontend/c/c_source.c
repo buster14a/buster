@@ -1806,7 +1806,7 @@ BUSTER_C_SHARED CSourceSite c_preprocess_token_site_cursor(CPreprocessResult con
         .map_offset_plus_one = token.offset + 1,
         .file = c_preprocess_token_source(preprocess, token, cursor),
     };
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
     // The source a region's key names is the source every position in that
     // region resolves to (TEXT regions answer region->source, STAMP regions a
     // stamp built with the same source), so the site agrees with the eager

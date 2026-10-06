@@ -5175,11 +5175,11 @@ BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* 
             }
         }
     }
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
     // The scan stays in the tree as the reference and answers every lookup
     // beside the map.  Unlike the initializer slot projection's check, which
     // runs once per type when the table is built, this one is per lookup and
-    // so is a debug build's alone: the Release tree carries the tests
+    // so is a Debug or sanitized build's alone: the Release tree carries the tests
     // (BUSTER_INCLUDE_TESTS=1) and running the scan there would put the whole
     // cost this removes straight back.  c_test_ir_local_entity_map_equivalent
     // is the Release-side check.  BUSTER_CHECK is an assumption in an
@@ -14732,7 +14732,7 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
         // The entity carries the name's interned id, so the grouping key is
         // read, not recomputed from the spelling.
         u32 entity_symbol = declaration.entity.value < parse->entity_count ? parse->entities[declaration.entity.value].symbol : 0;
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(!entity_symbol || !parse->symbols || c_symbol_find(parse->symbols, declaration.name) == entity_symbol);
 #endif
         u32 key = c_ir_function_name_key(index, entity_symbol, declaration.name);
@@ -19343,9 +19343,9 @@ BUSTER_C_INTERNAL void c_ir_prepared_control_expression_rollback(CIntegerIrBuild
 // them. A longer interior reads the classifying pass instead.
 #define C_IR_GROUP_FACT_SCAN_LIMIT 32u
 
-// A debug build cross-checks a tabled answer against the scan it replaces only
-// for interiors up to this long, so the check itself cannot square the cost of
-// a deeply nested body (GitHub #2740).
+// A reference-check build (Debug or sanitized) cross-checks a tabled answer
+// against the scan it replaces only for interiors up to this long, so the
+// check itself cannot square the cost of a deeply nested body (GitHub #2740).
 #define C_IR_GROUP_FACT_REFERENCE_LIMIT 4096u
 
 // Classify every `(` and `[` group of the body in one pass. A token is a root
@@ -19438,9 +19438,10 @@ BUSTER_C_INTERNAL bool c_ir_group_fact(CIntegerIrBuilder* builder, u32 open, u32
             c_ir_group_facts_build(builder);
         }
         answer = (builder->group_facts[open - builder->body_token_start] & fact) != 0;
-#if !BUSTER_OPTIMIZE
-        // The scan the pass replaces, kept as the reference: a debug build
-        // checks every tabled answer against it.
+#if BUSTER_REFERENCE_CHECKS
+        // The scan the pass replaces, kept as the reference: a Debug or
+        // sanitized build checks every tabled answer up to the reference limit
+        // against it.
         bool reference = close - open > C_IR_GROUP_FACT_REFERENCE_LIMIT ? answer
                          : fact == C_IR_GROUP_FACT_ROOT_CONTROL ? c_ir_has_root_control_operator(builder, open + 1, close)
                          : fact == C_IR_GROUP_FACT_ROOT_ASSIGNMENT ? c_ir_has_root_assignment(builder, open + 1, close)
@@ -19665,9 +19666,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token
 // inner call by its first token follows that link outward before consuming.
 // A call still being emitted is its own callee's context and stays excluded,
 // which is what keeps the callee lowering consuming the inner value.
-#if !BUSTER_OPTIMIZE
-// The scan the chain replaces, kept as the reference: a debug build checks
-// every step of every walk against it.  It is not compiled into the Release
+#if BUSTER_REFERENCE_CHECKS
+// The scan the chain replaces, kept as the reference: a Debug or sanitized
+// build checks every step of every walk against it.  It is not compiled into the Release
 // tree because that tree carries the tests (BUSTER_INCLUDE_TESTS=1) and
 // running the scan there would put back exactly the cost the chain removes.
 BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end, u32 answer)
@@ -19732,13 +19733,13 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_chained(CIntegerIrBuilder*
     u32 chained = c_ir_prepared_call_chained_index(builder, call, end);
     while (chained != UINT32_MAX)
     {
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
         c_ir_prepared_call_chained_check(builder, call, end, chained);
 #endif
         call = builder->prepared_calls + chained;
         chained = c_ir_prepared_call_chained_index(builder, call, end);
     }
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
     c_ir_prepared_call_chained_check(builder, call, end, UINT32_MAX);
 #endif
     return call;
@@ -41217,16 +41218,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
-                u32 expression_start = 0;
-                u32 expression_end = 0;
-                CIrConstantValue assertion = {0};
-                if (!c_ir_static_assert_expression_range(builder, index, assertion_end + 1, &expression_start, &expression_end) ||
-                    !c_ir_constant_evaluate(builder, expression_start, expression_end, &assertion) ||
-                    assertion.kind != C_IR_CONSTANT_INTEGER || c_ir_constant_truth(builder, &assertion) != C_IR_CONSTANT_TRUTH_TRUE)
-                {
-                    builder->failure_message = S8("static assertion expression is not a true integer constant expression");
-                    return false;
-                }
+                // Parsing checks immediate assertions; the translation-unit
+                // deferred pass checks the rest before any function is lowered.
+                // Consume the declaration without evaluating or diagnosing it twice.
                 index = assertion_end + 1;
                 continue;
             }
@@ -46725,11 +46719,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_identifier_leaf(CIntegerIr
     return folded;
 }
 
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
 // The differential gate: a leaf an arm folded is folded again through the
 // general folder into scratch, and the two answers must be the same bytes.
-// Debug builds only -- the general fold is the cost the arms exist to
-// remove, and the Release tree carries the tests.
+// Debug and sanitized builds only -- the general fold is the cost the arms
+// exist to remove, and the Release tree carries the tests.
 BUSTER_C_INTERNAL void c_ir_constant_initializer_check_literal_leaf(CIntegerIrBuilder* builder, IrTypeId child_type, IrType* child, u32 start,
                                                                      u32 end, u8* bytes, u64 child_offset)
 {
@@ -47069,7 +47063,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             break;
         default: BUSTER_TODO();
         }
-#if !BUSTER_OPTIMIZE
+#if BUSTER_REFERENCE_CHECKS
         if (folded)
         {
             c_ir_constant_initializer_check_literal_leaf(builder, child_type, child, value_start, value_end, bytes + child_offset, child_offset);

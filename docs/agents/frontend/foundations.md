@@ -512,6 +512,12 @@ without facts for identical bitcode and diagnostics.
   zero, a shift count outside the promoted width) is final. An assertion
   decided at the declaration reports `static assertion failed: "<message>"`
   (GitHub #1238).
+  Immediate assertions belong to parsing; `c_lower_to_ir`'s translation-unit
+  deferred loop owns the remaining checks at every scope. Function-body walks
+  consume their declarations without evaluating or diagnosing them again.
+  `c_test_deferred_assert_diagnostic_ownership` pins one source-located
+  diagnostic per failed assertion, including nonconstant controls, nested
+  blocks and multiple failures, through both frontend SSA forms (GitHub #1783).
 - Compile-time integer arithmetic has one implementation, `ir_integer_*`
   (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
   the canonical operations, each result carrying its exact-value faults

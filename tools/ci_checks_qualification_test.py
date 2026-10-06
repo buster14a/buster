@@ -259,7 +259,7 @@ class QualificationTests(unittest.TestCase):
             self.assertEqual(qualification.condition_keys("Windows x86-64 " + shard)[0], {"cl", "clang", "gcc", "zig"})
             for platform in ("Linux x86-64", "Linux AArch64", "macOS AArch64"):
                 self.assertEqual(qualification.condition_keys(platform + " " + shard)[0], {"clang", "gcc", "zig"})
-        for shard in github.SPLIT_CHECK_SHARDS:
+        for shard in qualification.COHORT_SPLIT_CHECK_SHARDS:
             self.assertEqual(qualification.condition_keys("Windows x86-64 " + shard), qualification.condition_keys("Windows x86-64 checks"))
 
     def test_wrong_role_maps_and_empty_required_tools_do_not_pass(self):
@@ -955,7 +955,7 @@ class QualificationTests(unittest.TestCase):
                     self.root = original / shard
                     self.root.mkdir()
                     item, coverage, condition = self.complete_desktop(shard=shard)
-                    variant = "split-overlap" if shard in github.SPLIT_CHECK_SHARDS else "combined-overlap"
+                    variant = "split-overlap" if shard in qualification.COHORT_SPLIT_CHECK_SHARDS else "combined-overlap"
                     reports[shard] = qualification.desktop(self.root, item, self.run_fixture(variant), condition, variant)
                     self.assertEqual(len(reports[shard]["rows"]), 28)
                     self.assertEqual(coverage["policy"]["required_count"], 6)
@@ -963,13 +963,13 @@ class QualificationTests(unittest.TestCase):
                         self.assertTrue(all(v == dict(state="not-applicable", reason="owned-by-release-shard") for v in coverage["obligations"].values()))
                     else:
                         self.assertTrue(all(v["state"] == "scheduled" for v in coverage["obligations"].values()))
-            split_rows = [row for shard in github.SPLIT_CHECK_SHARDS for row in reports[shard]["selected"]]
+            split_rows = [row for shard in qualification.COHORT_SPLIT_CHECK_SHARDS for row in reports[shard]["selected"]]
             self.assertEqual(Counter(split_rows), Counter(reports["checks"]["selected"]))
             self.assertEqual(len(split_rows), 5)
             self.assertEqual(len(reports["release"]["selected"]), 1)
             self.assertEqual(set(split_rows) | reports["release"]["selected"],
                              {row["id"] for row in reports["checks"]["rows"] if row["state"] == "required"})
-            for shard in github.SPLIT_CHECK_SHARDS:
+            for shard in qualification.COHORT_SPLIT_CHECK_SHARDS:
                 self.assertEqual(reports[shard]["policy"], reports["checks"]["policy"])
                 self.assertEqual(reports[shard]["rows"], reports["checks"]["rows"])
         finally:
