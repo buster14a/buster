@@ -62,7 +62,7 @@ jobs:
           path: .tools/tinycc
           persist-credentials: false
 
-      - name: Record actual checkout identity
+      - name: Record actual checkout identity 2
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
@@ -109,11 +109,3 @@ jobs:
             printf '```\n'
           } >>"$GITHUB_STEP_SUMMARY"
           exit "$status"
-
-      - name: Generate source-size acknowledgement for review
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build.sh source_size --write-baseline
-          cat docs/source-size-baseline.txt

@@ -78,6 +78,7 @@ jobs:
         with:
           name: ios-native-probes-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/ios-native-probes.log
             ${{ runner.temp }}/ios-native-probe-evidence/
           if-no-files-found: error
@@ -192,6 +193,7 @@ jobs:
         with:
           name: mobile-lifecycle-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/mobile-lifecycle.log
             ${{ runner.temp }}/ios-signing-budget.log
             ${{ runner.temp }}/ios-install-lifecycle.log

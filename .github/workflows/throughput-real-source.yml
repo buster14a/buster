@@ -81,7 +81,7 @@ jobs:
           ref: c859b25da02955fef659d658b8f324b5cde87be3
           path: external/cjson
           persist-credentials: false
-      - name: Record actual checkout identity
+      - name: Record actual checkout identity 2
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
@@ -96,7 +96,7 @@ jobs:
           ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
           path: external/lua-git
           persist-credentials: false
-      - name: Record actual checkout identity
+      - name: Record actual checkout identity 3
         if: ${{ !cancelled() }}
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
@@ -454,7 +454,7 @@ jobs:
           assert any(item["source"] == "sqlite3.c" and item["role"] == "object"
                      for item in receipts[2]["artifacts"])
           PY
-      - name: Retain machine records in existing evidence
+      - name: Retain machine records in existing evidence 2
         if: always()
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:

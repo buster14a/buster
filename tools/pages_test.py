@@ -186,6 +186,11 @@ class PagesTests(unittest.TestCase):
       name: github-pages
       url: ${{{{ steps.deployment.outputs.page_url }}}}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Deploy validated artifact
         id: deployment
         uses: {DEPLOY} # v5.0.1

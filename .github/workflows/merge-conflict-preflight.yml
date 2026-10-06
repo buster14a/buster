@@ -68,7 +68,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Record actual checkout identity
+      - name: Record actual checkout identity 2
         if: ${{ github.event_name != 'push' }}
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:

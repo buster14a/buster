@@ -67,7 +67,7 @@ jobs:
           ref: ${{ matrix.validation_ref }}
           path: replay-validation
           persist-credentials: false
-      - name: Record actual checkout identity
+      - name: Record actual checkout identity 2
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
@@ -79,7 +79,7 @@ jobs:
           ref: ${{ matrix.candidate_ref }}
           path: candidate
           persist-credentials: false
-      - name: Record actual checkout identity
+      - name: Record actual checkout identity 3
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
@@ -91,7 +91,7 @@ jobs:
           ref: 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           path: reference
           persist-credentials: false
-      - name: Record actual checkout identity
+      - name: Record actual checkout identity 4
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
@@ -170,7 +170,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: census-replay-${{ matrix.label }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/census-replay-${{ matrix.label }}-${{ github.run_id }}.json
+          path: |
+            ${{ runner.temp }}/census-replay-${{ matrix.label }}-${{ github.run_id }}.json
+            ${{ runner.temp }}/machine-specifications/
           retention-days: 7
           if-no-files-found: error
 
@@ -276,6 +278,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: strict-replay-${{ matrix.label }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json
+          path: |
+            ${{ runner.temp }}/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json
+            ${{ runner.temp }}/machine-specifications/
           retention-days: 7
           if-no-files-found: error

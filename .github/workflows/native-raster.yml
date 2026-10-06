@@ -109,7 +109,7 @@ jobs:
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: retain
-          retention-directory: build/${{ matrix.config }}/image_browser
+          retention-directory: build/${{ matrix.config }}
       - name: Preserve tested runnable slice
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # existing repository v7.0.1 pin
         with:
@@ -117,6 +117,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
+            build/${{ matrix.config }}/machine-specifications/
             build/${{ matrix.config }}/image_browser
             docs/projects/image-browser.md
             src/buster/tests/image_browser/fixtures/*.ppm

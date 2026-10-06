@@ -179,6 +179,7 @@ jobs:
         with:
           name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/actionlint.log
             ${{ runner.temp }}/selected-go.json
             ${{ runner.temp }}/job-environment.json
@@ -242,6 +243,7 @@ jobs:
           label_title: Main CI reuse
           name: main-ci-reuse-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/main-ci-reuse.json
             ${{ runner.temp }}/job-environment.json
           if-no-files-found: error
@@ -1091,7 +1093,7 @@ jobs:
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
 
       # A packing failure already fails this lane; still retain the original tree.
-      - name: Retain machine records in existing evidence
+      - name: Retain machine records in existing evidence 2
         if: ${{ !cancelled() && steps.pack.outcome != 'success' }}
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
@@ -1590,6 +1592,7 @@ jobs:
           name: desktop-partitions-${{ github.run_id }}-${{ github.run_attempt }}
           # Retain the reuse result on success AND failure; a failed result is not proof.
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/desktop-partitions.json
             ${{ runner.temp }}/main-ci-reuse-finish.json
             ${{ runner.temp }}/job-environment.json

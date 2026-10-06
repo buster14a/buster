@@ -113,6 +113,7 @@ jobs:
         with:
           name: production-profile-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            build/production-profile/machine-specifications/
             build/production-profile/summary.txt
             build/production-profile/profile/training-contract.txt
             build/production-profile/profile/manifest.txt

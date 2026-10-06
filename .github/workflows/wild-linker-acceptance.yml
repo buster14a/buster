@@ -175,6 +175,7 @@ jobs:
         with:
           name: wild-linker-acceptance-compact-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/wild-evaluation/evidence/machine-specifications/
             ${{ runner.temp }}/wild-evaluation/evidence/*.csv
             ${{ runner.temp }}/wild-evaluation/evidence/*.tsv
             ${{ runner.temp }}/wild-evaluation/evidence/*.txt
@@ -184,7 +185,7 @@ jobs:
             ${{ runner.temp }}/wild-evaluation/evidence/*.lock
             ${{ runner.temp }}/wild-evaluation/evidence/*.toml
           retention-days: 30
-      - name: Retain machine records in existing evidence
+      - name: Retain machine records in existing evidence 2
         if: ${{ always() }}
         uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:

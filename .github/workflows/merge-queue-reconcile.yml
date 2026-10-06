@@ -87,6 +87,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: merge-queue-reconcile-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/merge-queue-reconcile.json
+          path: |
+            ${{ runner.temp }}/merge-queue-reconcile.json
+            ${{ runner.temp }}/machine-specifications/
           if-no-files-found: ignore
           retention-days: 14
