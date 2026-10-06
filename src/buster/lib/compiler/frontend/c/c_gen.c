@@ -36254,6 +36254,13 @@ BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilde
     {
         return IR_TYPE_ID_INVALID;
     }
+    // GNU C and Clang accept one void operand as an extension: the other arm
+    // is evaluated for its effects and the conditional has type void. LLVM
+    // headers and RAD's set_progress_target use `p ? f(p) : (void)0`.
+    if (true_value->kind == IR_TYPE_VOID || false_value->kind == IR_TYPE_VOID)
+    {
+        return true_value->kind == IR_TYPE_VOID ? true_type : false_type;
+    }
     // C11 6.5.15p6: the second and third operands go through the usual
     // conversions, and an operand of array type becomes a pointer to its
     // first element. musl's select, pselect, ppoll and utime all write
