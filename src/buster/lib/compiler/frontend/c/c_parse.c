@@ -9114,7 +9114,8 @@ BUSTER_C_INTERNAL bool c_parse_initializer_index_range(CTypeParseMachine* machin
 // that still has a slot after the one the path used, outermost first, so the
 // innermost is resumed first (C17 6.7.9p17). The queue row of the search above
 // that declared the member is the starting point.
-BUSTER_C_INTERNAL bool c_parse_initializer_promoted_continuations(CTypeParseMachine* machine, CParseResult* result, u32 found_work, u32 found_field,
+BUSTER_C_INTERNAL bool c_parse_initializer_promoted_continuations(CTypeParseMachine* machine, CParseResult* result, CParseInitializerSlotCache* slot_cache,
+                                                                    u32 found_work, u32 found_field,
                                                                     CParseInitializerContinuation* continuations, u32* continuation_count, u32 capacity)
 {
     CParsePromotedMemberWork* work = machine->promoted_member_work;
@@ -9128,7 +9129,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_promoted_continuations(CTypeParseMach
         for (u32 link = depth; link > 0; link -= 1)
         {
             CType* link_type = result->types + work[walk].type.value;
-            u32 link_slot = c_parse_initializer_member_slot(result, link_type, field_on_path);
+            u32 link_slot = c_parse_initializer_member_slot(slot_cache, result, link_type, field_on_path);
             ok &= link_slot != UINT32_MAX && link_slot != UINT32_MAX - 1;
             continuations[base + link - 1] = (CParseInitializerContinuation){
                 .type = work[walk].type,
@@ -9144,7 +9145,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_promoted_continuations(CTypeParseMach
         for (u32 link = base; link < base + depth; link += 1)
         {
             CType* link_type = result->types + continuations[link].type.value;
-            if (continuations[link].next_index < c_parse_initializer_member_count(result, link_type))
+            if (continuations[link].next_index < c_parse_initializer_member_count(slot_cache, result, link_type))
             {
                 continuations[kept++] = continuations[link];
             }
@@ -9303,7 +9304,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                     .next_index = member_slot + 1,
                 };
             }
-            if (!c_parse_initializer_promoted_continuations(machine, result, found_work, found_field, designator->continuations,
+            if (!c_parse_initializer_promoted_continuations(machine, result, slot_cache, found_work, found_field, designator->continuations,
                                                             &designator->continuation_count, continuation_capacity))
             {
                 return false;
