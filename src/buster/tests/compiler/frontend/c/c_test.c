@@ -2622,6 +2622,17 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_fixed_enum_range_source = S8_INITIALIZE
     " && aligned_global==4294967296ULL && aligned_value()==4294967296ULL && aligned_widened==4294967296LL"
     " && LOCAL==255 && NEXT==1 && S8_CAST==-1 && U8_CAST==255); }\n");
 
+// A block-scope untagged enum with a fixed underlying type (#2849): `enum :`
+// has the `<identifier> :` shape of a label, which once swallowed the `enum`
+// and left `long { ... }` as a declaration with no declared identifier.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_untagged_local_fixed_enum_source = S8_INITIALIZER(
+    "int main(void) { int failure = 0; enum : long { E1 = 1 }; failure += E1 != 1;"
+    " { enum : unsigned char { B0, B1 }; failure += B1 != 1 || sizeof(B1) != 1; }"
+    " switch (failure) { case 0: { enum : short { S2 = 2 }; failure += S2 != 2; } }"
+    " goto enumeration; enumeration: return failure; }\n");
+#endif
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_enum_ranges(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3371,7 +3382,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("enum-runtime"), S8(".c"));
-    String8 sources[] = {c_test_enum_bit_field_source(arguments->arena), c_test_enum_lowering_source, c_test_fixed_enum_range_source};
+    String8 sources[] = {c_test_enum_bit_field_source(arguments->arena), c_test_enum_lowering_source, c_test_fixed_enum_range_source,
+                         c_test_untagged_local_fixed_enum_source};
     for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
     {
         String8 source_text = sources[fixture];
