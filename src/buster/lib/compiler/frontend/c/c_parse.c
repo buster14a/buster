@@ -91,6 +91,8 @@
 //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
 //                                                 entity lookup
+//   c_parse_scope_cursor_lookup                   post-binding lookups of the
+//                                                 lowering-constraint passes
 //   c_parse_local_declarations                    block-scope declarations,
 //                                                 auto inference, local
 //                                                 linkage redeclarations
@@ -18083,6 +18085,174 @@ void c_test_parse_binding_unwind(CParseResult* result, u32 mark)
 }
 #endif
 
+// The lowering-constraint passes ask about every scope of a body after the
+// binder has closed them all, so the binding array stands for the file scope
+// alone and each of their lookups would walk the parent chain: one hash and
+// bucket probe per enclosing scope, which made a reference at block depth d
+// cost d probes (#2809). The cursor gives those passes their own binding
+// array instead, standing for one scope and the root-to-scope path above it:
+//
+//   by_symbol[s]  the innermost block-scope entity on the path bound to s,
+//                 or invalid when only the file scope (or nothing) binds it;
+//   shadowed[e]   what by_symbol held for e's symbol before e was bound;
+//   stack         every bound entity in bind order, popped to a path mark
+//                 when a scope leaves the path;
+//   position_plus_one[scope]  the scope's index on the path plus one, or 0.
+//
+// A lookup from another scope first seeks it: the path is cut back to the
+// nearest ancestor on it and the scopes below are pushed with their
+// entities, oldest first, so the newest in each scope wins as it does in the
+// bucket chain. The answer is then one load. A pass walking a body in token
+// order pushes and pops each scope a bounded number of times, so its lookups
+// cost the scopes and entities of the body, not the scopes enclosing each
+// reference. The file scope is never pushed: the binding array or its one
+// bucket chain answers it.
+//
+// The cursor is reached through a pointer, so a rollback of the result by
+// value leaves it alone; any entity added or rolled back since it was built
+// (an entity count it was not built against, or an add marking it stale)
+// empties it before the next lookup.
+struct CParseScopeCursor
+{
+    CEntityId* by_symbol;
+    CEntityId* shadowed;
+    CEntityId* stack;
+    CScopeId* path;
+    u32* path_mark;
+    u32* position_plus_one;
+    CScopeId* pending;
+    u32 symbol_capacity;
+    u32 entity_capacity;
+    u32 scope_capacity;
+    u32 stack_count;
+    u32 path_count;
+    u32 entity_count;
+    bool stale;
+};
+
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name);
+
+BUSTER_C_INTERNAL CParseScopeCursor* c_parse_scope_cursor_create(Arena* arena, CParseResult* result)
+{
+    CParseScopeCursor* cursor = 0;
+    if (result->binding_by_symbol && result->binding_capacity)
+    {
+        cursor = arena_allocate(arena, CParseScopeCursor, 1);
+        *cursor = (CParseScopeCursor){
+            .symbol_capacity = result->binding_capacity,
+            .entity_capacity = result->entity_capacity,
+            .scope_capacity = result->scope_capacity,
+            .entity_count = result->entity_count,
+        };
+        cursor->by_symbol = arena_allocate(arena, CEntityId, cursor->symbol_capacity);
+        memset(cursor->by_symbol, 0xff, sizeof(*cursor->by_symbol) * cursor->symbol_capacity);
+        cursor->shadowed = arena_allocate(arena, CEntityId, cursor->entity_capacity);
+        cursor->stack = arena_allocate(arena, CEntityId, cursor->entity_capacity);
+        cursor->path = arena_allocate(arena, CScopeId, cursor->scope_capacity);
+        cursor->path_mark = arena_allocate(arena, u32, cursor->scope_capacity);
+        cursor->position_plus_one = arena_allocate_zeroed(arena, u32, cursor->scope_capacity);
+        cursor->pending = arena_allocate(arena, CScopeId, cursor->scope_capacity);
+    }
+    return cursor;
+}
+
+// Leaves the first `count` scopes on the path and unbinds the rest.
+BUSTER_C_INTERNAL void c_parse_scope_cursor_cut(CParseResult* result, CParseScopeCursor* cursor, u32 count)
+{
+    while (cursor->path_count > count)
+    {
+        cursor->path_count -= 1;
+        cursor->position_plus_one[cursor->path[cursor->path_count].value] = 0;
+        u32 mark = cursor->path_mark[cursor->path_count];
+        while (cursor->stack_count > mark)
+        {
+            CEntityId entity = cursor->stack[--cursor->stack_count];
+            cursor->by_symbol[result->entities[entity.value].symbol] = cursor->shadowed[entity.value];
+        }
+    }
+}
+
+// Makes `scope` the end of the path: cuts it back to the nearest ancestor on
+// it and pushes the scopes below that one. False, with the path unchanged,
+// when the parent chain ends somewhere other than the file scope; the bucket
+// chain answers such a scope.
+BUSTER_C_INTERNAL bool c_parse_scope_cursor_seek(CParseResult* result, CParseScopeCursor* cursor, CScopeId scope)
+{
+    bool rooted = cursor->path_count && cursor->path[cursor->path_count - 1].value == scope.value;
+    if (!rooted)
+    {
+        u32 pending_count = 0;
+        CScopeId walk = scope;
+        bool walking = true;
+        while (walking)
+        {
+            rooted = walk.value == 0 || (walk.value < cursor->scope_capacity && cursor->position_plus_one[walk.value]);
+            walking = !rooted && walk.value < result->scope_count && pending_count < cursor->scope_capacity;
+            if (walking)
+            {
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, 1);
+                cursor->pending[pending_count++] = walk;
+                CScopeId parent = result->scopes[walk.value].parent;
+                walking = parent.value != walk.value;
+                walk = parent;
+            }
+        }
+        if (rooted)
+        {
+            c_parse_scope_cursor_cut(result, cursor, walk.value ? cursor->position_plus_one[walk.value] : 0);
+            while (pending_count)
+            {
+                CScopeId pushed = cursor->pending[--pending_count];
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, 1);
+                cursor->path_mark[cursor->path_count] = cursor->stack_count;
+                cursor->path[cursor->path_count++] = pushed;
+                cursor->position_plus_one[pushed.value] = cursor->path_count;
+                for (CEntityId entity = result->scopes[pushed.value].first_entity; entity.value != C_ID_UNDERLYING_INVALID;
+                     entity = result->entities[entity.value].next_in_scope)
+                {
+                    u32 symbol = result->entities[entity.value].symbol;
+                    if (symbol && symbol < cursor->symbol_capacity && entity.value < cursor->entity_capacity &&
+                        result->entities[entity.value].scope.value == pushed.value)
+                    {
+                        BUSTER_VALIDATE(cursor->stack_count < cursor->entity_capacity);
+                        cursor->shadowed[entity.value] = cursor->by_symbol[symbol];
+                        cursor->stack[cursor->stack_count++] = entity;
+                        cursor->by_symbol[symbol] = entity;
+                    }
+                }
+            }
+        }
+    }
+    return rooted;
+}
+
+// What the bucket chain answers for `symbol` from `scope`, when the cursor
+// can answer it; see CParseScopeCursor.
+BUSTER_C_INTERNAL bool c_parse_scope_cursor_lookup(CParseResult* result, CScopeId scope, u32 symbol, String8 name, CEntityId* found)
+{
+    CParseScopeCursor* cursor = result->scope_cursor;
+    if (cursor->stale || cursor->entity_count != result->entity_count)
+    {
+        c_parse_scope_cursor_cut(result, cursor, 0);
+        cursor->stale = false;
+        cursor->entity_count = result->entity_count;
+    }
+    bool answered = symbol && symbol < cursor->symbol_capacity && scope.value && scope.value < result->scope_count &&
+                    scope.value < cursor->scope_capacity && result->entity_count <= cursor->entity_capacity;
+    answered = answered && c_parse_scope_cursor_seek(result, cursor, scope);
+    if (answered)
+    {
+        CEntityId entity = cursor->by_symbol[symbol];
+        if (entity.value == C_ID_UNDERLYING_INVALID)
+        {
+            entity = result->binding_scope.value == 0 ? result->binding_by_symbol[symbol]
+                                                      : c_parse_lookup_entity_in_scope_chain(result, (CScopeId){.value = 0}, symbol, name);
+        }
+        *found = entity;
+    }
+    return answered;
+}
+
 BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
 {
     CScope* value = &result->scopes[scope.value];
@@ -18120,14 +18290,20 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
         result->typedef_lookup_buckets[name_bucket] = entity;
     }
     c_parse_binding_bind(result, scope, entity, added->symbol);
+    if (result->scope_cursor)
+    {
+        result->scope_cursor->stale = true;
+    }
 }
 
 // The scope-and-symbol chains, walked from `scope` outwards: the definition
 // of what a name resolves to, and what every lookup outside the scope the
 // binding array stands for still asks.
-BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
+// `hops` receives the scopes walked, which only the work counters read.
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name, u32* hops)
 {
     CEntityId found = C_ENTITY_ID_INVALID;
+    *hops = 0;
     while (scope.value != C_ID_UNDERLYING_INVALID && found.value == C_ID_UNDERLYING_INVALID)
     {
         u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
@@ -18142,6 +18318,7 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
             entity = found.value == C_ID_UNDERLYING_INVALID ? candidate->next_in_lookup : entity;
         }
         scope = result->scopes[scope.value].parent;
+        *hops += 1;
     }
     return found;
 }
@@ -18153,16 +18330,24 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
 {
     CEntityId found;
+    u32 hops = 0;
     if (result->binding_by_symbol && symbol && symbol < result->binding_capacity && scope.value == result->binding_scope.value)
     {
         found = result->binding_by_symbol[symbol];
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name).value);
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
+#endif
+    }
+    else if (result->scope_cursor && c_parse_scope_cursor_lookup(result, scope, symbol, name, &found))
+    {
+#if BUSTER_REFERENCE_CHECKS
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
 #endif
     }
     else
     {
-        found = c_parse_lookup_entity_chain(result, scope, symbol, name);
+        found = c_parse_lookup_entity_chain(result, scope, symbol, name, &hops);
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, hops);
     }
     return found;
 }
@@ -18209,6 +18394,13 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope(CParseResult* result,
         CEntityId innermost = result->binding_by_symbol[symbol];
         found = innermost.value != C_ID_UNDERLYING_INVALID && result->entities[innermost.value].scope.value == scope.value ? innermost
                                                                                                                           : C_ENTITY_ID_INVALID;
+#if BUSTER_REFERENCE_CHECKS
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
+#endif
+    }
+    else if (result->scope_cursor && c_parse_scope_cursor_lookup(result, scope, symbol, name, &found))
+    {
+        found = found.value != C_ID_UNDERLYING_INVALID && result->entities[found.value].scope.value == scope.value ? found : C_ENTITY_ID_INVALID;
 #if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
 #endif
@@ -29261,6 +29453,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     {
         if (kind != C_TYPE_VA_LIST) c_parse_expression_scalar_type(result, (CTypeKind)kind);
     }
+    // Every family below walks bodies whose scopes the binder has closed.
+    result->scope_cursor = c_parse_scope_cursor_create(machine->scratch_arena, result);
     u32* first_local = arena_allocate(machine->scratch_arena, u32, result->declaration_count);
     u32* next_local = arena_allocate(machine->scratch_arena, u32, result->entity_count);
     memset(first_local, 0xff, sizeof(*first_local) * result->declaration_count);
@@ -29461,6 +29655,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     // declarations were bound; inspect the final member table before lowering.
     c_parse_validate_member_types(machine, result, preprocess);
     result->expression_scalar_types = 0;
+    result->scope_cursor = 0;
 }
 
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPreprocessResult preprocess, CParserResult syntax,

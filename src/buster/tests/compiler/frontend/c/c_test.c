@@ -28748,6 +28748,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArg
     return result;
 }
 
+// A reference at block depth d named in the function scope once cost d
+// scope probes in the lowering-constraint passes, whose lookups come after
+// the binder has closed every block (#2809). Every third level shadows `x`
+// and every fifth asks sizeof of it, so the walk crosses declaring and
+// non-declaring scopes and the sizeof query's lookups. Scope steps are the
+// bucket-chain hops plus the scope cursor's pushes, pops and shadow walks.
+BUSTER_GLOBAL_LOCAL u64 c_test_deep_block_lookup_steps(u32 depth)
+{
+    u64 steps = UINT64_MAX;
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 capacity = (u64)depth * 48 + 256;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int tall(int i, int u, int c) { int x = 0; "));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length,
+                             level % 3 == 0 ? S8("if (c) { int x = 1; x += i; ")
+                                            : level % 5 == 0 ? S8("if (c) { x += (int)sizeof x; ") : S8("if (c) { x += i; "));
+    }
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("}"));
+    }
+    c_test_append_source(bytes, capacity, &length, S8(" return x + i + u + c; }"));
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    u64 before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS);
+    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+    if (length < capacity && preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && analysis.diagnostic_count == 0 &&
+        analysis.analysis_complete)
+    {
+        steps = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS) - before;
+    }
+    scratch_end(temporary);
+    return steps;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deep_block_lookup_linear(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 2048, DEEP = 8192 };
+    u64 shallow = c_test_deep_block_lookup_steps(SHALLOW);
+    u64 deep = c_test_deep_block_lookup_steps(DEEP);
+    // Quadratic lookup takes some DEEP * DEEP / 2 = 33 M steps here.
+    BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && shallow >= SHALLOW && deep <= shallow * 5 &&
+                        deep <= (u64)DEEP * 32,
+                    string_format(arguments->arena, S8("lookup scope steps shallow={u64} deep={u64}"), shallow, deep));
+    return result;
+}
+
 // Lua's userdata accessor combines nested pointer-cast macros, a
 // builtin-offsetof ternary, and a switch whose other arm returns void *.  The
 // strict expression-type walk must preserve the pointer result instead of
@@ -43024,6 +43075,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_group_nesting);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_deep_block_lookup_linear);
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_diagnostic_ownership);
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
