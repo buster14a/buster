@@ -244,7 +244,7 @@ Focused controls, without compiling the full compiler matrix:
 ```sh
 python3 tools/matrix_shard_test.py -v
 python3 tools/coverage_manifest_test.py -v
-python3 tests/ci_tools_test.py -v
+python3 tools/ci_workflow_policy_test.py -v
 python3 tools/check_action_pins.py
 ```
 
@@ -304,12 +304,14 @@ row ownership remain unchanged; alternative-order predictions are diagnostic.
 ## Isolated module process experiment
 
 The `BUSTER_TEST_PROCESS_PARTITIONS` CMake option defaults to `OFF`; the CI
-matrix enables it for its sanitized Clang test trees, whose serialized test phases receive
+matrix enables it for sanitized Clang trees and native Windows AArch64 Clang
+trees. Their serialized test phases receive
 the whole low-core budget (see [build guidance](agents/build.md)).
 CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
 native `build.c test_units_partitioned <ide-path>` diagnostic. The partition
-driver runs `compiler_driver_tests` and the remaining enabled modules in
-separate processes, shares one built executable, divides its supplied test
+driver runs the `primary` module (`c_frontend_tests` on Windows x86-64,
+`compiler_driver_tests` elsewhere) and the remaining enabled modules in
+separate processes. It shares one built executable, divides its supplied test
 budget between the children, and replays their captured output in stable order.
 It rejects missing/duplicate module evidence, failed assertions/processes,
 timeouts, capture failures and incomplete cleanup. Whole-table audit exclusions
@@ -478,9 +480,14 @@ oracle derives features from the detected model and is labeled `target-native`,
 not CPUID. Unsupported or unavailable oracles cannot qualify a campaign.
 The existing inventory SHA-256 and binary receipt bind this record to the
 invocation. `ci_unit_tests_campaign.host_profile()` validates it without
-running a binary. Legacy inventories remain readable as diagnostic evidence;
-qualification requires an observed `identity.native_host_profile` equal to
-the independent query and includes that profile in each exact row census.
+running a binary. Inventories without a measured host profile remain
+diagnostic evidence when interpreted by the reader bound to their group
+schema. Archived `driver`/`rest` inventories remain interpretable only with
+their exact pinned historical reader; the current reader requires one
+`primary` owner and uses `primary`/`rest` records. Backward compatibility
+for old group names is not claimed. Qualification requires an observed
+`identity.native_host_profile` equal to the independent query and includes
+that profile in each exact row census.
 Duplicate, malformed or forged profiles fail closed. The ordinary test
 invocations, registered modules and assertion accounting are unchanged.
 

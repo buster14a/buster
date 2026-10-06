@@ -11,8 +11,8 @@
     },
     {
       "source": "src/buster/lib/arena.c",
-      "bytes": 35979,
-      "sha256": "e58a47b874e8f91fd67a9fbe117e66d71cac1388d47e715ab3bc9c458d66dad3"
+      "bytes": 36128,
+      "sha256": "3eece5cb7a356eec08b49338eba4de24e54a1b64debdefa382dd89432b1c7a37"
     },
     {
       "source": "src/buster/lib/arena.h",
@@ -21,8 +21,8 @@
     },
     {
       "source": "src/buster/lib/base.h",
-      "bytes": 42891,
-      "sha256": "a7f7f097159df8556bb968ddc9233290bc3bde2e213237f5e3cd4a0fa350cdae"
+      "bytes": 43670,
+      "sha256": "be8527d8c41b04cd26bd80c50bb02b035ee1828047a17c75145a348bb894ebc0"
     },
     {
       "source": "src/buster/lib/compiler/ebpf/ebpf.c",
@@ -41,8 +41,8 @@
     },
     {
       "source": "src/buster/lib/compiler/ir/ir.c",
-      "bytes": 308777,
-      "sha256": "5abf345a0e4acffacc5f7935a31fe07032b8fda87f57bacf24f21d497898c47f"
+      "bytes": 311812,
+      "sha256": "8cda63e39f0ae3189adc1b3d3ef39001520132f3d817e5a9b62bd879f6922f90"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir.h",
@@ -91,8 +91,8 @@
     },
     {
       "source": "src/buster/lib/file.c",
-      "bytes": 27663,
-      "sha256": "bbc1254d3dc71fcaaea7988583d89f69871e39714f6a70e31b7ddd6f52861f55"
+      "bytes": 28102,
+      "sha256": "f2b5a8a3581a9fca0670cb44943a21cbafa0d166d0245b85543ef613ce84f071"
     },
     {
       "source": "src/buster/lib/file.h",
@@ -136,8 +136,8 @@
     },
     {
       "source": "src/buster/lib/os.h",
-      "bytes": 35153,
-      "sha256": "aca971ea75bb02b83d87d2166a4a5066d38f1c086b7e2b334f65ea95fa050b23"
+      "bytes": 35614,
+      "sha256": "6a7d9c6c37e2adc2edbff9302bcde5b6279fc8adbd7ec565aaf732cd493b6631"
     },
     {
       "source": "src/buster/lib/os_internal.h",

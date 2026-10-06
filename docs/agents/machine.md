@@ -110,6 +110,17 @@ fixture as well as compiling both architectures.
   `vector_register_mask` describes class membership including
   nonallocatable registers. Target-less synthetic functions still accept
   bounded physical references without imposing a target class map.
+- MIR_STACK and FAST/QUALITY use the shared private frame arithmetic in
+  `machine_frame_internal.h`. Each home, colored slot group, dedicated slot
+  and edge-copy tile checks wide addition/alignment before publishing a
+  32-bit offset; outgoing storage and push parity are checked before the final
+  frame is published. x86-64 actual offsets and allocation sizes fit signed
+  disp32. AArch64 retains unsigned offsets and checks the encoder's footer and
+  Windows save areas. Capacity refusals remain distinct from malformed MIR,
+  including strict verification, and reach the driver as `codegen.capacity`.
+  Registered `machine_test_frame_capacity` checks representation boundaries,
+  parity, groups, outgoing storage and both frontend forms of a large-local C
+  witness without allocating or executing that native stack (GitHub #1838).
 - Stack alignments and call-target reference forms remain optional, defaulting
   to eight and DIRECT. Line marks permit duplicate rows and a final row equal
   to `instruction_count`; zero-row lowering can produce both. Validate every
@@ -401,7 +412,10 @@ fixture as well as compiling both architectures.
   emits closed metadata-backed x87 transactions, with one explicit ST(i)
   operand and architectural ST(0) left implicit in the exact token. Arithmetic,
   negation, comparison and conversion rows carry memory/barrier membership;
-  no x87 register class is allocated. Comparisons repair unordered flags,
+  no x87 register class is allocated. Comparisons repair unordered flags and
+  follow C17 F.3: `==`/`!=` are quiet (`ucomis[sd]`, `fucomip`, A64 `fcmp`) and
+  never raise FE_INVALID for a quiet NaN, while `<`, `<=`, `>`, `>=` are
+  signaling (`comis[sd]`, `fcomip`, A64 `fcmpe`), matching GCC,
   integer casts save/restore the caller's control word, and only call/return
   bridges carry live ST results. Frame sizes and operation payloads are checked
   by the MIR verifier. Scalar loads/stores copy ten payload bytes, while

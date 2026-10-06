@@ -95,6 +95,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed
   arena allocation clears only the dirty overlap. BSS and thread-local BSS
   keep their virtual sizes without allocating serialized storage (GitHub #303).
+- **AMD64 COFF TLS-index REL32 fields use the ordinary inline addend convention.**
+  The reader normalizes the signed inline displacement B to canonical A=B-4,
+  including references named `__tls_index`. The writer restores B=A+4 for
+  `OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32`, just as for ordinary PC32.
+  The registered object regression constructs raw COFF bytes independently,
+  checks both signed boundaries and a near-name ordinary-symbol control,
+  and inspects serialized fields across repeated read/write cycles. This
+  preserves addends within the current TLS model; platform TLS symbol spelling,
+  section conventions and runtime interoperability remain separate contracts
+  tracked by GitHub #1323.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents

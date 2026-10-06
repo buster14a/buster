@@ -14,7 +14,8 @@
 // test_watchdog_child_run is its private hanging payload. Parallel gang
 // boundaries are written live around deterministic lane replay, and
 // test_parallel_crash_child_self_test covers abrupt lane exit without changing
-// registered assertion or TEST_MODULE_TIMING totals.
+// registered assertion or TEST_MODULE_TIMING totals. iOS launch observations
+// bracket library_tests preparation before the first fixture can report.
 // Deliberate harness failures preserve their diagnostics and accounting while
 // suppressing only their debugger stop; test_debugger_failure_self_test checks
 // that ordinary argument-bearing and argument-free failures still stop.
@@ -24,7 +25,7 @@
 // generated tables and repository source. `ide test --module=a,b` narrows a
 // run to named descriptors (test_module_selection_resolve); library_tests
 // marks the others deselected in its working copy of the table. The opt-in
-// BUSTER_TEST_MODULE_GROUP=driver|rest selects complementary process groups
+// BUSTER_TEST_MODULE_GROUP=primary|rest selects complementary process groups
 // (test_module_group_resolve), preserving audit ownership and table indices.
 // Its inventory value queries the table without running any registered module.
 // test_native_host_profile records the same binary's usable native features
@@ -33,6 +34,7 @@
 // selected timing rows to the complete registered suite for the parent.
 
 #include <buster/tests/test.h>
+#include <buster/lib/entry_point.h>
 
 #include <buster/lib/os.h>
 #include <buster/lib/arena.h>
@@ -1162,10 +1164,18 @@ bool buster_test_module_selection_check(String8 selection)
     return result;
 }
 
+// Match the native parent independently. Windows x64's checked frontend
+// dominates the old rest group; ARM retains the better-balanced driver split.
+BUSTER_GLOBAL_LOCAL String8 test_module_group_primary_name(void)
+{
+    String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64 ? S8("c_frontend_tests") : S8("compiler_driver_tests");
+    return result;
+}
+
 typedef enum TestModuleGroup
 {
     TEST_MODULE_GROUP_NONE,
-    TEST_MODULE_GROUP_DRIVER,
+    TEST_MODULE_GROUP_PRIMARY,
     TEST_MODULE_GROUP_REST,
     TEST_MODULE_GROUP_INVENTORY,
     TEST_MODULE_GROUP_INVALID,
@@ -1175,7 +1185,7 @@ BUSTER_GLOBAL_LOCAL TestModuleGroup test_module_group_resolve(String8 name)
 {
     TestModuleGroup result = TEST_MODULE_GROUP_INVALID;
     if (!name.length) result = TEST_MODULE_GROUP_NONE;
-    else if (string_equal(name, S8("driver"))) result = TEST_MODULE_GROUP_DRIVER;
+    else if (string_equal(name, S8("primary"))) result = TEST_MODULE_GROUP_PRIMARY;
     else if (string_equal(name, S8("rest"))) result = TEST_MODULE_GROUP_REST;
     else if (string_equal(name, S8("inventory"))) result = TEST_MODULE_GROUP_INVENTORY;
     return result;
@@ -1183,17 +1193,17 @@ BUSTER_GLOBAL_LOCAL TestModuleGroup test_module_group_resolve(String8 name)
 
 BUSTER_GLOBAL_LOCAL TestModuleGroup test_module_group_owner(TestDescriptor descriptor)
 {
-    TestModuleGroup result = string_equal(descriptor.name, S8("compiler_driver_tests")) ? TEST_MODULE_GROUP_DRIVER : TEST_MODULE_GROUP_REST;
+    TestModuleGroup result = string_equal(descriptor.name, test_module_group_primary_name()) ? TEST_MODULE_GROUP_PRIMARY : TEST_MODULE_GROUP_REST;
     return result;
 }
 
-// Registered names are protocol tokens. Exactly one driver owner, at least one
+// Registered names are protocol tokens. Exactly one primary owner, at least one
 // other module, and unique nonempty names prevent a changed registration table
 // from silently turning the two-process union into partial coverage.
 BUSTER_GLOBAL_LOCAL bool test_module_group_table_valid(TestDescriptor* descriptors, u64 count)
 {
     bool result = count > 1;
-    u64 driver_count = 0;
+    u64 primary_count = 0;
     for (u64 index = 0; index < count; index += 1)
     {
         String8 name = descriptors[index].name;
@@ -1208,9 +1218,11 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_table_valid(TestDescriptor* descripto
         {
             result = result && !string_equal(descriptors[previous].name, name);
         }
-        driver_count += test_module_group_owner(descriptors[index]) == TEST_MODULE_GROUP_DRIVER;
+        bool primary = test_module_group_owner(descriptors[index]) == TEST_MODULE_GROUP_PRIMARY;
+        result = result && (!primary || !descriptors[index].table_audit);
+        primary_count += primary;
     }
-    result = result && driver_count == 1;
+    result = result && primary_count == 1;
     return result;
 }
 
@@ -1227,23 +1239,23 @@ BUSTER_GLOBAL_LOCAL u64 test_module_group_apply(TestDescriptor* descriptors, u64
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool test_module_group_union_valid(TestDescriptor* original, TestDescriptor* driver, TestDescriptor* rest, u64 count)
+BUSTER_GLOBAL_LOCAL bool test_module_group_union_valid(TestDescriptor* original, TestDescriptor* primary, TestDescriptor* rest, u64 count)
 {
     bool result = test_module_group_table_valid(original, count);
     for (u64 index = 0; index < count; index += 1)
     {
         bool enabled = buster_test_descriptor_runs(original[index]);
-        bool driver_selected = buster_test_descriptor_runs(driver[index]);
+        bool primary_selected = buster_test_descriptor_runs(primary[index]);
         bool rest_selected = buster_test_descriptor_runs(rest[index]);
         TestModuleGroup owner = test_module_group_owner(original[index]);
-        result = result && driver_selected == (enabled && owner == TEST_MODULE_GROUP_DRIVER) &&
+        result = result && primary_selected == (enabled && owner == TEST_MODULE_GROUP_PRIMARY) &&
                  rest_selected == (enabled && owner == TEST_MODULE_GROUP_REST);
-        result = result && string_equal(original[index].name, driver[index].name) && string_equal(original[index].name, rest[index].name) &&
-                 original[index].function == driver[index].function && original[index].function == rest[index].function &&
-                 original[index].table_audit == driver[index].table_audit && original[index].table_audit == rest[index].table_audit &&
-                 original[index].requires_temporary_root == driver[index].requires_temporary_root &&
+        result = result && string_equal(original[index].name, primary[index].name) && string_equal(original[index].name, rest[index].name) &&
+                 original[index].function == primary[index].function && original[index].function == rest[index].function &&
+                 original[index].table_audit == primary[index].table_audit && original[index].table_audit == rest[index].table_audit &&
+                 original[index].requires_temporary_root == primary[index].requires_temporary_root &&
                  original[index].requires_temporary_root == rest[index].requires_temporary_root &&
-                 original[index].parallel_kind == driver[index].parallel_kind && original[index].parallel_kind == rest[index].parallel_kind;
+                 original[index].parallel_kind == primary[index].parallel_kind && original[index].parallel_kind == rest[index].parallel_kind;
     }
     return result;
 }
@@ -1279,7 +1291,7 @@ BUSTER_GLOBAL_LOCAL void test_module_group_inventory(UnitTestArguments* argument
     for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
     {
         TestDescriptor descriptor = test_descriptors[index];
-        String8 owner = test_module_group_owner(descriptor) == TEST_MODULE_GROUP_DRIVER ? S8("driver") : S8("rest");
+        String8 owner = test_module_group_owner(descriptor) == TEST_MODULE_GROUP_PRIMARY ? S8("primary") : S8("rest");
         arguments->show(arguments, S8("CI_UNIT_MODULE_V1 index={u64} module={S8} table_audit={u32} enabled={u32} selected={u32} group={S8}\n"),
                         index, descriptor.name, (u32)descriptor.table_audit, (u32)buster_test_descriptor_runs(descriptor),
                         (u32)buster_test_descriptor_runs(selected[index]), owner);
@@ -2295,24 +2307,24 @@ BUSTER_GLOBAL_LOCAL bool test_module_selection_self_test(void)
 // partition can satisfy the semantic union used by the process orchestrator.
 BUSTER_GLOBAL_LOCAL bool test_module_group_self_test(void)
 {
-    TestDescriptor driver[TEST_ID_COUNT];
+    TestDescriptor primary[TEST_ID_COUNT];
     TestDescriptor rest[TEST_ID_COUNT];
-    memcpy(driver, test_descriptors, sizeof(driver));
+    memcpy(primary, test_descriptors, sizeof(primary));
     memcpy(rest, test_descriptors, sizeof(rest));
-    u64 driver_count = test_module_group_apply(driver, TEST_ID_COUNT, TEST_MODULE_GROUP_DRIVER, true);
+    u64 primary_count = test_module_group_apply(primary, TEST_ID_COUNT, TEST_MODULE_GROUP_PRIMARY, true);
     u64 rest_count = test_module_group_apply(rest, TEST_ID_COUNT, TEST_MODULE_GROUP_REST, true);
     u64 enabled_count = 0;
     for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
     {
         enabled_count += buster_test_descriptor_runs(test_descriptors[index]);
     }
-    bool result = driver_count == 1 && rest_count > 0 && driver_count + rest_count == enabled_count &&
-                  test_module_group_union_valid(test_descriptors, driver, rest, TEST_ID_COUNT);
+    bool result = primary_count == 1 && rest_count > 0 && primary_count + rest_count == enabled_count &&
+                  test_module_group_union_valid(test_descriptors, primary, rest, TEST_ID_COUNT);
     result = result && test_module_group_resolve(S8("")) == TEST_MODULE_GROUP_NONE &&
-             test_module_group_resolve(S8("driver")) == TEST_MODULE_GROUP_DRIVER &&
+             test_module_group_resolve(S8("primary")) == TEST_MODULE_GROUP_PRIMARY &&
              test_module_group_resolve(S8("rest")) == TEST_MODULE_GROUP_REST &&
              test_module_group_resolve(S8("inventory")) == TEST_MODULE_GROUP_INVENTORY;
-    String8 invalid[] = {S8("all"), S8("Driver"), S8("driver,rest"), S8(" driver"), S8("rest ")};
+    String8 invalid[] = {S8("all"), S8("driver"), S8("frontend"), S8("Primary"), S8("primary,rest"), S8(" primary"), S8("rest ")};
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
         result = result && test_module_group_resolve(invalid[index]) == TEST_MODULE_GROUP_INVALID;
@@ -2320,62 +2332,65 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_self_test(void)
 
     TestDescriptor original[] = {
         {.name = S8("self_test_first"), .function = &test_timing_self_test_pass},
-        {.name = S8("compiler_driver_tests"), .function = &test_timing_self_test_pass},
+        {.name = test_module_group_primary_name(), .function = &test_timing_self_test_pass},
         {.name = S8("self_test_audit"), .function = &test_timing_self_test_pass, .table_audit = true},
     };
-    TestDescriptor synthetic_driver[BUSTER_ARRAY_LENGTH(original)];
+    TestDescriptor synthetic_primary[BUSTER_ARRAY_LENGTH(original)];
     TestDescriptor synthetic_rest[BUSTER_ARRAY_LENGTH(original)];
-    memcpy(synthetic_driver, original, sizeof(original));
+    memcpy(synthetic_primary, original, sizeof(original));
     memcpy(synthetic_rest, original, sizeof(original));
-    u64 synthetic_driver_count = test_module_group_apply(synthetic_driver, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_DRIVER, true);
+    u64 synthetic_primary_count = test_module_group_apply(synthetic_primary, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_PRIMARY, true);
     u64 synthetic_rest_count = test_module_group_apply(synthetic_rest, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_REST, true);
-    result = result && synthetic_driver_count == 1 && synthetic_rest_count == 1 + (u64)buster_test_descriptor_runs(original[2]) &&
-             test_module_group_union_valid(original, synthetic_driver, synthetic_rest, BUSTER_ARRAY_LENGTH(original));
+    result = result && synthetic_primary_count == 1 && synthetic_rest_count == 1 + (u64)buster_test_descriptor_runs(original[2]) &&
+             test_module_group_union_valid(original, synthetic_primary, synthetic_rest, BUSTER_ARRAY_LENGTH(original));
     synthetic_rest[1].deselected = false;
-    result = result && !test_module_group_union_valid(original, synthetic_driver, synthetic_rest, BUSTER_ARRAY_LENGTH(original));
+    result = result && !test_module_group_union_valid(original, synthetic_primary, synthetic_rest, BUSTER_ARRAY_LENGTH(original));
     synthetic_rest[1].deselected = true;
     synthetic_rest[0].deselected = true;
-    result = result && !test_module_group_union_valid(original, synthetic_driver, synthetic_rest, BUSTER_ARRAY_LENGTH(original));
+    result = result && !test_module_group_union_valid(original, synthetic_primary, synthetic_rest, BUSTER_ARRAY_LENGTH(original));
     synthetic_rest[0].deselected = false;
     synthetic_rest[2].table_audit = false;
-    result = result && !test_module_group_union_valid(original, synthetic_driver, synthetic_rest, BUSTER_ARRAY_LENGTH(original));
+    result = result && !test_module_group_union_valid(original, synthetic_primary, synthetic_rest, BUSTER_ARRAY_LENGTH(original));
     synthetic_rest[2].table_audit = true;
     original[2].name = original[0].name;
     result = result && !test_module_group_table_valid(original, BUSTER_ARRAY_LENGTH(original));
     original[2].name = S8("self_test_audit");
     original[1].name = S8("compiler_driver_test");
     result = result && !test_module_group_table_valid(original, BUSTER_ARRAY_LENGTH(original));
-    original[1].name = S8("compiler_driver_tests");
+    original[1].name = test_module_group_primary_name();
+    original[1].table_audit = true;
+    result = result && !test_module_group_table_valid(original, BUSTER_ARRAY_LENGTH(original));
+    original[1].table_audit = false;
     original[2].name = S8("bad name");
     result = result && !test_module_group_table_valid(original, BUSTER_ARRAY_LENGTH(original));
     original[2].name = S8("self_test_audit");
     original[0].deselected = true;
-    memcpy(synthetic_driver, original, sizeof(original));
+    memcpy(synthetic_primary, original, sizeof(original));
     memcpy(synthetic_rest, original, sizeof(original));
-    test_module_group_apply(synthetic_driver, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_DRIVER, true);
+    test_module_group_apply(synthetic_primary, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_PRIMARY, true);
     test_module_group_apply(synthetic_rest, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_REST, true);
-    result = result && test_module_group_union_valid(original, synthetic_driver, synthetic_rest, BUSTER_ARRAY_LENGTH(original)) &&
-             synthetic_driver[0].deselected && synthetic_rest[0].deselected;
-    result = result && !test_module_group_apply(synthetic_driver, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_INVALID, false) &&
+    result = result && test_module_group_union_valid(original, synthetic_primary, synthetic_rest, BUSTER_ARRAY_LENGTH(original)) &&
+             synthetic_primary[0].deselected && synthetic_rest[0].deselected;
+    result = result && !test_module_group_apply(synthetic_primary, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_INVALID, false) &&
              !test_module_group_apply(synthetic_rest, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_REST, false);
-    memcpy(synthetic_driver, original, sizeof(original));
-    result = result && !test_module_group_apply(synthetic_driver, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_INVENTORY, true);
+    memcpy(synthetic_primary, original, sizeof(original));
+    result = result && !test_module_group_apply(synthetic_primary, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_INVENTORY, true);
 
-    // Execute the synthetic driver through the original descriptor runner;
+    // Execute the synthetic primary through the original descriptor runner;
     // the selected module keeps its canonical index and assertion totals.
-    memcpy(synthetic_driver, original, sizeof(original));
-    test_module_group_apply(synthetic_driver, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_DRIVER, true);
+    memcpy(synthetic_primary, original, sizeof(original));
+    test_module_group_apply(synthetic_primary, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_PRIMARY, true);
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
     BUSTER_CHECK(arena != 0 && output != 0);
     TestParallelArguments arguments = {.base = {.arena = arena, .show = &test_parallel_show}, .output_arena = output};
     u64 timing_record_count = 0;
-    BatchTestResult batch = buster_test_run_descriptors(&arguments.base, synthetic_driver, BUSTER_ARRAY_LENGTH(original), true,
+    BatchTestResult batch = buster_test_run_descriptors(&arguments.base, synthetic_primary, BUSTER_ARRAY_LENGTH(original), true,
                                                       &timing_record_count, 0);
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
     result = result && timing_record_count == 1 && batch.module_test_count == 1 && batch.succeeded_module_test_count == 1 &&
              batch.unit_test_count == 2 && batch.succeeded_unit_test_count == 2 &&
-             string_first_sequence(text, S8("TEST_MODULE_TIMING index=1 module=compiler_driver_tests ")) != BUSTER_STRING_NO_MATCH &&
+             string_first_sequence(text, string_format(arena, S8("TEST_MODULE_TIMING index=1 module={S8} "), test_module_group_primary_name())) != BUSTER_STRING_NO_MATCH &&
              string_first_sequence(text, S8("module=self_test_")) == BUSTER_STRING_NO_MATCH;
     result = arena_destroy(arena, 1) && result;
     result = arena_destroy(output, 1) && result;
@@ -2425,6 +2440,9 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test(UnitTestAr
 
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
+#if BUSTER_IOS
+    buster_ios_launch_trace(S8("suite-entry"));
+#endif
     BatchTestResult result = {0};
     if (!arguments || !arguments->arena || !arguments->show)
     {
@@ -2457,6 +2475,9 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     // for later work on their selected context. Fill every compiler-global
     // read-only table before the first module can create those workers.
     compiler_prewarm();
+#if BUSTER_IOS
+    buster_ios_launch_trace(S8("prewarm-ready"));
+#endif
     BUSTER_CHECK(c_test_lex_compact_tables_ready());
     // Keep the root path outside the per-descriptor arena rewind points. A
     // child that exits before requesting a path therefore owns no filesystem
@@ -2542,6 +2563,9 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     bool watchdog_started = test_watchdog_start(arguments, TEST_ID_COUNT);
+#if BUSTER_IOS
+    buster_ios_launch_trace(S8("fixtures-ready"));
+#endif
     u64 timing_record_count = 0;
     result = buster_test_run_parallel_descriptors(arguments, descriptors, TEST_ID_COUNT, timing_enabled, &timing_record_count);
     bool watchdog_stopped = test_watchdog_stop();
@@ -2585,7 +2609,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
 
     if (grouped)
     {
-        String8 group = module_group == TEST_MODULE_GROUP_DRIVER ? S8("driver") :
+        String8 group = module_group == TEST_MODULE_GROUP_PRIMARY ? S8("primary") :
                         module_group == TEST_MODULE_GROUP_REST ? S8("rest") :
                         module_group == TEST_MODULE_GROUP_INVENTORY ? S8("inventory") : S8("invalid");
         String8 status = batch_test_succeeded(result) ? S8("pass") : S8("fail");

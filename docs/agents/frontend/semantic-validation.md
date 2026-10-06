@@ -72,6 +72,20 @@ source locations and matching semantic-only/full-compilation refusal. Both
 frontend forms validate positive neighbors in those dialects, including
 enum/typedef shadowing, and GNU-zero neighbors independently.
 
+Structure and union member validation walks array, pointer and function-return derivations,
+including those inherited through typedefs, and rejects variably modified
+types at the member's original source site. Each bound is queried in its
+declaring scope using the existing typed constant predicate. The check runs
+after expression/type-name validation and also visits members appended by its
+own bound queries. Completed aggregate definitions retain their source identity,
+so deeply nested `sizeof` type names are covered without declaring an object.
+Flexible arrays, constant expression bounds and function-pointer prototype
+parameters keep their existing rules. `c_test_variable_member_types` checks
+rejected file/block/type-name/nested/typedef forms, exact member locations and
+valid neighbors through semantic-only analysis and both canonical frontend
+forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
+[WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
 pointers to arrays and functions retain their pointer size. Its explicit task
@@ -176,6 +190,15 @@ operands) snapshot into the machine's `frame_checkpoints` row for their own
 slot, and root snapshots and rollbacks are passed by pointer. A rollback that
 does not continue into a successful parse is masked by its root's rollback, so
 `c_test_type_parse_snapshot_rows` checks row independence directly.
+
+GNU `__attribute__((fallthrough));` and its `__fallthrough__` alias
+are null statements, including in C99/GNU11/C17. Leading attribute lists
+are skipped by the lowering body walker; `c_parse_validate_gnu_fallthrough`
+therefore checks the empty statement and zero-argument constraint (allowing
+an empty parenthesized parameter list) before lowering can erase the attribute prefix. Other attributes retain their own
+handling. Embedded driver regressions cover both spellings, dialects, both
+frontend forms and all four allocators, with syntax/object diagnostic
+equivalence for a missing semicolon or attribute arguments.
 
 A modification destination is typed from its whole operand.
 `c_parse_assignment_identifier_is_operand` is the one rule both assignment
@@ -289,3 +312,17 @@ large translation units and the compiler unity source. Then run the complete
 suite, sanitized suite and byte-identical self-host fixed point. Record compiler
 identities, input identities, actual results and limits in a new performance
 audit; do not substitute cross-path agreement for a baseline comparison.
+
+The final member check defers failed bound classifications until its live
+member walk has materialized nested aggregate definitions. It retries only failed
+candidates and visits physical members appended by retries, until neither member
+rows nor unique completed source-backed aggregate definitions grow. A lazy scratch
+bitset keyed by definition tokens includes GNU empty records; qualified copies
+and temporary type-only derivations do not count as progress. It then reports
+VM members, so a valid deeply nested sizeof
+bound does not become a runtime bound merely because its first layout query
+could not yet resolve a copied type name. Pending rows are sparse scratch data,
+released after validation; completed definitions reuse their source identity.
+The multidimensional constant/runtime pair pins a later array derivation that
+first materializes a member during retry, including its exact source diagnostic.
+A GNU17-only empty-record dimension pins completion without member-row growth.

@@ -198,6 +198,11 @@ GitHub's normal approval requirements still apply. The trusted cancellation
 recovery workflow remains scoped to `Buster CI` and eligible same-repository
 PRs; this change does not broaden recovery or the source-free broker.
 
+The maintained entry preserves every frozen CI/action test on the legacy topology.
+After the queue-lint transition it delegates to the full current policy suite;
+it rejects a runner-only substitute. The protected trusted writer uses this
+entry so the frozen support-file identities remain unchanged.
+
 `python3 tools/ci_workflow_policy_test.py -v` preserves the frozen suite's
 unaffected cases and checks the shared event/concurrency contract,
 retained bootstrap command order, and the actual `CI complete` shell predicate
