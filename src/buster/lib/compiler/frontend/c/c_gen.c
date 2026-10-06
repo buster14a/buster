@@ -29509,6 +29509,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
 BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields);
+BUSTER_C_INTERNAL bool c_ir_sizeof_unmapped_array_value_type(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
@@ -30510,6 +30511,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuild
         CIrSizeofFrame* frame = frames + count - 1;
         CIrSizeofStep step = frame->op == C_IR_SIZEOF_OP_CLASSIFY ? c_ir_sizeof_operand_type_classify(builder, frame, &returned)
                                                                    : c_ir_sizeof_operand_type_combine(builder, frame, returned, &returned);
+        // An additive operand is a value, so a bare incomplete array decays.
+        if (step == C_IR_SIZEOF_STEP_FAIL && frame->op == C_IR_SIZEOF_OP_CLASSIFY && count > 1 &&
+            frames[count - 2].op == C_IR_SIZEOF_OP_ADDITIVE &&
+            c_ir_sizeof_unmapped_array_value_type(builder, frame->start, frame->end, &returned))
+        {
+            step = C_IR_SIZEOF_STEP_DONE;
+        }
         if (step == C_IR_SIZEOF_STEP_DONE)
         {
             count -= 1;
@@ -30701,6 +30709,22 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_token_is_unmapped_array(CIntegerIrBuilder* bu
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     return start + 1 == end && c_ir_sizeof_token_is_unmapped_array(builder, start, false);
+}
+
+// An incomplete `extern T a[];` never maps to an IR array type, and the strict
+// operand walk refuses it bare so that sizeof can diagnose the unsized array.
+// Used as a value -- a conditional arm or an additive operand -- it is only
+// the pointer to its element; report that type, or fail when it is not one.
+BUSTER_C_INTERNAL bool c_ir_sizeof_unmapped_array_value_type(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
+{
+    bool result = false;
+    if (!builder->queries->has_request && c_ir_sizeof_operand_is_unmapped_array_object(builder, start, end))
+    {
+        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+        *type_out = c_ir_sizeof_unlowered_array_decay(builder, builder->parse.entities[entity.value].type);
+        result = type_out->value != IR_ID_UNDERLYING_INVALID;
+    }
+    return result;
 }
 
 // Whether a statement-expression operand's tail names an unlowered array
@@ -35418,7 +35442,16 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
     // the usual arithmetic conversions and pointer arithmetic, so use its
     // result whenever the full range is unambiguous.
     IrTypeId strict_type = IR_TYPE_ID_INVALID;
-    if (c_ir_sizeof_operand_type_attempt(builder, start, end, &strict_type))
+    // A bare incomplete extern array is only its decayed element pointer as a
+    // value; the strict walk refuses it so that sizeof can diagnose it, and
+    // the identifier fallback below guessed int, so `c ? tbl : "x"` looked
+    // int-versus-pointer (Lua's lapi.c, PCRE2's pcre2_compile.c).
+    bool strict_ready = c_ir_sizeof_operand_type_attempt(builder, start, end, &strict_type);
+    if (!strict_ready)
+    {
+        strict_ready = c_ir_sizeof_unmapped_array_value_type(builder, start, end, &strict_type);
+    }
+    if (strict_ready)
     {
         // The strict operand walk deliberately preserves an array's declared
         // type so callers such as sizeof can distinguish an array from its

@@ -9017,6 +9017,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(Unit
     return result;
 }
 
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+// An `extern const char tbl[];` whose bound no declaration in the unit gives
+// never maps to an IR array type. Used as a conditional arm (Lua's lapi.c,
+// PCRE2's pcre2_compile.c) its predicted type fell back to int and the
+// conditional failed as int against pointer. The definitions live in a second
+// translation unit so the arrays stay incomplete where they are used.
+BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_definitions = S8_INITIALIZER(
+    "const char tbl[] = \"tbl\";\n"
+    "const char other[] = \"other\";\n");
+
+BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_program = S8_INITIALIZER(
+    "extern const char tbl[];\n"
+    "extern const char other[];\n"
+    "static const char full[8] = \"full\";\n"
+    "static const char* const pointer = \"ptr\";\n"
+    "static const char* tbl_or_literal(int c) { return c ? tbl : \"x\"; }\n"
+    "static const char* literal_or_tbl(int c) { return c ? \"x\" : tbl; }\n"
+    "static const char* tbl_or_other(int c) { return c ? tbl : other; }\n"
+    "static const char* tbl_or_full(int c) { return c ? tbl : full; }\n"
+    "static const char* tbl_or_pointer(int c) { return c ? tbl : pointer; }\n"
+    "static const char* pointer_or_tbl(int c) { return c ? pointer : (tbl); }\n"
+    "static const char* tbl_or_null(int c) { return c ? tbl : 0; }\n"
+    "static const char* nested(int c, int d) { return c ? (d ? tbl : \"x\") : other; }\n"
+    "static const char* plus_or_p(int c, const char* p) { return c ? tbl + 1 : p; }\n"
+    "static const char* address_or_p(int c, const char* p) { return c ? &tbl[1] : p; }\n"
+    "static const char* group_or_p(int c, const char* p) { return c ? (tbl) : p; }\n"
+    "static int same(const char* left, const char* right) { while (*left && *left == *right) { left++; right++; } return *left == *right; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    return !same(tbl_or_literal(1), \"tbl\") || !same(tbl_or_literal(0), \"x\") || !same(literal_or_tbl(1), \"x\") ||\n"
+    "           !same(literal_or_tbl(0), \"tbl\") || !same(tbl_or_other(1), \"tbl\") || !same(tbl_or_other(0), \"other\") ||\n"
+    "           !same(tbl_or_full(1), \"tbl\") || !same(tbl_or_full(0), \"full\") || !same(tbl_or_pointer(1), \"tbl\") ||\n"
+    "           !same(tbl_or_pointer(0), \"ptr\") || !same(pointer_or_tbl(1), \"ptr\") || !same(pointer_or_tbl(0), \"tbl\") ||\n"
+    "           tbl_or_null(0) != 0 || !same(tbl_or_null(1), \"tbl\") || !same(nested(1, 1), \"tbl\") || !same(nested(1, 0), \"x\") ||\n"
+    "           !same(nested(0, 1), \"other\") || !same(plus_or_p(1, pointer), \"bl\") || !same(plus_or_p(0, pointer), \"ptr\") ||\n"
+    "           !same(address_or_p(1, pointer), \"bl\") || !same(address_or_p(0, pointer), \"ptr\") ||\n"
+    "           !same(group_or_p(1, pointer), \"tbl\") || !same(group_or_p(0, pointer), \"ptr\");\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_incomplete_array_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 definitions = buster_test_temporary_path(arguments->arena, S8("conditional-incomplete-array-definitions"), S8(".c"));
+    String8 source = buster_test_temporary_path(arguments->arena, S8("conditional-incomplete-array"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(definitions, BUSTER_SLICE_TO_BYTE_SLICE(c_test_conditional_incomplete_array_definitions))) &&
+        BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_conditional_incomplete_array_program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("conditional-incomplete-array-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output,
+                                     source, definitions};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("conditional incomplete array {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("conditional incomplete array runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -44249,6 +44337,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_complex_initializer_elision_runtime);
     C_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
     C_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
+    C_TEST_FIXTURE(arguments, c_test_conditional_incomplete_array_runtime);
     C_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     C_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     C_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
