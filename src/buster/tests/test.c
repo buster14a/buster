@@ -1796,6 +1796,7 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test_active;
 BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_body_called;
 #endif
 BUSTER_GLOBAL_LOCAL u64 buster_test_temporary_path_call_count;
+BUSTER_GLOBAL_LOCAL AtomicU64 buster_test_temporary_unique_path_serial;
 
 BUSTER_GLOBAL_LOCAL String8 buster_test_temporary_base(void)
 {
@@ -1955,6 +1956,15 @@ String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix)
     bool root_contained = string_starts_with_sequence(result, buster_test_temporary_root) && result.length > buster_test_temporary_root.length &&
                           (result.pointer[buster_test_temporary_root.length] == '/' || result.pointer[buster_test_temporary_root.length] == '\\');
     BUSTER_CHECK(root_contained);
+    return result;
+}
+
+String8 buster_test_temporary_unique_path(Arena* arena, String8 name, String8 suffix)
+{
+    // Concurrent fixtures share the counter, so take each serial atomically.
+    u64 serial = atomic_u64_increment(&buster_test_temporary_unique_path_serial);
+    String8 unique_suffix = string_format(arena, S8("-{u64}{S8}"), serial, suffix);
+    String8 result = buster_test_temporary_path(arena, name, unique_suffix);
     return result;
 }
 
