@@ -5119,6 +5119,22 @@ BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity(CIntegerIrBuilder* builder, u
     return result;
 }
 
+BUSTER_C_INTERNAL String8 c_ir_entity_kind_description(CEntityKind kind)
+{
+    String8 result;
+    switch (kind)
+    {
+    case C_ENTITY_OBJECT: result = S8("object"); break;
+    case C_ENTITY_FUNCTION: result = S8("function"); break;
+    case C_ENTITY_TYPEDEF: result = S8("typedef name"); break;
+    case C_ENTITY_PARAMETER: result = S8("parameter"); break;
+    case C_ENTITY_LOCAL: result = S8("local"); break;
+    case C_ENTITY_ENUMERATOR: result = S8("enumerator"); break;
+    case C_ENTITY_COUNT: default: BUSTER_TODO();
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity_or_lookup(CIntegerIrBuilder* builder, u32 token_index)
 {
     CEntityId entity = c_ir_identifier_entity(builder, token_index);
@@ -30567,10 +30583,10 @@ c_ir_expression_core_loop:
                     builder->failure_message =
                         failed_entity.value >= builder->parse.entity_count
                             ? string_format(builder->arena, S8("could not lower unbound identifier '{S8}'"), spelling)
-                        : called ? string_format(builder->arena, S8("could not lower call to '{S8}' bound to C entity {u32} of kind {u32}"), spelling,
-                                                 failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind)
-                                 : string_format(builder->arena, S8("could not lower identifier '{S8}' bound to C entity {u32} of kind {u32}"), spelling,
-                                                 failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind);
+                        : called ? string_format(builder->arena, S8("could not lower call to {S8} '{S8}'"),
+                                                 c_ir_entity_kind_description(builder->parse.entities[failed_entity.value].kind), spelling)
+                                 : string_format(builder->arena, S8("could not lower use of {S8} '{S8}'"),
+                                                 c_ir_entity_kind_description(builder->parse.entities[failed_entity.value].kind), spelling);
                 }
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
@@ -44930,7 +44946,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* bui
                 }
                 String8 diagnostic_message = string_equal(failure, S8("invalid initializer separator"))
                                                  ? failure
-                                                 : string_format(builder->arena, S8("{S8} for incomplete array type {u32} '{S8}'"), failure, type_index,
+                                                 : string_format(builder->arena, S8("{S8} for incomplete array type of '{S8}'"), failure,
                                                                  candidate_name);
                 *c_ir_lower_diagnostic_slot(result, diagnostic_arena, diagnostic_capacity) = (CDiagnostic){
                     .message = string_format(builder->arena, S8("C IR lowering: {S8}"), diagnostic_message),
