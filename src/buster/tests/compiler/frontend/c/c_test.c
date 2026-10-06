@@ -39953,6 +39953,110 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(Uni
     return result;
 }
 
+// A local written only by its declaration's initializer, outside the entry
+// block, skips the predecessor walk in the SSA finish: with no jump into a
+// scope the initializer dominates every reachable read. The shortcut must not
+// change the IR: each shape lowers with and without it to the same parameters,
+// values and instructions. Eligible shapes must create fewer provisional
+// parameters. A label or case/default disables it only for a local whose scope
+// it lies in when a jump to it starts before the local's initializer ends or
+// outside that scope.
+// A branching initializer stores in its join block and still qualifies; a
+// conditional first assignment or an initializer that reads the local does not.
+// The dead `r-=y` after a braced `break` sends an unreachable edge into the
+// loop latch, whose undefined merge the general walk already discards.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_declaration_definition(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct DeclarationDefinitionCase
+    {
+        String8 source;
+        // 1: the shortcut must create fewer provisional parameters; 0: it
+        // must not apply; -1: it applies where the walk would only have
+        // forwarded through single-predecessor blocks, so the count may tie.
+        s32 fewer;
+    } cases[] = {
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}done:return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}switch(c){default:r+=1;}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=({int z=x;l:z;});else r-=y;n-=1;}}return r;}"), 1},
+        // Jumps whose source and target both lie in the scope after the
+        // initializer keep the shortcut; a jump past the initializer does not.
+        {S8("int test(int*p,int n){int r=0;while(n-->0){int op=*p++;int k=op*2;switch(op){case 1:r+=k;break;case 2:r-=k;break;default:r^=k;}r+=op;}return r;}"), -1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;again:r+=x;if(--n>0)goto again;r+=x;}return r;}"), -1},
+        {S8("int test(int k,int n){int r=0;switch(k){case 0:{int x=n*3;case 1:while(n>0){r+=x;n-=1;}}}return r;}"), 0},
+        {S8("int test(int k,int n){int r=0;if(k){int x=n*3;switch(k){case 1:while(n>0){r+=x;n-=1;}}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c)goto in;{int x=n*3;in:while(n>0){r+=x;n-=1;}}return r;}"), 0},
+        {S8("int test(int k,int n){int r=0;switch(k){int x=n*3;case 1:while(n>0){r+=x;n-=1;}}return r;}"), 0},
+        {S8("int test(int c,int n){int r=0;while(n-->0){r+=({if(c)goto l;int z=n*3;l:while(c-->0)r+=z;z;});}return r;}"), 0},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){{r+=x;break;}r-=y;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){r+=(int){x};r+=c?x:y;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int y;int x=y;while(n>0){r+=x;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;while(n>0){r+=x;if(r>9)x=1;n-=1;}}return r;}"), 0},
+        // Initializers that branch store in a later block than the declaration.
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?n*3:n;int y=n&&c;int z=n||c;while(n>0){r+=x+y-z;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?(n?n*3:n):c;while(n>0){r+=x;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?x:n;while(n>0){r+=x;n-=1;}}return r;}"), 0},
+        {S8("int test(int c,int n){int r=0;if(c){int x;if(n)x=n*3;while(n>0){r+=x;n-=1;}}return r;}"), 0},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        struct DeclarationDefinitionCase test = cases[case_index];
+        CPreprocessResult tokens = c_preprocess(temporary.arena, test.source, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parse.diagnostic_count, test.source);
+        CIRLowerResult lowered[2];
+        IrFunction* functions[2] = {0};
+        for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(lowered); variant += 1)
+        {
+            lowered[variant] = c_lower_to_ir_with_options(temporary.arena, S8("declaration-definition.c"), tokens, parse, target_native,
+                (CIRLowerOptions){.disable_declaration_shortcut = variant == 1});
+            bool valid = lowered[variant].program && !lowered[variant].diagnostic_count &&
+                         ir_validate_canonical_module(lowered[variant].program, lowered[variant].program->modules).error == IR_VALIDATION_NONE;
+            BUSTER_TEST_RAW(arguments, valid, test.source);
+            functions[variant] = valid ? c_test_find_ir_function(lowered[variant].program->modules, S8("test")) : 0;
+        }
+        CIRDirectSsaStatistics shortcut = lowered[0].direct_ssa;
+        CIRDirectSsaStatistics walk = lowered[1].direct_ssa;
+        BUSTER_TEST_RAW(arguments, shortcut.parameters_created - shortcut.parameters_removed == walk.parameters_created - walk.parameters_removed,
+                        test.source);
+        BUSTER_TEST_RAW(arguments, test.fewer > 0   ? shortcut.parameters_created < walk.parameters_created
+                                   : test.fewer == 0 ? shortcut.parameters_created == walk.parameters_created
+                                                     : shortcut.parameters_created <= walk.parameters_created,
+                        test.source);
+        IrFunction* left = functions[0];
+        IrFunction* right = functions[1];
+        bool same = left && right && left->block_count == right->block_count && left->value_count == right->value_count &&
+                    left->instruction_count == right->instruction_count;
+        for (u32 block = 0; same && block < left->block_count; block += 1)
+        {
+            IrBlockParameter* a = left->blocks[block].first_parameter;
+            IrBlockParameter* b = right->blocks[block].first_parameter;
+            same = left->blocks[block].parameter_count == right->blocks[block].parameter_count;
+            for (; same && a && b; a = a->next, b = b->next)
+            {
+                same = a->value.value == b->value.value && a->incoming_count == b->incoming_count;
+            }
+            same = same && !a && !b;
+        }
+        for (u32 index = 0; same && index < left->instruction_count; index += 1)
+        {
+            IrInstruction* a = left->instructions + index;
+            IrInstruction* b = right->instructions + index;
+            same = a->opcode == b->opcode && a->result.value == b->result.value && a->operand_count == b->operand_count &&
+                   a->target_count == b->target_count;
+            for (u32 operand = 0; same && operand < a->operand_count; operand += 1)
+            {
+                same = a->operands[operand].value == b->operands[operand].value;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, same, test.source);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -45926,6 +46030,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_digraphs);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_declaration_definition);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
