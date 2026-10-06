@@ -91,6 +91,8 @@
 //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
 //                                                 entity lookup
+//   c_parse_scope_cursor_lookup                   post-binding lookups of the
+//                                                 lowering-constraint passes
 //   c_parse_local_declarations                    block-scope declarations,
 //                                                 auto inference, local
 //                                                 linkage redeclarations
@@ -2131,6 +2133,8 @@ BUSTER_C_SHARED u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 
     return size;
 }
 
+BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
+
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
                                                           u32* index_out);
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type_core(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
@@ -3128,31 +3132,70 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 {
                     CToken token = preprocess.tokens[bound.token_start + bound_index];
                     bool bound_word_is_alignof = token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
-                    if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) || bound_word_is_alignof) &&
-                        bound_index + 2 < bound.token_count &&
-                        c_token_is_punctuator(&preprocess.tokens[bound.token_start + bound_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    bool bound_word_is_sizeof = token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof"));
+                    if ((bound_word_is_sizeof || bound_word_is_alignof) && bound_index + 1 < bound.token_count)
                     {
-                        u32 operand_start = bound.token_start + bound_index + 2;
+                        u32 operand_start = bound.token_start + bound_index + 1;
                         u32 bound_end = bound.token_start + bound.token_count;
-                        u32 close = operand_start;
-                        u32 depth = 1;
-                        while (close < bound_end && depth)
+                        bool parenthesized = c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
+                        u32 close = operand_start + 1;
+                        u32 depth = 0;
+                        if (parenthesized)
                         {
-                            CToken operand_token = preprocess.tokens[close];
-                            if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                            operand_start += 1;
+                            close = operand_start;
+                            depth = 1;
+                            while (close < bound_end && depth)
                             {
-                                depth += 1;
-                            }
-                            else if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                            {
-                                depth -= 1;
-                                if (!depth)
+                                CToken operand_token = preprocess.tokens[close];
+                                if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                                 {
-                                    break;
+                                    depth += 1;
                                 }
+                                else if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                                {
+                                    depth -= 1;
+                                    if (!depth)
+                                    {
+                                        break;
+                                    }
+                                }
+                                close += 1;
                             }
-                            close += 1;
                         }
+                        // A bound reads the object bound at its declaration,
+                        // including block shadowing, rather than a type name at
+                        // file scope. Read its existing layout in this solve;
+                        // an open dependency keeps the array on the same agenda.
+                        u32 object_start = operand_start;
+                        u32 object_end = close;
+                        while (object_end > object_start + 1 &&
+                               c_token_is_punctuator(&preprocess.tokens[object_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                               c_parse_matching_delimiter(preprocess, object_start, object_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                          C_PUNCTUATOR_RIGHT_PARENTHESIS) + 1 == object_end)
+                        {
+                            object_start += 1;
+                            object_end -= 1;
+                        }
+                        CEntityId object = C_ENTITY_ID_INVALID;
+                        if (!depth && object_end == object_start + 1 && preprocess.tokens[object_start].kind == C_TOKEN_IDENTIFIER &&
+                            !c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[object_start]))
+                        {
+                            u32 use_index = c_parse_identifier_use_index(result, object_start);
+                            if (use_index != C_ID_UNDERLYING_INVALID)
+                            {
+                                object = result->identifier_uses[use_index].entity;
+                            }
+                            else
+                            {
+                                CScopeId scope = c_parse_scope_for_token(result, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                                        object_start);
+                                object = c_parse_lookup_entity_at_token(result, preprocess, scope, object_start);
+                            }
+                        }
+                        CEntity const* object_entity = object.value < result->entity_count ? result->entities + object.value : 0;
+                        bool object_operand = object_entity && (object_entity->kind == C_ENTITY_OBJECT || object_entity->kind == C_ENTITY_LOCAL ||
+                                                               object_entity->kind == C_ENTITY_PARAMETER);
                         u32 operand_type_index = operand_start;
                         CParseResult operand_parse = *result;
                         // Callers inside the explicit type-parse machine pass no
@@ -3163,7 +3206,12 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         // `sizeof(char[sizeof(T)])` folds rather than failing
                         // its whole enum.
                         CTypeId operand_type;
-                        if (!depth && close > operand_start)
+                        if (object_operand)
+                        {
+                            operand_type = object_entity->type;
+                            operand_type_index = close;
+                        }
+                        else if (parenthesized && !depth && close > operand_start)
                         {
                             operand_type = machine ? c_parse_type_name_specifiers(machine, &operand_parse, preprocess,
                                                                                    result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
@@ -3176,7 +3224,10 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         {
                             operand_type = C_TYPE_ID_INVALID;
                         }
-                        bool pointer_type = false;
+                        bool pointer_type = object_operand && object_entity->kind == C_ENTITY_PARAMETER &&
+                                            operand_type.value < operand_parse.type_count &&
+                                            (operand_parse.types[operand_type.value].kind == C_TYPE_ARRAY ||
+                                             operand_parse.types[operand_type.value].kind == C_TYPE_FUNCTION);
                         while (operand_type.value != C_ID_UNDERLYING_INVALID && operand_type_index < close)
                         {
                             CToken type_token = preprocess.tokens[operand_type_index];
@@ -3205,13 +3256,14 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             operand_alignment = c_preprocess_detail(preprocess)->data_layout.pointer.alignment;
                         }
                         else if (operand_resolved && operand_type.value < type_count &&
-                                 c_parse_layout_operand_resolved(context, agenda, operand_parse.types[operand_type.value].kind, operand_type.value))
+                                 (object_operand ? c_parse_layout_resolved(context, agenda, operand_type.value)
+                                                 : c_parse_layout_operand_resolved(context, agenda, operand_parse.types[operand_type.value].kind, operand_type.value)))
                         {
                             operand_size = c_parse_layout_size(context, agenda, operand_type.value);
                             operand_alignment = c_parse_layout_alignment(context, agenda, operand_type.value);
                             array_provisional |= c_parse_layout_provisional(context, agenda, operand_type.value);
                         }
-                        else if (operand_resolved && operand_type.value < operand_parse.type_count)
+                        else if (!object_operand && operand_resolved && operand_type.value < operand_parse.type_count)
                         {
                             // Kind-matching answers only for kinds whose layout
                             // the kind alone determines. A struct, union,
@@ -3233,6 +3285,39 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         {
                             operand_resolved = false;
                         }
+                        if (operand_resolved && object_operand && bound_word_is_alignof &&
+                            (object_entity->kind == C_ENTITY_OBJECT || object_entity->kind == C_ENTITY_LOCAL))
+                        {
+                            u32 alignment_cursor = 0;
+                            u32 run_start = 0;
+                            u32 run_count = 0;
+                            while (operand_resolved && c_alignof_object_next_run(result, object, object_start, &alignment_cursor, &run_start, &run_count))
+                            {
+                                // This layout reader's legacy integer evaluator
+                                // reads identifiers as zero. Keep unsupported
+                                // requests unresolved until the typed authority
+                                // migration (#1247), rather than publish a wrong
+                                // object alignment as a constant bound.
+                                for (u32 request = 0; operand_resolved && request < run_count; request += 1)
+                                {
+                                    operand_resolved = run_start <= result->alignment_count && request < result->alignment_count - run_start;
+                                    if (operand_resolved)
+                                    {
+                                        CAlignmentSpecifier specifier = result->alignments[run_start + request];
+                                        if (specifier.type.value >= type_count)
+                                        {
+                                            for (u32 index = 0; operand_resolved && index < specifier.token_count; index += 1)
+                                            {
+                                                operand_resolved = preprocess.tokens[specifier.token_start + index].kind != C_TOKEN_IDENTIFIER;
+                                            }
+                                        }
+                                    }
+                                }
+                                operand_resolved = operand_resolved &&
+                                                   c_parse_layout_alignment_specifiers(context, agenda, run_start, run_count, &operand_alignment, 0,
+                                                                                       &array_provisional);
+                            }
+                        }
                         if (!operand_resolved)
                         {
                             unresolved_identifier = true;
@@ -3241,7 +3326,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         bound_tokens[bound_token_count++] = c_space_token(
                             &bound_space, string_format(arena, S8("{u64}"), bound_word_is_alignof ? operand_alignment : operand_size),
                             C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-                        bound_index += close - (bound.token_start + bound_index);
+                        bound_index += close - (bound.token_start + bound_index) - !parenthesized;
                         continue;
                     }
                     if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -5694,6 +5779,45 @@ BUSTER_GLOBAL_LOCAL void c_parse_expression_query_publish(CTypeParseMachine* mac
     machine->expression_query_flags[slot] = (u8)flags;
 }
 
+// The first top-level `?` of [start, end) and the `:` that returns its
+// nesting to zero, as the operator scan in c_type_parse_sizeof_step records
+// them. The scan stops at that `:`, so locating the next level of a
+// conditional chain costs its condition and true arm, not the rest of the
+// chain (GitHub #2715).
+BUSTER_C_INTERNAL bool c_parse_expression_next_conditional(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* question_out,
+                                                           u32* colon_out)
+{
+    u32 question = end;
+    u32 colon = end;
+    u32 nested_questions = 0;
+    bool balanced = true;
+    for (u32 index = start; balanced && colon == end && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            balanced = close < end;
+            index = balanced ? close : index;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            question = question == end ? index : question;
+            nested_questions += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) && nested_questions)
+        {
+            nested_questions -= 1;
+            colon = nested_questions ? colon : index;
+        }
+    }
+    bool found = question != end && colon != end;
+    *question_out = question;
+    *colon_out = colon;
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -5790,6 +5914,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start += 1;
                     task->end -= 1;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                     stripped = true;
                 }
             }
@@ -5857,6 +5982,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start = tail_start;
                     task->end = tail_end;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                 }
                 else
                 {
@@ -5898,6 +6024,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start = identity->result_start;
                     task->end = identity->result_end;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                 }
                 else
                 {
@@ -5912,7 +6039,21 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             u32 colon = task->end;
             u32 nested_questions = 0;
             u32 cast_prefix_close = UINT32_MAX;
-            for (u32 index = task->start; !task->operators_checked && index < task->end; index += 1)
+            // Every top-level operator at the loosest left-associative
+            // precedence, recorded downward from the top of this frame's
+            // free task slots (operator i at tasks[capacity - 1 - i]) so the
+            // split below can push the whole chain's nested prefixes at once
+            // instead of rescanning each prefix (GitHub #2715). A chain that
+            // would reach the live stack is dropped and the prefix scans.
+            u32 chain_count = 0;
+            bool chain_fits = true;
+            bool hinted = task->conditional_hinted && task->split >= task->start && task->colon < task->end;
+            if (hinted)
+            {
+                question = task->split;
+                colon = task->colon;
+            }
+            for (u32 index = task->start; !hinted && !task->operators_checked && index < task->end; index += 1)
             {
                 CToken token = preprocess.tokens[index];
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
@@ -5985,6 +6126,14 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 bool right_associative = precedence == 2;
                 if (binary && (precedence < best_precedence || (precedence == best_precedence && !right_associative)))
                 {
+                    bool loosened = precedence < best_precedence;
+                    chain_count = loosened ? 0 : chain_count;
+                    chain_fits = (loosened || chain_fits) && task_count + chain_count < capacity;
+                    if (chain_fits)
+                    {
+                        tasks[capacity - 1 - chain_count].start = index;
+                        chain_count += 1;
+                    }
                     best_precedence = precedence;
                     best_operator = index;
                 }
@@ -6030,9 +6179,33 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     last = C_TYPE_ID_INVALID;
                     break;
                 }
+                // `o0 op o1 op ... op ok` splits at its last operator, and the
+                // prefix ending before operator i splits at operator i - 1: a
+                // scan of that prefix reaches the same state at each of its
+                // tokens. Push those already-split prefixes outermost first,
+                // then the first operand, so each operand is scanned once.
+                // Operator i is read before the push into slot task_count + i
+                // can overwrite it, because the chain was kept below the
+                // live stack.
+                u32 chain_start = task->start;
+                CParseExpressionTypeOperation chain_operation = task->operation;
+                u32 prefix_count = chain_fits && best_precedence != 2 && chain_count ? chain_count - 1 : 0;
+                for (u32 prefix = prefix_count; prefix != 0; prefix -= 1)
+                {
+                    u32 prefix_end = tasks[capacity - 1 - prefix].start;
+                    u32 prefix_split = tasks[capacity - prefix].start;
+                    tasks[task_count++] = (CParseExpressionTypeTask){
+                        .start = chain_start,
+                        .end = prefix_end,
+                        .split = prefix_split,
+                        .operation = chain_operation,
+                        .state = 1,
+                    };
+                }
+                u32 first_operand_end = prefix_count ? tasks[capacity - 1].start : best_operator;
                 tasks[task_count++] = (CParseExpressionTypeTask){
-                    .start = task->start,
-                    .end = best_operator,
+                    .start = chain_start,
+                    .end = first_operand_end,
                 };
                 continue;
             }
@@ -6318,9 +6491,20 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 last = C_TYPE_ID_INVALID;
                 break;
             }
+            // A conditional's false arm is the rest of its chain. The arm
+            // chooses a conditional exactly when it has a top-level `?` and
+            // `:`, because the enclosing range already did and the arm's
+            // loosest binary operator cannot be looser than the range's.
+            u32 next_question = UINT32_MAX;
+            u32 next_colon = UINT32_MAX;
+            bool next_conditional = task->operation == C_PARSE_EXPRESSION_TYPE_CONDITIONAL &&
+                c_parse_expression_next_conditional(result, preprocess, right_start, task->end, &next_question, &next_colon);
             tasks[task_count++] = (CParseExpressionTypeTask){
                 .start = right_start,
                 .end = task->operation == C_PARSE_EXPRESSION_TYPE_SUBSCRIPT ? task->end - 1 : task->end,
+                .split = next_conditional ? next_question : 0,
+                .colon = next_conditional ? next_colon : 0,
+                .conditional_hinted = next_conditional,
             };
             continue;
         }
@@ -6819,6 +7003,16 @@ BUSTER_C_INTERNAL u32 c_parse_identity_separator(CParseResult* result, CPreproce
     return found;
 }
 
+#define C_GENERIC_LOCAL_ASSOCIATIONS 16
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_generic_association_scratch_bytes;
+
+u64 c_test_generic_association_scratch_bytes(void)
+{
+    return c_generic_association_scratch_bytes;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                      CParseResult* result, CScopeId scope, u32 start, u32 end,
                                                      String8* message, u32* location)
@@ -6840,7 +7034,11 @@ BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine,
         if (!valid) *message = S8("could not determine the type of the _Generic controlling expression");
     }
     u64 mark = machine->scratch_arena->position;
-    CTypeId* associations = valid ? arena_allocate(machine->scratch_arena, CTypeId, close - controller_end) : 0;
+    // Only typed associations occupy this list; their expression token spans
+    // do not contribute storage. Nothing in the list escapes this query.
+    CTypeId local_associations[C_GENERIC_LOCAL_ASSOCIATIONS];
+    CTypeId* associations = local_associations;
+    u32 association_capacity = BUSTER_ARRAY_LENGTH(local_associations);
     u32 association_count = 0;
     u32 match_count = 0;
     CTypeIdentityQuery answer = {.token_start = start, .token_end = close + 1, .result_start = UINT32_MAX};
@@ -6879,6 +7077,26 @@ BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine,
                 {
                     *message = S8("_Generic selection has multiple compatible type associations");
                     valid = false;
+                }
+            }
+            if (valid)
+            {
+                if (association_count == association_capacity)
+                {
+                    u32 capacity = association_capacity * 2;
+                    valid = capacity > association_capacity;
+                    CTypeId* grown = valid ? arena_allocate(machine->scratch_arena, CTypeId, capacity) : 0;
+                    valid &= grown != 0;
+                    if (valid)
+                    {
+                        memcpy(grown, associations, association_count * sizeof(*grown));
+                        associations = grown;
+                        association_capacity = capacity;
+#if BUSTER_INCLUDE_TESTS
+                        c_generic_association_scratch_bytes += (u64)capacity * sizeof(*grown);
+#endif
+                    }
+                    else *message = S8("could not allocate _Generic association workspace");
                 }
             }
             if (valid)
@@ -18305,6 +18523,174 @@ void c_test_parse_binding_unwind(CParseResult* result, u32 mark)
 }
 #endif
 
+// The lowering-constraint passes ask about every scope of a body after the
+// binder has closed them all, so the binding array stands for the file scope
+// alone and each of their lookups would walk the parent chain: one hash and
+// bucket probe per enclosing scope, which made a reference at block depth d
+// cost d probes (#2809). The cursor gives those passes their own binding
+// array instead, standing for one scope and the root-to-scope path above it:
+//
+//   by_symbol[s]  the innermost block-scope entity on the path bound to s,
+//                 or invalid when only the file scope (or nothing) binds it;
+//   shadowed[e]   what by_symbol held for e's symbol before e was bound;
+//   stack         every bound entity in bind order, popped to a path mark
+//                 when a scope leaves the path;
+//   position_plus_one[scope]  the scope's index on the path plus one, or 0.
+//
+// A lookup from another scope first seeks it: the path is cut back to the
+// nearest ancestor on it and the scopes below are pushed with their
+// entities, oldest first, so the newest in each scope wins as it does in the
+// bucket chain. The answer is then one load. A pass walking a body in token
+// order pushes and pops each scope a bounded number of times, so its lookups
+// cost the scopes and entities of the body, not the scopes enclosing each
+// reference. The file scope is never pushed: the binding array or its one
+// bucket chain answers it.
+//
+// The cursor is reached through a pointer, so a rollback of the result by
+// value leaves it alone; any entity added or rolled back since it was built
+// (an entity count it was not built against, or an add marking it stale)
+// empties it before the next lookup.
+struct CParseScopeCursor
+{
+    CEntityId* by_symbol;
+    CEntityId* shadowed;
+    CEntityId* stack;
+    CScopeId* path;
+    u32* path_mark;
+    u32* position_plus_one;
+    CScopeId* pending;
+    u32 symbol_capacity;
+    u32 entity_capacity;
+    u32 scope_capacity;
+    u32 stack_count;
+    u32 path_count;
+    u32 entity_count;
+    bool stale;
+};
+
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name);
+
+BUSTER_C_INTERNAL CParseScopeCursor* c_parse_scope_cursor_create(Arena* arena, CParseResult* result)
+{
+    CParseScopeCursor* cursor = 0;
+    if (result->binding_by_symbol && result->binding_capacity)
+    {
+        cursor = arena_allocate(arena, CParseScopeCursor, 1);
+        *cursor = (CParseScopeCursor){
+            .symbol_capacity = result->binding_capacity,
+            .entity_capacity = result->entity_capacity,
+            .scope_capacity = result->scope_capacity,
+            .entity_count = result->entity_count,
+        };
+        cursor->by_symbol = arena_allocate(arena, CEntityId, cursor->symbol_capacity);
+        memset(cursor->by_symbol, 0xff, sizeof(*cursor->by_symbol) * cursor->symbol_capacity);
+        cursor->shadowed = arena_allocate(arena, CEntityId, cursor->entity_capacity);
+        cursor->stack = arena_allocate(arena, CEntityId, cursor->entity_capacity);
+        cursor->path = arena_allocate(arena, CScopeId, cursor->scope_capacity);
+        cursor->path_mark = arena_allocate(arena, u32, cursor->scope_capacity);
+        cursor->position_plus_one = arena_allocate_zeroed(arena, u32, cursor->scope_capacity);
+        cursor->pending = arena_allocate(arena, CScopeId, cursor->scope_capacity);
+    }
+    return cursor;
+}
+
+// Leaves the first `count` scopes on the path and unbinds the rest.
+BUSTER_C_INTERNAL void c_parse_scope_cursor_cut(CParseResult* result, CParseScopeCursor* cursor, u32 count)
+{
+    while (cursor->path_count > count)
+    {
+        cursor->path_count -= 1;
+        cursor->position_plus_one[cursor->path[cursor->path_count].value] = 0;
+        u32 mark = cursor->path_mark[cursor->path_count];
+        while (cursor->stack_count > mark)
+        {
+            CEntityId entity = cursor->stack[--cursor->stack_count];
+            cursor->by_symbol[result->entities[entity.value].symbol] = cursor->shadowed[entity.value];
+        }
+    }
+}
+
+// Makes `scope` the end of the path: cuts it back to the nearest ancestor on
+// it and pushes the scopes below that one. False, with the path unchanged,
+// when the parent chain ends somewhere other than the file scope; the bucket
+// chain answers such a scope.
+BUSTER_C_INTERNAL bool c_parse_scope_cursor_seek(CParseResult* result, CParseScopeCursor* cursor, CScopeId scope)
+{
+    bool rooted = cursor->path_count && cursor->path[cursor->path_count - 1].value == scope.value;
+    if (!rooted)
+    {
+        u32 pending_count = 0;
+        CScopeId walk = scope;
+        bool walking = true;
+        while (walking)
+        {
+            rooted = walk.value == 0 || (walk.value < cursor->scope_capacity && cursor->position_plus_one[walk.value]);
+            walking = !rooted && walk.value < result->scope_count && pending_count < cursor->scope_capacity;
+            if (walking)
+            {
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, 1);
+                cursor->pending[pending_count++] = walk;
+                CScopeId parent = result->scopes[walk.value].parent;
+                walking = parent.value != walk.value;
+                walk = parent;
+            }
+        }
+        if (rooted)
+        {
+            c_parse_scope_cursor_cut(result, cursor, walk.value ? cursor->position_plus_one[walk.value] : 0);
+            while (pending_count)
+            {
+                CScopeId pushed = cursor->pending[--pending_count];
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, 1);
+                cursor->path_mark[cursor->path_count] = cursor->stack_count;
+                cursor->path[cursor->path_count++] = pushed;
+                cursor->position_plus_one[pushed.value] = cursor->path_count;
+                for (CEntityId entity = result->scopes[pushed.value].first_entity; entity.value != C_ID_UNDERLYING_INVALID;
+                     entity = result->entities[entity.value].next_in_scope)
+                {
+                    u32 symbol = result->entities[entity.value].symbol;
+                    if (symbol && symbol < cursor->symbol_capacity && entity.value < cursor->entity_capacity &&
+                        result->entities[entity.value].scope.value == pushed.value)
+                    {
+                        BUSTER_VALIDATE(cursor->stack_count < cursor->entity_capacity);
+                        cursor->shadowed[entity.value] = cursor->by_symbol[symbol];
+                        cursor->stack[cursor->stack_count++] = entity;
+                        cursor->by_symbol[symbol] = entity;
+                    }
+                }
+            }
+        }
+    }
+    return rooted;
+}
+
+// What the bucket chain answers for `symbol` from `scope`, when the cursor
+// can answer it; see CParseScopeCursor.
+BUSTER_C_INTERNAL bool c_parse_scope_cursor_lookup(CParseResult* result, CScopeId scope, u32 symbol, String8 name, CEntityId* found)
+{
+    CParseScopeCursor* cursor = result->scope_cursor;
+    if (cursor->stale || cursor->entity_count != result->entity_count)
+    {
+        c_parse_scope_cursor_cut(result, cursor, 0);
+        cursor->stale = false;
+        cursor->entity_count = result->entity_count;
+    }
+    bool answered = symbol && symbol < cursor->symbol_capacity && scope.value && scope.value < result->scope_count &&
+                    scope.value < cursor->scope_capacity && result->entity_count <= cursor->entity_capacity;
+    answered = answered && c_parse_scope_cursor_seek(result, cursor, scope);
+    if (answered)
+    {
+        CEntityId entity = cursor->by_symbol[symbol];
+        if (entity.value == C_ID_UNDERLYING_INVALID)
+        {
+            entity = result->binding_by_symbol && result->binding_scope.value == 0 ? result->binding_by_symbol[symbol]
+                                                      : c_parse_lookup_entity_in_scope_chain(result, (CScopeId){.value = 0}, symbol, name);
+        }
+        *found = entity;
+    }
+    return answered;
+}
+
 BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
 {
     CScope* value = &result->scopes[scope.value];
@@ -18342,14 +18728,20 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
         result->typedef_lookup_buckets[name_bucket] = entity;
     }
     c_parse_binding_bind(result, scope, entity, added->symbol);
+    if (result->scope_cursor)
+    {
+        result->scope_cursor->stale = true;
+    }
 }
 
 // The scope-and-symbol chains, walked from `scope` outwards: the definition
 // of what a name resolves to, and what every lookup outside the scope the
 // binding array stands for still asks.
-BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
+// `hops` receives the scopes walked, which only the work counters read.
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name, u32* hops)
 {
     CEntityId found = C_ENTITY_ID_INVALID;
+    *hops = 0;
     while (scope.value != C_ID_UNDERLYING_INVALID && found.value == C_ID_UNDERLYING_INVALID)
     {
         u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
@@ -18364,6 +18756,7 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
             entity = found.value == C_ID_UNDERLYING_INVALID ? candidate->next_in_lookup : entity;
         }
         scope = result->scopes[scope.value].parent;
+        *hops += 1;
     }
     return found;
 }
@@ -18375,16 +18768,24 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
 {
     CEntityId found;
+    u32 hops = 0;
     if (result->binding_by_symbol && symbol && symbol < result->binding_capacity && scope.value == result->binding_scope.value)
     {
         found = result->binding_by_symbol[symbol];
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name).value);
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
+#endif
+    }
+    else if (result->scope_cursor && c_parse_scope_cursor_lookup(result, scope, symbol, name, &found))
+    {
+#if BUSTER_REFERENCE_CHECKS
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
 #endif
     }
     else
     {
-        found = c_parse_lookup_entity_chain(result, scope, symbol, name);
+        found = c_parse_lookup_entity_chain(result, scope, symbol, name, &hops);
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS, hops);
     }
     return found;
 }
@@ -18431,6 +18832,13 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope(CParseResult* result,
         CEntityId innermost = result->binding_by_symbol[symbol];
         found = innermost.value != C_ID_UNDERLYING_INVALID && result->entities[innermost.value].scope.value == scope.value ? innermost
                                                                                                                           : C_ENTITY_ID_INVALID;
+#if BUSTER_REFERENCE_CHECKS
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
+#endif
+    }
+    else if (result->scope_cursor && c_parse_scope_cursor_lookup(result, scope, symbol, name, &found))
+    {
+        found = found.value != C_ID_UNDERLYING_INVALID && result->entities[found.value].scope.value == scope.value ? found : C_ENTITY_ID_INVALID;
 #if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
 #endif
@@ -29553,6 +29961,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     {
         if (kind != C_TYPE_VA_LIST) c_parse_expression_scalar_type(result, (CTypeKind)kind);
     }
+    // Every family below walks bodies whose scopes the binder has closed.
+    result->scope_cursor = c_parse_scope_cursor_create(machine->scratch_arena, result);
     u32* first_local = arena_allocate(machine->scratch_arena, u32, result->declaration_count);
     u32* next_local = arena_allocate(machine->scratch_arena, u32, result->entity_count);
     memset(first_local, 0xff, sizeof(*first_local) * result->declaration_count);
@@ -29753,6 +30163,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     // declarations were bound; inspect the final member table before lowering.
     c_parse_validate_member_types(machine, result, preprocess);
     result->expression_scalar_types = 0;
+    result->scope_cursor = 0;
 }
 
 // Early resource failures precede the ordinary token-sized diagnostic table.

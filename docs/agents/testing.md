@@ -517,6 +517,16 @@ child. `WASM_NODE_PROCESS` retains separate startup and wait timings. Delayed
 startup and missing-readiness controls cover the handshake. Actual Node-backed
 Wasm oracle deadlines and success requirements are unchanged.
 
+The bit-field aggregate Node oracle (#2194) logs `WASM_NODE_MODULE` with the
+exact module size and SHA-256 before each run, and the module bytes as hex
+(`WASM_NODE_MODULE_BYTES`, at most 64 KiB) when the oracle fails. After
+`WASM_NODE_READY` its script writes a `WASM_NODE_PHASE <name> uptime_us=...`
+line after Node provenance (`ready`), the artifact read, module compilation and
+instantiation, then the summary and `WASM_NODE_DONE`/`WASM_NODE_EXIT` stamps.
+`WASM_NODE_PROCESS` reports the last complete phase as `last_phase`, so a
+timeout names the step it interrupted. Phases and stamps are evidence only:
+success still requires the summary, a normal zero exit and empty stderr.
+
 ## Throughput runner integration
 
 The desktop combination matrix builds and runs `bench_throughput self-test`
