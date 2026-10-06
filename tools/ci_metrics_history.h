@@ -143,6 +143,8 @@ BUSTER_GLOBAL_LOCAL int cm_stage(CmTransport *t, CmOutputs *out, const char *dir
     {
         fputs("{\"schema\":\"buster-ci-history-publication-v1\",\"observed_at\":", manifest); cm_quote(manifest, observed);
         fputs(",\"collector_revision\":", manifest); cm_quote(manifest, t->revision);
+        fputs(",\"producer_run_id\":", manifest); cm_quote(manifest, getenv("GITHUB_RUN_ID") ? getenv("GITHUB_RUN_ID") : "");
+        fputs(",\"producer_run_attempt\":", manifest); cm_quote(manifest, getenv("GITHUB_RUN_ATTEMPT") ? getenv("GITHUB_RUN_ATTEMPT") : "");
         fputs(",\"expected_head\":", manifest); cm_quote(manifest, t->head);
         fputs(",\"expected_tree\":", manifest); cm_quote(manifest, t->tree);
         fputs(",\"files\":[", manifest);
@@ -174,13 +176,20 @@ BUSTER_GLOBAL_LOCAL int cm_regular_read(const char *directory, const char *name,
 {
     int result = cm_path(name) && !strchr(name, '/');
     char path[4096];
-    struct stat st;
     if (result)
     {
         int n = snprintf(path, sizeof(path), "%s/%s", directory, name);
-        result = n > 0 && (size_t)n < sizeof(path) && lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+        int fd = n > 0 && (size_t)n < sizeof(path) ? open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) : -1;
+        struct stat st = {0};
+        result = fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
             st.st_nlink == 1 && st.st_size >= 0 && (uint64_t)st.st_size <= CM_BYTES;
-        if (result) { size_t length = 0; *content = cm_read(path, CM_BYTES, &length); result = *content != NULL && !memchr(*content, 0, length); }
+        FILE *file = result ? fdopen(fd, "rb") : NULL;
+        if (file)
+        {
+            *content = cm_memory(file); fclose(file);
+            result = *content != NULL && strlen(*content) == (size_t)st.st_size;
+        }
+        else { if (fd >= 0) close(fd); result = 0; }
     }
     return result;
 }
@@ -193,6 +202,8 @@ BUSTER_GLOBAL_LOCAL int cm_publish_stage(CmTransport *t, const char *directory)
     CmJson plan = cm_json_parse(text ? text : "", text ? strlen(text) : 0);
     valid = valid && plan.valid && cm_equal(cm_get(&plan, 1, "schema"), "buster-ci-history-publication-v1") &&
         cm_equal(cm_get(&plan, 1, "collector_revision"), t->revision) &&
+        cm_equal(cm_get(&plan, 1, "producer_run_id"), getenv("GITHUB_RUN_ID")) &&
+        cm_equal(cm_get(&plan, 1, "producer_run_attempt"), getenv("GITHUB_RUN_ATTEMPT")) &&
         cm_time(cm_get(&plan, 1, "observed_at")) >= 0;
     CmOutputs out = {0};
     if (valid)

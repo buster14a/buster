@@ -17,7 +17,7 @@ struct CmCollection
     const char *observed;
     uint64_t selected_job;
     unsigned executions, machine_verified, source_verified, skipped, failed;
-    int source_action_verified;
+    int source_action_verified, quiet;
 };
 BUSTER_GLOBAL_LOCAL const char *cm_machine_value(const CmJson *j, const char *key)
 {
@@ -453,7 +453,7 @@ BUSTER_GLOBAL_LOCAL int cm_collect_job(CmCollection *c, const CmJson *j, unsigne
             {
                 int added = cm_add(c->store, &row);
                 valid = added != 0;
-                if (added == 1) cm_emit_row(stdout, &row);
+                if (added == 1 && !c->quiet) cm_emit_row(stdout, &row);
             }
         }
         free(steps);
@@ -471,6 +471,18 @@ BUSTER_GLOBAL_LOCAL int cm_collect_run(CmCollection *c, uint64_t id)
         cm_equal(cm_get(&run, 1, "status"), "completed") && attempts > 0 && attempts <= CM_MAX_ATTEMPTS;
     for (uint64_t attempt = 1; valid && attempt <= attempts; ++attempt)
     {
+        CmJson previous = {0};
+        const CmJson *execution = &run;
+        if (attempt < attempts)
+        {
+            snprintf(endpoint, sizeof(endpoint), "actions/runs/%" PRIu64 "/attempts/%" PRIu64, id, attempt);
+            previous = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
+            execution = &previous;
+        }
+        valid = execution->valid && cm_number(execution, 1, "id") == id &&
+            cm_number(execution, 1, "run_attempt") == attempt &&
+            cm_equal(cm_get(execution, 1, "head_sha"), cm_get(&run, 1, "head_sha")) &&
+            cm_equal(cm_get(execution, 1, "status"), "completed");
         uint64_t total = UINT64_MAX, seen[CM_MAX_JOBS];
         unsigned count = 0;
         for (unsigned page = 1; valid && count < total; ++page)
@@ -488,11 +500,12 @@ BUSTER_GLOBAL_LOCAL int cm_collect_run(CmCollection *c, uint64_t id)
                 uint64_t job_id = cm_number(&jobs, job, "id");
                 valid = job_id && count < total && count < CM_MAX_JOBS && ++chunk <= 100;
                 for (unsigned i = 0; valid && i < count; ++i) valid = seen[i] != job_id;
-                if (valid) { seen[count++] = job_id; valid = cm_collect_job(c, &jobs, job, &run, attempt); }
+                if (valid) { seen[count++] = job_id; valid = cm_collect_job(c, &jobs, job, execution, attempt); }
             }
             valid = valid && (count == total || chunk == 100);
             cm_json_free(&jobs);
         }
+        cm_json_free(&previous);
     }
     if (!valid) { ++c->store->gaps; ++c->store->incomplete_runs; ++c->failed; }
     cm_json_free(&run);

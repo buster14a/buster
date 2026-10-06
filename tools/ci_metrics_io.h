@@ -13,6 +13,8 @@
 #include <sys/resource.h>
 #include <signal.h>
 #define CM_REQUESTS 600u
+typedef struct CmResponse CmResponse;
+struct CmResponse { const char *path, *method, *content; int success, missing; };
 typedef struct CmTransport CmTransport;
 struct CmTransport
 {
@@ -20,6 +22,9 @@ struct CmTransport
     double deadline;
     char revision[41], head[41], tree[41];
     int data_exists, invalid_data;
+    // Explicit synthetic read fixtures; production leaves this pointer null.
+    const CmResponse *fixture;
+    unsigned fixture_count, fixture_cursor;
 };
 BUSTER_GLOBAL_LOCAL double cm_clock(void)
 {
@@ -81,11 +86,24 @@ BUSTER_GLOBAL_LOCAL int cm_process(char *const *args, char **output, size_t limi
             else result = 0;
         }
         else result = 0;
-        if (not_found)
+        if (not_found || !result)
         {
             char message[2048];
             rewind(err); size_t n = fread(message, 1, sizeof(message) - 1, err); message[n] = 0;
-            *not_found = !result && strstr(message, "(HTTP 404)") != NULL;
+            if (not_found) *not_found = !result && strstr(message, "(HTTP 404)") != NULL;
+            if (!result)
+            {
+                const char *http = strstr(message, "(HTTP ");
+                int code = http && strlen(http) >= 9 ? atoi(http + 6) : 0;
+                const char *reason = strstr(message, "Resource not accessible") ? "resource-inaccessible" :
+                    strstr(message, "admin rights") ? "admin-rights-required" :
+                    strstr(message, "authentication") ? "authentication-failed" :
+                    strstr(message, "rate limit") ? "rate-limited" :
+                    strstr(message, "TLS") ? "tls-error" : strstr(message, "timeout") ? "timeout" :
+                    strstr(message, "redirect") ? "redirect-error" : "transport-or-response-error";
+                fprintf(stderr, "CI history transport: exit=%d http=%d reason=%s\n",
+                    status != -1 && WIFEXITED(status) ? WEXITSTATUS(status) : -1, code, reason);
+            }
         }
     }
     if (out) fclose(out);
@@ -122,14 +140,25 @@ BUSTER_GLOBAL_LOCAL int cm_api(CmTransport *t, const char *path, const char *met
                 "-H", "X-GitHub-Api-Version: 2022-11-28", NULL, NULL, NULL};
             if (body) { args[11] = "--input"; args[12] = temporary; }
             int absent = 0; ++t->requests;
-            result = cm_process(args, output, CM_BYTES, &absent);
+            if (t->fixture)
+            {
+                if (t->fixture_cursor < t->fixture_count)
+                {
+                    const CmResponse *response = &t->fixture[t->fixture_cursor++];
+                    result = cm_equal(path, response->path) && cm_equal(method, response->method) && response->success;
+                    absent = response->missing;
+                    *output = strdup(response->content ? response->content : "");
+                    result &= *output != NULL;
+                }
+            }
+            else result = cm_process(args, output, CM_BYTES, &absent);
             last_absent = absent;
             if (missing) *missing = absent;
             if (absent) allowed = 0;
             if (!result && allowed && attempt + 1 < attempts)
             {
                 ++t->retries;
-                struct timespec pause = {(time_t)(attempt + 1), 0}; nanosleep(&pause, NULL);
+                if (!t->fixture) { struct timespec pause = {(time_t)(attempt + 1), 0}; nanosleep(&pause, NULL); }
             }
         }
     }

@@ -2,7 +2,7 @@
 // No fixture is ever written to the production history branch.
 #ifndef BUSTER_CI_METRICS_TEST_H
 #define BUSTER_CI_METRICS_TEST_H
-#include "ci_metrics_model.h"
+#include "ci_metrics_history.h"
 BUSTER_GLOBAL_LOCAL int cm_test_check(int condition, const char *name)
 {
     int result = condition ? 0 : 1;
@@ -41,9 +41,107 @@ BUSTER_GLOBAL_LOCAL CmRow cm_fixture(char text[CM_FIELD_COUNT][CM_FIELD + 1], un
     snprintf(text[CM_COMPLETED], CM_FIELD + 1, "2026-10-%02uT00:%02d:%02dZ", day, seconds / 60, seconds % 60);
     return r;
 }
-BUSTER_GLOBAL_LOCAL int cm_self_test(void)
+BUSTER_GLOBAL_LOCAL char *cm_inventory_fixture(unsigned begin, unsigned count, unsigned total, int terminal)
+{
+    FILE *file = tmpfile();
+    char *result = NULL;
+    if (file)
+    {
+        fprintf(file, "{\"total_count\":%u,\"jobs\":[", total);
+        for (unsigned i = 0; i < count; ++i)
+        {
+            if (i) fputc(',', file);
+            fprintf(file, "{\"id\":%u,\"run_id\":1,\"run_attempt\":1,"
+                "\"head_sha\":\"1111111111111111111111111111111111111111\","
+                "\"name\":\"cell-%u\",\"status\":\"%s\",\"conclusion\":\"skipped\","
+                "\"started_at\":\"2026-10-01T00:00:00Z\",\"completed_at\":\"2026-10-01T00:00:01Z\","
+                "\"runner_id\":0,\"labels\":[],\"steps\":[]}", begin + i, begin + i, terminal ? "completed" : "in_progress");
+        }
+        fputs("]}", file); result = cm_memory(file); fclose(file);
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int cm_inventory_tests(void)
 {
     int failures = 0;
+    const char *run = "{\"id\":1,\"run_attempt\":1,\"repository\":{\"full_name\":\"" CM_REPO "\"},"
+        "\"status\":\"completed\",\"conclusion\":\"failure\",\"event\":\"push\",\"head_branch\":\"main\","
+        "\"head_sha\":\"1111111111111111111111111111111111111111\","
+        "\"path\":\".github/workflows/ci.yml\",\"created_at\":\"2026-10-01T00:00:00Z\"}";
+    char *page1 = cm_inventory_fixture(10, 100, 101, 1), *page2 = cm_inventory_fixture(110, 1, 101, 1);
+    char *duplicate = cm_inventory_fixture(10, 1, 101, 1), *unfinished = cm_inventory_fixture(110, 1, 101, 0);
+    CmStore store;
+    int initialized = cm_store_init(&store);
+    if (initialized && page1 && page2 && duplicate && unfinished)
+    {
+        CmResponse responses[] =
+        {
+            {"actions/runs/1", "GET", run, 1, 0},
+            {"actions/runs/1/attempts/1/jobs?per_page=100&page=1", "GET", "", 0, 0},
+            {"actions/runs/1/attempts/1/jobs?per_page=100&page=1", "GET", page1, 1, 0},
+            {"actions/runs/1/attempts/1/jobs?per_page=100&page=2", "GET", duplicate, 1, 0}
+        };
+        CmTransport transport = {0}; transport.deadline = cm_clock() + 60;
+        cm_copy(transport.revision, sizeof(transport.revision), "1111111111111111111111111111111111111111");
+        transport.fixture = responses; transport.fixture_count = sizeof(responses) / sizeof(responses[0]);
+        CmCollection collection = {0}; collection.transport = &transport; collection.store = &store;
+        collection.observed = "2026-10-06T12:00:00Z"; collection.quiet = 1;
+        failures += cm_test_check(!cm_collect_run(&collection, 1) && store.count == 100 &&
+            store.gaps == 1 && transport.retries == 1, "pagination duplicate rejected after bounded transient recovery");
+        responses[1].success = 1; responses[1].content = page1;
+        responses[2].path = responses[3].path; responses[2].content = unfinished; responses[3].path = "";
+        transport.fixture_cursor = 0; transport.fixture_count = 3;
+        failures += cm_test_check(!cm_collect_run(&collection, 1) && store.count == 100,
+            "completed workflow with unfinalized job remains pending");
+        responses[2].content = page2; transport.fixture_cursor = 0;
+        failures += cm_test_check(cm_collect_run(&collection, 1) && store.count == 101,
+            "late finalized retry adds only the missing execution");
+        transport.fixture_cursor = 0;
+        failures += cm_test_check(cm_collect_run(&collection, 1) && store.count == 101,
+            "paginated reconciliation does not duplicate durable executions");
+        CmResponse absent[] = {{"git/ref/heads/" CM_BRANCH, "GET", "", 0, 1}};
+        transport.fixture = absent; transport.fixture_cursor = 0; transport.fixture_count = 1;
+        unsigned before = transport.failures;
+        failures += cm_test_check(cm_data_head(&transport) && !transport.data_exists &&
+            transport.fixture_cursor == 1 && transport.failures == before, "initial absent data branch is not an API outage");
+    }
+    else ++failures;
+    cm_store_free(&store); free(page1); free(page2); free(duplicate); free(unfinished);
+    const char *workflow = "name: Fixture\njobs:\n  test:\n    steps:\n"
+        "      - name: Machine specifications\n"
+        "        uses: buster14a/buster/.github/actions/machine-specifications@" CM_REPORTER "\n"
+        "      - name: Record actual checkout identity\n"
+        "        uses: buster14a/buster/.github/actions/machine-specifications@" CM_REPORTER "\n"
+        "        with:\n          mode: source\n";
+    int matrix = 0;
+    failures += cm_test_check(cm_workflow_startup(workflow, "test", &matrix) &&
+        cm_workflow_source(workflow, "test"), "reviewed startup and source action provenance");
+    failures += cm_test_check(!cm_workflow_startup(workflow, "other", &matrix),
+        "same display name cannot bind a different logical job");
+    char log[] = "2026-10-01T00:00:00Z MACHINE_SPECIFICATIONS_JSON {}\n"
+        "2026-10-01T00:00:01Z MACHINE_SPECIFICATIONS_JSON {}\n";
+    unsigned duplicates = 0;
+    char *record = cm_log_record(log, "MACHINE_SPECIFICATIONS_JSON ",
+        "2026-10-01T00:00:00Z", "2026-10-01T00:00:01Z", &duplicates);
+    failures += cm_test_check(!record && duplicates == 2, "duplicate startup records never attribute hardware");
+    free(record);
+    char directory[] = "/tmp/buster-ci-history-test-XXXXXX";
+    char *created = mkdtemp(directory);
+    if (created)
+    {
+        char path[4096]; snprintf(path, sizeof(path), "%s/link.txt", directory);
+        int linked = symlink("/etc/passwd", path) == 0;
+        char *content = NULL;
+        failures += cm_test_check(linked && !cm_regular_read(directory, "link.txt", &content),
+            "publisher rejects symlink payload without following it");
+        free(content); unlink(path); rmdir(directory);
+    }
+    else ++failures;
+    return failures;
+}
+BUSTER_GLOBAL_LOCAL int cm_self_test(void)
+{
+    int failures = cm_inventory_tests();
     const char *valid[] = {"{}", "[]", "{\"a\":[1,true,false,null,\"a\\n\\u20ac\\ud83d\\ude00\"]}", "0", "-1.25e+2"};
     const char *invalid[] = {"", "{\"a\":1,\"a\":2}", "[1,]", "{\"a\":}", "{\"a\":1,}", "[01]", "[NaN]",
         "[Infinity]", "[1e]", "\"\\u0000\"", "\"\\ud800\"", "\"\\udc00\"", "{}{}", "\"bad\nstring\""};

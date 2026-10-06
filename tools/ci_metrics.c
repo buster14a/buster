@@ -64,7 +64,7 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
         {
             valid = cm_publish_stage(&transport, directory);
             result = valid ? 0 : 2;
-            printf("CI_HISTORY_PUBLICATION status=%s data_head=%s\n", valid ? "published-or-idempotent" : "failed", transport.head);
+            printf("CI_HISTORY_PUBLICATION status=%s data_head=%s\n", valid ? "published" : "failed", transport.head);
         }
         else if (valid && (cm_equal(mode, "collect") || cm_equal(mode, "report")))
         {
