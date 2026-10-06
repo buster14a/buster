@@ -217,6 +217,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs_check.c"),
          .both_optimizations = true},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_variadic_aggregates.c"),
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_variadic_aggregates_check.c"),
+         .both_optimizations = true},
 #endif
 #endif
         {.source = S8("tests/basic_c_llvm_integer_boundary_values.c"), .caller = S8("tests/basic_c_llvm_integer_boundary_check.c")},
@@ -1226,7 +1229,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArg
                                  S8("tests/basic_c_llvm_abi_unsupported.c")};
             CompilerDriverResult emitted = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-            if (mode != 3)
+            // x86-64 lowers aggregate variadic arguments with the call-site ABI.
+            if (mode != 3 && !(target == 3 && mode == 4))
             {
                 // A SysV record containing only ignored padding has no
                 // transport parts. The frontend's unsupported zero-part

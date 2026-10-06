@@ -253,6 +253,22 @@ struct LlvmBcAbiSignature
     u32 attribute_list_id;
     u32 first_attribute_group;
     u32 attribute_group_count;
+    // Register counters after the fixed parameters, which a call site with
+    // aggregate variadic arguments continues from.
+    IrAbiConvention convention;
+    u32 integer_registers;
+    u32 float_registers;
+};
+
+// Call-site signature of one variadic call whose extra arguments include an
+// aggregate: the callee type's signature extended by those arguments, with
+// its own attribute list for their byval storage.
+typedef struct LlvmBcCallSignature LlvmBcCallSignature;
+struct LlvmBcCallSignature
+{
+    IrFunction* function;
+    IrInstruction* instruction;
+    LlvmBcAbiSignature* signature;
 };
 
 typedef struct LlvmBcAttributeGroup LlvmBcAttributeGroup;
@@ -361,6 +377,10 @@ struct LlvmBcContext
     u32** ir_field_indices;
     LlvmBcAbiSignature** abi_signatures;
     LlvmBcAbiSignature** attribute_lists;
+    u32 attribute_list_capacity;
+    LlvmBcCallSignature* call_signatures;
+    u32 call_signature_count;
+    u32 call_signature_capacity;
     LlvmBcAttributeGroup* attribute_groups;
     u32 attribute_group_count;
     u32 attribute_group_capacity;
@@ -961,6 +981,7 @@ static bool llvm_bc_build_types(LlvmBcContext* context)
     context->ir_type_ids = arena_allocate(context->arena, u32, count ? count : 1);
     context->abi_signatures = arena_allocate(context->arena, LlvmBcAbiSignature*, count ? count : 1);
     context->attribute_lists = arena_allocate(context->arena, LlvmBcAbiSignature*, count ? count : 1);
+    context->attribute_list_capacity = count ? count : 1;
     memset(context->abi_signatures, 0, sizeof(*context->abi_signatures) * count);
     TargetParseResult target = target_parse_triple(context->options.target_triple);
     context->abi_target = target.target;
@@ -1299,6 +1320,17 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_scalar_abi_extension(LlvmBcContext* context, IrT
     return extension;
 }
 
+BUSTER_GLOBAL_LOCAL void llvm_bc_register_attribute_list(LlvmBcContext* context, LlvmBcAbiSignature* signature)
+{
+    if (signature->attribute_group_count)
+    {
+        llvm_bc_vec_reserve(context->arena, (void**)&context->attribute_lists, &context->attribute_list_capacity,
+                            context->attribute_list_count + 1, sizeof(*context->attribute_lists), BUSTER_ALIGN_OF(LlvmBcAbiSignature*));
+        context->attribute_lists[context->attribute_list_count] = signature;
+        signature->attribute_list_id = ++context->attribute_list_count;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcContext* context, IrType* type)
 {
     LlvmBcAbiSignature* signature = context->abi_signatures[type->id.value];
@@ -1354,14 +1386,84 @@ BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcCont
                                      BUSTER_MAX(parameter->layout.alignment, 8u));
             }
         }
-        if (signature->attribute_group_count)
-        {
-            context->attribute_lists[context->attribute_list_count] = signature;
-            signature->attribute_list_id = ++context->attribute_list_count;
-        }
+        signature->convention = convention;
+        signature->integer_registers = integers;
+        signature->float_registers = floats;
+        llvm_bc_register_attribute_list(context, signature);
         context->ir_type_ids[type->id.value] = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, operands, count);
     }
     return signature;
+}
+
+// Variadic aggregates follow the fixed-parameter classification of the same
+// target ABI: SysV eightbytes ride registers as scalars, memory-class values
+// are byval, and Win64 copies anything over eight bytes behind a pointer.
+BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_variadic_call_signature(LlvmBcContext* context, IrFunction* function, IrInstruction* instruction,
+                                                                        LlvmBcAbiSignature* base, u32 fixed_count)
+{
+    LlvmBcAbiSignature* result = base;
+    bool aggregate = false;
+    for (u32 index = fixed_count + 1; index < instruction->operand_count; index += 1)
+    {
+        aggregate |= llvm_bc_is_aggregate(llvm_bc_ir_type(context, function->values[instruction->operands[index].value].canonical_type));
+    }
+    if (aggregate)
+    {
+        LlvmBcCallSignature* cached = 0;
+        for (u32 index = 0; index < context->call_signature_count && !cached; index += 1)
+        {
+            LlvmBcCallSignature* entry = context->call_signatures + index;
+            cached = entry->instruction == instruction && entry->function == function ? entry : 0;
+        }
+        if (cached)
+        {
+            result = cached->signature;
+        }
+        else if (!context->abi_target_valid || context->abi_target.cpu_arch != CPU_ARCH_X86_64)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE,
+                         llvm_bc_s8("LLVM aggregate variadic arguments require call-site ABI lowering"),
+                         function, 0, instruction, instruction->symbol);
+        }
+        else
+        {
+            u32 total = instruction->operand_count - 1;
+            LlvmBcAbiSignature* derived = arena_allocate(context->arena, LlvmBcAbiSignature, 1);
+            *derived = *base;
+            derived->parameters = arena_allocate(context->arena, LlvmBcAbiValue, total);
+            memcpy(derived->parameters, base->parameters, sizeof(LlvmBcAbiValue) * fixed_count);
+            derived->parameter_count = total;
+            derived->attribute_list_id = 0;
+            derived->first_attribute_group = context->attribute_group_count;
+            derived->attribute_group_count = 0;
+            for (u32 group = 0; group < base->attribute_group_count; group += 1)
+            {
+                LlvmBcAttributeGroup copy = context->attribute_groups[base->first_attribute_group + group];
+                llvm_bc_abi_attribute(context, derived, copy.parameter, copy.kind, copy.type_id, copy.alignment);
+            }
+            u32 integers = base->integer_registers;
+            u32 floats = base->float_registers;
+            u32 indirect_result = base->result.aggregate && base->result.indirect;
+            for (u32 index = fixed_count; index < total && !llvm_bc_failed(context); index += 1)
+            {
+                IrTypeId type_id = function->values[instruction->operands[index + 1].value].canonical_type;
+                IrType* type = llvm_bc_ir_type(context, type_id);
+                derived->parameters[index] = llvm_bc_abi_value(context, type_id, base->convention, false, &integers, &floats);
+                if (derived->parameters[index].byval)
+                {
+                    llvm_bc_abi_attribute(context, derived, index + 1 + indirect_result, LLVM_BC_ATTRIBUTE_BYVAL,
+                                          context->ir_type_ids[type_id.value], BUSTER_MAX(type->layout.alignment, 8u));
+                }
+            }
+            llvm_bc_register_attribute_list(context, derived);
+            llvm_bc_vec_reserve(context->arena, (void**)&context->call_signatures, &context->call_signature_capacity,
+                                context->call_signature_count + 1, sizeof(*context->call_signatures), BUSTER_ALIGN_OF(LlvmBcCallSignature));
+            context->call_signatures[context->call_signature_count++] =
+                (LlvmBcCallSignature){.function = function, .instruction = instruction, .signature = derived};
+            result = derived;
+        }
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_call_signature(LlvmBcContext* context, IrFunction* function, IrInstruction* instruction)
@@ -1377,6 +1479,10 @@ BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_call_signature(LlvmBcContext* co
         if (signature && signature->kind == IR_TYPE_FUNCTION)
         {
             result = llvm_bc_prepare_abi_signature(context, signature);
+            if (signature->is_variadic && instruction->operand_count > signature->parameter_count + 1)
+            {
+                result = llvm_bc_variadic_call_signature(context, function, instruction, result, signature->parameter_count);
+            }
         }
     }
     if (!result)

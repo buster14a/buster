@@ -152,8 +152,17 @@ C calling convention, including indirect calls, register exhaustion, by-value
 stack arguments, and hidden result pointers. LLVM parameter attributes describe
 these ABI storage requirements.
 
+Aggregates passed through `...` on x86-64 follow the same classification at the
+call site: System V eightbytes ride registers as scalar arguments (with the
+register-exhaustion rollback to byval stack storage) and Win64 copies values over
+eight bytes behind a pointer. A call with such arguments gets its own call-site
+attribute list so byval storage is described on the variadic parameters. Reading
+them back with `va_arg` of an aggregate inside an LLVM-emitted definition is not
+implemented.
+
 Aggregate function signatures on AArch64, Wasm64, and eBPF, aggregate
-parameters/results without value fields, aggregate variadic arguments, and System V unions containing
+variadic arguments on those targets, aggregate
+parameters/results without value fields, and System V unions containing
 128-bit floating values currently produce an
 explicit diagnostic. Scalar signatures and aggregate local storage remain
 available on those targets. The emitter does not substitute a raw LLVM record
