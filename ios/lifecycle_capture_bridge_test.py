@@ -647,6 +647,95 @@ fi
         self.assertEqual(status, int(complete[2]))
         return status, self.supervisor(prefix), time.monotonic() - started
 
+    def test_closed_completion_pipe_reports_failure_without_traceback_or_status_invention(self):
+        cases = ((0, None, False, 125), (137, None, False, 124),
+                 (0, signal.SIGINT, False, 130), (0, signal.SIGTERM, False, 143),
+                 (137, None, True, 124))
+        for monitor_status, signum, caller_lost, expected in cases:
+            with self.subTest(monitor_status=monitor_status, signum=signum, caller_lost=caller_lost):
+                case = self.owner_driver(["/bin/sh", "-c", "printf completion-control"],
+                                         command_seconds=10, capture_seconds=21)
+                process, prefix, descriptors, generation, started = case
+                self.assertEqual(self.read_frame(descriptors["ready"], 3),
+                                 ("DONE %s\n" % generation).encode())
+                # DONE precedes final monitor proof. Close the only completion
+                # reader before authorizing terminal publication: real EPIPE.
+                self.close_descriptor(descriptors["completion"])
+                if signum is not None:
+                    os.write(descriptors["lifetime"], ("CANCEL %s %d\n" % (generation, signum)).encode())
+                if caller_lost:
+                    self.close_descriptor(descriptors["lifetime"])
+                os.write(descriptors["adjudication"],
+                         ("COMMAND-MONITOR %s %d\n" % (generation, monitor_status)).encode())
+                self.close_descriptor(descriptors["adjudication"])
+                self.close_descriptor(descriptors["control"])
+                self.assertEqual(process.wait(timeout=4), expected)
+                owner = self.supervisor(prefix)
+                self.assertEqual(owner["helper_error"], "BrokenPipeError")
+                self.assertEqual(owner["cleanup_status"], "1")
+                self.assertEqual(owner["command_status"], str(expected))
+                self.assertEqual(owner["native_status"], "0")
+                self.assertEqual(owner["deadline_reached"], "1" if monitor_status else "0")
+                self.assertEqual(owner["cancellation_signal"], str(signum or 0))
+                self.assertEqual(owner["caller_lost"], str(int(caller_lost)))
+                self.assertEqual(owner["native_reaped"], "1")
+                self.assertEqual(owner["keeper_reaped"], "1")
+                self.assertEqual(owner["group_authority_released"], "1")
+                self.assertEqual(Path(str(prefix) + ".log").read_bytes(), b"completion-control")
+                errors = (self.root / ("direct-errors-%d" % self.sequence)).read_text()
+                self.assertEqual(errors, "")
+                self.assertLess(time.monotonic() - started, 5)
+
+    def test_native_probe_receipts_accept_only_explicit_optional_unavailability(self):
+        script = SOURCE_ROOT / "ios/launch_diagnostics_simulator_test.sh"
+        status_log = self.root / "native-probe.status"
+        output_log = self.root / "native-probe.output"
+        run_log = self.root / "native-probe.run"
+        prefix = "BUSTER_IOS_PHASE phase=diagnostic-process-table label=probe-control "
+        suffix = ("elapsed_seconds=42 deadline_seconds=10 output_limit_bytes=65536 "
+                  "command_elapsed_seconds=unavailable capture_elapsed_seconds=42 ")
+        expired = (prefix + "outcome=evidence-failure status=125 native_status=unavailable capture_status=124 "
+                   + suffix + "capture_receipt=incomplete\n"
+                   + "BUSTER_IOS_CALLER_GATE monitor_status=137 admission=0 invocation_status=unavailable "
+                   "generation=Direct01 reason=starting\n"
+                   + "BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt\n")
+        warning = "warning: iOS diagnostic unavailable name=process-table outcome=evidence-failure status=1;\n"
+        complete = prefix + "outcome=success status=0 native_status=0 capture_status=0 " + suffix + "capture_receipt=complete\n"
+        cases = [
+            ("success", complete, "", b"", 0),
+            ("command-failure", complete.replace("outcome=success status=0 native_status=0",
+                                                "outcome=command-failure status=70 native_status=70"), warning, b"stderr", 0),
+            ("native-124", complete.replace("outcome=success status=0 native_status=0",
+                                           "outcome=command-failure status=124 native_status=124"), warning, b"stderr", 0),
+            ("timeout", complete.replace("outcome=success status=0 native_status=0",
+                                         "outcome=timeout status=124 native_status=143"), warning, b"stderr", 0),
+            ("capture-expired", expired, warning, None, 0),
+            ("capture-expired-124", expired.replace("monitor_status=137", "monitor_status=124"), warning, None, 0),
+            ("limit", complete, "", b"x" * 65536, 0),
+            ("oversized", complete, "", b"x" * 65537, 1),
+            ("missing-output", complete, "", None, 1),
+            ("missing-status", "", warning, None, 1),
+            ("missing-warning", expired, "", None, 1),
+            ("wrong-probe-warning", expired, warning.replace("process-table", "unified-log"), None, 1),
+            ("traceback", expired, warning + "Traceback (most recent call last):\n", None, 1),
+            ("non-timer-refusal", expired.replace("monitor_status=137", "monitor_status=1"), warning, None, 1),
+            ("malformed-caller", expired.replace("generation=Direct01", "generation=bad"), warning, None, 1),
+            ("missing-capture-reason", expired.split("BUSTER_IOS_CAPTURE")[0], warning, None, 1),
+            ("wrong-deadline", expired.replace("deadline_seconds=10", "deadline_seconds=11"), warning, None, 1),
+            ("partial-capture", complete.replace("capture_status=0", "capture_status=124"), warning, b"", 1),
+        ]
+        for label, receipt, run, output, expected in cases:
+            with self.subTest(label=label):
+                status_log.write_text(receipt)
+                run_log.write_text(run)
+                output_log.unlink(missing_ok=True)
+                if output is not None:
+                    output_log.write_bytes(output)
+                result = subprocess.run(["/bin/bash", str(script), "--check-probe-receipt",
+                                         str(status_log), str(output_log), str(run_log), "process-table", "10"],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+                self.assertEqual(result.returncode, expected, result.stderr.decode())
+
     def test_observed_startup_deadline_survives_caller_loss_without_native_admission(self):
         for monitor_status, signum in ((137, None), (None, None), (137, signal.SIGINT), (137, signal.SIGTERM)):
             with self.subTest(monitor_status=monitor_status, signum=signum):

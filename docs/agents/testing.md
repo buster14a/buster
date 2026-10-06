@@ -324,6 +324,17 @@
   payload with real CoreSimulator boot, probes and shutdown on hosted macOS
   ARM64. The mobile lifecycle workflow retains actual probe availability and
   failure reasons there; real app compilation/execution remains in mobile CI.
+  These optional diagnostics retain a ten-second command deadline and a
+  thirty-second caller capture cap. A hosted phase observed at 42 seconds in
+  #2742 had no promoted snapshot; increasing those evidence budgets would delay
+  failure reporting without making the launch verdict stronger. The native
+  control therefore accepts an explicitly unavailable probe with an actual
+  caller-clock expiry receipt and warning, while missing/malformed protocol
+  evidence, tracebacks and oversized output still fail. A closed final
+  completion pipe becomes a private helper-failure receipt without retry;
+  native exit, deadline and cancellation facts remain separate. The bridge
+  controls cover closed completion after native success, deadline and INT/TERM,
+  plus accepted/rejected native-control receipt shapes without a simulator.
 - On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
   codesign deadline when the caller has not supplied one. This is separate
   from the test-execution, boot, install, and shutdown deadlines. Local and
