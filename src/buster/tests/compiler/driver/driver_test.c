@@ -18102,6 +18102,111 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
 }
 
 
+// GCC and Clang spellings that build systems and configure probes pass
+// (GitHub #2851). -mtune only tunes scheduling and is accepted; -static is
+// ignored without a link and refused by name at one; a lone `-` reads one C
+// translation unit from standard input under -x c or -E.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_probe_spellings(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 tunes[] = {S8("-mtune=native"), S8("-mtune=generic"), S8("-mtune=znver5")};
+    for (u32 tune_index = 0; tune_index < BUSTER_ARRAY_LENGTH(tunes); tune_index += 1)
+    {
+        String8 command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), tunes[tune_index], S8("-o"), S8("output"), S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE, invocation.diagnostic);
+    }
+    String8 empty_tune[] = {S8("-mtune="), S8("tests/basic_c_pic.c")};
+    CompilerDriverInvocation empty_tune_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(empty_tune));
+    BUSTER_STRING_TEST(arguments, empty_tune_invocation.diagnostic, S8("unsupported option: -mtune="));
+
+    String8 static_actions[] = {S8("-c"), S8("-E"), S8("-S"), S8("-fsyntax-only")};
+    for (u32 action_index = 0; action_index < BUSTER_ARRAY_LENGTH(static_actions); action_index += 1)
+    {
+        String8 command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-static"), static_actions[action_index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE, invocation.diagnostic);
+    }
+    String8 static_link[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_pic.c"), S8("-static"), S8("-o"), S8("output")};
+    CompilerDriverInvocation static_refused = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(static_link));
+    BUSTER_TEST(arguments, static_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, string_starts_with_sequence(static_refused.diagnostic, S8("unsupported option: -static (")));
+
+    // Standard input needs -x c or -E, is C only, and is one stream.
+    typedef struct StandardInputCase StandardInputCase;
+    struct StandardInputCase
+    {
+        String8 arguments[5];
+        u32 count;
+        String8 diagnostic;
+    };
+    StandardInputCase refused_cases[] = {
+        {{S8("-"), S8("-o"), S8("output")}, 3, S8("-E or -x c is required when input is from standard input -")},
+        {{S8("-c"), S8("-")}, 2, S8("-E or -x c is required when input is from standard input -")},
+        {{S8("-x"), S8("assembler"), S8("-c"), S8("-")}, 4, S8("standard input - is supported only for C source")},
+        {{S8("-x"), S8("c"), S8("-E"), S8("-"), S8("-")}, 5, S8("standard input - can be named only once")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(refused_cases); case_index += 1)
+    {
+        CompilerDriverInvocation invocation =
+            compiler_driver_parse_arguments(arena, (SliceString8){refused_cases[case_index].arguments, refused_cases[case_index].count});
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, invocation.diagnostic, refused_cases[case_index].diagnostic);
+    }
+    String8 preprocess_line[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-E"), S8("-"), S8("-o"), S8("-")};
+    CompilerDriverInvocation preprocess = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess_line));
+    BUSTER_TEST_RAW(arguments, preprocess.error == COMPILER_DRIVER_ERROR_NONE, preprocess.diagnostic);
+    if (preprocess.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        BUSTER_TEST(arguments, preprocess.input_count == 1 && preprocess.input_languages[0] == COMPILER_DRIVER_LANGUAGE_C);
+        CompilerDriverResult missing = compiler_driver_execute_invocation(arena, preprocess);
+        BUSTER_TEST(arguments, missing.error == COMPILER_DRIVER_ERROR_FILE_READ);
+        preprocess.standard_input = S8("#define VALUE 42\nint stdin_marker = VALUE;\n");
+        CompilerDriverResult preprocessed = compiler_driver_execute_invocation(arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocessed.error == COMPILER_DRIVER_ERROR_NONE, preprocessed.diagnostic);
+        // The serializer keeps a space after an expansion; match the tokens.
+        BUSTER_TEST(arguments, string_first_sequence(preprocessed.output, S8("int stdin_marker = 42")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(preprocessed.output, S8("VALUE")) == BUSTER_STRING_NO_MATCH);
+    }
+    String8 object_path = buster_test_temporary_path(arena, S8("standard-input-object"), S8(".o"));
+    String8 object_line[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-g0"), S8("-x"), S8("c"), S8("-c"), S8("-"),
+                             S8("-o"), object_path};
+    CompilerDriverInvocation object = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_line));
+    BUSTER_TEST_RAW(arguments, object.error == COMPILER_DRIVER_ERROR_NONE, object.diagnostic);
+    if (object.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        object.standard_input = S8("int main(void) { return 0; }\n");
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, object);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        BUSTER_TEST(arguments, file_read(arena, object_path, (FileReadOptions){0}).length != 0);
+        BUSTER_TEST(arguments, os_file_delete(object_path));
+    }
+    // The cc command reads the stream itself; a captured stdin is empty, an
+    // empty translation unit that preprocesses to nothing.
+    String8 child_command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-nostdinc"), S8("-x"), S8("c"), S8("-E"), S8("-")};
+    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_command), (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){
+                                                    .capture = ((u64)1 << STANDARD_STREAM_INPUT) | ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                               ((u64)1 << STANDARD_STREAM_ERROR),
+                                                    .use_process_environment = 1, .search_path = 1,
+                                                });
+    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+        BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS,
+                        BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+        BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_ERROR].length == 0);
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // AArch64 ELF has no PIC reference model. Keep admission, flag order and
 // non-code-generation routes distinct from architectures with another model.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_arguments(UnitTestArguments* arguments)
@@ -23758,6 +23863,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_section_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_probe_spellings);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_pic_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_pic_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_weak_unwind);

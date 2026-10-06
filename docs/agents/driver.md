@@ -263,6 +263,9 @@ Host detection falls back to the dynamic `native` identity if a virtualized
 family/model description names a processor incompatible with the executing
 architecture; independently probed host features are preserved. Explicit
 `-march`/`-mcpu` requests still receive the incompatibility diagnostic.
+`-mtune=<model>` is accepted with any nonempty value, `native` included, and
+ignored: it selects only a scheduling model, and instruction selection here has
+no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
@@ -1031,6 +1034,13 @@ On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
 
+`-static` follows the same split on every target: `-c`, `-S`, `-E` and
+`-fsyntax-only` ignore it, and a link refuses it as
+`unsupported option: -static (...)` because no image writer produces a
+static executable; hosted ELF links import `libc.so.6` dynamically. A
+configure probe that links with `-static` therefore learns the truth instead of
+receiving a dynamic executable (GitHub #2851).
+
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
 
@@ -1229,6 +1239,17 @@ leave the pointer null and `input_language_count` zero retain the legacy
 invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
+
+A lone `-` is an input naming standard input, as for GCC and Clang. It has no
+suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
+it as C source; without either, or under another language, the parser refuses
+it, and it may appear only once. The source text travels in
+`CompilerDriverInvocation.standard_input`: the `cc` command reads standard
+input to EOF into it after parsing, and embedding callers fill it themselves. A
+null pointer there fails the input as a read error. Diagnostics and `__FILE__`
+name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+`compiler_driver_test_probe_spellings` covers the admission rules, both routes
+and the `-static`/`-mtune` spellings (GitHub #2851).
 
 ## Response files
 
