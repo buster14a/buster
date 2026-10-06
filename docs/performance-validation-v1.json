@@ -245,7 +245,18 @@
       "zen5": {
         "route": "none",
         "status": "not applicable",
-        "reason": "marker; measures nothing"
+        "reason": "marker and queued-check bridge; measures nothing"
+      }
+    },
+    {
+      "id": "workflow:9700x-compiler-report.yml",
+      "kind": "workflow",
+      "validation": "policy",
+      "measures": "publication-only recovery of a past main comparison's commit report",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "republishes retained 9700X evidence; measures nothing"
       }
     },
     {
