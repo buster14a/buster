@@ -7,8 +7,12 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - Type-embedded constant producers use the protected TYPE query contract
   described in [foundations](foundations.md). It reads a declaration-point
   model and returns stable integer facts without entering the live declaration
-  machine. Enum consumers retain the explicit ENUM compatibility mode until
-  their declaration preparation is migrated (#1247).
+  machine. Enum consumers retain explicit ENUM compatibility arithmetic and
+  successful machineless answers. Only failed `sizeof` expression leaves use
+  that private reader at their live declaration point, exporting the size
+  magnitude without a private type ID. Type-name/function-valued operands,
+  nested layout operators and attributes remain outside this partial fallback;
+  stored-layout and broader declaration preparation remain open (#1258/#1247).
 - Record definitions in expression type names are registered in the containing
   C scope as their keyword is reached. Their braces hold member declarations;
   the block binder skips those bodies instead of opening a local scope or
