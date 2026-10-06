@@ -6162,7 +6162,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         // Every family takes two same-typed value operands and a value result
         // (places denote storage; LOAD supplies the value of a place before
         // this row), so that shared clause is checked first.
-        IrBinaryOperation operation = instruction->binary_operation;
+        u32 operation = instruction->binary_operation;
         IrValue* left = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
         IrValue* right = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
         bool valid = left && right && left->category == IR_VALUE_VALUE && right->category == IR_VALUE_VALUE &&
