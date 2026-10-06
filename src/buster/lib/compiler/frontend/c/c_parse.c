@@ -1580,6 +1580,7 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
 BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                                    CTypeId base, u32 declarator_start, u32 name_index, u32 suffix_end, bool has_name);
 BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index);
+BUSTER_C_INTERNAL bool c_parse_declarator_name_has_parameters(CPreprocessResult preprocess, u32 name_index, u32 end);
 
 BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index, bool parameter,
                                                           u32 segment_start, u32 segment_end, bool declares_no_storage);
@@ -16141,7 +16142,14 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_function_name(CPreprocessResult pre
         }
         close += 1;
     }
-    if (depth || close >= end || !c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    // `(*f(int))(void)` and `(*f(int))[3]` both declare a function: the
+    // group's own name carries the parameter list, and what follows the group
+    // is the pointee of the returned pointer. `(*p)[3]` has no parameter list
+    // after its name and stays an object.
+    if (depth || close >= end ||
+        !(c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+          (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_BRACKET) &&
+           c_parse_declarator_name_has_parameters(preprocess, candidate, end))))
     {
         return false;
     }

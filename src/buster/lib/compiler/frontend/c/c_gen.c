@@ -25861,7 +25861,12 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             IrTypeId right_pointer_type = right_pointer ? right_type : c_ir_add_pointer_type(builder->program, builder->pointer_types, right->element_type);
             IrType* left_pointer_value = ir_type_from_id(&builder->program->types, left_pointer_type);
             IrType* right_pointer_value = ir_type_from_id(&builder->program->types, right_pointer_type);
-            if (!left_pointer_value || !right_pointer_value || left_pointer_value->element_type.value != right_pointer_value->element_type.value)
+            // Each declarator spelling of an array type owns its IR array, so
+            // `int (*)[4]` operands naming the same shape compare by
+            // representation rather than by IR type identity.
+            if (!left_pointer_value || !right_pointer_value ||
+                (left_pointer_value->element_type.value != right_pointer_value->element_type.value &&
+                 !c_ir_representation_types_compatible(builder, left_pointer_value->element_type, right_pointer_value->element_type)))
             {
                 return false;
             }
@@ -27233,6 +27238,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end);
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix_bounds(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end, bool allow_unknown_bound);
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_parameter(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 // A declarator inside a type name spells a function two ways: `int (void)` is
@@ -27376,7 +27382,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
             else if (pointer_count && pointer_index == pointer_close && parameters_open < end &&
                      c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_BRACKET))
             {
-                type = c_ir_type_name_suffix(builder, type, parameters_open, end);
+                // `int (*)[]` points at an array of unknown bound, a complete
+                // object type for the pointer (C17 6.7.6.2p6).
+                type = c_ir_type_name_suffix_bounds(builder, type, parameters_open, end, true);
                 while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
                 {
                     type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
@@ -27421,6 +27429,11 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* bu
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end)
+{
+    return c_ir_type_name_suffix_bounds(builder, type, index, end, false);
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix_bounds(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end, bool allow_unknown_bound)
 {
     while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR))
     {
@@ -27471,7 +27484,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrT
     while (valid && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
     {
         u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-        valid = close < end && close > index + 1;
+        valid = close < end && (close > index + 1 || (allow_unknown_bound && !array_count));
         if (valid)
         {
             bounds[array_count++] = (CArrayBound){.token_start = index + 1, .token_count = close - index - 1};
@@ -27480,7 +27493,11 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrT
     }
     while (valid && array_count && type.value != IR_ID_UNDERLYING_INVALID)
     {
-        type = c_ir_vla_array_type_add(builder, type, bounds[--array_count]);
+        CArrayBound bound = bounds[--array_count];
+        IrType* bound_element = ir_type_from_id(&builder->program->types, type);
+        type = bound.token_count ? c_ir_vla_array_type_add(builder, type, bound)
+               : bound_element && bound_element->layout.resolved ? c_ir_add_array_type(builder->program, builder->pointer_types, type, 0)
+                                                                  : IR_TYPE_ID_INVALID;
     }
     return valid && index == end ? type : IR_TYPE_ID_INVALID;
 }
@@ -53932,6 +53949,23 @@ BUSTER_C_INTERNAL void c_ir_collect_flexible_array_types(CParseResult* parse, bo
         if (!bound.token_count && !bound.is_star && !bound.has_inferred_count)
         {
             flexible[member->type.value] = true;
+        }
+    }
+    // The pointee of `int (*)[]` is an array of unknown bound, which is a
+    // complete object type for the pointer (C17 6.7.6.2p6) and maps like a
+    // flexible array: no elements and the element's alignment.
+    for (u32 pointer_index = 0; pointer_index < parse->type_count; pointer_index += 1)
+    {
+        CType* pointer = parse->types + pointer_index;
+        if (pointer->kind != C_TYPE_POINTER || pointer->element_type.value >= parse->type_count)
+        {
+            continue;
+        }
+        CType* array = parse->types + pointer->element_type.value;
+        if (array->kind == C_TYPE_ARRAY && array->array_bound < parse->array_bound_count && array->element_type.value < parse->type_count)
+        {
+            CArrayBound bound = parse->array_bounds[array->array_bound];
+            flexible[pointer->element_type.value] |= !bound.token_count && !bound.is_star && !bound.has_inferred_count;
         }
     }
 }

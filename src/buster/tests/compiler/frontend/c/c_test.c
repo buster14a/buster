@@ -42842,6 +42842,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitT
     return result;
 }
 
+// Pointer-to-array declarator shapes (#1262): an unknown-bound pointee, a
+// difference and comparison of pointers to separately spelled `int[4]` arrays,
+// functions returning pointers to arrays, abstract declarators in type names
+// and the qualification a member array of a const object carries. Each check
+// returns its own status so a failure names the shape.
+BUSTER_GLOBAL_LOCAL String8 const c_test_pointer_to_array_shapes_source = S8_INITIALIZER(
+    "typedef struct { unsigned char id[32]; unsigned long len; } sess;\n"
+    "static inline unsigned const char (*get_id(const sess *session))[32] { return &session->id; }\n"
+    "static inline unsigned long get_len(const sess *session) { return session->len; }\n"
+    "static int rowsdata[2][3] = {{1, 2, 3}, {4, 5, 6}};\n"
+    "int (*rows(void))[3] { return rowsdata; }\n"
+    "int (*rows_proto(int))[3];\n"
+    "int a3[3] = {1, 2, 3};\n"
+    "int m[4][4];\n"
+    "int main(void)\n"
+    "{\n"
+    "    int (*p)[] = &a3;\n"
+    "    if ((*p)[2] != 3) return 1;\n"
+    "    int (*q)[4] = &m[3];\n"
+    "    int (*r)[4] = &m[1];\n"
+    "    if (q - r != 2 || r - q != -2) return 2;\n"
+    "    if (!(r < q) || !(q > r) || r == q) return 3;\n"
+    "    if (rows()[1][2] != 6 || (*rows())[1] != 2) return 4;\n"
+    "    if (rows_proto(0)[0][1] != 2) return 5;\n"
+    "    if (__builtin_types_compatible_p(int (*)[], int (*)[3]) != 1) return 6;\n"
+    "    if (__builtin_types_compatible_p(int (*)[], int (*)[4]) != 1) return 7;\n"
+    "    int a[3];\n"
+    "    if (_Generic(&a, int (*)[3]: 1, default: 2) != 1) return 8;\n"
+    "    if (sizeof(int (*)[]) != sizeof(void *)) return 9;\n"
+    "    char buf[8] = {0};\n"
+    "    if (sizeof(*(char (*)[8])buf) != 8) return 10;\n"
+    "    int (*u)[] = (int (*)[])m;\n"
+    "    if ((*u)[5] != 0) return 11;\n"
+    "    sess s = {{7}, 3};\n"
+    "    if ((*get_id(&s))[0] != 7 || get_len(&s) != 3) return 12;\n"
+    "    const sess *cs = &s;\n"
+    "    const unsigned char (*cq)[32] = &cs->id;\n"
+    "    if ((*cq)[0] != 7) return 13;\n"
+    "    return 0;\n"
+    "}\n"
+    "int (*rows_proto(int x))[3] { (void)x; return rowsdata; }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_to_array_shapes_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("pointer-to-array-shapes"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_pointer_to_array_shapes_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("pointer-to-array-shapes-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("pointer-to-array runtime mode={u32} form={u32}: status={u32} timed_out={u32}"),
+                                mode, form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A place is not a scalar value, and an unknown read is not known false.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArguments* arguments)
 {
@@ -44498,6 +44584,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     C_TEST_FIXTURE(arguments, c_test_phase_arena_release);
     C_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
+    C_TEST_FIXTURE(arguments, c_test_pointer_to_array_shapes_runtime);
     C_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
     C_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     C_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
