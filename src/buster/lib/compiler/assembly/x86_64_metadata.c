@@ -770,7 +770,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_fill_nul_distances(char8 const* poo
         // as terminators, so the window mask gates the compare result too.
         Mask64 window_mask = mask64_prefix(size - window_base);
         Simd512 bytes = simd512_load_masked(pool + window_base, window_mask);
-        Mask64 terminators = mask64_and(simd512_equal_byte(bytes, terminator), window_mask);
+        Mask64 terminators = mask64_and(simd512_equal_u8(bytes, terminator), window_mask);
         while (terminators)
         {
             u64 nul = window_base + mask64_first_set(terminators);

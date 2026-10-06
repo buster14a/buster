@@ -583,7 +583,8 @@ struct CPreprocessOptions
     bool position_independent_executable;
     // The token stream is printed as text (-E) rather than parsed, so it keeps
     // the source's spellings: parser-facing rewrites such as the obsolete
-    // `member:` designator (c_preprocess_rewrite_obsolete_designators) are
+    // `member:` designator (c_preprocess_rewrite_obsolete_designators) and
+    // the GNU local-label respelling (c_preprocess_rename_local_labels) are
     // skipped. Consumes padding before phase_arena.
     bool preserve_spellings;
     // Optional caller-owned arena for state whose last reader is inside the
