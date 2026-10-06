@@ -41823,7 +41823,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_record_jump_targets(CIntegerIrBuilder* builder, 
             if (c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(GOTO)))
             {
                 CIrLabel* label = index + 1 < body_end && builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER
-                                      ? c_ir_label_find(state->labels, label_count,
+                                      ? c_ir_label_find(state->labels, label_count, &state->label_index,
                                                         c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]))
                                       : 0;
                 if (label)
