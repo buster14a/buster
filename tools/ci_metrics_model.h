@@ -144,6 +144,18 @@ BUSTER_GLOBAL_LOCAL int cm_immutable_equal(const CmRow *a, const CmRow *b)
         result = cm_equal(a->s[immutable[i]], b->s[immutable[i]]);
     return result;
 }
+BUSTER_GLOBAL_LOCAL int cm_receipt_conflict(const CmRow *a, const CmRow *b)
+{
+    const unsigned fields[] = {CM_TESTED_SHA, CM_TESTED_TREE, CM_CPU, CM_OS, CM_WORKFLOW_SHA, CM_WORKFLOW_BLOB};
+    int result = 0;
+    if (a->origin_job == b->origin_job && a->origin_attempt == b->origin_attempt)
+        for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
+        {
+            unsigned field = fields[i];
+            result |= a->s[field][0] && b->s[field][0] && !cm_equal(a->s[field], b->s[field]);
+        }
+    return result;
+}
 BUSTER_GLOBAL_LOCAL int cm_add(CmStore *s, const CmRow *input)
 {
     int result = cm_row_valid(input) && s->count < CM_ROWS;
@@ -155,7 +167,7 @@ BUSTER_GLOBAL_LOCAL int cm_add(CmStore *s, const CmRow *input)
         {
             previous = i;
             if (cm_rows_equal(r, input, 1)) { ++s->duplicates; result = 2; }
-            else if (!cm_immutable_equal(r, input)) { ++s->conflicts; result = 0; }
+            else if (!cm_immutable_equal(r, input) || cm_receipt_conflict(r, input)) { ++s->conflicts; result = 0; }
             else if (cm_time(input->s[CM_OBSERVED]) <= cm_time(r->s[CM_OBSERVED])) result = 2;
         }
         if (result == 2) break;

@@ -333,6 +333,8 @@ BUSTER_GLOBAL_LOCAL int cm_self_test(void)
                 cm_equal(store.rows[1].s[CM_CPU], "CPU A"), "expired logs cannot erase a retained verified receipt");
             CmRow conflicting = enriched; conflicting.s[CM_OBSERVED] = "2026-10-07T12:00:00Z"; conflicting.s[CM_CPU] = "CPU B";
             failures += cm_test_check(!cm_add(&store, &conflicting), "conflicting hardware for the same physical execution quarantines enrichment");
+            conflicting.s[CM_OBSERVED] = "2026-10-05T12:00:00Z";
+            failures += cm_test_check(!cm_add(&store, &conflicting), "stale conflicting receipts are still detected");
             cm_store_free(&store);
         }
         else ++failures;
