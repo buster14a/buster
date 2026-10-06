@@ -22532,9 +22532,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 IrValueId comparison_place = place;
                 IrValueId comparison_expected = expected;
                 IrValueId comparison_desired = desired;
-                if (representation_value)
+                // The exchange compares object representations (C17
+                // 7.17.7.4p3), so a floating-point object takes the same
+                // integer view as a record: -0.0 must not match 0.0 and an
+                // identical NaN must match itself.
+                bool float_value = unqualified->kind == IR_TYPE_FLOAT;
+                bool bits_comparison = representation_value || float_value;
+                if (bits_comparison)
                 {
-                    if (!selected->builtin_atomic_generic &&
+                    if (!selected->builtin_atomic_generic && !float_value &&
                         (selected->builtin_atomic_gnu || !c_ir_atomic_aggregate_access_representable(builder, atomic_type)))
                     {
                         builder->failure_message = S8("C IR lowering does not support this atomic aggregate compare-exchange width");
@@ -22616,7 +22622,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     instruction.failure_memory_order = (u8)failure_order;
                     instruction.result = observed;
                     c_ir_append_instruction(builder, instruction, instruction_source);
-                    IrValueId observed_value = representation_value
+                    IrValueId observed_value = bits_comparison
                                                    ? c_ir_atomic_aggregate_bits_value(builder, observed, value_type_id, comparison_type, false, source)
                                                    : observed;
                     if (observed_value.value == IR_ID_UNDERLYING_INVALID ||
