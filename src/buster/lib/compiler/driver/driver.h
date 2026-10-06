@@ -229,6 +229,10 @@ struct CompilerDriverInvocation
     NativeImageKind image_kind;
     // -static was given: the link must produce an image with no loader.
     bool static_link;
+    // One plus the input index that `-` named, or 0: that input is read from
+    // standard input, whatever its displayed path; a file named like the
+    // displayed path is still an ordinary file.
+    u32 standard_input_index_plus_one;
     u8 optimization_level;
     bool has_gpu_target;
     bool save_gpu_temporaries;

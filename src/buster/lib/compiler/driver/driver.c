@@ -1408,6 +1408,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             u32 input_index = invocation.input_count++;
             invocation.input_paths[input_index] = argument;
+            if (standard_input)
+            {
+                invocation.standard_input_index_plus_one = input_index + 1;
+            }
             invocation.input_languages[input_index] = invocation.language;
             invocation.input_language_count = invocation.input_count;
             invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
@@ -4514,10 +4518,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_detach_object(Arena* arena, CPreprocess
 // The translation unit a `-` argument names. The path stays the spelling the
 // diagnostics and __FILE__ show; the bytes come from standard input, read to
 // end of stream into the arena (zero-terminated, and nonnull even when empty).
-BUSTER_GLOBAL_LOCAL FileMapRead compiler_driver_read_input(Arena* arena, String8 path)
+BUSTER_GLOBAL_LOCAL FileMapRead compiler_driver_read_input(Arena* arena, CompilerDriverInvocation const* invocation, u32 input_index)
 {
     FileMapRead result = {0};
-    if (string_equal(path, COMPILER_DRIVER_STANDARD_INPUT_PATH))
+    String8 path = invocation->input_paths[input_index];
+    if (invocation->standard_input_index_plus_one == input_index + 1)
     {
         OsFileDescriptor* input = os_get_standard_stream(STANDARD_STREAM_INPUT);
         u64 capacity = BUSTER_KB(64);
@@ -4583,7 +4588,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = S8("the C frontend currently requires exactly one C input");
         goto end;
     }
-    source_file = compiler_driver_read_input(arena, invocation.input_paths[0]);
+    source_file = compiler_driver_read_input(arena, &invocation, 0);
     ByteSlice bytes = source_file.bytes;
     if (!bytes.pointer)
     {
