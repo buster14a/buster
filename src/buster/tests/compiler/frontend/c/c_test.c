@@ -42847,6 +42847,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitT
 // functions returning pointers to arrays, abstract declarators in type names
 // and the qualification a member array of a const object carries. Each check
 // returns its own status so a failure names the shape.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 const c_test_pointer_to_array_shapes_source = S8_INITIALIZER(
     "typedef struct { unsigned char id[32]; unsigned long len; } sess;\n"
     "static inline unsigned const char (*get_id(const sess *session))[32] { return &session->id; }\n"
@@ -42883,6 +42884,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_pointer_to_array_shapes_source = S8_INI
     "    return 0;\n"
     "}\n"
     "int (*rows_proto(int x))[3] { (void)x; return rowsdata; }\n");
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_to_array_shapes_runtime(UnitTestArguments* arguments)
 {
