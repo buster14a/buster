@@ -18,6 +18,12 @@ typedef enum AssemblyUnitSectionKind
     ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA,
     ASSEMBLY_UNIT_SECTION_DATA,
     ASSEMBLY_UNIT_SECTION_ZERO,
+    // `@init_array`/`@fini_array`/`@preinit_array` and the `T` flag: the
+    // object model gives each its own ELF type or TLS flag.
+    ASSEMBLY_UNIT_SECTION_INIT_ARRAY,
+    ASSEMBLY_UNIT_SECTION_FINI_ARRAY,
+    ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA,
+    ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO,
     // Known DWARF sections retain their nonallocated object identities.
     ASSEMBLY_UNIT_SECTION_DEBUG_INFO,
     ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV,

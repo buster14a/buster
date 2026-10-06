@@ -244,6 +244,11 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder
 
 // --------------------------------------------------------------- sections
 
+BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_is_zero_fill(AssemblyUnitSectionKind kind)
+{
+    return kind == ASSEMBLY_UNIT_SECTION_ZERO || kind == ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO;
+}
+
 // Bare section defaults are an exact name, or a dot-delimited member of
 // an ordinary code/data family. DWARF names retain their nonallocated kinds;
 // unsupported bare names cannot silently acquire flags from a raw prefix.
@@ -261,6 +266,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
         {S8_INITIALIZER(".rodata"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA, true},
         {S8_INITIALIZER(".data"), ASSEMBLY_UNIT_SECTION_DATA, true},
         {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO, true},
+        // GNU as's name table: these carry their type and flags by name.
+        {S8_INITIALIZER(".init_array"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY, true},
+        {S8_INITIALIZER(".preinit_array"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY, true},
+        {S8_INITIALIZER(".fini_array"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY, true},
+        {S8_INITIALIZER(".tdata"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA, true},
+        {S8_INITIALIZER(".tbss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO, true},
         {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO, false},
         {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV, false},
         {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE, false},
@@ -597,24 +608,75 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
     String8 name = assembly_unit_unquote(assembly_unit_word(parts[0], 0));
     AssemblyUnitSectionKind kind = ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
     bool classified = false;
+    bool flags_valid = true;
+    String8 directive = push ? S8(".pushsection") : S8(".section");
     if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
     {
         String8 flags = string_slice(parts[1], 1, parts[1].length - 1);
         bool writable = false;
         bool executable = false;
-        for (u64 index = 0; index < flags.length; index += 1)
+        bool thread_local = false;
+        for (u64 index = 0; index < flags.length && flags_valid; index += 1)
         {
-            writable = writable || flags.pointer[index] == 'w';
-            executable = executable || flags.pointer[index] == 'x';
+            char8 letter = flags.pointer[index];
+            writable = writable || letter == 'w';
+            executable = executable || letter == 'x';
+            thread_local = thread_local || letter == 'T';
+            // `a`, `M`, `S` and `R` change no byte this object model stores:
+            // merging and retention only let a linker do more or less.
+            flags_valid = letter == 'a' || letter == 'w' || letter == 'x' || letter == 'T' || letter == 'M' || letter == 'S' || letter == 'R';
+            if (!flags_valid)
+            {
+                assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                         string_format(builder->arena, S8("section flag '{S8}' of the '{S8}' directive has no object representation"),
+                                                       string_slice(flags, index, index + 1), directive));
+            }
         }
-        bool no_bits = part_count > 2 && string_ends_with_sequence(parts[2], S8("nobits"));
-        kind = executable    ? ASSEMBLY_UNIT_SECTION_TEXT
-               : no_bits     ? ASSEMBLY_UNIT_SECTION_ZERO
-               : writable    ? ASSEMBLY_UNIT_SECTION_DATA
-                             : ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
+        // Names the types the object model can represent; an unsupported or
+        // malformed one (`@unwind`, ...) is diagnosed. `@note` is accepted as
+        // the kind its flags select (sh_type SHT_NOTE is not preserved), since
+        // compilers emit `.note.gnu.property,"a",@note` in ordinary output.
+        String8 type = part_count > 2 ? parts[2] : (String8){0};
+        bool has_type = type.length != 0;
+        String8 type_name = has_type && (type.pointer[0] == '@' || type.pointer[0] == '%') ? string_slice(type, 1, type.length) : (String8){0};
+        bool no_bits = string_equal(type_name, S8("nobits"));
+        bool init_array = string_equal(type_name, S8("init_array"));
+        bool fini_array = string_equal(type_name, S8("fini_array"));
+        bool preinit_array = string_equal(type_name, S8("preinit_array"));
+        if (flags_valid && has_type && !no_bits && !init_array && !fini_array && !preinit_array && !string_equal(type_name, S8("progbits")) &&
+            !string_equal(type_name, S8("note")))
+        {
+            flags_valid = false;
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                     string_format(builder->arena, S8("section type '{S8}' of the '{S8}' directive has no object representation"), type,
+                                                   directive));
+        }
+        bool array = init_array || fini_array || preinit_array;
+        if (flags_valid && ((array && (executable || thread_local || no_bits)) || (thread_local && executable)))
+        {
+            flags_valid = false;
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                     string_format(builder->arena, S8("this flag and type combination of the '{S8}' directive has no object representation"),
+                                                   directive));
+        }
+        // The object writer names a `.preinit_array` by its section name.
+        if (flags_valid && preinit_array && !string_starts_with_sequence(name, S8(".preinit_array")))
+        {
+            flags_valid = false;
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                     string_format(builder->arena, S8("'@preinit_array' needs a '.preinit_array' section name in the '{S8}' directive"),
+                                                   directive));
+        }
+        kind = init_array || preinit_array ? ASSEMBLY_UNIT_SECTION_INIT_ARRAY
+               : fini_array                ? ASSEMBLY_UNIT_SECTION_FINI_ARRAY
+               : thread_local              ? (no_bits ? ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO : ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA)
+               : executable                ? ASSEMBLY_UNIT_SECTION_TEXT
+               : no_bits                   ? ASSEMBLY_UNIT_SECTION_ZERO
+               : writable                  ? ASSEMBLY_UNIT_SECTION_DATA
+                                           : ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
         classified = true;
     }
-    if (!classified && !assembly_unit_section_kind_for_name(name, &kind))
+    if (!flags_valid || (!classified && !assembly_unit_section_kind_for_name(name, &kind)))
     {
         return false;
     }
@@ -632,11 +694,26 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
         }
     }
     u32 section = valid ? assembly_unit_section_select(builder, name, kind) : UINT32_MAX;
-    if (section != UINT32_MAX)
+    // Reopening a section with a flag/type that would make it an initializer
+    // array or TLS section (or stop being one) cannot be honoured: the first
+    // directive already fixed the object section's identity.
+    bool reopened_differently = false;
+    if (section != UINT32_MAX && builder->result.sections[section].kind != kind)
+    {
+        AssemblyUnitSectionKind existing = builder->result.sections[section].kind;
+        reopened_differently = classified && (existing >= ASSEMBLY_UNIT_SECTION_INIT_ARRAY || kind >= ASSEMBLY_UNIT_SECTION_INIT_ARRAY) &&
+                               existing <= ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO && kind <= ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO;
+        if (reopened_differently)
+        {
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                     string_format(builder->arena, S8("'{S8}' reopens a section with a different flag or type"), directive));
+        }
+    }
+    if (section != UINT32_MAX && !reopened_differently)
     {
         assembly_unit_section_switch(builder, section);
     }
-    return section != UINT32_MAX;
+    return section != UINT32_MAX && !reopened_differently;
 }
 
 // `.popsection` and `.previous` need an earlier section to return to.
@@ -755,7 +832,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_align(AssemblyUnitBuilder* buil
     {
         return true;
     }
-    if (section->kind == ASSEMBLY_UNIT_SECTION_ZERO)
+    if (assembly_unit_section_kind_is_zero_fill(section->kind))
     {
         return assembly_unit_append(builder, 0, padding);
     }
@@ -792,7 +869,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_zero(AssemblyUnitBuilder* build
     {
         return false;
     }
-    if (builder->result.sections[builder->current_section].kind == ASSEMBLY_UNIT_SECTION_ZERO)
+    if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
     {
         return assembly_unit_append(builder, 0, (u64)count);
     }
@@ -862,7 +939,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* bu
     String8 parts[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
     u32 count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
     bool valid = count != UINT32_MAX && count && assembly_unit_section_current(builder);
-    valid = valid && builder->result.sections[builder->current_section].kind != ASSEMBLY_UNIT_SECTION_ZERO &&
+    valid = valid && !assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind) &&
             count <= builder->integer_capacity - builder->integer_count;
     // Refuse malformed expressions before reserving any bytes. Symbols and
     // bindings are evaluated again after parsing to resolve forward differences.
@@ -986,7 +1063,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_ascii(AssemblyUnitBuilder* buil
     {
         return false;
     }
-    if (!assembly_unit_section_current(builder) || builder->result.sections[builder->current_section].kind == ASSEMBLY_UNIT_SECTION_ZERO)
+    if (!assembly_unit_section_current(builder) || assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
     {
         return false;
     }
@@ -1541,7 +1618,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
     {
         return false;
     }
-    if (builder->result.sections[builder->current_section].kind == ASSEMBLY_UNIT_SECTION_ZERO)
+    if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
     {
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, S8("an instruction cannot be emitted into a zero-fill section"));
         return false;
@@ -1925,7 +2002,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
     {
         AssemblyUnitSection* record = builder->result.sections + section;
         u64 size = builder->section_offsets[section];
-        if (record->kind == ASSEMBLY_UNIT_SECTION_ZERO)
+        if (assembly_unit_section_kind_is_zero_fill(record->kind))
         {
             record->zero_size = size;
             continue;
@@ -1944,7 +2021,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
     {
         AssemblyUnitPiece piece = builder->pieces[index];
         AssemblyUnitSection* record = builder->result.sections + piece.section;
-        if (record->kind == ASSEMBLY_UNIT_SECTION_ZERO || !piece.length)
+        if (assembly_unit_section_kind_is_zero_fill(record->kind) || !piece.length)
         {
             filled[piece.section] += piece.length;
             continue;

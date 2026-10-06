@@ -526,18 +526,28 @@ longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
 choice; both are equal-value encodings left alone because changing them would
 change shared encoder selection.
 
-Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
-and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
-DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_str`,
-`.debug_loc`, `.debug_ranges`, `.debug_addr`, `.debug_str_offsets`,
-`.debug_line_str`, `.debug_rnglists`, `.debug_loclists`). DWARF sections
-retain nonallocated object identities through the driver. Raw-prefix
-lookalikes such as `.initdata` cannot acquire executable flags. Other bare
-names are diagnosed while the wider explicit flag/type and generic
-nonallocated section contract remains tracked in
-[#1279](https://github.com/buster14a/buster/issues/1279). These known bare
-DWARF names cover the section directives emitted by the current `-S` printer;
-quoted instruction operands and the broader round trip are tracked in
+Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
+`.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
+suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
+and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
+`.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
+`.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
+`.debug_loclists`). DWARF sections retain nonallocated object identities
+through the driver. Raw-prefix lookalikes such as `.initdata` cannot acquire
+flags from the prefix and other bare names are diagnosed.
+
+`.section NAME,"flags",@type` (and `.pushsection`) honours `w`, `x`, `T`
+(TLS: `SHF_TLS`, so labels become `STT_TLS`) and the types `@progbits`,
+`@nobits`, `@init_array`, `@fini_array` and `@preinit_array` (the last only
+for a `.preinit_array` name). `a`, `M`, `S` and `R` are accepted and change
+nothing the object stores. Other flag letters (`G`, `e`, `o`, ...), other
+types (`@unwind`, ...), array types combined with `x`/`T`/`@nobits`,
+`T` with `x`, and reopening a section as or from an array/TLS section with
+different flags are diagnosed naming the directive. Still open in
+[#1279](https://github.com/buster14a/buster/issues/1279): a section without
+`a` (such as `.note.GNU-stack,""`) is still written allocated, and `M`/`S`
+merging has no object representation, and `@note` is accepted as an approximation: the section takes the kind its flags select (read-only data for `"a"`) and `SHT_NOTE` is not preserved.
+Quoted instruction operands and the broader round trip are tracked in
 [#2519](https://github.com/buster14a/buster/issues/2519).
 
 Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
