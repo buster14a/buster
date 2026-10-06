@@ -299,6 +299,9 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
             fputs("Anchor reason: initial observations of this exact policy/cohort. It fills at most twenty points and never slides. "
                 "Candidate overlap is excluded. Changing an anchor requires a new explicit report/policy and recorded reason; old rows remain.\n\n", report);
             cm_window(report, "Fixed anchor", fixed, fixed_count);
+            fputs("Existing native phase receipts, where supplied, are retained in the JSON/CSV exports as native_phase_records_json. "
+                "Their native monotonic clock scope, elapsed_ns and observer overhead remain separate from API job wall time; phases are not summed into CPU time. "
+                "Toolchain log receipts are reported context rather than complete producer authentication.\n\n", report);
             fputs("These are descriptive CI signals, not independent significance tests or paired experiments. "
                 "At least eight successful physical executions and three UTC date buckets per side are required. "
                 "No detectable change does not establish equivalence or causality. Outliers remain in the raw rows.\n\n", report);

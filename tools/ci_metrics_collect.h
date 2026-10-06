@@ -334,6 +334,66 @@ BUSTER_GLOBAL_LOCAL int cm_workflow_proof(CmCollection *c, const CmJson *machine
     }
     return valid;
 }
+BUSTER_GLOBAL_LOCAL void cm_reported_context(CmCollection *c, const char *log, CmRow *row,
+    char fields[CM_FIELD_COUNT][CM_FIELD + 1])
+{
+    FILE *phases = tmpfile();
+    unsigned count = 0, tools = 0; int valid = phases != NULL;
+    uint64_t seen[64];
+    if (phases) fputc('[', phases);
+    for (const char *line = log; valid && line && *line; )
+    {
+        const char *end = strchr(line, '\n'); size_t length = end ? (size_t)(end - line) : strlen(line);
+        const char *space = memchr(line, ' ', length);
+        if (space && (size_t)(space - line) < 32)
+        {
+            char stamp[32]; size_t n = (size_t)(space - line);
+            memcpy(stamp, line, n); stamp[n] = 0;
+            const char *text = space + 1; size_t bytes = length - (size_t)(text - line);
+            if (bytes && text[bytes - 1] == '\r') --bytes;
+            if (cm_log_interval(stamp, row->s[CM_STARTED], row->s[CM_COMPLETED]))
+            {
+                const char *phase_marker = "NATIVE_PHASE_RECORD ", *tool_marker = "NATIVE_TOOLCHAIN ";
+                size_t marker = strlen(phase_marker);
+                if (bytes > marker && strncmp(text, phase_marker, marker) == 0)
+                {
+                    CmJson record = cm_json_parse(text + marker, bytes - marker);
+                    uint64_t sequence = cm_number(&record, 1, "sequence");
+                    uint64_t elapsed = cm_number(&record, 1, "elapsed_ns");
+                    int accepted = record.valid && cm_equal(cm_get(&record, 1, "schema"), "buster.native-observation.phase.v1") &&
+                        cm_equal(cm_get(&record, 1, "clock"), "time.perf_counter_ns") &&
+                        sequence > 0 && sequence <= 1000 && elapsed <= UINT64_C(604800000000000) &&
+                        strlen(cm_get(&record, 1, "identity_sha256")) == 64 && strlen(cm_get(&record, 1, "phase")) <= 128;
+                    for (unsigned i = 0; accepted && i < count; ++i) accepted = seen[i] != sequence;
+                    valid = valid && accepted && count < 64;
+                    if (valid)
+                    {
+                        seen[count] = sequence; if (count++) fputc(',', phases);
+                        fwrite(text + marker, 1, bytes - marker, phases);
+                    }
+                    cm_json_free(&record);
+                }
+                marker = strlen(tool_marker);
+                if (bytes > marker && strncmp(text, tool_marker, marker) == 0)
+                {
+                    ++tools;
+                    if (tools == 1 && bytes - marker < CM_FIELD)
+                    { memcpy(fields[CM_TOOLCHAIN], text + marker, bytes - marker); fields[CM_TOOLCHAIN][bytes - marker] = 0; }
+                    else fields[CM_TOOLCHAIN][0] = 0;
+                }
+            }
+        }
+        line = end ? end + 1 : NULL;
+    }
+    if (phases)
+    {
+        fputc(']', phases); char *text = valid && count ? cm_memory(phases) : NULL; fclose(phases);
+        if (text && strlen(text) <= 65536) row->s[CM_PHASE_JSON] = cm_keep(c->store, text);
+        free(text);
+    }
+    // Existing log receipts are retained as reported context. They do not
+    // authenticate all tools, workers, caches or workloads for qualification.
+}
 BUSTER_GLOBAL_LOCAL int cm_machine(CmCollection *c, const CmJson *jobs, unsigned job, CmRow *row,
     char fields[CM_FIELD_COUNT][CM_FIELD + 1])
 {
@@ -387,6 +447,7 @@ BUSTER_GLOBAL_LOCAL int cm_machine(CmCollection *c, const CmJson *jobs, unsigned
                 row->s[CM_MACHINE_JSON] = cm_keep(c->store, record);
                 valid = row->s[CM_MACHINE_JSON] != NULL;
                 ++c->machine_verified;
+                if (original_log) cm_reported_context(c, original_log, row, fields);
                 if (original_log && source_step && c->source_action_verified)
                 {
                     unsigned source_count = 0;
@@ -512,6 +573,9 @@ BUSTER_GLOBAL_LOCAL int cm_collect_job(CmCollection *c, const CmJson *j, unsigne
                     for (unsigned i = CM_JOB_KEY; i <= CM_WORKERS; ++i)
                         if (i != CM_NAME && i != CM_EVENT && i != CM_HEAD_BRANCH && i != CM_EVENT_SHA)
                             row.s[i] = origin->s[i];
+                    row.s[CM_CONTEXT_STATUS] = origin->s[CM_CONTEXT_STATUS];
+                    row.s[CM_MACHINE_JSON] = origin->s[CM_MACHINE_JSON]; row.s[CM_SOURCE_JSON] = origin->s[CM_SOURCE_JSON];
+                    row.s[CM_PHASE_JSON] = origin->s[CM_PHASE_JSON];
                 }
                 else if (matches > 1)
                 {

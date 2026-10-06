@@ -17,7 +17,7 @@ typedef enum CmField
     CM_IMAGE, CM_IMAGE_VERSION, CM_EXECUTION_CONTEXT, CM_TOOLCHAIN, CM_CACHE,
     CM_WORKLOAD, CM_WORKERS, CM_KIND, CM_CONCLUSION, CM_STARTED, CM_COMPLETED,
     CM_STEPS, CM_ALIAS, CM_OBSERVED, CM_COLLECTOR, CM_RUN_CONCLUSION, CM_CREATED,
-    CM_CONTEXT_STATUS, CM_MACHINE_JSON, CM_SOURCE_JSON, CM_FIELD_COUNT
+    CM_CONTEXT_STATUS, CM_MACHINE_JSON, CM_SOURCE_JSON, CM_PHASE_JSON, CM_FIELD_COUNT
 } CmField;
 BUSTER_GLOBAL_LOCAL const char *const cm_fields[CM_FIELD_COUNT] =
 {
@@ -28,7 +28,7 @@ BUSTER_GLOBAL_LOCAL const char *const cm_fields[CM_FIELD_COUNT] =
     "runner_image", "runner_image_version", "execution_context", "toolchain_identity", "cache_state",
     "workload_identity", "worker_budget", "execution_kind", "conclusion", "started_at", "completed_at",
     "steps_json", "alias_status", "observed_at", "collector_revision", "workflow_conclusion", "workflow_created_at",
-    "comparison_context_status", "machine_report_json", "source_report_json"
+    "comparison_context_status", "machine_report_json", "source_report_json", "native_phase_records_json"
 };
 typedef struct CmRow CmRow;
 struct CmRow
@@ -89,7 +89,7 @@ BUSTER_GLOBAL_LOCAL int cm_row_valid(const CmRow *r)
         r->origin_attempt <= r->attempt && cm_kind(r->s[CM_KIND]) && cm_time(r->s[CM_OBSERVED]) >= 0 &&
         cm_sha(r->s[CM_COLLECTOR]);
     for (unsigned i = 0; valid && i < CM_FIELD_COUNT; ++i)
-        valid = r->s[i] && strlen(r->s[i]) <= ((i == CM_STEPS || i == CM_MACHINE_JSON || i == CM_SOURCE_JSON) ? 65536u : CM_FIELD);
+        valid = r->s[i] && strlen(r->s[i]) <= ((i == CM_STEPS || i == CM_MACHINE_JSON || i == CM_SOURCE_JSON || i == CM_PHASE_JSON) ? 65536u : CM_FIELD);
     valid = valid && (!r->s[CM_TESTED_SHA][0] || cm_sha(r->s[CM_TESTED_SHA])) &&
         (!r->s[CM_EVENT_SHA][0] || cm_sha(r->s[CM_EVENT_SHA])) &&
         (!r->s[CM_TESTED_TREE][0] || cm_sha(r->s[CM_TESTED_TREE])) &&
@@ -104,11 +104,15 @@ BUSTER_GLOBAL_LOCAL int cm_row_valid(const CmRow *r)
     int elapsed = cm_span(r->s[CM_STARTED], r->s[CM_COMPLETED], &seconds);
     if (!cm_equal(r->s[CM_KIND], "executed") && !cm_equal(r->s[CM_KIND], "draft-deferral")) elapsed = 0;
     valid = valid && r->elapsed_available == elapsed && (!elapsed || r->seconds == seconds);
-    if (valid && r->s[CM_STEPS][0])
+    const unsigned arrays[] = {CM_STEPS, CM_PHASE_JSON};
+    for (unsigned i = 0; valid && i < sizeof(arrays) / sizeof(arrays[0]); ++i)
     {
-        CmJson steps = cm_json_parse(r->s[CM_STEPS], strlen(r->s[CM_STEPS]));
-        valid = steps.valid && steps.tokens[1].kind == 'a';
-        cm_json_free(&steps);
+        const char *text = r->s[arrays[i]];
+        if (text[0])
+        {
+            CmJson value = cm_json_parse(text, strlen(text));
+            valid = value.valid && value.tokens[1].kind == 'a'; cm_json_free(&value);
+        }
     }
     return valid;
 }
