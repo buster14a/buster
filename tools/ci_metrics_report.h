@@ -38,7 +38,7 @@ BUSTER_GLOBAL_LOCAL int cm_output(CmOutputs *out, const char *path, FILE *file)
     char *content = result ? cm_memory(file) : NULL;
     if (file) fclose(file);
     char *name = content ? strdup(path) : NULL;
-    result = result && content && name && strlen(content) <= CM_ARENA_BYTES - out->bytes;
+    result = result && content && name && strlen(content) <= CM_BYTES && strlen(content) <= CM_ARENA_BYTES - out->bytes;
     if (result) { out->bytes += strlen(content); out->files[out->count++] = (CmFile){name, content, {0}}; }
     else { free(content); free(name); }
     return result;

@@ -125,7 +125,7 @@ BUSTER_GLOBAL_LOCAL int cm_api(CmTransport *t, const char *path, const char *met
 {
     int result = 0, last_absent = 0;
     char endpoint[4096], temporary[] = "/tmp/buster-ci-metrics-input-XXXXXX";
-    int fd = body ? mkstemp(temporary) : -1, input_ok = !body;
+    int fd = body && strlen(body) <= CM_SERIALIZED_BYTES ? mkstemp(temporary) : -1, input_ok = !body;
     if (body && fd >= 0)
     {
         FILE *input = fdopen(fd, "wb");
@@ -196,7 +196,7 @@ BUSTER_GLOBAL_LOCAL char *cm_memory(FILE *file)
     if (file && fflush(file) == 0 && fseek(file, 0, SEEK_END) == 0)
     {
         long n = ftell(file);
-        if (n >= 0 && (uint64_t)n <= CM_BYTES && fseek(file, 0, SEEK_SET) == 0)
+        if (n >= 0 && (uint64_t)n <= CM_SERIALIZED_BYTES && fseek(file, 0, SEEK_SET) == 0)
         {
             result = malloc((size_t)n + 1);
             if (result)

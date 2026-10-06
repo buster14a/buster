@@ -160,6 +160,24 @@ BUSTER_GLOBAL_LOCAL int cm_publication_tests(void)
         !cm_publication_path("history/2026-02-29/0.jsonl") && !cm_publication_path("history/2026-10-01/64.jsonl") &&
         !cm_publication_path("reports/payload.sh") && !cm_publication_path(".github/workflows/test.yml"),
         "publisher path grammar excludes code and malformed shard identities");
+    FILE *quoted = tmpfile();
+    if (quoted)
+    {
+        size_t raw_length = CM_BYTES / 2 + 1024;
+        char *raw = malloc(raw_length + 1);
+        if (raw)
+        {
+            memset(raw, 34, raw_length); raw[raw_length] = 0;
+            fputs("{\"content\":", quoted); cm_quote(quoted, raw); fputc('}', quoted);
+            char *serialized = cm_memory(quoted);
+            failures += cm_test_check(serialized && strlen(serialized) > CM_BYTES &&
+                strlen(serialized) <= CM_SERIALIZED_BYTES, "blob quoting expansion uses a distinct bounded request budget");
+            free(serialized); free(raw);
+        }
+        else ++failures;
+        fclose(quoted);
+    }
+    else ++failures;
     const char *keys[] = {"GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"};
     const char *values[] = {"refs/heads/main", "schedule", "7", "1"};
     char *before[4] = {0};

@@ -13,6 +13,9 @@
 #include <errno.h>
 #include <time.h>
 #define CM_BYTES (16u * 1024u * 1024u)
+// Blob POST JSON quoting expands retained file bytes; keep transport output
+// and retained-file bounds separate from the serialized request bound.
+#define CM_SERIALIZED_BYTES (CM_BYTES * 2u + 4096u)
 #define CM_TOKENS 131072u
 #define CM_DEPTH 64u
 #define CM_FIELD 2048u
