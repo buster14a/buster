@@ -14,6 +14,8 @@ import sys
 
 
 APPROVED = {
+    "actions/upload-pages-artifact": {"fc324d3547104276b827a68afc52ff2a11cc49c9"},
+    "actions/deploy-pages": {"368f82528645a54fb793d4d04e342629a3f51346"},
     "actions/checkout": {"11bd71901bbe5b1630ceea73d27597364c9af683"},
     "actions/upload-artifact": {"ea165f8d65b6e75b540449e92b4886f43607fa02", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"},
     "actions/cache/restore": {"0057852bfaa89a56745cba8c7296529d2fc39830"},

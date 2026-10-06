@@ -1,0 +1,126 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 919c12613..67210191a 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -5279,8 +5279,55 @@ struct CIrSsaParameter
+     u32 block;
+     u32 local;
+     IrValueId forwarded;
++#if BUSTER_BENCH_ALLOCATIONS
++    // DV probe: function->instruction_count when the provisional parameter
++    // was created during construction; UINT32_MAX when created by finish.
++    u32 dv_creation_instruction_count;
++#endif
+ };
+ 
++#if BUSTER_BENCH_ALLOCATIONS
++#include <stdio.h>
++// DV probe (diagnostic census only): classification of provisional SSA block
++// parameters by whether their block was already sealable when the read that
++// created them ran, i.e. every final predecessor's terminator row already
++// existed. Indices: see dv_ssa_census_print.
++enum
++{
++    DV_SSA_CREATED_CONSTRUCTION,
++    DV_SSA_CREATED_FINISH,
++    DV_SSA_MEMORY_OWNED,
++    DV_SSA_PREDS0,
++    DV_SSA_SEALED_PRED1_REMOVED,
++    DV_SSA_SEALED_PRED1_KEPT,
++    DV_SSA_SEALED_MULTI_REMOVED,
++    DV_SSA_SEALED_MULTI_KEPT,
++    DV_SSA_UNSEALED_PRED1_REMOVED,
++    DV_SSA_UNSEALED_PRED1_KEPT,
++    DV_SSA_UNSEALED_MULTI_REMOVED,
++    DV_SSA_UNSEALED_MULTI_KEPT,
++    DV_SSA_UNSEALED_LATE_PREDS,
++    DV_SSA_FUNCTIONS,
++    DV_SSA_COUNT,
++};
++BUSTER_GLOBAL_LOCAL u64 dv_ssa_census[DV_SSA_COUNT];
++BUSTER_GLOBAL_LOCAL void dv_ssa_census_print(void)
++{
++    fprintf(stderr,
++            "DV_SSA_CENSUS functions=%llu created_construction=%llu created_finish=%llu memory_owned=%llu preds0=%llu "
++            "sealed_pred1_removed=%llu sealed_pred1_kept=%llu sealed_multi_removed=%llu sealed_multi_kept=%llu "
++            "unsealed_pred1_removed=%llu unsealed_pred1_kept=%llu unsealed_multi_removed=%llu unsealed_multi_kept=%llu "
++            "unsealed_late_predecessor_rows=%llu\n",
++            (unsigned long long)dv_ssa_census[DV_SSA_FUNCTIONS], (unsigned long long)dv_ssa_census[DV_SSA_CREATED_CONSTRUCTION],
++            (unsigned long long)dv_ssa_census[DV_SSA_CREATED_FINISH], (unsigned long long)dv_ssa_census[DV_SSA_MEMORY_OWNED],
++            (unsigned long long)dv_ssa_census[DV_SSA_PREDS0], (unsigned long long)dv_ssa_census[DV_SSA_SEALED_PRED1_REMOVED],
++            (unsigned long long)dv_ssa_census[DV_SSA_SEALED_PRED1_KEPT], (unsigned long long)dv_ssa_census[DV_SSA_SEALED_MULTI_REMOVED],
++            (unsigned long long)dv_ssa_census[DV_SSA_SEALED_MULTI_KEPT], (unsigned long long)dv_ssa_census[DV_SSA_UNSEALED_PRED1_REMOVED],
++            (unsigned long long)dv_ssa_census[DV_SSA_UNSEALED_PRED1_KEPT], (unsigned long long)dv_ssa_census[DV_SSA_UNSEALED_MULTI_REMOVED],
++            (unsigned long long)dv_ssa_census[DV_SSA_UNSEALED_MULTI_KEPT], (unsigned long long)dv_ssa_census[DV_SSA_UNSEALED_LATE_PREDS]);
++}
++#endif
++
+ typedef struct CIrSsaLocal CIrSsaLocal;
+ struct CIrSsaLocal
+ {
+@@ -5539,6 +5586,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_parameter(CIntegerIrBuilder* builder, u32 b
+         destination->parameter_count += 1;
+         CIrSsaParameter* pending = arena_allocate(builder->scratch_arena, CIrSsaParameter, 1);
+         *pending = (CIrSsaParameter){.parameter = parameter, .block = block, .local = local_index, .forwarded = IR_VALUE_ID_INVALID};
++#if BUSTER_BENCH_ALLOCATIONS
++        pending->dv_creation_instruction_count = builder->direct_ssa->predecessor_offsets ? UINT32_MAX : builder->function->instruction_count;
++        dv_ssa_census[builder->direct_ssa->predecessor_offsets ? DV_SSA_CREATED_FINISH : DV_SSA_CREATED_CONSTRUCTION] += 1;
++#endif
+         if (builder->direct_ssa->last_parameter)
+         {
+             builder->direct_ssa->last_parameter->next = pending;
+@@ -6313,6 +6364,44 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
+                 parameter_by_value[parameter->value.value] = parameter;
+             }
+         }
++#if BUSTER_BENCH_ALLOCATIONS
++        // DV probe: classify every provisional parameter now that predecessor
++        // lists exist and simplification has decided which ones survive.
++        dv_ssa_census[DV_SSA_FUNCTIONS] += 1;
++        for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
++        {
++            u32 b = pending->block;
++            u32 preds = offsets[b + 1] - offsets[b];
++            bool kept = parameter_by_value[pending->parameter->value.value] != 0;
++            u32 created = pending->dv_creation_instruction_count;
++            if (memory[pending->local])
++            {
++                dv_ssa_census[DV_SSA_MEMORY_OWNED] += 1;
++            }
++            else if (preds == 0)
++            {
++                dv_ssa_census[DV_SSA_PREDS0] += 1;
++            }
++            else if (created == UINT32_MAX)
++            {
++                // Created during finish (stamped cycle): counted above only.
++            }
++            else
++            {
++                bool sealed = true;
++                for (u32 index = offsets[b]; index < offsets[b + 1]; index += 1)
++                {
++                    IrBlock* predecessor = function->blocks + predecessors[index];
++                    bool emitted = predecessor->last_instruction.value != IR_ID_UNDERLYING_INVALID && predecessor->last_instruction.value < created;
++                    sealed = sealed && emitted;
++                    dv_ssa_census[DV_SSA_UNSEALED_LATE_PREDS] += !emitted;
++                }
++                u32 category = sealed ? (preds == 1 ? DV_SSA_SEALED_PRED1_REMOVED : DV_SSA_SEALED_MULTI_REMOVED)
++                                      : (preds == 1 ? DV_SSA_UNSEALED_PRED1_REMOVED : DV_SSA_UNSEALED_MULTI_REMOVED);
++                dv_ssa_census[category + (kept ? 1 : 0)] += 1;
++            }
++        }
++#endif
+         for (u32 index = 0; index < function->instruction_count; index += 1)
+         {
+             IrInstruction* instruction = function->instructions + index;
+@@ -53809,6 +53898,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
+         }
+         scratch_end(temporary);
+     }
++#if BUSTER_BENCH_ALLOCATIONS
++    dv_ssa_census_print();
++#endif
+     return result;
+ }
+ 
