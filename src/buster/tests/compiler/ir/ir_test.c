@@ -532,6 +532,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_binary_families(UnitTestArg
         IrValidationResult validation = ir_test_canonical_binary_fixture(controls[index], control_operands[index], control_results[index]);
         BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
     }
+    // Operations in no family stay rejected whatever the operand shape,
+    // including every shape some family above accepts.
+    IrBinaryOperation outside[] = {IR_BINARY_BOOLEAN_EQUAL, IR_BINARY_BOOLEAN_NOT_EQUAL, IR_BINARY_RANGE, IR_BINARY_COUNT};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(outside); index += 1)
+    {
+        for (u32 operand_type = 0; operand_type < 6; operand_type += 1)
+        {
+            for (u32 comparison = 0; comparison < 2; comparison += 1)
+            {
+                IrValidationResult validation = ir_test_canonical_binary_fixture(outside[index], operand_type, comparison ? 2 : operand_type);
+                BUSTER_TEST(arguments, validation.error == IR_VALIDATION_OPERATION);
+                BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 2);
+            }
+        }
+    }
     return result;
 }
 
