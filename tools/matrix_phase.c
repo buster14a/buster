@@ -175,7 +175,9 @@ BUSTER_GLOBAL_LOCAL Generate matrix_phase_tree(Arena* arena, Generate generate, 
         for (u32 i = 0; i < tree.row_count; i += 1)
         {
             MatrixCoverageRow row = coverage->plan.rows[tree.row_indices[i]];
-            if (tree.compiler == BUILD_COMPILER_CLANG)
+            // Build-only rows (sanitized Clang Debug since #2657) have no
+            // nested test phase; only runtime rows execute test_all.
+            if (string_equal(row.execution, S8("runtime")))
             {
                 matrix_phase_task(arena, record->id, S8("test"), row.configuration, S8(""), S8("nested"), S8(""), 0, (SliceString8){0});
             }

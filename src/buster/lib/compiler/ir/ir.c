@@ -370,9 +370,9 @@ BUSTER_GLOBAL_LOCAL u32 ir_source_search_vector(void const* words, u32 low, u32 
     Mask64 valid = mask64_prefix(lanes);
     Mask64 bytes_valid = mask64_prefix(lanes * 4);
     Simd512 loaded = simd512_load_masked(words, bytes_valid);
-    // `simd512_less_word` is strict, so the covered lanes are the complement
+    // `simd512_less_u32` is strict, so the covered lanes are the complement
     // of "probe < key" inside the valid lanes.
-    Mask64 covered = valid & ~simd512_less_word(simd512_splat_word(probe), loaded);
+    Mask64 covered = valid & ~simd512_less_u32(simd512_splat_u32(probe), loaded);
     if (stride_words == 2)
     {
         covered &= (Mask64)0x5555;
@@ -778,21 +778,22 @@ IrSimdShape ir_simd_operation_shape(IrSimdOperation operation)
         [IR_SIMD_LOAD_MASKED] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 2, .predicate_lane_count = 64},
         [IR_SIMD_STORE] = {.operand_count = 2},
         [IR_SIMD_STORE_MASKED] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
-        [IR_SIMD_SPLAT_BYTE] = {.operand_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_EQUAL_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_COMPARE_LESS_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_SIGN_MASK_BYTE] = {.operand_count = 1, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_TEST_MASK_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_PERMUTE2_BYTE] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
-        [IR_SIMD_COMPRESS_BYTE] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
-        [IR_SIMD_COMPRESS_STORE_BYTE] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
-        [IR_SIMD_WIDEN_BYTE_TO_WORD] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_SHIFT_LEFT_WORD] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_TERNARY_WORD] = {.operand_count = 3, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_EQUAL_WORD] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
-        [IR_SIMD_SPLAT_WORD] = {.operand_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_LESS_WORD] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
-        [IR_SIMD_COMPRESS_WORD] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
+        [IR_SIMD_SPLAT_U8] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_EQUAL_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_COMPARE_LESS_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_SIGN_MASK_U8] = {.operand_count = 1, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_TEST_MASK_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_PERMUTE2_U8] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
+        [IR_SIMD_COMPRESS_U8] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
+        [IR_SIMD_COMPRESS_STORE_U8] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
+        [IR_SIMD_WIDEN_U8_TO_U32] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_SHIFT_LEFT_U32] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_TERNARY_U32] = {.operand_count = 3, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_EQUAL_U32] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
+        [IR_SIMD_SPLAT_U32] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_LESS_U32] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
+        [IR_SIMD_COMPRESS_U32] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
+        [IR_SIMD_PERMUTE2_U32] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
     };
     IrSimdShape result = {0};
     if ((u32)operation < IR_SIMD_COUNT)
@@ -810,11 +811,11 @@ bool ir_simd_operation_supported(Target target, IrSimdOperation operation)
     bool result = ir_vector_operation_semantics(IR_OPCODE_SIMD, (u32)operation) == IR_VECTOR_SEMANTICS_EXACT_X86_512 &&
                   target.cpu_arch == CPU_ARCH_X86_64 && target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) &&
                   target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW);
-    if (result && operation == IR_SIMD_PERMUTE2_BYTE)
+    if (result && operation == IR_SIMD_PERMUTE2_U8)
     {
         result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
     }
-    else if (result && (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE))
+    else if (result && (operation == IR_SIMD_COMPRESS_U8 || operation == IR_SIMD_COMPRESS_STORE_U8))
     {
         result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
     }
@@ -833,36 +834,38 @@ String8 ir_simd_operation_name(IrSimdOperation operation)
         return S8("simd.store");
     case IR_SIMD_STORE_MASKED:
         return S8("simd.store_masked");
-    case IR_SIMD_SPLAT_BYTE:
-        return S8("simd.splat_byte");
-    case IR_SIMD_COMPARE_EQUAL_BYTE:
-        return S8("simd.compare_equal_byte");
-    case IR_SIMD_COMPARE_LESS_BYTE:
-        return S8("simd.compare_less_byte");
-    case IR_SIMD_SIGN_MASK_BYTE:
-        return S8("simd.sign_mask_byte");
-    case IR_SIMD_TEST_MASK_BYTE:
-        return S8("simd.test_mask_byte");
-    case IR_SIMD_PERMUTE2_BYTE:
-        return S8("simd.permute2_byte");
-    case IR_SIMD_COMPRESS_BYTE:
-        return S8("simd.compress_byte");
-    case IR_SIMD_COMPRESS_STORE_BYTE:
-        return S8("simd.compress_store_byte");
-    case IR_SIMD_WIDEN_BYTE_TO_WORD:
-        return S8("simd.widen_byte_to_word");
-    case IR_SIMD_SHIFT_LEFT_WORD:
-        return S8("simd.shift_left_word");
-    case IR_SIMD_TERNARY_WORD:
-        return S8("simd.ternary_word");
-    case IR_SIMD_COMPARE_EQUAL_WORD:
-        return S8("simd.compare_equal_word");
-    case IR_SIMD_SPLAT_WORD:
-        return S8("simd.splat_word");
-    case IR_SIMD_COMPARE_LESS_WORD:
-        return S8("simd.compare_less_word");
-    case IR_SIMD_COMPRESS_WORD:
-        return S8("simd.compress_word");
+    case IR_SIMD_SPLAT_U8:
+        return S8("simd.splat_u8");
+    case IR_SIMD_COMPARE_EQUAL_U8:
+        return S8("simd.compare_equal_u8");
+    case IR_SIMD_COMPARE_LESS_U8:
+        return S8("simd.compare_less_u8");
+    case IR_SIMD_SIGN_MASK_U8:
+        return S8("simd.sign_mask_u8");
+    case IR_SIMD_TEST_MASK_U8:
+        return S8("simd.test_mask_u8");
+    case IR_SIMD_PERMUTE2_U8:
+        return S8("simd.permute2_u8");
+    case IR_SIMD_COMPRESS_U8:
+        return S8("simd.compress_u8");
+    case IR_SIMD_COMPRESS_STORE_U8:
+        return S8("simd.compress_store_u8");
+    case IR_SIMD_WIDEN_U8_TO_U32:
+        return S8("simd.widen_u8_to_u32");
+    case IR_SIMD_SHIFT_LEFT_U32:
+        return S8("simd.shift_left_u32");
+    case IR_SIMD_TERNARY_U32:
+        return S8("simd.ternary_u32");
+    case IR_SIMD_COMPARE_EQUAL_U32:
+        return S8("simd.compare_equal_u32");
+    case IR_SIMD_SPLAT_U32:
+        return S8("simd.splat_u32");
+    case IR_SIMD_COMPARE_LESS_U32:
+        return S8("simd.compare_less_u32");
+    case IR_SIMD_COMPRESS_U32:
+        return S8("simd.compress_u32");
+    case IR_SIMD_PERMUTE2_U32:
+        return S8("simd.permute2_u32");
     case IR_SIMD_COUNT:
         break;
     }
@@ -947,13 +950,13 @@ BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_mask(IrProgram* program, IrTypeId id)
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 64;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_byte(IrProgram* program, IrTypeId id)
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_u8(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 8;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_word(IrProgram* program, IrTypeId id)
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_u32(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 32;
@@ -1005,41 +1008,42 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
             valid = ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && result->kind == IR_TYPE_VOID;
             break;
         case IR_SIMD_STORE_MASKED:
-        case IR_SIMD_COMPRESS_STORE_BYTE:
+        case IR_SIMD_COMPRESS_STORE_U8:
             valid = ir_simd_type_is_address(program, operands[0]) &&
                    ir_simd_type_is_vector(program, operands[2]) && result->kind == IR_TYPE_VOID;
             break;
-        case IR_SIMD_SPLAT_BYTE:
-            valid = ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_SPLAT_U8:
+            valid = ir_simd_type_is_u8(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_SPLAT_WORD:
-            valid = ir_simd_type_is_word(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_SPLAT_U32:
+            valid = ir_simd_type_is_u32(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_COMPARE_EQUAL_BYTE:
-        case IR_SIMD_COMPARE_LESS_BYTE:
-        case IR_SIMD_TEST_MASK_BYTE:
-        case IR_SIMD_COMPARE_EQUAL_WORD:
-        case IR_SIMD_COMPARE_LESS_WORD:
+        case IR_SIMD_COMPARE_EQUAL_U8:
+        case IR_SIMD_COMPARE_LESS_U8:
+        case IR_SIMD_TEST_MASK_U8:
+        case IR_SIMD_COMPARE_EQUAL_U32:
+        case IR_SIMD_COMPARE_LESS_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]);
             break;
-        case IR_SIMD_SIGN_MASK_BYTE:
+        case IR_SIMD_SIGN_MASK_U8:
             valid = ir_simd_type_is_vector(program, operands[0]);
             break;
-        case IR_SIMD_PERMUTE2_BYTE:
+        case IR_SIMD_PERMUTE2_U8:
+        case IR_SIMD_PERMUTE2_U32:
             valid = ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, operands[3]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_COMPRESS_BYTE:
-        case IR_SIMD_COMPRESS_WORD:
+        case IR_SIMD_COMPRESS_U8:
+        case IR_SIMD_COMPRESS_U32:
             valid = ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_WIDEN_BYTE_TO_WORD:
+        case IR_SIMD_WIDEN_U8_TO_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;
             break;
-        case IR_SIMD_SHIFT_LEFT_WORD:
+        case IR_SIMD_SHIFT_LEFT_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 32;
             break;
-        case IR_SIMD_TERNARY_WORD:
+        case IR_SIMD_TERNARY_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, result_type) && immediate < 256;
             break;
@@ -4728,6 +4732,7 @@ IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
     {
         module->label_address_relocation_count += global.relocations[relocation_index].is_label_address ? 1 : 0;
     }
+    module->label_difference_count += global.label_difference_count;
     return result;
 }
 
@@ -5403,6 +5408,33 @@ BUSTER_GLOBAL_LOCAL bool ir_validate_unordered_relocations_overlap_free(IrProgra
     return overlap_free;
 }
 
+// Each label difference names two blocks of one lowered function and a whole
+// power-of-two integer slot of a byte image, still zero, for the backend to
+// fill once the blocks are placed.
+BUSTER_GLOBAL_LOCAL bool ir_validate_label_differences(IrProgram* program, IrModule* module, IrGlobal* global, IrType* type,
+                                                       IrLabelOwnerIndex* label_owners)
+{
+    bool valid = global->label_differences && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer &&
+                 global->bytes.length == type->layout.size;
+    for (u32 index = 0; valid && index < global->label_difference_count; index += 1)
+    {
+        IrGlobalLabelDifference* difference = global->label_differences + index;
+        IrSymbol* owner_symbol = ir_symbol_from_id(&program->symbols, difference->symbol);
+        IrFunction* owner = owner_symbol && owner_symbol->kind == IR_SYMBOL_FUNCTION && owner_symbol->is_definition
+                                ? ir_module_function_for_symbol(program, module, label_owners, difference->symbol)
+                                : 0;
+        u32 size = difference->size;
+        valid = owner && owner->state == IR_FUNCTION_LOWERED && difference->label_block.value < owner->block_count &&
+                difference->base_block.value < owner->block_count && (size == 1 || size == 2 || size == 4 || size == 8) &&
+                difference->offset <= global->bytes.length && size <= global->bytes.length - difference->offset;
+        for (u32 byte = 0; valid && byte < size; byte += 1)
+        {
+            valid = global->bytes.pointer[difference->offset + byte] == 0;
+        }
+    }
+    return valid;
+}
+
 // One global's alignment, initializer, and relocation table. Nothing here names
 // a function, a block or an instruction, so the caller keeps the invalid ids the
 // module-level result already carries and only the error kind travels back.
@@ -5522,6 +5554,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
             {
                 error = IR_VALIDATION_OPERATION;
             }
+            if (error == IR_VALIDATION_NONE && global->label_difference_count &&
+                !ir_validate_label_differences(program, module, global, type, label_owners))
+            {
+                error = IR_VALIDATION_OPERATION;
+            }
         }
     }
     return error;
@@ -5529,12 +5566,22 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
 
 // Every value's type, label provenance and alignment. These faults name the
 // instruction that defined the value rather than a block.
+// The per-value half of ir_validate_canonical_function. Most functions carry
+// no label metadata; for them every provenance clause is vacuous and the
+// value check reduces to the definition's operand-existence rule
+// (ir_label_transfer_valid_without_metadata) and a resolved type layout,
+// which the loop answers without materializing zero metadata per value.
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* program, IrFunction* function)
 {
     IrValidationResult result = ir_validation_ok();
     TemporalArena temporary = scratch_begin(&program->arena, 1);
-    u8* parameter_definitions = arena_allocate(temporary.arena, u8, function->value_count);
-    memset(parameter_definitions, 0, function->value_count);
+    u32 value_count = function->value_count;
+    u32 instruction_count = function->instruction_count;
+    IrValue* values = function->values;
+    IrTypeTable* types = &program->types;
+    bool has_label_metadata = function->label_metadata_count != 0;
+    u8* parameter_definitions = arena_allocate(temporary.arena, u8, value_count);
+    memset(parameter_definitions, 0, value_count);
     for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
     {
         IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_BLOCKS, 1);
@@ -5554,7 +5601,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
                 value = builder_parameter->value;
                 builder_parameter = builder_parameter->next;
             }
-            if (value.value >= function->value_count || parameter_definitions[value.value])
+            if (value.value >= value_count || parameter_definitions[value.value])
             {
                 result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
             }
@@ -5568,23 +5615,41 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
             result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
         }
     }
-    for (u32 value_index = 0; value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
+    for (u32 value_index = 0; value_index < value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
     {
         IR_CONSTRUCTION_RECORD(VALIDATION_VALUES, 1);
-        IrValue* value = function->values + value_index;
+        IrValue* value = values + value_index;
         IrValueId value_id = {.value = value_index};
-        IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-        if (!value_type || (value->definition.value >= function->instruction_count &&
-                            !(value->definition.value == IR_ID_UNDERLYING_INVALID && parameter_definitions[value_index] &&
-                              value->category == IR_VALUE_VALUE)))
+        IrType* value_type = ir_type_from_id(types, value->canonical_type);
+        bool parameter_defined = parameter_definitions[value_index] != 0;
+        bool row_defined = value->definition.value < instruction_count;
+        if (!value_type ||
+            (!row_defined && !(value->definition.value == IR_ID_UNDERLYING_INVALID && parameter_defined && value->category == IR_VALUE_VALUE)))
         {
             result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
         }
-        else if (value->definition.value < function->instruction_count && parameter_definitions[value_index])
+        else if (row_defined && parameter_defined)
         {
             // A value has exactly one definition: the row it names cannot
             // also share it with a block parameter.
             result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, IR_BLOCK_ID_INVALID, value->definition);
+        }
+        else if (!has_label_metadata)
+        {
+            IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
+            bool transfer_valid = true;
+            if (row_defined)
+            {
+                IrInstruction* definition = function->instructions + value->definition.value;
+                IrValue* first_slot = definition->operand_count && definition->operands && definition->operands[0].value < value_count
+                                          ? values + definition->operands[0].value
+                                          : 0;
+                transfer_valid = ir_label_transfer_valid_without_metadata(program, function, definition, first_slot);
+            }
+            if (!transfer_valid || !value_type->layout.resolved)
+            {
+                result = ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
+            }
         }
         else
         {
@@ -5612,11 +5677,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
                     }
                 }
             }
-            if (result.error == IR_VALIDATION_NONE && value->alignment &&
-                ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
-            {
-                result = ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
-            }
+        }
+        if (result.error == IR_VALIDATION_NONE && value->alignment &&
+            ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
+        {
+            result = ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
         }
     }
     scratch_end(temporary);
@@ -5740,6 +5805,67 @@ BUSTER_GLOBAL_LOCAL bool ir_place_narrow_bit_field_access(IrProgram* program, Ir
 // The per-opcode obligations: operand counts and types, immediates, targets and
 // result shape. Every fault here names the instruction the caller is holding, so
 // only the kind comes back.
+// Switch case keys name integer bit patterns. Keep the caller's case order;
+// monotonic keys need no copy, while unordered keys use bounded scratch radix.
+BUSTER_GLOBAL_LOCAL bool ir_canonical_switch_keys_unique(IrProgram* program, IrInstruction* instruction, u32 bit_width)
+{
+    u32 count = instruction->immediate_count;
+    u64 mask = bit_width > 0 && bit_width < 64 ? (UINT64_C(1) << bit_width) - 1 : UINT64_MAX;
+    u64 previous = count ? instruction->immediates[0] & mask : 0;
+    u64 largest = previous;
+    bool ascending = true;
+    bool descending = true;
+    bool unique = true;
+    for (u32 index = 1; index < count && unique; index += 1)
+    {
+        u64 key = instruction->immediates[index] & mask;
+        ascending &= key > previous;
+        descending &= key < previous;
+        unique = key != previous;
+        largest = BUSTER_MAX(largest, key);
+        previous = key;
+    }
+    if (unique && !ascending && !descending)
+    {
+        TemporalArena temporary = scratch_begin(&program->arena, 1);
+        u64* source = arena_allocate(temporary.arena, u64, count);
+        u64* destination = arena_allocate(temporary.arena, u64, count);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            source[index] = instruction->immediates[index] & mask;
+        }
+        enum { IR_SWITCH_RADIX_BITS = 8, IR_SWITCH_RADIX_BUCKETS = 1 << IR_SWITCH_RADIX_BITS };
+        for (u32 shift = 0; shift < 64 && (largest >> shift) != 0; shift += IR_SWITCH_RADIX_BITS)
+        {
+            u32 offsets[IR_SWITCH_RADIX_BUCKETS] = {0};
+            for (u32 index = 0; index < count; index += 1)
+            {
+                offsets[(source[index] >> shift) & (IR_SWITCH_RADIX_BUCKETS - 1)] += 1;
+            }
+            u32 offset = 0;
+            for (u32 bucket = 0; bucket < IR_SWITCH_RADIX_BUCKETS; bucket += 1)
+            {
+                u32 population = offsets[bucket];
+                offsets[bucket] = offset;
+                offset += population;
+            }
+            for (u32 index = 0; index < count; index += 1)
+            {
+                destination[offsets[(source[index] >> shift) & (IR_SWITCH_RADIX_BUCKETS - 1)]++] = source[index];
+            }
+            u64* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        for (u32 index = 1; index < count && unique; index += 1)
+        {
+            unique = source[index] != source[index - 1];
+        }
+        scratch_end(temporary);
+    }
+    return unique;
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgram* program, IrFunction* function, IrType* signature,
                                                                         IrInstruction* instruction)
 {
@@ -5841,9 +5967,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         // unreduced (the native emitters do) then sees the same number as one
         // that reduces it (ir_integer_constant_decode).
         IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        u32 width = ir_integer_type_width(type);
         if (!type || (type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN && type->kind != IR_TYPE_ENUM) ||
             instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
-            (ir_integer_type_width(type) && !ir_integer_constant_canonical(instruction, ir_integer_type_width(type))))
+            (width && !ir_integer_constant_canonical(instruction, width)))
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -6067,60 +6194,68 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_BINARY)
     {
-        IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        // The operation families below are disjoint ranges of
+        // IrBinaryOperation, so only the operation's own family is evaluated.
+        // Every family takes two same-typed value operands and a value result
+        // (places denote storage; LOAD supplies the value of a place before
+        // this row), so that shared clause is checked first.
+        u32 operation = instruction->binary_operation;
         IrValue* left = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
         IrValue* right = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
-        IrType* operand_type = left ? ir_type_from_id(&program->types, left->canonical_type) : 0;
-        bool arithmetic =
-            instruction->binary_operation <= IR_BINARY_FLOAT_DIVIDE ||
-            (instruction->binary_operation >= IR_BINARY_SIGNED_REMAINDER && instruction->binary_operation <= IR_BINARY_INTEGER_BITWISE_XOR);
-        bool comparison =
-            instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL ||
-            instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
-            (instruction->binary_operation >= IR_BINARY_SIGNED_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
-        bool float_operation =
-            (instruction->binary_operation >= IR_BINARY_FLOAT_ADD && instruction->binary_operation <= IR_BINARY_FLOAT_DIVIDE) ||
-            instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
-            (instruction->binary_operation >= IR_BINARY_FLOAT_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
-        bool matching_scalar_family = operand_type &&
-                                      (float_operation ? operand_type->kind == IR_TYPE_FLOAT : operand_type->kind == IR_TYPE_INTEGER);
-        bool vector_operation = ir_vector_operation_semantics(IR_OPCODE_BINARY, instruction->binary_operation) == IR_VECTOR_SEMANTICS_GENERIC;
-        bool vector_comparison = instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
-                                 instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
-        bool matching_operands = left && right && left->canonical_type.value == right->canonical_type.value;
-        bool valid_arithmetic = arithmetic && matching_scalar_family && result_type && matching_operands &&
-                                left->canonical_type.value == instruction->canonical_type.value;
-        bool valid_comparison = comparison && matching_scalar_family && result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands;
-        bool valid_boolean = (instruction->binary_operation == IR_BINARY_BOOLEAN_AND || instruction->binary_operation == IR_BINARY_BOOLEAN_OR) &&
-                             result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands &&
-                             left->canonical_type.value == instruction->canonical_type.value &&
-                             left->category == IR_VALUE_VALUE && right->category == IR_VALUE_VALUE &&
-                             instruction->result.value < function->value_count &&
-                             function->values[instruction->result.value].category == IR_VALUE_VALUE;
-        IrType* operand_element =
-            operand_type && operand_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, operand_type->element_type) : 0;
-        IrType* result_element =
-            result_type && result_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, result_type->element_type) : 0;
-        bool vector_float_operation =
-            (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
-            (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_EQUAL &&
-             instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
-        bool valid_vector_result = !vector_comparison ? result_type == operand_type
-                                                      : result_type && operand_type && operand_element && result_element &&
-                                                            result_element->kind == IR_TYPE_INTEGER && result_element->is_signed &&
-                                                            result_type->element_count == operand_type->element_count &&
-                                                            result_type->layout.size == operand_type->layout.size &&
-                                                            result_element->bit_width == operand_element->bit_width;
-        bool valid_vector_operation = vector_operation && matching_operands && operand_type && operand_type->kind == IR_TYPE_VECTOR &&
-                                      operand_element &&
-                                      ((vector_float_operation && operand_element->kind == IR_TYPE_FLOAT) ||
-                                       (!vector_float_operation && operand_element->kind == IR_TYPE_INTEGER)) &&
-                                      valid_vector_result;
-        bool valid_pointer_comparison =
-            (instruction->binary_operation == IR_BINARY_POINTER_EQUAL || instruction->binary_operation == IR_BINARY_POINTER_NOT_EQUAL) &&
-            result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type && operand_type->kind == IR_TYPE_POINTER;
-        if ((!valid_arithmetic && !valid_comparison && !valid_boolean && !valid_vector_operation && !valid_pointer_comparison) ||
-            instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        bool valid = left && right && left->category == IR_VALUE_VALUE && right->category == IR_VALUE_VALUE &&
+                     left->canonical_type.value == right->canonical_type.value && instruction->result.value < function->value_count &&
+                     function->values[instruction->result.value].category == IR_VALUE_VALUE;
+        if (valid)
+        {
+            IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            IrType* operand_type = ir_type_from_id(&program->types, left->canonical_type);
+            bool same_as_result = left->canonical_type.value == instruction->canonical_type.value;
+            bool arithmetic = operation <= IR_BINARY_FLOAT_DIVIDE || (operation >= IR_BINARY_SIGNED_REMAINDER && operation <= IR_BINARY_INTEGER_BITWISE_XOR);
+            bool comparison = operation == IR_BINARY_INTEGER_EQUAL || operation == IR_BINARY_INTEGER_NOT_EQUAL || operation == IR_BINARY_FLOAT_EQUAL ||
+                              operation == IR_BINARY_FLOAT_NOT_EQUAL ||
+                              (operation >= IR_BINARY_SIGNED_LESS && operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+            if (arithmetic || comparison)
+            {
+                bool float_operation = (operation >= IR_BINARY_FLOAT_ADD && operation <= IR_BINARY_FLOAT_DIVIDE) || operation == IR_BINARY_FLOAT_EQUAL ||
+                                       operation == IR_BINARY_FLOAT_NOT_EQUAL ||
+                                       (operation >= IR_BINARY_FLOAT_LESS && operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+                bool matching_scalar_family = operand_type && (float_operation ? operand_type->kind == IR_TYPE_FLOAT : operand_type->kind == IR_TYPE_INTEGER);
+                valid = matching_scalar_family && result_type && (arithmetic ? same_as_result : result_type->kind == IR_TYPE_BOOLEAN);
+            }
+            else if (operation == IR_BINARY_BOOLEAN_AND || operation == IR_BINARY_BOOLEAN_OR)
+            {
+                valid = result_type && result_type->kind == IR_TYPE_BOOLEAN && same_as_result;
+            }
+            else if (operation == IR_BINARY_POINTER_EQUAL || operation == IR_BINARY_POINTER_NOT_EQUAL)
+            {
+                valid = result_type && result_type->kind == IR_TYPE_BOOLEAN && operand_type && operand_type->kind == IR_TYPE_POINTER;
+            }
+            else if (ir_vector_operation_semantics(IR_OPCODE_BINARY, operation) == IR_VECTOR_SEMANTICS_GENERIC)
+            {
+                bool vector_comparison = operation >= IR_BINARY_VECTOR_INTEGER_EQUAL && operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+                bool vector_float_operation = (operation >= IR_BINARY_VECTOR_FLOAT_ADD && operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
+                                              (operation >= IR_BINARY_VECTOR_FLOAT_EQUAL && operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
+                IrType* operand_element =
+                    operand_type && operand_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, operand_type->element_type) : 0;
+                IrType* result_element =
+                    result_type && result_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, result_type->element_type) : 0;
+                bool valid_vector_result = !vector_comparison ? result_type == operand_type
+                                                              : result_type && operand_type && operand_element && result_element &&
+                                                                    result_element->kind == IR_TYPE_INTEGER && result_element->is_signed &&
+                                                                    result_type->element_count == operand_type->element_count &&
+                                                                    result_type->layout.size == operand_type->layout.size &&
+                                                                    result_element->bit_width == operand_element->bit_width;
+                valid = operand_type && operand_type->kind == IR_TYPE_VECTOR && operand_element &&
+                        ((vector_float_operation && operand_element->kind == IR_TYPE_FLOAT) ||
+                         (!vector_float_operation && operand_element->kind == IR_TYPE_INTEGER)) &&
+                        valid_vector_result;
+            }
+            else
+            {
+                valid = false;
+            }
+        }
+        if (!valid)
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -6133,13 +6268,18 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrValue* operand_slot = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
         IrType* source = operand_slot ? ir_type_from_id(&program->types, operand_slot->canonical_type) : 0;
         bool result_in_range = instruction->result.value < function->value_count;
-        IrValueLabelMetadata operand_metadata =
-            operand_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
-        IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+        // Without label metadata in the function both sides are all-zero, so
+        // neither carries a label and the provenance clause is vacuous.
+        bool has_label_metadata = function->label_metadata_count != 0;
+        IrValueLabelMetadata operand_metadata = has_label_metadata && operand_slot ? ir_value_label_metadata(function, instruction->operands[0])
+                                                                                   : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata result_metadata =
+            has_label_metadata && result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
         IrValueLabelMetadata* operand = operand_slot ? &operand_metadata : 0;
         IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
         bool label_conversion_valid = true;
-        if ((operand && ir_label_metadata_has_label(operand)) || (label_result && ir_label_metadata_has_label(label_result)))
+        if (has_label_metadata &&
+            ((operand && ir_label_metadata_has_label(operand)) || (label_result && ir_label_metadata_has_label(label_result))))
         {
             label_conversion_valid = operand && source && destination && ir_canonical_void_pointer_type(program, operand_slot->canonical_type) &&
                                      ir_canonical_void_pointer_type(program, instruction->canonical_type) && source->id.value == destination->id.value &&
@@ -6377,7 +6517,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         {
             valid_targets = instruction->targets[target_index].value < function->block_count;
         }
-        if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID ||
+            !ir_canonical_switch_keys_unique(program, instruction, switched_type->bit_width))
         {
             error = IR_VALIDATION_BRANCH_TARGET;
         }
@@ -6404,54 +6545,70 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram* program, IrFunction* function, IrType* signature, IrBlock* block)
 {
     IrValidationResult result = ir_validation_ok();
+    // Nothing below writes the function or the type table, so the row loop
+    // keeps their bounds in locals instead of reloading them per row.
+    u32 type_count = program->types.count;
+    u32 value_count = function->value_count;
+    u32 block_count = function->block_count;
+    IrValue* values = function->values;
+    IrInstruction* instructions = function->instructions;
     IrInstructionId instruction_id = block->first_instruction;
     bool terminated = false;
-    while (instruction_id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
+    IrValidationError error = IR_VALIDATION_NONE;
+    while (instruction_id.value != IR_ID_UNDERLYING_INVALID && error == IR_VALIDATION_NONE)
     {
         IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTIONS, 1);
         IR_CONSTRUCTION_RECORD(VALIDATION_TERMINATOR_CHECKS, 1);
-        IrInstruction* instruction = function->instructions + instruction_id.value;
-        IrValidationError error = IR_VALIDATION_NONE;
-        if (terminated || instruction->opcode >= IR_OPCODE_COUNT || !ir_type_from_id(&program->types, instruction->canonical_type))
+        IrInstruction* instruction = instructions + instruction_id.value;
+        u32 operand_count = instruction->operand_count;
+        u32 target_count = instruction->target_count;
+        IrValueId const* operands = instruction->operands;
+        IrBlockId const* targets = instruction->targets;
+        u32 result_value = instruction->result.value;
+        if (terminated || instruction->opcode >= IR_OPCODE_COUNT || instruction->canonical_type.value >= type_count)
         {
             error = terminated ? IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR : IR_VALIDATION_INVALID_ID;
         }
-        else if ((instruction->operand_count && !instruction->operands) || (instruction->target_count && !instruction->targets) ||
-                 (instruction->immediate_count && !instruction->immediates))
+        else if ((operand_count && !operands) || (target_count && !targets) || (instruction->immediate_count && !instruction->immediates))
         {
             error = IR_VALIDATION_OPERATION;
         }
         else
         {
-            for (u32 operand_index = 0; operand_index < instruction->operand_count && error == IR_VALIDATION_NONE; operand_index += 1)
+            // Range checks fold into one flag per id array: only whether some
+            // id is out of range matters, not which one.
+            bool operands_valid = true;
+            for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
             {
                 IR_CONSTRUCTION_RECORD(VALIDATION_OPERAND_IDS, 1);
-                if (instruction->operands[operand_index].value >= function->value_count)
-                {
-                    error = IR_VALIDATION_INVALID_ID;
-                }
+                operands_valid &= operands[operand_index].value < value_count;
             }
-            for (u32 target_index = 0; target_index < instruction->target_count && error == IR_VALIDATION_NONE; target_index += 1)
+            bool targets_valid = true;
+            for (u32 target_index = 0; operands_valid && target_index < target_count; target_index += 1)
             {
                 IR_CONSTRUCTION_RECORD(VALIDATION_TARGET_IDS, 1);
-                if (instruction->targets[target_index].value >= function->block_count)
-                {
-                    error = IR_VALIDATION_BRANCH_TARGET;
-                }
+                targets_valid &= targets[target_index].value < block_count;
             }
-            if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-                (instruction->result.value >= function->value_count ||
-                 function->values[instruction->result.value].definition.value != instruction_id.value ||
-                 function->values[instruction->result.value].canonical_type.value != instruction->canonical_type.value))
+            if (!operands_valid)
+            {
+                error = IR_VALIDATION_INVALID_ID;
+            }
+            else if (!targets_valid)
+            {
+                error = IR_VALIDATION_BRANCH_TARGET;
+            }
+            else if (result_value != IR_ID_UNDERLYING_INVALID &&
+                     (result_value >= value_count || values[result_value].definition.value != instruction_id.value ||
+                      values[result_value].canonical_type.value != instruction->canonical_type.value))
             {
                 error = IR_VALIDATION_RESULT_TYPE;
             }
-            if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID)
+            else
             {
-                IR_CONSTRUCTION_RECORD(VALIDATION_RESULT_RELATIONSHIPS, 1);
-            }
-            if (error == IR_VALIDATION_NONE)
-            {
+                if (result_value != IR_ID_UNDERLYING_INVALID)
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_RESULT_RELATIONSHIPS, 1);
+                }
                 error = ir_validate_instruction_operation(program, function, signature, instruction);
             }
         }
@@ -6465,7 +6622,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram*
             instruction_id = ir_block_next_instruction(function, block, instruction_id);
         }
     }
-    if (result.error == IR_VALIDATION_NONE && !terminated)
+    if (error == IR_VALIDATION_NONE && !terminated)
     {
         result = ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
     }

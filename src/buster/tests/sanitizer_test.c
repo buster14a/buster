@@ -317,6 +317,9 @@ BUSTER_GLOBAL_LOCAL void sanitizer_test_check_contracts(UnitTestArguments* argum
     BUSTER_TEST(arguments, SANITIZER_TEST_COMPILER_OPTIMIZES == BUSTER_OPTIMIZE);
 #endif
     BUSTER_TEST(arguments, SANITIZER_TEST_COMPILER_SANITIZES == BUSTER_SANITIZE);
+    // Issue 2657: the reference checks once reached only by sanitized Debug
+    // follow the checked contracts, so sanitized Release executes them too.
+    BUSTER_TEST(arguments, BUSTER_REFERENCE_CHECKS == SANITIZER_TEST_CHECKED_CONTRACTS);
 
     u32 check_count = 0;
     BUSTER_CHECK(sanitizer_test_count_operand(&check_count, true));

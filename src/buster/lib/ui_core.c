@@ -2651,6 +2651,7 @@ BUSTER_GLOBAL_LOCAL void ui_signal_apply_event(UI_Box* box, UI_Signal* signal, U
     {
         sig.f |= UI_SignalFlag_KeyboardPressed;
         sig.clicked_left = 1;
+        sig.activation_count += 1;
         sig.key = event->key;
         sig.modifiers = event->modifiers;
         ui_eat_event(event);
@@ -2707,6 +2708,7 @@ BUSTER_GLOBAL_LOCAL void ui_signal_apply_event(UI_Box* box, UI_Signal* signal, U
             {
                 sig.f |= UI_SignalFlag_LeftClicked;
                 sig.clicked_left = 1;
+                sig.activation_count += 1;
                 sig.left_click_position = event->pos;
             }
         }
@@ -2719,6 +2721,7 @@ BUSTER_GLOBAL_LOCAL void ui_signal_apply_event(UI_Box* box, UI_Signal* signal, U
     {
         sig.f |= UI_SignalFlag_KeyboardPressed;
         sig.clicked_left = 1;
+        sig.activation_count += 1;
         sig.key = event->key;
         sig.modifiers = event->modifiers;
         ui_eat_event(event);

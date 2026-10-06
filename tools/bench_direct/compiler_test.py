@@ -1,0 +1,609 @@
+#!/usr/bin/env python3
+"""Offline checks of the 9700X compiler comparison receipt, harness and publisher (#2752)."""
+
+from __future__ import annotations
+
+import copy
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import compiler_compare  # noqa: E402
+import compiler_publish  # noqa: E402
+import compiler_receipt  # noqa: E402
+
+A256, B256 = "1" * 64, "2" * 64
+
+
+def summary(outcome: str = "slower") -> dict:
+    return {
+        "schema": compiler_receipt.LAB_SCHEMA,
+        "baseline": {"sha256": A256, "runs": 12, "failed": 0, "deterministic": True},
+        "candidate": {"sha256": B256, "runs": 12, "failed": 0, "deterministic": True},
+        "plan": {"complete_pairs": 12},
+        "verdict": {"metric": "wall", "outcome": outcome, "ratio": 1.02, "ci_low": 1.01, "ci_high": 1.03,
+                    "text": "Candidate is SLOWER."},
+        "metrics": {"wall": {"a_median": 1.0, "b_median": 1.02, "ratio": 1.02, "ci_low": 1.01, "ci_high": 1.03,
+                             "outcome": outcome}},
+        "warnings": [],
+    }
+
+
+BINARIES = {"baseline": {"sha256": A256}, "candidate": {"sha256": B256}}
+MODES_ALL = ("none", "mir-stack", "fast", "quality")
+
+
+def corpus(decision: str = "no substantial regression detected", **summary_change) -> dict:
+    """A complete throughput-corpus-v1 run on BINARIES, as {summary, metadata}."""
+    profile = compiler_receipt.THROUGHPUT_PROFILE
+    cases = [{"name": f"{name}/{mode}", "medians": {}, "tests": [], "decision": decision}
+             for name in profile["workloads"] for mode in MODES_ALL]
+    regressions = len(cases) if decision == "regression" else 0
+    result = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": regressions,
+              "inconclusive_cases": 0, "valid": True}
+    result.update(summary_change)
+    metadata = {"schema": 2, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
+                "rounds": profile["rounds"], "warmups": profile["warmups"], "cpu": profile["cpu"],
+                "workloads": list(profile["workloads"]),
+                "compiler_provenance": [{"sha256": A256}, {"sha256": B256}]}
+    return {"summary": result, "metadata": metadata}
+def scaling(status: str = "valid", compiler: str = B256) -> dict:
+    """A complete scaling-v1 run on the candidate of BINARIES, as {series: {summary, metadata}}."""
+    point = {"workers": 2, "placement": "core", "observed_workers": 2, "wall_median": 0.5, "speedup": 1.6,
+             "speedup_interval": [1.4, 1.8], "efficiency": 0.8, "cpu_inflation": 1.2, "rss_inflation": 1.3}
+    return {name: {"summary": {"schema": compiler_receipt.SCALING_SCHEMA, "status": status, "reason": "",
+                               "series": [{"name": "equal", "inputs": 28, "points": [point]},
+                                          {"name": "diagnostic", "diagnostics_identical": True, "exit_code": 1}]},
+                   "metadata": {"schema": compiler_receipt.SCALING_SCHEMA, "compiler_sha256": compiler,
+                                "cpu_set": "1-7,9-15", "excluded_cpus": "0,8", "physical_cores": 7,
+                                "logical_cpus": 14}}
+            for name in compiler_receipt.SCALING_PROFILE["series"]}
+
+
+HOST = {"hostname": "benchpress", "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor"}
+EXPECTED = {"mode": "main", "repository": "buster14a/buster", "ref": "refs/heads/main",
+            "pull": "7", "pull_head": "c" * 40, "base": "b" * 40, "base_tree": "e" * 40, "head": "a" * 40,
+            "head_tree": "d" * 40, "trusted_revision": "9" * 40, "request_run_id": "91", "run_id": "92",
+            "run_attempt": "1"}
+
+
+def receipt(state: str = "measured") -> dict:
+    return {"schema": compiler_receipt.RECEIPT_SCHEMA, "mode": "main", "state": state, "reasons": [],
+            "host": dict(HOST), "identity": dict(EXPECTED), "profile": copy.deepcopy(compiler_receipt.PROFILE),
+            "throughput_profile": copy.deepcopy(compiler_receipt.THROUGHPUT_PROFILE),
+            "binaries": copy.deepcopy(BINARIES), "timings": {"build_seconds": {"baseline": 60.0}}}
+
+
+class ReceiptTest(unittest.TestCase):
+    def test_every_complete_direction_is_a_valid_measurement(self) -> None:
+        for outcome in compiler_receipt.MEASURED_OUTCOMES:
+            with self.subTest(outcome=outcome):
+                self.assertEqual(compiler_receipt.classify(summary(outcome), BINARIES), [])
+
+    def test_incomplete_or_mismatched_core_evidence_is_invalid(self) -> None:
+        def change(path: tuple, value: object) -> dict:
+            data = summary()
+            target = data
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            return data
+        cases = {
+            "schema": change(("schema",), "buster-uarch-lab-compare-v1"),
+            "hash": change(("candidate", "sha256"), A256),
+            "failed": change(("baseline", "failed"), 1),
+            "nondeterministic": change(("candidate", "deterministic"), False),
+            "pairs": change(("plan", "complete_pairs"), 5),
+            "inconclusive": change(("verdict", "outcome"), "inconclusive"),
+            "no verdict": change(("verdict", "outcome"), "no complete pair"),
+            "metric": change(("verdict", "metric"), "instructions"),
+            "ratio": change(("verdict", "ratio"), None),
+        }
+        for name, data in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.classify(data, BINARIES))
+        for value in (None, [], "summary"):
+            self.assertTrue(compiler_receipt.classify(value, BINARIES))
+        self.assertTrue(compiler_receipt.classify(summary(), {}))
+
+    def test_regression_policy_defaults_to_report_only_and_enforce_fails_closed(self) -> None:
+        self.assertEqual(compiler_receipt.regression_policy(""), ("report-only", ""))
+        self.assertEqual(compiler_receipt.regression_policy(" report-only "), ("report-only", ""))
+        for value in ("enforce", "off", "Report-only"):
+            self.assertTrue(compiler_receipt.regression_policy(value)[1])
+
+    def test_host_must_be_the_observed_9700x(self) -> None:
+        self.assertEqual(compiler_receipt.host_problem(receipt()), "")
+        for model in ("AMD EPYC 9654 96-Core Processor", "AMD Ryzen 9 7950X", "", None, "znver5"):
+            with self.subTest(model=model):
+                self.assertTrue(compiler_receipt.host_problem(dict(receipt(), host={"cpu_model": model})))
+        self.assertTrue(compiler_receipt.host_problem({}))
+
+    def test_marker_binds_exact_head(self) -> None:
+        self.assertEqual(compiler_receipt.check_marker("a" * 40), "buster-9700x-compiler-main-v1:" + "a" * 40)
+        self.assertEqual(compiler_receipt.check_marker("a" * 40, "pull"), "buster-9700x-compiler-pr-v1:" + "a" * 40)
+        self.assertNotEqual(compiler_receipt.check_name("pull"), compiler_receipt.check_name("main"))
+        with self.assertRaises(ValueError):
+            compiler_receipt.check_marker("main")
+
+
+class DecideTest(unittest.TestCase):
+    def decide(self, **change) -> tuple[str, str, list[str]]:
+        values = {"expected": dict(EXPECTED), "authorized": True, "compare_result": "success",
+                  "receipt": receipt(), "summary": summary(), "policy_value": "", "throughput": corpus()}
+        values.update(change)
+        return compiler_publish.decide(**values)
+
+    def test_slow_valid_measurement_succeeds_report_only(self) -> None:
+        conclusion, title, reasons = self.decide()
+        self.assertEqual((conclusion, reasons), ("success", []))
+        self.assertIn("report-only", title)
+        self.assertIn("slower", title)
+
+    def test_missing_or_invalid_evidence_is_never_success(self) -> None:
+        mismatched = receipt()
+        mismatched["identity"]["base"] = "8" * 40
+        profile = receipt()
+        profile["profile"] = dict(profile["profile"], target_minutes=1)
+        other_host = dict(receipt(), host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})
+        other_mode = dict(receipt(), mode="pull")
+        cases = {
+            "unauthorized": {"authorized": False},
+            "not the Zen 5 host": {"receipt": other_host},
+            "other mode": {"receipt": other_mode},
+            "no receipt": {"receipt": None},
+            "wrong schema": {"receipt": dict(receipt(), schema="other")},
+            "mismatched identity": {"receipt": mismatched},
+            "changed profile": {"receipt": profile},
+            "failed host": {"receipt": receipt("failed")},
+            "invalid samples": {"summary": dict(summary(), plan={"complete_pairs": 2})},
+            "compare cancelled": {"compare_result": "cancelled"},
+            "enforcement requested": {"policy_value": "enforce"},
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                conclusion, _, reasons = self.decide(**change)
+                self.assertEqual(conclusion, "failure")
+                self.assertTrue(reasons)
+
+    def test_corpus_regressions_are_reported_not_decided(self) -> None:
+        conclusion, _, reasons = self.decide(throughput=corpus("regression"))
+        self.assertEqual((conclusion, reasons), ("success", []))
+
+    def test_incomplete_or_unbound_corpus_is_never_success(self) -> None:
+        other_binary = corpus()
+        other_binary["metadata"]["compiler_provenance"][1]["sha256"] = "3" * 64
+        fewer_pairs = corpus()
+        fewer_pairs["metadata"]["pairs_per_round"] = 5
+        partial = corpus()
+        partial["summary"]["comparisons"] = partial["summary"]["comparisons"][:4]
+        no_profile = receipt()
+        del no_profile["throughput_profile"]
+        changed_profile = receipt()
+        changed_profile["throughput_profile"] = dict(changed_profile["throughput_profile"], pairs_per_round=5)
+        cases = {
+            "no corpus evidence": {"throughput": None},
+            "no metadata": {"throughput": {"summary": corpus()["summary"]}},
+            "invalid comparison": {"throughput": corpus(valid=False)},
+            "guard disabled": {"throughput": corpus(guard_enabled=False)},
+            "other schema": {"throughput": corpus(schema=1)},
+            "another compiler": {"throughput": other_binary},
+            "fewer pairs than the profile": {"throughput": fewer_pairs},
+            "missing workloads": {"throughput": partial},
+            "receipt without the corpus profile": {"receipt": no_profile},
+            "changed corpus profile": {"receipt": changed_profile},
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                conclusion, _, reasons = self.decide(**change)
+                self.assertEqual(conclusion, "failure")
+                self.assertTrue(reasons)
+
+    def test_requested_scaling_is_validated_and_reported_not_decided(self) -> None:
+        asked = receipt()
+        asked["scaling_profile"] = copy.deepcopy(compiler_receipt.SCALING_PROFILE)
+        self.assertEqual(self.decide(receipt=asked, throughput=dict(corpus(), scaling=scaling())),
+                         ("success", self.decide()[1], []))
+        changed = copy.deepcopy(asked)
+        changed["scaling_profile"]["series"]["cores"] = ["--workers", "1"]
+        cases = {
+            "no bundles": {"receipt": asked, "throughput": corpus()},
+            "invalid bundle": {"receipt": asked, "throughput": dict(corpus(), scaling=scaling("invalid"))},
+            "another compiler": {"receipt": asked, "throughput": dict(corpus(), scaling=scaling(compiler=A256))},
+            "missing series": {"receipt": asked, "throughput": dict(corpus(), scaling={"cores": scaling()["cores"]})},
+            "changed profile": {"receipt": changed, "throughput": dict(corpus(), scaling=scaling())},
+        }
+        for label, change in cases.items():
+            with self.subTest(label=label):
+                conclusion, _, reasons = self.decide(**change)
+                self.assertEqual(conclusion, "failure")
+                self.assertIn("scaling", " ".join(reasons))
+        # A comparison that did not ask for scaling ignores any bundle.
+        self.assertEqual(self.decide(throughput=dict(corpus(), scaling=scaling("invalid")))[0], "success")
+        report = compiler_receipt.render(dict(asked, scaling=compiler_receipt.scaling_digest(scaling())), summary(),
+                                         "success", [])
+        self.assertIn("Series `cores`: valid on CPU set `1-7,9-15` (7 cores, 14 logical CPUs; housekeeping `0,8` "
+                      "excluded)", report)
+        self.assertIn("| equal (28) | 2 | core | 2 | 0.5000 | 1.600 | [1.400, 1.800] | 0.800 | 1.200 | 1.300 |", report)
+
+    def test_only_recovery_of_a_legacy_receipt_skips_the_corpus(self) -> None:
+        legacy = receipt()
+        del legacy["throughput_profile"]
+        self.assertEqual(self.decide(receipt=legacy, throughput=None, require_throughput=False)[0], "success")
+        # A receipt that names the profile is always checked.
+        self.assertEqual(self.decide(throughput=None, require_throughput=False)[0], "failure")
+
+    def test_superseded_group_is_neutral_and_transfers_nothing(self) -> None:
+        conclusion, title, _ = self.decide(receipt=receipt("superseded"), summary=None)
+        self.assertEqual((conclusion, title), ("neutral", "Superseded before measurement"))
+
+
+class FakeApi:
+    def __init__(self, archive: bytes, rows: list | None = None):
+        self.archive = archive
+        self.rows = rows
+
+    def request(self, path: str, data: dict | None = None) -> object:
+        return {"artifacts": self.rows if self.rows is not None else [
+            {"name": "buster-9700x-compiler-x-1", "expired": False, "size_in_bytes": len(self.archive),
+             "archive_download_url": "https://api.invalid/zip"}]}
+
+    def download(self, url: str) -> bytes:
+        return self.archive
+
+
+def archive(members: dict) -> bytes:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as output:
+        for name, value in members.items():
+            output.writestr(name, value)
+    return stream.getvalue()
+
+
+class EvidenceTest(unittest.TestCase):
+    def test_reads_receipt_and_summary_as_data(self) -> None:
+        payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
+                           "throughput/summary.json": json.dumps(corpus()["summary"]),
+                           "throughput/metadata.json": json.dumps(corpus()["metadata"])})
+        got = compiler_publish.read_evidence(FakeApi(payload), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(got[:3], (receipt(), summary(), ""))
+        self.assertEqual(got[3]["name"], "buster-9700x-compiler-x-1")
+        unscaled = {name: {"summary": None, "metadata": None} for name in compiler_receipt.SCALING_PROFILE["series"]}
+        self.assertEqual(got[4], dict(corpus(), scaling=unscaled))
+        bundles = scaling()
+        members = {f"scaling/{name}/{leaf}": json.dumps(bundles[name][key]) for name in bundles
+                   for leaf, key in (("scaling.json", "summary"), ("scaling-metadata.json", "metadata"))}
+        payload = archive({"receipt.json": json.dumps(receipt()), **members})
+        self.assertEqual(compiler_publish.read_evidence(FakeApi(payload), "92", "buster-9700x-compiler-x-1")[4]["scaling"],
+                         bundles)
+
+    def test_missing_ambiguous_or_malformed_evidence(self) -> None:
+        payload = archive({"receipt.json": "{not json"})
+        self.assertEqual(compiler_publish.read_evidence(FakeApi(payload), "92", "buster-9700x-compiler-x-1")[:2],
+                         (None, None))
+        for rows in ([], [{"name": "buster-9700x-compiler-x-1"}] * 2,
+                     [{"name": "buster-9700x-compiler-x-1", "expired": True, "size_in_bytes": 1,
+                       "archive_download_url": "u"}]):
+            with self.subTest(rows=rows):
+                self.assertTrue(compiler_publish.read_evidence(FakeApi(b"", rows), "92",
+                                                               "buster-9700x-compiler-x-1")[2])
+
+
+FAKE_BUILD = """#!/usr/bin/env bash
+set -euo pipefail
+if [[ $1 == bench_throughput && $2 == scale ]]; then
+    exec python3 scaling_fake.py "$@"
+elif [[ $1 == bench_throughput ]]; then
+    exec python3 throughput_fake.py "$@"
+elif [[ $1 == generate ]]; then
+    mkdir -p build/Release
+    printf 'BUSTER_INCLUDE_TESTS:BOOL=OFF\\n' > build/CMakeCache.txt
+else
+    cp compiler.txt build/Release/ide
+fi
+"""
+FAKE_LAB = """import hashlib, json, sys
+argv = sys.argv
+value = lambda flag: argv[argv.index(flag) + 1]
+digest = lambda path: hashlib.sha256(open(path, "rb").read()).hexdigest()
+variant = lambda path: {"sha256": digest(path), "runs": 12, "failed": 0, "deterministic": True}
+import os
+os.makedirs(value("--output"))
+summary = {"schema": "buster-uarch-lab-compare-v2", "baseline": variant(value("--baseline")),
+           "candidate": variant(value("--candidate")), "plan": {"complete_pairs": 12},
+           "verdict": {"metric": "wall", "outcome": "no detectable difference", "ratio": 1.0, "ci_low": 0.99,
+                       "ci_high": 1.01, "text": "NO DETECTABLE DIFFERENCE"}, "metrics": {}, "warnings": []}
+open(os.path.join(value("--output"), "summary.json"), "w").write(json.dumps(summary))
+open(os.path.join(value("--output"), "reference.exe"), "w").write("excluded")
+"""
+
+
+# Stands in for `./build.sh bench_throughput run`; FAKE_THROUGHPUT=fail|partial
+# makes it exit nonzero or cover only one workload.
+FAKE_THROUGHPUT = """import hashlib, json, os, sys
+argv = sys.argv
+value = lambda flag: argv[argv.index(flag) + 1]
+digest = lambda path: hashlib.sha256(open(path, "rb").read()).hexdigest()
+behavior = os.environ.get("FAKE_THROUGHPUT", "")
+workloads = ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure"]
+output = value("--output")
+os.makedirs(output)
+covered = workloads[:1] if behavior == "partial" else workloads
+cases = [{"name": name + "/" + mode, "decision": "no substantial regression detected"}
+         for name in covered for mode in ("none", "mir-stack", "fast", "quality")]
+summary = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": 0,
+           "inconclusive_cases": 0, "valid": True}
+metadata = {"schema": 2, "profile": value("--profile"), "pairs_per_round": int(value("--pairs")), "rounds": 2,
+            "warmups": int(value("--warmups")), "cpu": int(value("--cpu")), "workloads": workloads,
+            "compiler_provenance": [{"sha256": digest(value("--baseline"))}, {"sha256": digest(value("--candidate"))}]}
+open(os.path.join(output, "summary.json"), "w").write(json.dumps(summary))
+open(os.path.join(output, "metadata.json"), "w").write(json.dumps(metadata))
+sys.exit(3 if behavior == "fail" else 0)
+"""
+# Stands in for `./build.sh bench_throughput scale`; FAKE_SCALING=fail makes
+# the bundle invalid and the command exit 2.
+FAKE_SCALING = """import hashlib, json, os, sys
+argv = sys.argv
+value = lambda flag: argv[argv.index(flag) + 1]
+digest = lambda path: hashlib.sha256(open(path, "rb").read()).hexdigest()
+failed = os.environ.get("FAKE_SCALING", "") == "fail"
+output = value("--output")
+os.makedirs(os.path.join(output, "inputs", "equal"))
+open(os.path.join(output, "inputs", "equal", "tu0000.c"), "w").write("int main(void) { return 0; }\\n")
+open(os.path.join(output, "samples.metrics"), "w").write("excluded")
+point = {"workers": 2, "placement": "core", "observed_workers": 2, "speedup": 1.5}
+summary = {"schema": "buster-throughput-scaling-v1", "status": "invalid" if failed else "valid", "reason": "",
+           "series": [] if failed else [{"name": "equal", "inputs": 28, "points": [point]}]}
+metadata = {"schema": "buster-throughput-scaling-v1", "compiler_sha256": digest(value("--compiler")),
+            "cpu_set": value("--cpu-set"), "arguments": argv[2:]}
+open(os.path.join(output, "scaling.json"), "w").write(json.dumps(summary))
+open(os.path.join(output, "scaling-metadata.json"), "w").write(json.dumps(metadata))
+sys.exit(2 if failed else 0)
+"""
+
+
+def retained(evidence: Path) -> dict:
+    """The corpus and scaling documents as the publisher reads them from the artifact."""
+    load = lambda path: json.loads(path.read_text()) if path.is_file() else None  # noqa: E731
+    result = {name.split(".")[0]: json.loads((evidence / "throughput" / name).read_text())
+              for name in ("summary.json", "metadata.json")}
+    result["scaling"] = {name: {"summary": load(evidence / "scaling" / name / "scaling.json"),
+                                "metadata": load(evidence / "scaling" / name / "scaling-metadata.json")}
+                         for name in compiler_receipt.SCALING_PROFILE["series"]}
+    return result
+
+
+class HarnessTest(unittest.TestCase):
+    """The host harness against a real two-parent group with stand-in builds and lab."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        root = Path(self.directory.name)
+        self.repo = root / "candidate"
+        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
+                                                capture_output=True, text=True).stdout.strip()
+        self.repo.mkdir()
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        (self.repo / "build.sh").write_text(FAKE_BUILD)
+        (self.repo / "build.sh").chmod(0o755)
+        (self.repo / "compiler.txt").write_text("base compiler\n")
+        (self.repo / "throughput_fake.py").write_text(FAKE_THROUGHPUT)
+        (self.repo / "scaling_fake.py").write_text(FAKE_SCALING)
+        git("add", ".")
+        git("commit", "-qm", "base")
+        self.base = git("rev-parse", "HEAD")
+        git("checkout", "-qb", "pr")
+        (self.repo / "compiler.txt").write_text("candidate compiler\n")
+        git("commit", "-qam", "candidate")
+        self.pull_head = git("rev-parse", "HEAD")
+        git("checkout", "-q", "main")
+        git("merge", "-q", "--no-ff", "-m", "group", "pr")
+        self.head = git("rev-parse", "HEAD")
+        self.trees = git("rev-parse", "HEAD^{tree}"), git("rev-parse", self.base + "^{tree}")
+        self.lab = root / "lab.py"
+        self.lab.write_text(FAKE_LAB)
+        self.root = root
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def run_harness(self, live: object, cpu: str = HOST["cpu_model"], corpus_behavior: str = "",
+                    scaling_behavior: str = "", **change) -> tuple[int, dict, Path]:
+        values = {"mode": "main", "candidate": str(self.repo), "lab": str(self.lab), "work": str(self.root / "work"),
+                  "evidence": str(self.root / "evidence"), "summary": str(self.root / "step.md"),
+                  "repository": "buster14a/buster", "ref": "refs/heads/main",
+                  "pull": "7", "pull-head": self.pull_head, "base": self.base, "base-tree": self.trees[1],
+                  "head": self.head, "head-tree": self.trees[0], "trusted-revision": "9" * 40,
+                  "request-run-id": "91", "run-id": "92", "run-attempt": "1"}
+        values.update(change)
+        argv = [item for key, value in values.items() for item in ("--" + key, value)]
+        with mock.patch.object(compiler_compare, "queue_head", return_value=live), \
+                mock.patch.object(compiler_compare, "cpu_model", return_value=cpu), \
+                mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", ""), "FAKE_THROUGHPUT": corpus_behavior,
+                                             "FAKE_SCALING": scaling_behavior}):
+            code = compiler_compare.main(argv)
+        evidence = self.root / "evidence"
+        return code, json.loads((evidence / "receipt.json").read_text()), evidence
+
+    def test_builds_base_then_candidate_and_measures_on_the_base_tree(self) -> None:
+        code, result, evidence = self.run_harness(self.head)
+        self.assertEqual((code, result["state"], result["reasons"]), (0, "measured", []))
+        self.assertEqual(set(result["timings"]["build_seconds"]), {"baseline", "candidate", "closure"})
+        self.assertNotEqual(result["binaries"]["baseline"]["sha256"], result["binaries"]["candidate"]["sha256"])
+        self.assertEqual(result["binaries"]["baseline"]["revision"], self.base)
+        self.assertEqual(result["identity"]["head"], self.head)
+        self.assertEqual(result["profile"], compiler_receipt.PROFILE)
+        # The frozen workload is the base tree, and compiled outputs are not retained.
+        self.assertEqual((self.repo / "compiler.txt").read_text(), "base compiler\n")
+        self.assertTrue((evidence / "lab" / "summary.json").is_file())
+        self.assertFalse((evidence / "lab" / "reference.exe").exists())
+        self.assertEqual(result["coverage"], {"first_parent": self.base, "range": "1"})
+        expected = dict(result["identity"], first_parent=self.base, range="1")
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence))[0], "success")
+        # The host's range must equal the authorized one.
+        self.assertEqual(compiler_publish.decide(dict(expected, range="2"), True, "success", result, summary, "", retained(evidence))[0],
+                         "failure")
+
+    def test_range_baseline_on_the_first_parent_chain(self) -> None:
+        # A burst left head unmeasured: the next main commit is compared with base, two first-parent commits back.
+        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
+                                                capture_output=True, text=True).stdout.strip()
+        (self.repo / "compiler.txt").write_text("later compiler\n")
+        git("commit", "-qam", "later")
+        later, later_tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+        code, result, _ = self.run_harness(later, head=later, pull="0", **{"pull-head": later, "head-tree": later_tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["coverage"], {"first_parent": self.head, "range": "2"})
+        self.assertEqual(result["binaries"]["baseline"]["revision"], self.base)
+        # A pull request side commit is an ancestor but not on the first-parent chain.
+        pull_tree = git("rev-parse", self.pull_head + "^{tree}")
+        git("checkout", "-q", "--detach", later)
+        code, result, _ = self.run_harness(later, head=later, pull="0", base=self.pull_head,
+                                           **{"pull-head": later, "head-tree": later_tree, "base-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("not on the first-parent chain", " ".join(result["reasons"]))
+        self.assertNotIn("coverage", result)
+
+    def test_pull_mode_compares_head_with_its_merge_base(self) -> None:
+        # The pull request head (second parent) against the base it branched from.
+        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                                  **{"head-tree": pull_tree})
+        self.assertEqual((code, result["state"], result["mode"]), (0, "measured", "pull"), result["reasons"])
+        expected = dict(result["identity"])
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence))[0], "success")
+        # A main-mode publisher never accepts a pull-mode receipt.
+        self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "", retained(evidence))[0],
+                         "failure")
+
+    def scaling_head(self) -> tuple[str, str]:
+        """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""
+        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
+                                                capture_output=True, text=True).stdout.strip()
+        git("checkout", "-q", "--detach", self.pull_head)
+        request = self.repo / compiler_receipt.SCALING_REQUEST
+        request.parent.mkdir(parents=True)
+        request.write_text("# request: scaling\n")
+        git("add", compiler_receipt.SCALING_REQUEST)
+        git("commit", "-qm", "request scaling")
+        return git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+    def test_requested_scaling_runs_on_the_candidate_only(self) -> None:
+        head, tree = self.scaling_head()
+        code, result, evidence = self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head,
+                                                  **{"pull-head": head, "head-tree": tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["scaling_profile"], compiler_receipt.SCALING_PROFILE)
+        self.assertIn("scaling_seconds", result["timings"])
+        documents = retained(evidence)["scaling"]
+        for name, arguments in compiler_receipt.SCALING_PROFILE["series"].items():
+            with self.subTest(series=name):
+                metadata = documents[name]["metadata"]
+                self.assertEqual(metadata["compiler_sha256"], result["binaries"]["candidate"]["sha256"])
+                self.assertEqual(metadata["arguments"][1:5], ["--compiler", metadata["arguments"][2], "--output",
+                                                              metadata["arguments"][4]])
+                self.assertEqual(metadata["arguments"][5:], arguments)
+                # Generated inputs and per-sample metrics stay out of the evidence.
+                self.assertFalse((evidence / "scaling" / name / "inputs").exists())
+                self.assertFalse((evidence / "scaling" / name / "samples.metrics").exists())
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        expected = dict(result["identity"])
+        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence))[0],
+                         "success")
+
+    def test_failed_scaling_fails_the_receipt(self) -> None:
+        head, tree = self.scaling_head()
+        code, result, _ = self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head, scaling_behavior="fail",
+                                           **{"pull-head": head, "head-tree": tree})
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("bench_throughput scale (cores) exited 2", " ".join(result["reasons"]))
+
+    def test_scaling_needs_the_request_in_this_pull_request(self) -> None:
+        # Pull mode without the request, and main mode with it, never run the scaling leg.
+        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        code, result, _ = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                           **{"head-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertNotIn("scaling_profile", result)
+        head, tree = self.scaling_head()
+        code, result, _ = self.run_harness(head, head=head, pull="0", base=self.pull_head,
+                                           **{"pull-head": head, "head-tree": tree,
+                                              "base-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertNotIn("scaling_profile", result)
+
+    def test_corpus_runs_on_the_measured_binaries(self) -> None:
+        code, result, evidence = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["throughput_profile"], compiler_receipt.THROUGHPUT_PROFILE)
+        self.assertEqual((result["throughput"]["exit"], len(result["throughput"]["cases"])), (0, 24))
+        metadata = retained(evidence)["metadata"]
+        self.assertEqual([row["sha256"] for row in metadata["compiler_provenance"]],
+                         [result["binaries"][role]["sha256"] for role in ("baseline", "candidate")])
+        self.assertIn("throughput_seconds", result["timings"])
+
+    def test_failed_or_partial_corpus_fails_the_receipt(self) -> None:
+        for behavior, expected in (("fail", "bench_throughput run exited 3"), ("partial", "not every profile workload")):
+            with self.subTest(behavior=behavior):
+                # Each run leaves the frozen base checked out.
+                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                code, result, _ = self.run_harness(self.head, corpus_behavior=behavior)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertIn(expected, " ".join(result["reasons"]))
+
+    def test_other_hardware_is_never_measured_as_zen5(self) -> None:
+        code, result, _ = self.run_harness(self.head, cpu="AMD EPYC 9B14")
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("not the approved Zen 5 host", " ".join(result["reasons"]))
+        self.assertEqual(result["timings"]["build_seconds"], {})
+
+    def test_main_commit_is_measured_after_main_moves_on(self) -> None:
+        code, result, _ = self.run_harness("f" * 40)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+
+    def test_direct_push_is_its_own_pull_head(self) -> None:
+        # pull_head's only parent is base: a single-parent commit on main.
+        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        code, result, _ = self.run_harness(self.pull_head, head=self.pull_head, pull="0", **{"head-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["identity"]["pull_head"], self.pull_head)
+
+    def test_moved_pull_request_is_superseded_without_building(self) -> None:
+        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        code, result, _ = self.run_harness("", mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                           **{"head-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (0, "superseded"))
+        self.assertEqual(result["timings"]["build_seconds"], {})
+
+    def test_identity_mismatch_and_failed_build_are_failures(self) -> None:
+        code, result, _ = self.run_harness(self.head, base="8" * 40)
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        (self.repo / "build.sh").write_text("#!/usr/bin/env bash\nexit 3\n")
+        subprocess.run(["git", "-C", str(self.repo), "update-index", "--assume-unchanged", "build.sh"], check=True)
+        code, result, _ = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("failed with exit 3", " ".join(result["reasons"]))
+
+
+if __name__ == "__main__":
+    unittest.main()
