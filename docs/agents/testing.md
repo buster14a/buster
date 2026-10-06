@@ -243,7 +243,15 @@
   entry completion. Each fixed-size direct stderr write carries PID, app
   monotonic/wall microseconds, process CPU microseconds and separate clock/query
   statuses; nonzero statuses make the corresponding measurement unavailable.
-  This path needs no arena or thread context. `BUSTER_IOS_LAUNCH_OBSERVATION`
+  This path needs no arena or thread context. Right after the `main` record,
+  `BUSTER_IOS_PROCESS_V1` reports the kernel's process start wall time
+  (`start_wall_us`, from `sysctl` `KERN_PROC_PID`) and `start_status`. Host
+  launch to `start_wall_us` is simulator spawn scheduling. `start_wall_us` to
+  the `main` wall time is loader and static-initialization work.
+  `ios/test_ci.sh` launches Release before Debug by default (checked by
+  `ios/hosted_signing_budget_test.py`), so the first
+  launch on a freshly booted device does not consume the Debug budget (#2819).
+  `BUSTER_IOS_LAUNCH_OBSERVATION`
   records the host's first polled console, app trace and fixture receipt using
   the existing Bash launch clock. Poll observations include scheduling and
   scanning delay and are not native timestamps; missing events stay absent.
@@ -517,6 +525,16 @@ child. `WASM_NODE_PROCESS` retains separate startup and wait timings. Delayed
 startup and missing-readiness controls cover the handshake. Actual Node-backed
 Wasm oracle deadlines and success requirements are unchanged.
 
+The bit-field aggregate Node oracle (#2194) logs `WASM_NODE_MODULE` with the
+exact module size and SHA-256 before each run, and the module bytes as hex
+(`WASM_NODE_MODULE_BYTES`, at most 64 KiB) when the oracle fails. After
+`WASM_NODE_READY` its script writes a `WASM_NODE_PHASE <name> uptime_us=...`
+line after Node provenance (`ready`), the artifact read, module compilation and
+instantiation, then the summary and `WASM_NODE_DONE`/`WASM_NODE_EXIT` stamps.
+`WASM_NODE_PROCESS` reports the last complete phase as `last_phase`, so a
+timeout names the step it interrupted. Phases and stamps are evidence only:
+success still requires the summary, a normal zero exit and empty stderr.
+
 ## Throughput runner integration
 
 The desktop combination matrix builds and runs `bench_throughput self-test`
@@ -732,6 +750,12 @@ program/verifier body remains live through its dependent checks. The runner's
 work-indexed parallel records lie below module marks, and parallel output has
 its own arena. The temporary-root pathname lives in a separate run-owned arena;
 compiler-global metadata and persistent lane contexts keep their existing owners.
+
+A fixture that compiles and runs an executable on every loop iteration names it
+with `buster_test_temporary_unique_path`, which appends a process-wide serial to
+`buster_test_temporary_path`. Windows may refuse to overwrite an image that has
+just run (`ERROR_ACCESS_DENIED`; #2089, #2836), so no iteration may rewrite a
+path an earlier one launched.
 
 `test_arena_self_test` runs as a fail-closed harness check without changing
 registered assertion/module counts. It covers nested and empty scopes, retained
@@ -973,6 +997,20 @@ The companion lives beside the startup shim in `tools/`, outside the frozen
 inventory remain unchanged.
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
+
+The first Node launch in a job pages the Node executable in from disk; every later launch starts warm. On hosted Linux AArch64 that cold page-in has taken between 0.1 s and 2.1 s in passing jobs. In one incident it stalled for about a minute at near-zero CPU (#2194). The incident looked like this:
+
+- The bit-field oracle's first attempt timed out silently.
+- Its retry printed `WASM_NODE_READY` with under a second of budget left.
+- Together, the two attempts paged in about one normal cold start (roughly 76,500 blocks).
+
+`compiler_driver_test_wasm_node_cold_start` therefore runs immediately before the first real oracle in module order. It starts Node once, compiles and instantiates an empty Wasm module, synchronously writes `WASM_NODE_COLD_START_DONE` and exits.
+
+- It has its own bounded 120-second budget and logs a `WASM_NODE_COLD_START` line with its elapsed time.
+- It fails on a timeout, a nonzero exit, any stderr output or a missing marker.
+- Each oracle's deadline then measures a warm start plus the oracle's own work.
+
+This fixture accounts for a cold start the runner was charging to an oracle. It does not relax any oracle's deadline, retry or success rule. A test or module selection that skips the fixture gets the previous behavior.
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 

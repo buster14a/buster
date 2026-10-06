@@ -119,6 +119,17 @@ allocator modes and both frontend forms.
   it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
   both macros under all four allocators and
   `c_test_typeof_conditional_type` pins the resolved types themselves.
+  Both engines type an operand in time linear in its token count (GitHub
+  #2715). A left-associative chain such as `a + b + ... + z` folds left to
+  right instead of splitting at its last operator and retyping the prefix:
+  the gen-side `CIrSizeofFrame` keeps the operands folded so far in
+  `first_type` and resumes `c_ir_sizeof_operator_scan` after each operator to
+  find the next one, while the parse side pushes a chain's prefixes at once. A
+  shift chain is typed by its first operand alone. A conditional's false arm
+  receives its own top-level `?` and `:` (`question_hint`/`colon_hint`, and
+  `c_parse_expression_next_conditional` on the parse side) instead of
+  rescanning the rest of the chain. `c_test_tall_expression_types` types
+  10,000-operand chains.
 - **Every conditional converts to its own common type before its consumer.**
   The selection worklist types immediate children in postorder, retaining only
   the type at each question token. Flattened control flow shares a result place

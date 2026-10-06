@@ -1057,6 +1057,34 @@ BUSTER_GLOBAL_LOCAL void compiler_print_diagnostic(String8 format, ...)
     va_end(arguments);
 }
 
+// The `-` input names standard input. Read it to EOF once, before the driver
+// runs, into one contiguous buffer that doubles until the stream ends. A
+// failed read leaves the pointer null, which the caller reports.
+BUSTER_GLOBAL_LOCAL String8 c_compiler_read_standard_input(Arena* arena)
+{
+    OsFileDescriptor* input = os_get_standard_stream(STANDARD_STREAM_INPUT);
+    u64 capacity = BUSTER_KB(64);
+    u64 length = 0;
+    char8* buffer = arena_allocate(arena, char8, capacity);
+    bool ended = false;
+    bool failed = false;
+    while (!ended)
+    {
+        OsFileReadResult read = os_file_read_exact(input, (ByteSlice){.pointer = (u8*)buffer + length, .length = capacity - length});
+        length += read.transferred;
+        failed = read.status == OS_FILE_READ_ERROR;
+        ended = read.status != OS_FILE_READ_OK;
+        if (!ended)
+        {
+            char8* grown = arena_allocate(arena, char8, capacity * 2);
+            memcpy(grown, buffer, length);
+            buffer = grown;
+            capacity *= 2;
+        }
+    }
+    return failed ? (String8){0} : (String8){.pointer = buffer, .length = length};
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
@@ -1072,6 +1100,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     if (query)
     {
         string_print(S8("{S8}"), compiler_driver_query_text(arena, &invocation));
+    }
+    for (u32 input_index = 0; invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
+    {
+        if (string_equal(invocation.input_paths[input_index], S8("-")))
+        {
+            invocation.standard_input = c_compiler_read_standard_input(arena);
+            if (!invocation.standard_input.pointer)
+            {
+                invocation.error = COMPILER_DRIVER_ERROR_FILE_READ;
+                invocation.diagnostic = S8("could not read standard input");
+            }
+        }
     }
     // The metrics clock starts after argument parsing: reading it earlier
     // would cost every compile a clock read to learn the option was absent.

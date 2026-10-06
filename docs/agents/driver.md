@@ -69,8 +69,11 @@ inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
 `-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
 existing execution. Objects, archives, assembly and each `-l` occurrence are
 serial boundaries, even when `-x c` is present. A library between C sources
-ends the cohort before later translation units can publish definitions. Worker count is clamped to logical CPUs, input
-count and one inside an embedding caller's multi-lane gang.
+ends the cohort before later translation units can publish definitions. Worker count is clamped to the logical CPUs the
+process may run on (the affinity mask on Linux and Windows, so `taskset`, a
+cpuset or a job object narrows it; cgroup CPU quotas are not considered), input
+count and one inside an embedding caller's multi-lane gang. The default
+`lane_run` width uses the same count.
 
 Each cohort contains at most one full TU per worker. `lane_range` gives
 stable input slots, the existing persistent gang is reused, and each worker
@@ -265,9 +268,14 @@ architecture; independently probed host features are preserved. Explicit
 targets keep `unsupported CPU model`): each level is `baseline` plus the
 cumulative features of `compiler_driver_psabi_features` (v2: cx16, popcnt,
 sse3, ssse3, sse4.1, sse4.2; v3: avx, avx2, bmi1, bmi2, f16c, fma, lzcnt,
-movbe, xsave; v4: avx512f/bw/cd/dq/vl), so `__SSE4_2__`, `__AVX2__` and the
-other feature predefines follow, and `-mattr` overrides still refine the level.
+movbe, xsave; v4: avx512f/bw/cd/dq/vl). The feature predefines the frontend
+publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
+the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
+not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+`-mtune=<model>` is accepted with any nonempty value, `native` included, and
+ignored: it selects only a scheduling model, and instruction selection here has
+no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
@@ -1048,6 +1056,13 @@ On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
 
+`-static` follows the same split on every target: `-c`, `-S`, `-E` and
+`-fsyntax-only` ignore it, and a link refuses it as
+`unsupported option: -static (...)` because no image writer produces a
+static executable; hosted ELF links import `libc.so.6` dynamically. A
+configure probe that links with `-static` therefore learns the truth instead of
+receiving a dynamic executable (GitHub #2851).
+
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
 
@@ -1246,6 +1261,17 @@ leave the pointer null and `input_language_count` zero retain the legacy
 invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
+
+A lone `-` is an input naming standard input, as for GCC and Clang. It has no
+suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
+it as C source; without either, or under another language, the parser refuses
+it, and it may appear only once. The source text travels in
+`CompilerDriverInvocation.standard_input`: the `cc` command reads standard
+input to EOF into it after parsing, and embedding callers fill it themselves. A
+null pointer there fails the input as a read error. Diagnostics and `__FILE__`
+name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+`compiler_driver_test_probe_spellings` covers the admission rules, both routes
+and the `-static`/`-mtune` spellings (GitHub #2851).
 
 ## Response files
 
