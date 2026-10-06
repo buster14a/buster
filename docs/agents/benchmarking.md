@@ -454,7 +454,8 @@ captures (#2741).
   the observed CPU, the Ryzen 7 9700X; a runner label, target flag or other
   host is refused. The direct workload harness reads the same observed CPU
   model, prints it in its report, and on any other host compiles and runs
-  nothing and fails.
+  nothing and fails. The inventory test also refuses a `covered` row whose
+  evidence consumer never checks the observed host against `APPROVED_HOST`.
 - **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
   The queued benchmark service, its dispatch workflow and the earlier
   `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
