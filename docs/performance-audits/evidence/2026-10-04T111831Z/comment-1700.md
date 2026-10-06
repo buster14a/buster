@@ -1,0 +1,8 @@
+Per-token numbers at `94976eccad9c31776cf264a33dcda960dd8ed51a` from the minimum-work audit in https://github.com/buster14a/buster/pull/2627 (`docs/performance-audits/2026-10-04T111831Z.md`), posted as evidence for the claimed census branch `devin/1700-lowering-scan-census` (no overlap intended: this is a whole-pipeline model, not a lowering census, and it changes no source). Diagnostic desktop sample; instruction totals exact.
+
+- Stage-1 self-compile: `c_lower_to_ir_reserved_run` 29.20% of cycles ≈ 6.28 G of 21.51 G instructions for 2,076,108 body tokens ≈ **3,030 instructions per body token** (1,670 per preprocessed token); `c_ir_lower_dispatch_run` 17.94%, `c_ir_ssa_finish` 6.62%, `c_ir_global_initializer` 2.07%. Pinned `sqlite3.c -g`: lowering 29.58%, dispatch 21.14%, SSA finish 4.14%.
+- The audit's priced lower bound for IR construction including sealed-block SSA (write 1.63 M 64-byte rows + operands + 1.4 M values + source ranges ≈ 155 MB; ~300 K SSA reads/writes) is ~100 M instructions, so lowering is ~60x it — the largest per-stage ratio in the pipeline.
+- Where the extra visits are (ledger, exact): 197,224 lowering query roots and 28,904 type predictions; 8.18 M spelling reads and 11.3 M `string_equal` calls inside lowering; `ssa_remap_value_rows` 4,170,386, `ssa_remap_instruction_rows` 1,610,066, `ssa_finish_slot_probes` 3,449,652; 6,373,108 instruction and value slots reserved for 1.63 M final rows.
+- The SSA half has its own census on #1321 (71% of the 500,552 provisional parameters are created by the finish walk, 24% avoidable by sealing at construction).
+
+TinyCC's whole compile of the same SQLite input is 750 instructions per token (532 M, 57 ms, 13 MB) on this host; Buster's is 5,720 (4.05 G, 0.44 s, 259 MB).

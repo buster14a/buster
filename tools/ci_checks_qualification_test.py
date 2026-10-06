@@ -15,6 +15,10 @@ import ci_matrix_phases as phases
 import ci_matrix_phases_test as phase_tests
 import github_ci_time as github
 
+HOST_RECORD = "CI_UNIT_HOST_V1 architecture=x86_64 feature_source=cpuid-xcr0 feature_word_count=4 word0=1 word1=2 word2=3 word3=4 simd_512_base=0 simd_512=0"
+HOST_PROFILE = {"schema": "buster-native-host-profile-v1", "architecture": "x86_64", "feature_source": "cpuid-xcr0",
+                "feature_words": [1, 2, 3, 4], "simd_512_base": False, "simd_512": False}
+
 
 def reference(root, name, value):
     path = root / name
@@ -65,8 +69,8 @@ class QualificationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def run_fixture(self, variant="combined-overlap", reuse=False):
-        names = list(github.combination_jobs("split" if variant == "split-overlap" else "combined"))
+    def run_fixture(self, variant="combined-overlap", reuse=False, cohort_name=qualification.LEGACY_COHORT):
+        names = list(qualification.cohort_jobs(variant))
         if reuse:
             names.append(github.MAIN_REUSE_JOB)
         origin = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -74,12 +78,53 @@ class QualificationTests(unittest.TestCase):
         jobs = [dict(id=i + 1, name=name, status="completed", conclusion="success", run_attempt=1, labels=["synthetic"],
                      created_at=stamp(1), started_at=stamp(10), completed_at=stamp(110), steps=[])
                 for i, name in enumerate(names)]
-        return dict(id=123, path=".github/workflows/ci.yml", event="workflow_dispatch", head_branch="codex/ci-checks-" + variant,
+        prefix = "codex/2120-evidence-v2-" if cohort_name == qualification.PROSPECTIVE_COHORT else "codex/ci-checks-"
+        return dict(id=123, path=".github/workflows/ci.yml", event="workflow_dispatch", head_branch=prefix + variant,
                     status="completed", conclusion="success", run_attempt=1, head_sha="a" * 40, workflow_blob_sha="b" * 40,
                     created_at=stamp(0), jobs=jobs)
 
     def measured(self):
         return {"job_seconds": {"Windows x86-64 checks": 100}, "elapsed_seconds": 110, "runner_seconds": 2100}
+
+    def conditions_fixture(self, run):
+        jobs = {}
+        for job in run["jobs"]:
+            if qualification.skipped_reuse(job):
+                continue
+            name = qualification.role(job["name"])
+            tools, caches = qualification.condition_keys(name)
+            entry = dict(job_id=job["id"], image_os="fixture", image_version="1", runner="synthetic",
+                         toolchains={key: "synthetic1" for key in tools}, caches={key: "not-used" for key in caches})
+            if "BUSTER_CI_ZIG_CACHE_HIT" in caches:
+                entry["caches"]["BUSTER_CI_ZIG_CACHE_HIT"] = "false"
+            if name == "iOS AArch64":
+                comparable = dict(runtime="com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+                                  device_type="com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro")
+                receipt = dict(schema="buster-ci-ios-simulator-selection-v1", status="observed", invalid_bindings=[], reason="none",
+                               repository="buster14a/buster", source_revision=run["head_sha"], run_id=str(run["id"]),
+                               run_attempt=str(run["run_attempt"]), job="mobile",
+                               selection=dict(kind="name-reuse", udid="12345678-1234-1234-1234-123456789ABC", **comparable))
+                entry["simulator_selection"] = reference(self.root, "selected-simulator-" + str(job["id"]) + ".json", receipt)
+                entry["toolchains"]["ios_simulator"] = comparable
+            if name == "Android x86-64":
+                entry["toolchains"].update(android_system_image="system-images;android-35;google_apis;x86_64", android_system_image_revision="9")
+                entry["caches"]["android_sdk_package_state_before"] = {
+                    "emulator": "failure", "platforms;android-35": "success",
+                    "system-images;android-35;google_apis;x86_64": "failure"}
+            if name in qualification.SELECTED_TOOL_ROLES:
+                job_key, tool, key = qualification.SELECTED_TOOL_ROLES[name]
+                comparable = dict(sha256="c" * 64, version="synthetic1\n")
+                selection = dict(kind="executable", requested=tool, path="/synthetic/" + tool, resolved_path="/synthetic/" + tool)
+                if tool == "ninja":
+                    selection.update(kind="cmake-cache", requested=selection["path"], cmake_cache="/synthetic/CMakeCache.txt")
+                receipt = dict(schema="buster-ci-selected-tool-v1", repository="buster14a/buster", source_revision=run["head_sha"],
+                               run_id=str(run["id"]), run_attempt=str(run["run_attempt"]), job=job_key, tool=tool,
+                               status="observed", selection=selection, comparable=comparable,
+                               command=[selection["resolved_path"], "--version" if tool == "ninja" else "version"])
+                entry["selected_tools"] = {tool: reference(self.root, "selected-tool-" + str(job["id"]) + ".json", receipt)}
+                entry["toolchains"][key] = comparable
+            jobs[job["name"]] = entry
+        return dict(schema="buster-ci-checks-conditions-v1", run_id=run["id"], jobs=jobs)
 
     def test_exact_inventory_and_optional_reuse_is_counted(self):
         for variant, expected in (("combined-overlap", 21), ("split-overlap", 27)):
@@ -115,9 +160,7 @@ class QualificationTests(unittest.TestCase):
     def test_skipped_reuse_has_no_assigned_runner_conditions(self):
         run = self.run_fixture(reuse=True)
         run["jobs"][-1].update(conclusion="skipped", created_at=None, started_at=None, completed_at=None, labels=[])
-        jobs = {job["name"]: dict(job_id=job["id"], image_os="fixture", image_version="1", runner="synthetic", toolchains={"fixture": "1"}, caches={})
-                for job in run["jobs"] if job["name"] != github.MAIN_REUSE_JOB}
-        value = dict(schema="buster-ci-checks-conditions-v1", run_id=123, jobs=jobs)
+        value = self.conditions_fixture(run)
         _, skipped = qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
         _, absent = qualification.conditions(self.root, reference(self.root, "conditions.json", value), self.run_fixture())
         self.assertEqual(skipped, absent)
@@ -147,10 +190,42 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ineligible GitHub attempt"):
             qualification.timing(self.run_fixture(), "combined-overlap")
 
+    def test_named_cohorts_accept_only_their_exact_dispatch_variant_refs(self):
+        for cohort_name in qualification.COHORT_BRANCHES:
+            for variant in qualification.VARIANTS:
+                run = self.run_fixture(variant, cohort_name=cohort_name)
+                with self.subTest(cohort=cohort_name, variant=variant), mock.patch.object(github, "measure", return_value=(self.measured(), None)):
+                    measured = qualification.timing(run, variant, cohort_name)
+                    self.assertEqual(measured["job_count"], 27 if variant == "split-overlap" else 21)
+                branches = {branch for mapping in qualification.COHORT_BRANCHES.values() for branch in mapping.values()}
+                branches.discard(run["head_branch"])
+                branches.update(("main", run["head_branch"] + "-extra", "prefix/" + run["head_branch"], None))
+                for branch in branches:
+                    with self.subTest(cohort=cohort_name, variant=variant, branch=branch), self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(dict(run, head_branch=branch), variant, cohort_name)
+                for event in (None, "push", "pull_request", "merge_group", "schedule"):
+                    with self.subTest(cohort=cohort_name, variant=variant, event=event), self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(dict(run, event=event), variant, cohort_name)
+                if cohort_name == qualification.PROSPECTIVE_COHORT:
+                    with self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(run, variant)
+        with self.assertRaisesRegex(ValueError, "unknown qualification cohort"):
+            qualification.timing(self.run_fixture(), "combined-overlap", "unknown")
+
+    def test_sample_propagates_cohort_before_loading_native_evidence(self):
+        run = self.run_fixture(cohort_name=qualification.PROSPECTIVE_COHORT)
+        item = dict(variant="combined-overlap", run=reference(self.root, "run.json", run))
+        with mock.patch.object(github, "measure", return_value=(self.measured(), None)), mock.patch.object(qualification, "conditions", side_effect=ValueError("native evidence marker")) as joined:
+            with self.assertRaisesRegex(ValueError, "native evidence marker"):
+                qualification.sample(self.root, dict(item, conditions={}), qualification.PROSPECTIVE_COHORT)
+            self.assertEqual(joined.call_count, 1)
+        with mock.patch.object(qualification, "conditions") as joined, self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+            qualification.sample(self.root, item)
+        joined.assert_not_called()
+
     def test_missing_unknown_and_unmatched_conditions_fail(self):
         run = self.run_fixture("split-overlap")
-        jobs = {job["name"]: dict(job_id=job["id"], image_os="fixture", image_version="1", runner="synthetic", toolchains={"fixture": "1"}, caches={}) for job in run["jobs"]}
-        value = dict(schema="buster-ci-checks-conditions-v1", run_id=123, jobs=jobs)
+        value = self.conditions_fixture(run)
         good = reference(self.root, "conditions.json", value)
         _, normalized = qualification.conditions(self.root, good, run)
         self.assertEqual(len(normalized), 21)
@@ -161,6 +236,192 @@ class QualificationTests(unittest.TestCase):
             invalid = copy.deepcopy(value)
             change(invalid)
             with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_every_required_role_tool_and_cache_key_is_enforced(self):
+        run = self.run_fixture("split-overlap")
+        value = self.conditions_fixture(run)
+        for job in run["jobs"]:
+            for group in ("toolchains", "caches"):
+                for key in value["jobs"][job["name"]][group]:
+                    for missing in (True, False):
+                        invalid = copy.deepcopy(value)
+                        if missing:
+                            del invalid["jobs"][job["name"]][group][key]
+                        else:
+                            invalid["jobs"][job["name"]][group][key] = "unknown"
+                        with self.subTest(job=job["name"], group=group, key=key, missing=missing), self.assertRaises(ValueError):
+                            qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_desktop_required_tools_preserve_the_actual_supported_architecture_scope(self):
+        for shard in ("release", "checks"):
+            self.assertEqual(qualification.condition_keys("Windows AArch64 " + shard)[0], {"cl", "clang"})
+            self.assertEqual(qualification.condition_keys("Windows x86-64 " + shard)[0], {"cl", "clang", "gcc", "zig"})
+            for platform in ("Linux x86-64", "Linux AArch64", "macOS AArch64"):
+                self.assertEqual(qualification.condition_keys(platform + " " + shard)[0], {"clang", "gcc", "zig"})
+        for shard in qualification.COHORT_SPLIT_CHECK_SHARDS:
+            self.assertEqual(qualification.condition_keys("Windows x86-64 " + shard), qualification.condition_keys("Windows x86-64 checks"))
+
+    def test_wrong_role_maps_and_empty_required_tools_do_not_pass(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        for name in ("Workflow lint", "Linux x86-64 native", "UEFI firmware boot", "Android x86-64"):
+            for tools in ({"fixture": "1"}, {key: {} for key in value["jobs"][name]["toolchains"]}):
+                invalid = copy.deepcopy(value)
+                invalid["jobs"][name]["toolchains"] = tools
+                with self.subTest(name=name, tools=tools), self.assertRaises(ValueError):
+                    qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+        with self.assertRaisesRegex(ValueError, "unknown conditions role"):
+            qualification.condition_keys("not a workflow job")
+
+    def test_selected_simulator_uuid_is_provenance_not_a_comparable(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["iOS AArch64"]
+        _, original = qualification.conditions(self.root, reference(self.root, "first-conditions.json", value), run)
+        path = self.root / entry["simulator_selection"]["path"]
+        receipt = json.loads(path.read_text())
+        receipt["selection"]["udid"] = "87654321-4321-4321-4321-CBA987654321"
+        entry["simulator_selection"] = reference(self.root, path.name, receipt)
+        _, changed = qualification.conditions(self.root, reference(self.root, "second-conditions.json", value), run)
+        self.assertEqual(original, changed)
+        self.assertNotIn("udid", changed["iOS AArch64"]["toolchains"]["ios_simulator"])
+
+    def test_missing_or_guessed_simulator_observations_never_pass(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        changes = (lambda e: e.pop("simulator_selection"),
+                   lambda e: e["toolchains"].update(ios_simulator="synthetic1"),
+                   lambda e: e["toolchains"]["ios_simulator"].update(udid="12345678-1234-1234-1234-123456789ABC"),
+                   lambda e: e["toolchains"]["ios_simulator"].update(runtime="latest"))
+        for change in changes:
+            invalid = copy.deepcopy(value)
+            change(invalid["jobs"]["iOS AArch64"])
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid-conditions.json", invalid), run)
+
+    def test_simulator_receipt_identity_actual_fields_and_status_are_required(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["iOS AArch64"]
+        path = self.root / entry["simulator_selection"]["path"]
+        original = json.loads(path.read_text())
+        changes = ({"source_revision": "d" * 40}, {"repository": "elsewhere/repo"}, {"run_id": "124"},
+                   {"run_attempt": "2"}, {"job": "lint"}, {"status": "unknown"}, {"invalid_bindings": ["run_id"]},
+                   {"selection": dict(original["selection"], kind="explicit")},
+                   {"selection": dict(original["selection"], udid="FAKE-UDID")},
+                   {"selection": dict(original["selection"], runtime="latest")},
+                   {"selection": dict(original["selection"], device_type=None)},
+                   {"selection": {k: v for k, v in original["selection"].items() if k != "device_type"}})
+        for change in changes:
+            invalid = copy.deepcopy(original)
+            invalid.update(change)
+            entry["simulator_selection"] = reference(self.root, path.name, invalid)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid-conditions.json", value), run)
+
+    def test_selected_tool_receipt_identity_and_authority_are_required(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["Workflow lint"]
+        path = self.root / entry["selected_tools"]["go"]["path"]
+        original = json.loads(path.read_text())
+        changes = ({"source_revision": "d" * 40}, {"repository": "somewhere/else"}, {"run_id": "124"},
+                   {"run_attempt": "2"}, {"job": "mobile"}, {"tool": "ninja"}, {"status": "unknown"},
+                   {"command": ["/synthetic/go", "--version"]}, {"comparable": {"sha256": "bad", "version": "1"}},
+                   {"selection": dict(original["selection"], kind="cmake-cache")},
+                   {"selection": dict(original["selection"], requested=False)},
+                   {"selection": dict(original["selection"], requested=123)},
+                   {"selection": dict(original["selection"], requested="go\x00")},
+                   {"selection": dict(original["selection"], path="/synthetic/go\x00")},
+                   {"selection": dict(original["selection"], resolved_path="/synthetic/go\x00")})
+        for change in changes:
+            invalid = copy.deepcopy(value)
+            receipt = dict(original, **change)
+            invalid["jobs"]["Workflow lint"]["selected_tools"]["go"] = reference(self.root, "changed-tool.json", receipt)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+        for selected in ({}, {"ninja": entry["selected_tools"]["go"]}):
+            invalid = copy.deepcopy(value)
+            invalid["jobs"]["Workflow lint"]["selected_tools"] = selected
+            with self.subTest(selected=selected), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_selected_tool_provenance_is_retained_without_comparing_temporary_roots(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        _, original = qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+        entry = value["jobs"]["UEFI firmware boot"]
+        receipt = json.loads((self.root / entry["selected_tools"]["ninja"]["path"]).read_text())
+        receipt["selection"]["cmake_cache"] = "/different/job/root/CMakeCache.txt"
+        receipt["selection"].update(path="/different/tools/ninja", resolved_path="/different/tools/ninja", requested="/different/tools/ninja")
+        receipt["command"][0] = "/different/tools/ninja"
+        entry["selected_tools"]["ninja"] = reference(self.root, "different-root.json", receipt)
+        _, changed = qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+        self.assertEqual(original, changed)
+        entry["toolchains"]["ninja"]["version"] = "different\n"
+        with self.assertRaisesRegex(ValueError, "differs from condition map"):
+            qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+
+    def test_selected_tool_binary_digest_is_a_string_even_when_all_digits(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["Workflow lint"]
+        receipt = json.loads((self.root / entry["selected_tools"]["go"]["path"]).read_text())
+        receipt["comparable"]["sha256"] = int("1" * 64)
+        entry["toolchains"]["go"] = receipt["comparable"]
+        entry["selected_tools"]["go"] = reference(self.root, "numeric-digest.json", receipt)
+        with self.assertRaisesRegex(ValueError, "bounded selected tool identity"):
+            qualification.conditions(self.root, reference(self.root, "invalid.json", value), run)
+
+    def test_malformed_selected_receipt_objects_fail_with_a_pending_input_error(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        ref = value["jobs"]["Workflow lint"]["selected_tools"]["go"]
+        original = json.loads((self.root / ref["path"]).read_text())
+        for malformed in ([], "record", 1, None):
+            for field in (None, "selection", "comparable"):
+                receipt = copy.deepcopy(original)
+                if field is None:
+                    receipt = malformed
+                else:
+                    receipt[field] = malformed
+                invalid = copy.deepcopy(value)
+                invalid["jobs"]["Workflow lint"]["selected_tools"]["go"] = reference(self.root, "malformed.json", receipt)
+                with self.subTest(field=field, malformed=malformed), self.assertRaises(ValueError):
+                    qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+            for name in ("Workflow lint", "Linux x86-64 native", "CI complete"):
+                invalid = copy.deepcopy(value)
+                invalid["jobs"][name]["selected_tools"] = malformed
+                with self.subTest(references=name, malformed=malformed), self.assertRaises(ValueError):
+                    qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_split_roles_keep_full_tool_maps_and_exact_cache_equality(self):
+        run = self.run_fixture("split-overlap")
+        value = self.conditions_fixture(run)
+        for group, key, change in (("toolchains", "gcc", "other compiler"), ("caches", "BUSTER_CI_ZIG_CACHE_HIT", "true")):
+            invalid = copy.deepcopy(value)
+            invalid["jobs"]["Linux x86-64 portability"][group][key] = change
+            with self.subTest(group=group), self.assertRaisesRegex(ValueError, "split jobs have different"):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+        invalid = copy.deepcopy(value)
+        del invalid["jobs"]["Linux x86-64 portability"]["toolchains"]["clang"]
+        with self.assertRaisesRegex(ValueError, "required role"):
+            qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_android_cache_scope_is_initial_validity_and_revision_not_absence(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+        for change in ("absent", "unknown"):
+            invalid = copy.deepcopy(value)
+            invalid["jobs"]["Android x86-64"]["caches"]["android_sdk_package_state_before"]["emulator"] = change
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+        for revision in ("unknown", True, False, 1.0, 0, "0", "09"):
+            invalid = copy.deepcopy(value)
+            invalid["jobs"]["Android x86-64"]["toolchains"]["android_system_image_revision"] = revision
+            with self.subTest(revision=revision), self.assertRaises(ValueError):
                 qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
 
     def test_digest_binding_and_empty_campaign_stay_pending(self):
@@ -180,14 +441,106 @@ class QualificationTests(unittest.TestCase):
                     conditions={"same": True}, platforms={"same": True}, timing=dict(elapsed_seconds=wall, runner_seconds=105 if variant != "combined-overlap" else 100,
                     job_seconds={"Windows x86-64 checks": windows}, initial_queue_seconds=5, job_queue_seconds={}))
 
-    def campaign(self):
+    def campaign(self, cohort=None):
         path = self.root / "campaign.json"
         samples = [dict(variant=variant, synthetic_id=i + 1) for i, variant in enumerate(qualification.VARIANTS * 3)]
-        reference(self.root, path.name, dict(schema=qualification.SCHEMA, repository="buster14a/buster", samples=samples))
+        value = dict(schema=qualification.SCHEMA, repository="buster14a/buster", samples=samples)
+        if cohort is not None:
+            value["cohort"] = cohort
+        reference(self.root, path.name, value)
         return path
 
+    def prospective_cohort(self):
+        return dict(name=qualification.PROSPECTIVE_COHORT, head_sha="a" * 40, workflow_blob_sha="b" * 40)
+
+    def test_prospective_cohort_pins_are_retained_without_accepting_resources(self):
+        declaration = self.prospective_cohort()
+        def collect(root, item, cohort_name):
+            self.assertEqual(cohort_name, qualification.PROSPECTIVE_COHORT)
+            return self.observation(item["variant"], item["synthetic_id"])
+        with mock.patch.object(qualification, "sample", side_effect=collect) as collected:
+            report = qualification.qualify(self.campaign(declaration))
+        self.assertEqual(collected.call_count, 9)
+        self.assertEqual(report["cohort"], declaration)
+        self.assertEqual(report["head_sha"], declaration["head_sha"])
+        self.assertEqual(report["workflow_blob_sha"], declaration["workflow_blob_sha"])
+        self.assertEqual(report["timing_status"], "accepted")
+        self.assertEqual(report["status"], "pending")
+        self.assertFalse(report["performance_accepted"])
+        self.assertEqual(report["resource_review"], "pending")
+        self.assertEqual(report["issues"]["2119"]["maximum_time_ratio"], .90)
+        self.assertEqual(report["issues"]["2120"]["maximum_time_ratio"], .85)
+        self.assertTrue(all(issue["maximum_runner_seconds_ratio"] == 1.05 for issue in report["issues"].values()))
+
+    def test_malformed_cohort_declarations_refuse_before_loading_samples(self):
+        valid = self.prospective_cohort()
+        invalid = [None, [], "issue2120-evidence-v2", {}, dict(valid, name="unknown"), dict(valid, name=False),
+                   dict(valid, branches={}), {key: value for key, value in valid.items() if key != "name"}]
+        for key in ("head_sha", "workflow_blob_sha"):
+            invalid.append({field: value for field, value in valid.items() if field != key})
+            invalid.extend(dict(valid, **{key: value}) for value in (None, False, True, int("1" * 40), "a" * 39, "a" * 41,
+                                                                        "A" * 40, "g" * 40, "a" * 40 + "\n", []))
+        for declaration in invalid:
+            path = self.campaign()
+            value = json.loads(path.read_text())
+            value["cohort"] = declaration
+            reference(self.root, path.name, value)
+            with self.subTest(declaration=declaration), mock.patch.object(qualification, "sample") as collected:
+                report = qualification.qualify(path)
+            collected.assert_not_called()
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertTrue(report["errors"])
+
+    def test_every_prospective_sample_must_match_both_declared_pins(self):
+        for key in ("head_sha", "workflow_blob_sha"):
+            for changed in range(1, 10):
+                def collect(root, item, cohort_name):
+                    result = self.observation(item["variant"], item["synthetic_id"])
+                    if item["synthetic_id"] == changed:
+                        result[key] = "c" * 40
+                    return result
+                with self.subTest(key=key, changed=changed), mock.patch.object(qualification, "sample", side_effect=collect):
+                    report = qualification.qualify(self.campaign(self.prospective_cohort()))
+                self.assertEqual(report["status"], "pending")
+                self.assertFalse(report["performance_accepted"])
+                self.assertIn("sample differs from declared cohort: " + key, report["errors"])
+
+    def test_mutually_equal_samples_cannot_redefine_declared_source_or_workflow(self):
+        for key in ("head_sha", "workflow_blob_sha"):
+            def collect(root, item, cohort_name):
+                result = self.observation(item["variant"], item["synthetic_id"])
+                result[key] = "c" * 40
+                return result
+            with self.subTest(key=key), mock.patch.object(qualification, "sample", side_effect=collect):
+                report = qualification.qualify(self.campaign(self.prospective_cohort()))
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertIn("sample differs from declared cohort: " + key, report["errors"])
+
+    def test_declared_cohort_keeps_nine_distinct_samples_and_exact_comparability(self):
+        for mutation in ("missing", "duplicate-run", "conditions", "platforms"):
+            def collect(root, item, cohort_name):
+                result = self.observation(item["variant"], item["synthetic_id"])
+                if item["synthetic_id"] == 9:
+                    if mutation == "duplicate-run":
+                        result["run_id"] = 1
+                    elif mutation in ("conditions", "platforms"):
+                        result[mutation] = {"changed": True}
+                return result
+            path = self.campaign(self.prospective_cohort())
+            if mutation == "missing":
+                value = json.loads(path.read_text())
+                value["samples"].pop()
+                reference(self.root, path.name, value)
+            with self.subTest(mutation=mutation), mock.patch.object(qualification, "sample", side_effect=collect):
+                report = qualification.qualify(path)
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertTrue(report["errors"])
+
     def test_contract_boundaries_and_runner_growth_are_enforced(self):
-        def collect(root, item):
+        def collect(root, item, cohort_name=qualification.LEGACY_COHORT):
             return self.observation(item["variant"], item["synthetic_id"])
         with mock.patch.object(qualification, "sample", side_effect=collect):
             report = qualification.qualify(self.campaign())
@@ -200,7 +553,7 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(all(issue["status"] == "pending" for issue in report["issues"].values()))
         self.assertEqual(report["issues"]["2119"]["time_ratio"], .90)
         self.assertEqual(report["issues"]["2120"]["time_ratio"], .85)
-        def costly(root, item):
+        def costly(root, item, cohort_name=qualification.LEGACY_COHORT):
             result = collect(root, item)
             if result["variant"] == "split-overlap":
                 result["timing"]["runner_seconds"] = 105.1
@@ -215,7 +568,7 @@ class QualificationTests(unittest.TestCase):
 
     def test_changed_census_source_images_and_repeated_runs_stay_pending(self):
         for key in ("head_sha", "workflow_blob_sha", "conditions", "platforms", "run_id"):
-            def collect(root, item):
+            def collect(root, item, cohort_name=qualification.LEGACY_COHORT):
                 result = self.observation(item["variant"], item["synthetic_id"])
                 if item["synthetic_id"] == 9:
                     result[key] = 1 if key == "run_id" else "changed"
@@ -339,7 +692,7 @@ class QualificationTests(unittest.TestCase):
             sidecar = self.root / "unit-observations" / event["id"]
             sidecar.mkdir(parents=True)
             inventory = [dict(index=0, name="compiler_driver_tests", table_audit=False), dict(index=1, name="fixture", table_audit=False), dict(index=2, name="table_audit_fixture", table_audit=True)]
-            lines = [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'driver' if r['index'] == 0 else 'rest'}" for r in inventory]
+            lines = [HOST_RECORD] + [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'primary' if r['index'] == 0 else 'rest'}" for r in inventory]
             lines += ["CI_UNIT_BATCH_V1 group=inventory modules=0 modules_passed=0 assertions=0 passed=0 failed=0 external=0 external_passed=0 status=inventory", "[0/0] Unit tests (0 of 3 modules selected)", "[0/0] Module tests", "[0/0] External tests"]
             inventory_path = sidecar / "inventory.log"
             inventory_path.write_text("\n".join(lines) + "\n")
@@ -352,7 +705,7 @@ class QualificationTests(unittest.TestCase):
                         inventory=inventory, log=str(log.relative_to(self.root)),
                         identity=dict(source_revision="a" * 40, binary_sha256="e" * 64, runner_image={k: condition[k] for k in ("image_os", "image_version", "runner")},
                                       platform="macos" if direct else "windows", architecture="x86_64", configuration=row["configuration"], sanitize=row["sanitize"], fuzz=row["fuzz"], table_audits=release or direct,
-                                      toolchain={k: cap[k] for k in qualification.CAP_KEYS}, cpu_budget=4))
+                                      toolchain={k: cap[k] for k in qualification.CAP_KEYS}, cpu_budget=4, native_host_profile=copy.deepcopy(HOST_PROFILE)))
             receipt = {k: event[k] for k in ("id", "epoch_us", "pid", "argv")}
             receipt.update(schema="buster-desktop-unit-observation-v1", source_revision="a" * 40, run_id="123", run_attempt="1", binary_path=event["argv"][0], binary_sha256="e" * 64,
                            inventory_file="inventory.log", log_file="test.log", inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
@@ -389,6 +742,61 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "runtime assertion census"):
             qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
 
+    def test_host_profile_is_required_and_bound_to_same_binary_query(self):
+        item, _, condition = self.complete_desktop()
+        test = item["tests"][0]
+        manifest_path = self.root / test["manifest"]["path"]
+        original = phases.read(manifest_path)
+        for profile in (None, dict(HOST_PROFILE, feature_words=[9, 2, 3, 4]),
+                        dict(HOST_PROFILE, simd_512_base=True), dict(HOST_PROFILE, architecture="aarch64"),
+                        dict(HOST_PROFILE, feature_words=[True, 2, 3, 4]), dict(HOST_PROFILE, simd_512_base=0),
+                        dict(HOST_PROFILE, feature_words=[1.0, 2, 3, 4])):
+            manifest = copy.deepcopy(original)
+            if profile is None:
+                del manifest["identity"]["native_host_profile"]
+            else:
+                manifest["identity"]["native_host_profile"] = profile
+            test["manifest"] = reference(self.root, test["manifest"]["path"], manifest)
+            with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "same-binary inventory query"):
+                qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_missing_duplicate_and_malformed_host_query_cannot_qualify(self):
+        item, _, condition = self.complete_desktop()
+        test = item["tests"][0]
+        receipt_path = self.root / test["observation"]["path"]
+        original_receipt = phases.read(receipt_path)
+        inventory_path = receipt_path.parent / "inventory.log"
+        original = inventory_path.read_text()
+        mutations = (original.replace(HOST_RECORD + "\n", ""), HOST_RECORD + "\n" + original,
+                     original.replace("word0=1", "word0=18446744073709551616"))
+        for mutation in mutations:
+            inventory_path.write_text(mutation)
+            receipt = dict(original_receipt, inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest())
+            test["observation"] = reference(self.root, test["observation"]["path"], receipt)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_host_profile_and_assertion_differences_both_keep_campaign_pending(self):
+        item, _, condition = self.complete_desktop()
+        desktop = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        self.assertTrue(all(row["native_host_profile"] == HOST_PROFILE for row in desktop["census"].values()))
+        for changed in ("native_host_profile", "modules"):
+            def collect(root, sample, cohort_name=qualification.LEGACY_COHORT):
+                result = self.observation(sample["variant"], sample["synthetic_id"])
+                result["platforms"] = copy.deepcopy(desktop)
+                if sample["synthetic_id"] == 9:
+                    census = next(iter(result["platforms"]["census"].values()))
+                    if changed == "native_host_profile":
+                        census[changed]["feature_words"][0] = 9
+                    else:
+                        census[changed]["compiler_driver_tests"]["assertions"] += 1
+                        census[changed]["compiler_driver_tests"]["passed"] += 1
+                return result
+            with self.subTest(changed=changed), mock.patch.object(qualification, "sample", side_effect=collect):
+                result = qualification.qualify(self.campaign())
+            self.assertEqual(result["status"], "pending")
+            self.assertFalse(result["performance_accepted"])
+
     def test_unknown_metadata_keeps_retained_native_runner_observations(self):
         item, _, condition = self.complete_desktop()
         expected = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
@@ -422,6 +830,36 @@ class QualificationTests(unittest.TestCase):
         invalid = dict(item, coverage=reference(self.root, "invalid-coverage.json", changed))
         with self.assertRaisesRegex(ValueError, message):
             qualification.desktop(self.root, invalid, self.run_fixture(), condition, "combined-overlap")
+
+    def test_detected_capability_duplicates_are_rejected_before_projection(self):
+        item, coverage, condition = self.complete_desktop()
+        qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        original = coverage["detected"]
+        conflicting = dict(original[0], version="conflicting")
+        changes = {
+            "identical-extra": original + [copy.deepcopy(original[0])],
+            "conflicting-overwritten": [conflicting] + original,
+            "identical-same-length": original[:1] + [copy.deepcopy(original[0])] + original[2:],
+            "conflicting-same-length": original[:1] + [conflicting] + original[2:],
+        }
+        for name, detected in changes.items():
+            with self.subTest(change=name):
+                self.reject_coverage(item, coverage, condition,
+                                     lambda value: value.update(detected=detected), "detected capability")
+
+    def test_detected_capability_census_rejects_missing_foreign_and_malformed_records(self):
+        item, coverage, condition = self.complete_desktop()
+        original = coverage["detected"]
+        changes = [None, False, 1, "records", {}, [], original[:-1],
+                   original[:-1] + [dict(original[-1], id="foreign")]]
+        for row in (None, False, 1, "record", [], {}, {"id": None}, {"id": False},
+                    {"id": 1}, {"id": []}, {"id": {}}, {"id": ""}):
+            changes.append(original[:-1] + [row])
+        for detected in changes:
+            with self.subTest(detected=detected):
+                self.reject_coverage(item, coverage, condition,
+                                     lambda value: value.update(detected=detected), "detected capability")
+        self.reject_coverage(item, coverage, condition, lambda value: value.pop("detected"), "detected capability")
 
     def test_recomputed_shrunken_policy_is_rejected_by_independent_anchor(self):
         item, coverage, condition = self.complete_desktop()
@@ -517,7 +955,7 @@ class QualificationTests(unittest.TestCase):
                     self.root = original / shard
                     self.root.mkdir()
                     item, coverage, condition = self.complete_desktop(shard=shard)
-                    variant = "split-overlap" if shard in github.SPLIT_CHECK_SHARDS else "combined-overlap"
+                    variant = "split-overlap" if shard in qualification.COHORT_SPLIT_CHECK_SHARDS else "combined-overlap"
                     reports[shard] = qualification.desktop(self.root, item, self.run_fixture(variant), condition, variant)
                     self.assertEqual(len(reports[shard]["rows"]), 28)
                     self.assertEqual(coverage["policy"]["required_count"], 6)
@@ -525,13 +963,13 @@ class QualificationTests(unittest.TestCase):
                         self.assertTrue(all(v == dict(state="not-applicable", reason="owned-by-release-shard") for v in coverage["obligations"].values()))
                     else:
                         self.assertTrue(all(v["state"] == "scheduled" for v in coverage["obligations"].values()))
-            split_rows = [row for shard in github.SPLIT_CHECK_SHARDS for row in reports[shard]["selected"]]
+            split_rows = [row for shard in qualification.COHORT_SPLIT_CHECK_SHARDS for row in reports[shard]["selected"]]
             self.assertEqual(Counter(split_rows), Counter(reports["checks"]["selected"]))
             self.assertEqual(len(split_rows), 5)
             self.assertEqual(len(reports["release"]["selected"]), 1)
             self.assertEqual(set(split_rows) | reports["release"]["selected"],
                              {row["id"] for row in reports["checks"]["rows"] if row["state"] == "required"})
-            for shard in github.SPLIT_CHECK_SHARDS:
+            for shard in qualification.COHORT_SPLIT_CHECK_SHARDS:
                 self.assertEqual(reports[shard]["policy"], reports["checks"]["policy"])
                 self.assertEqual(reports[shard]["rows"], reports["checks"]["rows"])
         finally:

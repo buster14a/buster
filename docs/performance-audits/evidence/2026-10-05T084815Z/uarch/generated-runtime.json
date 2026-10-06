@@ -1,0 +1,30 @@
+{
+  "both_generated_ide_help_pass": true,
+  "outputs_identical": true,
+  "commands": [
+    {
+      "variant": "a",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-uarch/a/reference.exe",
+        "help"
+      ],
+      "exit": 0,
+      "stdout_sha256": "cb43170ec2e6b346ac80f76d47fe44532558491663c540247d4dd5f3ddb0ee67",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "image_sha256": "7c5d966a2114392eafb8d7ecfcf34e892febaee486d52adbafb9ea91b73ad99c",
+      "copied_reference_execute_bits_set_before_run": true
+    },
+    {
+      "variant": "b",
+      "argv": [
+        "/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2622-uarch/b/reference.exe",
+        "help"
+      ],
+      "exit": 0,
+      "stdout_sha256": "cb43170ec2e6b346ac80f76d47fe44532558491663c540247d4dd5f3ddb0ee67",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "image_sha256": "4a639c5a6dccf716a938d5ec43945b0f8d61c830425359779b51740a54a25c3d",
+      "copied_reference_execute_bits_set_before_run": true
+    }
+  ]
+}

@@ -22,12 +22,17 @@ FAKE_IDE = r'''
 #else
 #include <unistd.h>
 #endif
+#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
+#define PRIMARY_MODULE "c_frontend_tests"
+#else
+#define PRIMARY_MODULE "compiler_driver_tests"
+#endif
 int main(int argc, char** argv)
 {
     const char* group = getenv("BUSTER_TEST_MODULE_GROUP");
     const char* mode = getenv("OBSERVATION_FIXTURE_MODE");
     int inventory = group && !strcmp(group, "inventory");
-    int driver = group && !strcmp(group, "driver");
+    int primary = group && !strcmp(group, "primary");
     int rest = group && !strcmp(group, "rest");
     int result = 0;
     if (argc < 2 || strcmp(argv[1], "test")) { result = 6; }
@@ -46,9 +51,9 @@ int main(int argc, char** argv)
         {
             for (int i = 0; i < 32768; ++i) { puts("inventory-overflow"); }
         }
-        if (inventory || driver || rest)
+        if (inventory || primary || rest)
         {
-            printf("CI_UNIT_MODULE_V1 index=0 module=compiler_driver_tests table_audit=0 enabled=1 selected=%d group=driver\n", driver);
+            printf("CI_UNIT_MODULE_V1 index=0 module=" PRIMARY_MODULE " table_audit=0 enabled=1 selected=%d group=primary\n", primary);
             printf("CI_UNIT_MODULE_V1 index=1 module=other_tests table_audit=0 enabled=1 selected=%d group=rest\n", rest);
         }
         if (inventory)
@@ -59,9 +64,9 @@ int main(int argc, char** argv)
         }
         else
         {
-            if (!rest) { puts("TEST_MODULE_TIMING index=0 module=compiler_driver_tests duration_ns=1 passed=2 failed=0 assertions=2 status=pass"); }
-            if (!driver) { puts("TEST_MODULE_TIMING index=1 module=other_tests duration_ns=1 passed=2 failed=0 assertions=2 status=pass"); }
-            if (driver || rest)
+            if (!rest) { puts("TEST_MODULE_TIMING index=0 module=" PRIMARY_MODULE " duration_ns=1 passed=2 failed=0 assertions=2 status=pass"); }
+            if (!primary) { puts("TEST_MODULE_TIMING index=1 module=other_tests duration_ns=1 passed=2 failed=0 assertions=2 status=pass"); }
+            if (primary || rest)
             {
                 printf("CI_UNIT_BATCH_V1 group=%s modules=1 modules_passed=1 assertions=2 passed=2 failed=0 external=0 external_passed=0 status=pass\n", group);
                 puts("[2/2] Unit tests (1 of 2 modules selected)\n[1/1] Module tests\n[0/0] External tests");

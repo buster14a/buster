@@ -99,3 +99,18 @@ producer, compare its decoded RGBA with the named external implementation, run
 the focused `image_tests` module, and update the corresponding byte count and
 hash in the same commit. Pixel equivalence alone is insufficient when a test
 also relies on exact encoded offsets or packet structure.
+
+## Native image-browser fixtures
+
+`src/buster/tests/image_browser/fixtures/first.ppm` (2×2 RGB/white) and `second.ppm` (3×2
+asymmetric yellow/cyan/magenta and three distinct colours) are hand-authored
+ASCII P3 images created for this application. No corpus, third-party image or
+external encoder was used. Their complete encoded contents are retained as
+text. These application fixtures live beside their component tests, outside the
+compiler's frozen `tests/` input inventory. Git blob identities are `7517a64e2ad17667e4fdf1b488d8de0eb6876495` and
+`926927e2656ad32a143bf13d4c77d6f03b5ce763`, respectively. The native
+smoke validates decoded dimensions and colour samples, then compares the
+presented canvas with server pixels. The state tests' byte arrays and synthetic
+metadata are also authored in the test source. New code and fixtures follow
+Buster's current first-party licensing status: no license has been selected
+(see `LICENSES/README.md` and #621); no SPDX license is inferred.

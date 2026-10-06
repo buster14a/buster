@@ -16,6 +16,32 @@
 #define BUSTER_X86_METADATA_OPERAND_ANY BUSTER_X86_METADATA_ANY_U8
 #define BUSTER_X86_METADATA_ADDRESS_SIZE_ANY 0
 
+// Shared ordinary condition-family projection. The generated metadata stays
+// authoritative for encoding/legality; this table supplies only identities
+// and spellings. Numeric identities are the established architectural nibble.
+typedef enum BusterX86Condition
+{
+#define BUSTER_X86_CONDITION(name, nibble, suffix, alias1, alias2, jump, set, move) BUSTER_X86_CONDITION_##name = nibble,
+#include <buster/lib/compiler/assembly/x86_64_conditions.inc>
+#undef BUSTER_X86_CONDITION
+    BUSTER_X86_CONDITION_COUNT = 16,
+} BusterX86Condition;
+
+typedef enum BusterX86ConditionFamily
+{
+    BUSTER_X86_CONDITION_FAMILY_JUMP,
+    BUSTER_X86_CONDITION_FAMILY_SET,
+    BUSTER_X86_CONDITION_FAMILY_MOVE,
+    BUSTER_X86_CONDITION_FAMILY_COUNT,
+} BusterX86ConditionFamily;
+
+// ASCII case-insensitive exact suffix parsing; failure preserves the output.
+BUSTER_F_DECL bool buster_x86_metadata_condition_parse(String8 suffix, u8* condition);
+// Invalid family/condition returns an empty string. Canonical names are static.
+BUSTER_F_DECL String8 buster_x86_metadata_condition_mnemonic(u32 family, u32 condition);
+// Unknown or excluded full mnemonics retain their original spelling.
+BUSTER_F_DECL String8 buster_x86_metadata_condition_canonical_mnemonic(String8 mnemonic);
+
 typedef enum BusterX86MetadataCoverageClass
 {
     BUSTER_X86_METADATA_COVERAGE_DIRECT,
@@ -740,6 +766,9 @@ struct BusterX86MetadataPhysicalQuery
     bool include_not64;
     bool include_implicit;
     bool source_semantics;
+    // Source `movabs` between the accumulator and an absolute address names the
+    // MOV moffs row even when a ModRM disp32 form would be shorter.
+    bool source_moffs;
     u8 reserved;
 };
 
@@ -1271,9 +1300,10 @@ BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact(BusterX
 // source-level operand projection is performed, and the durable key appears
 // exactly once in the input object.
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_query(BusterX86MetadataExactQuery query);
-// Prepare one durable key into immutable exact state.  Call this only from
-// the serial prewarm phase after buster_x86_metadata_prewarm(); duplicate
-// preparation of the same key is idempotent.  No heap or callback is used.
+// Prepare one durable key into immutable exact state. New keys require the
+// serial prewarm phase after buster_x86_metadata_prewarm(). Repeating an
+// already prepared key is an immutable lookup, safe on active lanes or while
+// the persistent gang is parked. No heap or callback is used.
 BUSTER_F_DECL bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key,
                                                            BusterX86MetadataExactPlan* result);
 // Resolve a durable key to an immutable exact plan prepared during the
