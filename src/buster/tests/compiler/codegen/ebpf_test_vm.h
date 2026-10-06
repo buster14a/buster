@@ -26,7 +26,10 @@
 // still not the verifier.
 //
 // codegen_test_ebpf_kernel_run loads the same bytes into the Linux verifier
-// and JIT when this host permits BPF_PROG_LOAD. codegen_test_ebpf_check runs
+// and JIT when this host permits BPF_PROG_LOAD. The separate kernel_object
+// loader selects a named entry in the whole .text section and resolves only
+// same-section function calls; the VM retains its single-function contract.
+// codegen_test_ebpf_check runs
 // every available oracle, and codegen_test_ebpf_oracle_report states whether
 // the kernel took part, because VM agreement alone does not prove acceptance.
 // Includers that use only the VM leave the oracle helpers unreferenced.
@@ -171,7 +174,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_ebpf_decode(u8 const* row)
 
 // The verifier's check_cfg over one function. A fixed point over the
 // instruction order replaces a worklist; each pass is linear.
-BUSTER_GLOBAL_LOCAL bool codegen_test_ebpf_verify_structure(ByteSlice code)
+BUSTER_GLOBAL_LOCAL bool codegen_test_ebpf_verify_function(ByteSlice code, bool local_calls)
 {
     u64 tails[CODEGEN_TEST_EBPF_MAX_INSTRUCTIONS / 64] = {0};
     u64 reached[CODEGEN_TEST_EBPF_MAX_INSTRUCTIONS / 64] = {0};
@@ -182,11 +185,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_ebpf_verify_structure(ByteSlice code)
         u8 const* row = code.pointer + pc * 8;
         if (!((tails[pc / 64] >> (pc % 64)) & 1))
         {
-            valid = codegen_test_ebpf_decode(row);
+            bool call = local_calls && row[0] == 0x85 && row[1] == 0x10 && codegen_test_ebpf_read(row + 2, 2) == 0;
+            valid = call || codegen_test_ebpf_decode(row);
             if (valid && row[0] == 0x18)
             {
                 valid = pc + 1 < count && row[8] == 0 && row[9] == 0 && codegen_test_ebpf_read(row + 10, 2) == 0;
-                tails[(pc + 1) / 64] |= UINT64_C(1) << ((pc + 1) % 64);
+                if (valid) tails[(pc + 1) / 64] |= UINT64_C(1) << ((pc + 1) % 64);
             }
         }
     }
@@ -204,7 +208,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_ebpf_verify_structure(ByteSlice code)
                 // JA only jumps, EXIT has no successor and LDDW is two rows.
                 s64 successors[2] = {pc + (opcode == 0x18 ? 2 : 1), target};
                 u32 begin = opcode == 0x05 ? 1 : 0;
-                u32 end = opcode == 0x95 ? 0 : (opcode & 7) == 5 ? 2 : 1;
+                u32 end = opcode == 0x95 ? 0 : (opcode & 7) == 5 && opcode != 0x85 ? 2 : 1;
                 for (u32 index = begin; valid && index < end; index += 1)
                 {
                     s64 next = successors[index];
@@ -223,6 +227,173 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_ebpf_verify_structure(ByteSlice code)
         valid = ((reached[pc / 64] | tails[pc / 64]) >> (pc % 64)) & 1;
     }
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_test_ebpf_verify_structure(ByteSlice code)
+{
+    return codegen_test_ebpf_verify_function(code, false);
+}
+
+typedef struct CodegenTestEbpfObject CodegenTestEbpfObject;
+struct CodegenTestEbpfObject
+{
+    ByteSlice code;
+    u64 entry_offset;
+};
+
+// Test-only ELF64/BPF loader. Require a partition of .text by STT_FUNC rows,
+// choose one unambiguous named entry and refuse every code relocation except
+// R_BPF_64_32 to a defined function in that section. The emitted REL form uses
+// immediate -1 (zero addend); RELA additionally requires an explicit zero.
+// Structural checks run without BPF privileges; register and stack verification
+// remains the kernel's responsibility for this multi-function execution path.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL CodegenTestEbpfObject codegen_test_ebpf_kernel_object(Arena* arena, ByteSlice elf, String8 entry,
+                                                                                           String8* reason)
+{
+    CodegenTestEbpfObject result = {0};
+    ByteSlice code = {0}, symbols = {0}, strings = {0};
+    u64 sections = 0, stride = 0, count = 0;
+    u64 code_index = UINT64_MAX, symbol_index = UINT64_MAX, entry_offset = UINT64_MAX;
+    bool valid = elf.length >= 64 && memcmp(elf.pointer, "\177ELF\2\1\1", 7) == 0 &&
+                 codegen_test_ebpf_read(elf.pointer + 16, 2) == 1 && codegen_test_ebpf_read(elf.pointer + 18, 2) == 247 &&
+                 codegen_test_ebpf_read(elf.pointer + 20, 4) == 1 && codegen_test_ebpf_read(elf.pointer + 52, 2) == 64 && entry.length;
+    if (valid)
+    {
+        sections = codegen_test_ebpf_read(elf.pointer + 40, 8);
+        stride = codegen_test_ebpf_read(elf.pointer + 58, 2);
+        count = codegen_test_ebpf_read(elf.pointer + 60, 2);
+        valid = stride >= 64 && count && sections <= elf.length && count <= (elf.length - sections) / stride;
+    }
+    u64 names_index = valid ? codegen_test_ebpf_read(elf.pointer + 62, 2) : UINT64_MAX;
+    ByteSlice names = {0};
+    if (valid)
+    {
+        valid = names_index < count;
+        if (valid)
+        {
+            u8 const* section = elf.pointer + sections + names_index * stride;
+            u64 offset = codegen_test_ebpf_read(section + 24, 8), size = codegen_test_ebpf_read(section + 32, 8);
+            valid = codegen_test_ebpf_read(section + 4, 4) == 3 && offset <= elf.length && size <= elf.length - offset;
+            if (valid) names = (ByteSlice){elf.pointer + offset, size};
+        }
+    }
+    for (u64 index = 0; valid && index < count; index += 1)
+    {
+        u8 const* section = elf.pointer + sections + index * stride;
+        u64 type = codegen_test_ebpf_read(section + 4, 4), flags = codegen_test_ebpf_read(section + 8, 8);
+        u64 offset = codegen_test_ebpf_read(section + 24, 8), size = codegen_test_ebpf_read(section + 32, 8);
+        // SHT_NOBITS has no payload; all other referenced byte ranges exist.
+        valid = type == 8 || (offset <= elf.length && size <= elf.length - offset);
+        if (valid && (flags & 4))
+        {
+            u64 name = codegen_test_ebpf_read(section, 4);
+            valid = type == 1 && code_index == UINT64_MAX && name < names.length && names.length - name >= 6 &&
+                    memcmp(names.pointer + name, ".text\0", 6) == 0 && size && size % 8 == 0 &&
+                    size / 8 <= CODEGEN_TEST_EBPF_MAX_INSTRUCTIONS;
+            if (valid)
+            {
+                code_index = index;
+                code = (ByteSlice){elf.pointer + offset, size};
+            }
+        }
+        if (valid && type == 2)
+        {
+            valid = symbol_index == UINT64_MAX && codegen_test_ebpf_read(section + 56, 8) == 24 && size && size % 24 == 0;
+            u64 link = codegen_test_ebpf_read(section + 40, 4);
+            valid = valid && link < count;
+            if (valid)
+            {
+                u8 const* table = elf.pointer + sections + link * stride;
+                u64 table_offset = codegen_test_ebpf_read(table + 24, 8), table_size = codegen_test_ebpf_read(table + 32, 8);
+                valid = codegen_test_ebpf_read(table + 4, 4) == 3 && table_offset <= elf.length && table_size <= elf.length - table_offset;
+                if (valid)
+                {
+                    symbol_index = index;
+                    symbols = (ByteSlice){elf.pointer + offset, size};
+                    strings = (ByteSlice){elf.pointer + table_offset, table_size};
+                }
+            }
+        }
+    }
+    valid = valid && code_index != UINT64_MAX && symbol_index != UINT64_MAX;
+    u64* starts = valid ? arena_allocate_zeroed(arena, u64, code.length / 8) : 0;
+    u8* owners = valid ? arena_allocate_zeroed(arena, u8, code.length / 8) : 0;
+    for (u64 index = 0; valid && index < symbols.length / 24; index += 1)
+    {
+        u8 const* symbol = symbols.pointer + index * 24;
+        u64 name = codegen_test_ebpf_read(symbol, 4), name_end = name;
+        valid = name < strings.length;
+        while (valid && name_end < strings.length && strings.pointer[name_end]) name_end += 1;
+        valid = valid && name_end < strings.length;
+        if (valid && (symbol[4] & 15) == 2 && codegen_test_ebpf_read(symbol + 6, 2) == code_index)
+        {
+            u64 offset = codegen_test_ebpf_read(symbol + 8, 8), size = codegen_test_ebpf_read(symbol + 16, 8);
+            valid = size && offset < code.length && size <= code.length - offset && offset % 8 == 0 && size % 8 == 0;
+            if (valid)
+            {
+                starts[offset / 8] = size;
+                for (u64 pc = offset / 8; valid && pc < (offset + size) / 8; pc += 1)
+                {
+                    valid = owners[pc] == 0;
+                    if (valid) owners[pc] = 1;
+                }
+                if (valid && entry.length == name_end - name && memcmp(strings.pointer + name, entry.pointer, entry.length) == 0)
+                {
+                    valid = entry_offset == UINT64_MAX;
+                    entry_offset = offset;
+                }
+            }
+        }
+    }
+    valid = valid && entry_offset != UINT64_MAX;
+    for (u64 pc = 0; valid && pc < code.length / 8; pc += 1) valid = owners[pc] != 0;
+    u8* relocated = valid ? arena_allocate(arena, u8, code.length) : 0;
+    u8* calls = valid ? arena_allocate_zeroed(arena, u8, code.length / 8) : 0;
+    if (valid) memcpy(relocated, code.pointer, code.length);
+    for (u64 index = 0; valid && index < count; index += 1)
+    {
+        u8 const* section = elf.pointer + sections + index * stride;
+        u64 type = codegen_test_ebpf_read(section + 4, 4);
+        if ((type == 4 || type == 9) && codegen_test_ebpf_read(section + 44, 4) == code_index)
+        {
+            u64 offset = codegen_test_ebpf_read(section + 24, 8), size = codegen_test_ebpf_read(section + 32, 8);
+            u64 width = type == 4 ? 24 : 16;
+            valid = codegen_test_ebpf_read(section + 40, 4) == symbol_index && codegen_test_ebpf_read(section + 56, 8) == width &&
+                    size % width == 0;
+            for (u64 row = 0; valid && row < size; row += width)
+            {
+                u8 const* relocation = elf.pointer + offset + row;
+                u64 site = codegen_test_ebpf_read(relocation, 8), info = codegen_test_ebpf_read(relocation + 8, 8);
+                u64 target_index = info >> 32;
+                valid = (u32)info == 10 && target_index < symbols.length / 24 && site < code.length && site % 8 == 0 &&
+                        (type != 4 || codegen_test_ebpf_read(relocation + 16, 8) == 0);
+                if (valid)
+                {
+                    u8 const* target = symbols.pointer + target_index * 24;
+                    u64 target_offset = codegen_test_ebpf_read(target + 8, 8);
+                    u8* instruction = relocated + site;
+                    valid = (target[4] & 15) == 2 && codegen_test_ebpf_read(target + 6, 2) == code_index &&
+                            target_offset < code.length && target_offset % 8 == 0 && starts[target_offset / 8] &&
+                            instruction[0] == 0x85 && instruction[1] == 0x10 && codegen_test_ebpf_read(instruction + 2, 2) == 0 &&
+                            codegen_test_ebpf_read(instruction + 4, 4) == UINT32_MAX && calls[site / 8] == 0;
+                    if (valid)
+                    {
+                        s64 immediate = (s64)(target_offset / 8) - (s64)(site / 8) - 1;
+                        for (u32 byte = 0; byte < 4; byte += 1) instruction[4 + byte] = (u8)((u64)immediate >> (byte * 8));
+                        calls[site / 8] = 1;
+                    }
+                }
+            }
+        }
+    }
+    for (u64 pc = 0; valid && pc < code.length / 8; pc += 1)
+    {
+        if (starts[pc]) valid = codegen_test_ebpf_verify_function((ByteSlice){relocated + pc * 8, starts[pc]}, true);
+        if (relocated[pc * 8] == 0x85) valid = valid && calls[pc] != 0;
+    }
+    *reason = valid ? S8("prepared named entry and local calls") : S8("unsupported or malformed eBPF object, entry or call relocation");
+    if (valid) result = (CodegenTestEbpfObject){.code = {relocated, code.length}, .entry_offset = entry_offset};
+    return result;
 }
 
 // Execute one structurally verified function with R1 = first, R2 = second.
@@ -436,16 +607,17 @@ BUSTER_GLOBAL_LOCAL String8 codegen_test_ebpf_kernel_reason(u8 const* log, u64 c
 // program (Linux 5.14+) that passes R1 = first and R2 = second, and read the
 // full 64-bit result back through the context; a socket filter would return
 // only its low 32 bits. Otherwise this is the issue #1305 loader.
-BUSTER_GLOBAL_LOCAL CodegenTestEbpfKernel codegen_test_ebpf_kernel_run(Arena* arena, ByteSlice code, u64 first, u64 second, u64* output,
-                                                                     String8* reason)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL CodegenTestEbpfKernel codegen_test_ebpf_kernel_run_entry(Arena* arena, ByteSlice code, u64 entry_offset,
+                                                                                              u64 first, u64 second, u64* output, String8* reason)
 {
     CodegenTestEbpfKernel result = CODEGEN_TEST_EBPF_KERNEL_UNAVAILABLE;
     *reason = S8("BPF_PROG_LOAD is not available on this platform");
 #if BUSTER_LINUX && defined(SYS_bpf)
-    if (!code.length || code.length % 8)
+    if (!code.length || code.length % 8 || code.length / 8 > CODEGEN_TEST_EBPF_MAX_INSTRUCTIONS ||
+        entry_offset >= code.length || entry_offset % 8)
     {
         result = CODEGEN_TEST_EBPF_KERNEL_REJECTED;
-        *reason = S8("the object is not one relocation-free function");
+        *reason = S8("invalid code section or entry offset");
     }
     else
     {
@@ -463,6 +635,8 @@ BUSTER_GLOBAL_LOCAL CodegenTestEbpfKernel codegen_test_ebpf_kernel_run(Arena* ar
             0x95, 0x00, 0, 0, 0, 0, 0, 0,
         };
         u64 inputs[2] = {first, second};
+        u32 entry_call = (u32)(entry_offset / 8) + CODEGEN_TEST_EBPF_KERNEL_PROLOGUE - 6;
+        for (u32 byte = 0; byte < 4; byte += 1) prologue[5 * 8 + 4 + byte] = (u8)(entry_call >> (byte * 8));
         for (u32 index = 0; index < 2; index += 1)
         {
             for (u32 byte = 0; byte < 4; byte += 1)
@@ -514,11 +688,18 @@ BUSTER_GLOBAL_LOCAL CodegenTestEbpfKernel codegen_test_ebpf_kernel_run(Arena* ar
 #else
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(code);
+    BUSTER_UNUSED(entry_offset);
     BUSTER_UNUSED(first);
     BUSTER_UNUSED(second);
     BUSTER_UNUSED(output);
 #endif
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL CodegenTestEbpfKernel codegen_test_ebpf_kernel_run(Arena* arena, ByteSlice code, u64 first, u64 second, u64* output,
+                                                                     String8* reason)
+{
+    return codegen_test_ebpf_kernel_run_entry(arena, code, 0, first, second, output, reason);
 }
 
 typedef struct CodegenTestEbpfOracle CodegenTestEbpfOracle;

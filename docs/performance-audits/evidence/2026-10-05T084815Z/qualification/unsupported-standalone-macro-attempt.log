@@ -1,0 +1,5 @@
+[1m/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622/src/buster/lib/compiler/codegen/register_allocator_fast.c:414:5: [0m[0;1;31merror: [0m[1m'BUSTER_SIMD_512' is not defined, evaluates to 0 [-Werror,-Wundef][0m
+  414 | #[0;34mif[0m BUSTER_SIMD_512[0m
+      | [0;1;32m    ^
+[0m[0;1;31mfatal error: [0m[1mtoo many errors emitted, stopping now [-ferror-limit=][0m
+2 errors generated.
