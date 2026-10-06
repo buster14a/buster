@@ -733,6 +733,12 @@ work-indexed parallel records lie below module marks, and parallel output has
 its own arena. The temporary-root pathname lives in a separate run-owned arena;
 compiler-global metadata and persistent lane contexts keep their existing owners.
 
+A fixture that compiles and runs an executable on every loop iteration names it
+with `buster_test_temporary_unique_path`, which appends a process-wide serial to
+`buster_test_temporary_path`. Windows may refuse to overwrite an image that has
+just run (`ERROR_ACCESS_DENIED`; #2089, #2836), so no iteration may rewrite a
+path an earlier one launched.
+
 `test_arena_self_test` runs as a fail-closed harness check without changing
 registered assertion/module counts. It covers nested and empty scopes, retained
 scopes, an internal rewind, decommit, dirty-byte zeroing, quiet mode, and buffered
