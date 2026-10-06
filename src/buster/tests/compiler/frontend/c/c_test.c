@@ -6710,6 +6710,117 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_negative_array_bounds(UnitTestArgument
 
 // Frozen acceptance covers the same source through semantics-only and both
 // canonical lowering forms, including valid neighboring declarations.
+// A VM member is invalid even when no object of its aggregate is declared.
+// The member's original source position must survive both semantic entry paths.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CVariableMemberRejectedCase CVariableMemberRejectedCase;
+    struct CVariableMemberRejectedCase
+    {
+        String8 source;
+        u32 member_line;
+        u32 member_column;
+    };
+    CVariableMemberRejectedCase rejected[] = {
+        {S8("int n = 3;\nstruct S {\n    int a[n];\n};\n"), 3, 9},
+        {S8("int f(int n) {\nstruct S {\n    int a[n];\n};\nreturn sizeof(struct S);\n}\n"), 3, 9},
+        {S8("int f(int n) {\nreturn sizeof(struct {\n    int a[n];\n});\n}\n"), 3, 9},
+        {S8("int f(int n) {\nstruct S {\n    int a[n];\n} s;\nreturn sizeof s;\n}\n"), 3, 9},
+        {S8("int f(int n) {\nunion U {\n    int a[n];\n};\nreturn 0;\n}\n"), 3, 9},
+        {S8("int f(int n) {\nstruct S {\n    int a[2][n];\n};\nreturn 0;\n}\n"), 3, 9},
+        {S8("int f(int n) {\nstruct S {\n    int (*a)[n];\n};\nreturn 0;\n}\n"), 3, 11},
+        {S8("int f(int n) {\ntypedef int A[n];\nstruct S {\n    A a;\n};\nreturn 0;\n}\n"), 4, 7},
+        {S8("int f(int n) {\ntypedef int A[n];\nstruct S {\n    A *a;\n};\nreturn 0;\n}\n"), 4, 8},
+        {S8("int f(int n) {\ntypedef int A[n];\nstruct S {\n    A *(*a)(void);\n};\nreturn 0;\n}\n"), 4, 10},
+        {S8("int f(int n) {\nstruct S { struct {\n    int a[n];\n} inner; };\nreturn 0;\n}\n"), 3, 9},
+        {S8("int f(int n) {\nif (sizeof(struct {\n    int a[n];\n})) return 1;\nreturn 0;\n}\n"), 3, 9},
+        {S8("int f(int n) {\n(void)sizeof(struct {\n    int a[n];\n});\nreturn 0;\n}\n"), 3, 9},
+        {S8("int f(int n) {\nstruct S {\n    int a[n], b;\n} x, y;\nreturn 0;\n}\n"), 3, 9},
+        {S8("int n;\nstruct S {\n    char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct {\n        int (*p)[n];\n    })]; })]; })];\n};\nint f(void) { return 0; }\n"), 4, 15},
+        {S8("int n;\nstruct S {\n    char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct {\n        int (*p)[3];\n    })]; })][sizeof(struct {\n        int (*q)[n];\n    })]; })];\n};\nint f(void) { return 0; }\n"), 6, 15},
+    };
+    String8 accepted[] = {
+        S8("enum { N = 3 }; struct S { int a[N]; char b[sizeof(int) * 2]; }; int f(void) { return sizeof(struct S); }"),
+        S8("int object; struct S { char a[sizeof(object)]; }; int f(void) { return sizeof(struct S); }"),
+        S8("struct S { int count; int a[]; }; int f(void) { return sizeof(struct S); }"),
+        S8("int f(int n) { int a[n]; a[0] = 1; return a[0]; }"),
+        S8("int f(int n) { typedef int A[n]; A a; a[0] = 1; return a[0]; }"),
+        S8("struct S { void (*f)(int n, int a[n]); }; int g(void) { return sizeof(struct S); }"),
+        S8("int n; int f(void) { enum { n = 3 }; struct S { int a[n]; }; return sizeof(struct S); }"),
+        S8("enum { N = 3 }; typedef int A[N]; int f(int N) { struct S { A a; }; return sizeof(struct S); }"),
+        S8("enum { n = 3 }; struct S { char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct { int (*p)[n]; })]; })]; })]; }; int f(void) { return sizeof(struct S); }"),
+        S8("enum { n = 3 }; struct S { char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct { int (*p)[3]; })]; })][sizeof(struct { int (*q)[n]; })]; })]; }; int f(void) { return sizeof(struct S); }"),
+    };
+    String8 gnu_empty = S8("enum { n = 3 }; struct S { char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct { int (*p)[n]; })]; })][sizeof(struct {}) + 1]; })]; }; int f(void) { return sizeof(struct S); }");
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(rejected); case_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[case_index].source,
+                    (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect_index]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, rejected[case_index].source);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool member_diagnostic = false;
+                for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                {
+                    CDiagnostic diagnostic = semantic.diagnostics[index];
+                    member_diagnostic |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                        string_equal(diagnostic.message, S8("a structure or union member may not have variably modified type")) &&
+                        diagnostic.location.line == rejected[case_index].member_line && diagnostic.location.column == rejected[case_index].member_column;
+                }
+                BUSTER_TEST_RAW(arguments, member_diagnostic, rejected[case_index].source);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("variable-member.c"), tokens, syntax, target_native,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && lowered.program == 0, rejected[case_index].source);
+                BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                for (u32 index = 0; index < semantic.diagnostic_count && index < lowered.diagnostic_count; index += 1)
+                {
+                    BUSTER_TEST(arguments, semantic.diagnostics[index].kind == lowered.diagnostics[index].kind);
+                    BUSTER_STRING_TEST(arguments, semantic.diagnostics[index].message, lowered.diagnostics[index].message);
+                    BUSTER_TEST(arguments, semantic.diagnostics[index].location.line == lowered.diagnostics[index].location.line);
+                    BUSTER_TEST(arguments, semantic.diagnostics[index].location.column == lowered.diagnostics[index].location.column);
+                }
+                scratch_end(temporary);
+            }
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(accepted) + 1; case_index += 1)
+            {
+                if (case_index == BUSTER_ARRAY_LENGTH(accepted) && dialects[dialect_index] != C_PREPROCESS_DIALECT_GNU17)
+                {
+                    continue;
+                }
+                String8 accepted_source = case_index < BUSTER_ARRAY_LENGTH(accepted) ? accepted[case_index] : gnu_empty;
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, accepted_source,
+                    (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect_index]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                {
+                    CDiagnostic diagnostic = semantic.diagnostics[index];
+                    arguments->show(arguments, S8("constant-member.c:{u32}:{u32}: {S8}\n"),
+                                    diagnostic.location.line, diagnostic.location.column, diagnostic.message);
+                }
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && semantic.diagnostic_count == 0, accepted_source);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("constant-member.c"), tokens, syntax, target_native,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, accepted_source);
+                if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42798,6 +42909,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_va_list_identity_and_places);
     BUSTER_TEST_FIXTURE(arguments, c_test_validation_candidates);
+    BUSTER_TEST_FIXTURE(arguments, c_test_variable_member_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
     BUSTER_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
     BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
