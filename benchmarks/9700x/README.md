@@ -6,6 +6,43 @@ modifies it. A draft pull request is enough; nothing needs to be merged, and
 there is no manual dispatch or upload. The run's summary shows every run's
 exit status, timings and printed output.
 
+## How an agent runs a workload
+
+1. Create a branch in this repository (not a fork) and add or change one C
+   file directly in this directory. Compile it once locally with the flags in
+   [Contract](#contract) so a warning does not cost a run.
+2. Push and open a pull request, draft if it is not meant to merge, using git
+   and `gh` authenticated as `davidgmbb`. A pull request opened or pushed
+   under any other identity, including an app or connector identity, is
+   skipped before it reaches the host.
+3. Two runs follow. "9700X direct workload request" appears in the pull
+   request's checks and finishes in seconds. "9700X direct workload
+   benchmark" then starts from `main`; it is listed under Actions, not in the
+   pull request's checks:
+
+   ```sh
+   gh run list --repo buster14a/buster --workflow 9700x-direct-bench.yml --limit 5
+   ```
+
+4. Read the report from the run's summary page, or from its log:
+
+   ```sh
+   gh run view RUN_ID --repo buster14a/buster --log
+   ```
+
+   The report begins at `## 9700X direct workload run` and its first line
+   names the head commit it measured; check that it is yours. It lists each
+   of the eleven runs with exit status, wall and CPU time, peak RSS and an
+   output digest, then the printed output.
+5. Report the run URL, the head commit and the numbers as measured. They are
+   diagnostic; see [What the numbers mean](#what-the-numbers-mean).
+
+The host has one runner, so runs queue behind each other, and every push to a
+pull request that changes a workload starts another run. Batch your edits, and
+do not use this path as a retry loop. A run that is skipped means the gate
+refused it; a `bench` job that waits for a runner means the host or its runner
+group is unavailable. Report either instead of working around it.
+
 ## Contract
 
 - File name: `[a-z0-9][a-z0-9_-]{0,47}.c`, at most 256 KiB, at most four
