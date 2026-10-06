@@ -1375,6 +1375,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 architecture_option = {0};
     bool options_ended = false;
     bool action_seen = false;
+    bool standard_input_seen = false;
     // Whether the code model in force came from -fPIE/-fpie, which is what
     // -fno-pie cancels; -fno-pie after -fPIC leaves -fPIC's model alone.
     bool position_independent_executable_model = false;
@@ -1386,7 +1387,24 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
-        if (options_ended || !argument.length || argument.pointer[0] != '-')
+        bool standard_input = !options_ended && string_equal(argument, S8("-"));
+        if (standard_input)
+        {
+            // GCC cannot guess a language from a stream, so -x is required.
+            if (invocation.language == COMPILER_DRIVER_LANGUAGE_AUTOMATIC)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("-x <language> is required when reading standard input ({S8})"), argument);
+                break;
+            }
+            if (standard_input_seen)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("standard input can be read only once ({S8})"), argument);
+                break;
+            }
+            standard_input_seen = true;
+            argument = COMPILER_DRIVER_STANDARD_INPUT_PATH;
+        }
+        if (options_ended || !argument.length || argument.pointer[0] != '-' || standard_input)
         {
             u32 input_index = invocation.input_count++;
             invocation.input_paths[input_index] = argument;
@@ -2168,6 +2186,21 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // clang's spelling of the flag configure scripts pass the linker as
         // `-Xlinker -export-dynamic`; both routes land in linker_arguments
         // and the hosted ELF writer reads it there.
+        // -static asks the link for an image with no loader. The hosted ELF
+        // writers already emit one when nothing needs a dynamic import; they
+        // refuse the request otherwise. Compile-only actions ignore it, as
+        // GCC does.
+        if (string_equal(argument, S8("-static")))
+        {
+            invocation.static_link = true;
+            continue;
+        }
+        // Tuning only steers scheduling choices this compiler does not make
+        // per CPU, so the request is accepted and ignored.
+        if (string_starts_with_sequence(argument, S8("-mtune=")))
+        {
+            continue;
+        }
         if (string_equal(argument, S8("-rdynamic")))
         {
             invocation.linker_arguments[invocation.linker_argument_count++] = S8("-export-dynamic");
@@ -2228,6 +2261,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.action == COMPILER_DRIVER_ACTION_LINK && !position_independent_image_target)
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_image_option);
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.static_link && invocation.action == COMPILER_DRIVER_ACTION_LINK &&
+        (invocation.has_gpu_target || invocation.target.os != OPERATING_SYSTEM_LINUX))
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-static"));
     }
     // Code linked into a position-independent image in this invocation is
     // compiled for one: the fixed-address model's absolute and copy-relocated
@@ -3959,7 +3997,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena,
         String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION &&
                        link.requires_position_independent_objects
                            ? S8(" (a position-independent image needs objects compiled with -fPIC)") : S8("");
-        diagnostic = string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
+        diagnostic = link.error == LINK_ERROR_UNSUPPORTED_FEATURE && string_equal(link.symbol, S8("-static"))
+                         ? S8("-static is not supported when the program links against the system C library, thread-local storage or a shared object")
+                         : string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
     }
     return diagnostic;
 }
@@ -4099,6 +4139,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                     .debug_info = invocation.debug_info,
                                                     .image_kind = (u8)invocation.image_kind,
+                                                    .require_static_image = invocation.static_link,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
@@ -4470,6 +4511,47 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_detach_object(Arena* arena, CPreprocess
     }
 }
 
+// The translation unit a `-` argument names. The path stays the spelling the
+// diagnostics and __FILE__ show; the bytes come from standard input, read to
+// end of stream into the arena (zero-terminated, and nonnull even when empty).
+BUSTER_GLOBAL_LOCAL FileMapRead compiler_driver_read_input(Arena* arena, String8 path)
+{
+    FileMapRead result = {0};
+    if (string_equal(path, COMPILER_DRIVER_STANDARD_INPUT_PATH))
+    {
+        OsFileDescriptor* input = os_get_standard_stream(STANDARD_STREAM_INPUT);
+        u64 capacity = BUSTER_KB(64);
+        u8* buffer = arena_allocate(arena, u8, capacity + 1);
+        u64 length = 0;
+        bool failed = input == 0;
+        bool ended = false;
+        while (!failed && !ended)
+        {
+            if (length == capacity)
+            {
+                u8* grown = arena_allocate(arena, u8, capacity * 2 + 1);
+                memcpy(grown, buffer, length);
+                buffer = grown;
+                capacity *= 2;
+            }
+            OsFileReadResult read = os_file_read_some(input, (ByteSlice){.pointer = buffer + length, .length = capacity - length});
+            length += read.transferred;
+            failed = read.status == OS_FILE_READ_ERROR;
+            ended = read.status == OS_FILE_READ_EOF;
+        }
+        if (!failed)
+        {
+            buffer[length] = 0;
+            result.bytes = (ByteSlice){.pointer = buffer, .length = length};
+        }
+    }
+    else
+    {
+        result = file_map_read(arena, path, (FileReadOptions){0});
+    }
+    return result;
+}
+
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
                                                              CompilerDriverDiagnosticCollector* warnings, CompilerDriverUnitMetrics* metrics)
 {
@@ -4501,7 +4583,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = S8("the C frontend currently requires exactly one C input");
         goto end;
     }
-    source_file = file_map_read(arena, invocation.input_paths[0], (FileReadOptions){0});
+    source_file = compiler_driver_read_input(arena, invocation.input_paths[0]);
     ByteSlice bytes = source_file.bytes;
     if (!bytes.pointer)
     {
@@ -6508,6 +6590,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                     .debug_info = invocation.debug_info,
                                                     .image_kind = (u8)invocation.image_kind,
+                                                    .require_static_image = invocation.static_link,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result.native_link.executable.length);

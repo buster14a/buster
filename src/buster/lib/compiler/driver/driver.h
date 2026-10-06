@@ -29,6 +29,8 @@
 // the bytes read from all response files of one invocation together, and the
 // length of the expanded command line. A command line with no argument that
 // begins with '@' is not expanded and neither bound applies to it.
+// The path a `-` input carries; diagnostics and __FILE__ show it as written.
+#define COMPILER_DRIVER_STANDARD_INPUT_PATH S8("<stdin>")
 #define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
 #define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
@@ -225,6 +227,8 @@ struct CompilerDriverInvocation
     // -shared or -pie: the NativeImageKind a link produces. Accepted for a
     // link only on x86-64 Linux, the one target with a writer for it.
     NativeImageKind image_kind;
+    // -static was given: the link must produce an image with no loader.
+    bool static_link;
     u8 optimization_level;
     bool has_gpu_target;
     bool save_gpu_temporaries;

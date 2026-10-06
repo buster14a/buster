@@ -1227,6 +1227,31 @@ invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
 
+## Standard input, `-static` and `-mtune`
+
+`-` names standard input as one translation unit. GCC cannot guess a language
+from a stream, so `-x <language>` must precede it (`-x c -`); without one the
+parser fails with a diagnostic naming `-x`, and a second `-` fails because the
+stream can be read only once. The input path, and so every diagnostic and
+`__FILE__`, is `<stdin>` (`COMPILER_DRIVER_STANDARD_INPUT_PATH`);
+`compiler_driver_read_input` reads the stream to end of file for the C
+pipeline. `-E -` preprocesses it.
+
+`-static` sets `CompilerDriverInvocation.static_link` and is ignored by `-c`,
+`-S` and `-E`, as it is for GCC. A link passes it to the linker as
+`NativeExecutableLinkOptions.require_static_image`. The Linux ELF writers
+already emit a loader-free image when nothing needs a dynamic import, so a
+self-contained program links statically; a program that imports from the
+system C library, uses thread-local storage or asks for a shared or PIE image
+fails with `-static is not supported when the program links against the
+system C library, thread-local storage or a shared object`. There is no
+static libc, so `-static` plus libc calls is refused rather than silently
+producing a dynamic executable. Other targets refuse `-static` for a link.
+
+`-mtune=<cpu>` is accepted and ignored: the compiler makes no per-CPU
+scheduling choices, and `-march=`/`-mcpu=` remain the options that change the
+target.
+
 ## Response files
 
 `compiler_driver_parse_arguments` expands `@path` arguments before it reads

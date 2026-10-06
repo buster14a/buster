@@ -14455,7 +14455,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             {
                 dynamic_image = link_elf_symbol_needs_dynamic_import(exports, object->symbols + index);
             }
-            if (!link_validate_linker_arguments(object->target, options, dynamic_image || options.image_kind != NATIVE_IMAGE_EXECUTABLE, &result.symbol))
+            if (options.require_static_image && (dynamic_image || options.image_kind != NATIVE_IMAGE_EXECUTABLE))
+            {
+                result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+                result.symbol = S8("-static");
+            }
+            else if (!link_validate_linker_arguments(object->target, options, dynamic_image || options.image_kind != NATIVE_IMAGE_EXECUTABLE, &result.symbol))
             {
                 result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
             }

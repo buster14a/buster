@@ -163,7 +163,11 @@ struct NativeExecutableLinkOptions
     bool debug_info;
     // A NativeImageKind; zero is the fixed-address executable.
     u8 image_kind;
-    u8 reserved[5];
+    // -static: refuse to publish an image that needs a loader (dynamic
+    // imports, TLS, or a position-independent image) instead of silently
+    // producing one. Only the hosted ELF writers consult it.
+    bool require_static_image;
+    u8 reserved[4];
 };
 
 typedef struct NativeExecutableLinkResult NativeExecutableLinkResult;
