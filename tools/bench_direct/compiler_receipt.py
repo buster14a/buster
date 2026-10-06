@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""Shared contract of the 9700X compiler comparison (#2752, #2769, #2761).
+
+Ownership: `tools/bench_direct`, trusted `main` only. The host harness
+(`compiler_compare.py`) writes a receipt; the hosted publisher
+(`compiler_publish.py`) re-validates it as data and publishes one exact-head
+check run. Both share the names and rules below. Nothing gates merging on
+these checks: they are report-only evidence.
+
+Two modes measure the same way and differ only in what they compare:
+    main   a commit after it landed on main against its first parent, the
+           main commit it landed on, or, when that commit has no valid
+           measurement, the nearest first-parent ancestor with one, so a
+           merge burst's unmeasured commits are inside a measured range
+           (#2752); merging never waits for it
+    pull   an owner pull request head against its merge base with the base
+           branch, on request and without merging (#2769)
+Each mode publishes its own check name and marker.
+
+Both modes also run THROUGHPUT_PROFILE (#2761): the predeclared native
+throughput corpus of `./build.sh bench_throughput` on the same two compilers,
+so the corpus has a Zen 5 route. Its evidence must be complete and bound to
+the measured binaries; its regressions, like the self-host verdict, are
+reported and never decide.
+
+Pull mode adds SCALING_PROFILE when the pull request also adds or changes
+SCALING_REQUEST (#424): `./build.sh bench_throughput scale` times the
+candidate compiler alone, compiling and linking generated multi-TU inputs with
+-fcompile-jobs=W on whole physical cores. It is report-only too; its bundles
+must be valid and bound to the candidate binary.
+
+Map (searchable symbols):
+    RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
+    attempt_marker                                         one attempt's check (#2803)
+    PROFILE                                                frozen profile
+    APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
+    MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
+    THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
+    SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
+    REGRESSION_POLICIES, regression_policy                 report-only switch
+    range_label                                            main baseline relation
+    render                                                 readable report
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+RECEIPT_SCHEMA = "buster-9700x-compiler-receipt-v1"
+LAB_SCHEMA = "buster-uarch-lab-compare-v2"
+# mode: (check name, external-ID marker prefix).
+MODES = {
+    "main": ("9700X compiler benchmark", "buster-9700x-compiler-main-v1"),
+    "pull": ("9700X compiler benchmark (pull request)", "buster-9700x-compiler-pr-v1"),
+}
+CHECK_NAME, MARKER = MODES["main"]
+# The approved Zen 5 host (#2761): the observed CPU model, never a runner
+# label or target flag, must name the Ryzen 7 9700X.
+APPROVED_HOST = re.compile(r"AMD Ryzen 7 9700X\b")
+SHA = re.compile(r"[0-9a-f]{40}\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+DECIMAL = re.compile(r"[1-9][0-9]*\Z")
+
+# The routine comparison of both modes. It is frozen per profile name:
+# changing any value needs a new name so receipts stay comparable. Deeper
+# diagnosis (top-down, sampling, IBS) stays a separate, manually requested
+# lab run.
+PROFILE = {
+    "name": "compiler-compare-v1",
+    "workload": "uarch_lab compare default: stage-1 self-host compile of the unity "
+                "src/buster/apps/ide/ide.c on the configured base tree",
+    "frozen_source": "the base revision: a main commit's first parent or a pull request's merge base",
+    "build": "./build.sh generate --cc clang --no-include-tests; ./build.sh build --config Release -t ide",
+    "cpu": 2,
+    "target_minutes": 10,
+    "warmups": 1,
+    "profile_steps": [],
+    "corpus": "not included in compiler-compare-v1",
+}
+# The throughput corpus run after the self-host comparison (#2761), frozen per
+# name like PROFILE. The harness is tools/throughput at the base revision (a
+# main commit), built by its own build.c command; `arguments` follow the
+# baseline/candidate/output/ids that compiler_compare supplies.
+THROUGHPUT_SCHEMA = 2
+THROUGHPUT_PROFILE = {
+    "name": "throughput-corpus-v1",
+    "workload": "bench_throughput run: the predeclared default CI corpus under every allocator mode, "
+                "paired, two rounds, with its regression guard",
+    "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
+    "arguments": ["--profile", "ci", "--mode", "all", "--pairs", "20", "--warmups", "2", "--timeout", "120",
+                  "--cpu", "2"],
+    "workloads": ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow",
+                  "backend_pressure"],
+    "pairs_per_round": 20,
+    "rounds": 2,
+    "warmups": 2,
+    "cpu": 2,
+}
+# The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
+# is one `bench_throughput scale` bundle on the candidate binary, with the
+# --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
+# physical core to the runner and other housekeeping and places W workers on
+# whole cores (plus one SMT point over the remaining logical CPUs); "machine"
+# is the separate whole-host series, 8 cores and 8C/16T on the 9700X.
+SCALING_REQUEST = "benchmarks/9700x/scaling.request"
+SCALING_SCHEMA = "buster-throughput-scaling-v1"
+SCALING_PROFILE = {
+    "name": "scaling-v1",
+    "workload": "bench_throughput scale: generated multi-TU compile-and-link with -fcompile-jobs=W on the "
+                "candidate compiler, workers placed on whole physical cores (report-only)",
+    "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
+    "series": {
+        "cores": ["--cpu-set", "auto", "--exclude-core", "0", "--workers", "1,2,4,7", "--allow-smt",
+                  "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
+        "machine": ["--cpu-set", "auto", "--workers", "8", "--allow-smt", "--shape", "equal", "--shape", "skewed",
+                    "--shape", "tiny", "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
+    },
+}
+# A wall-time CI needs at least six complete pairs (uarch_lab sign_test_rank).
+MIN_PAIRS = 6
+# Every complete verdict counts, whatever its direction; "inconclusive" means
+# too few pairs and "NO VERDICT" no pair at all, so neither is a measurement.
+MEASURED_OUTCOMES = ("faster", "slower", "below-floor", "no detectable difference")
+# Only report-only exists. "enforce" is reserved for a separately reviewed
+# rollout with qualified A/A noise and thresholds; until then it fails closed.
+REGRESSION_POLICIES = ("report-only",)
+
+
+IDENTITY_KEYS = ("mode", "repository", "ref", "pull", "pull_head", "base", "base_tree", "head", "head_tree",
+                 "trusted_revision", "request_run_id", "run_id", "run_attempt")
+
+
+def check_name(mode: str = "main") -> str:
+    return MODES[mode][0]
+
+
+def check_marker(head: str, mode: str = "main") -> str:
+    if not (isinstance(head, str) and SHA.fullmatch(head)):
+        raise ValueError("check marker needs an exact 40-hex head")
+    return MODES[mode][1] + ":" + head
+
+
+def attempt_marker(head: str, mode: str, request_run_id: str, request_attempt: str, run_attempt: str) -> str:
+    """External ID of one measurement attempt's check (#2803).
+
+    The request run and its attempt name the scheduling, the bench attempt the
+    measurement, so a transport retry finds the same check while a deliberate
+    re-run (of either workflow) gets its own. The external ID is only a lookup
+    key; ownership also needs the GitHub Actions app, the name and the head.
+    """
+    for value in (request_run_id, request_attempt, run_attempt):
+        if not (isinstance(value, str) and DECIMAL.fullmatch(value)):
+            raise ValueError("attempt marker needs decimal run and attempt numbers")
+    return f"{check_marker(head, mode)}:{request_run_id}.{request_attempt}:{run_attempt}"
+
+
+def observed_cpu_model() -> str:
+    """The running host's CPU model name from /proc/cpuinfo, or 'NA'."""
+    model = "NA"
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("model name"):
+                model = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    return model
+
+
+def host_problem(receipt: object) -> str:
+    """Why the receipt's observed host is not the approved Zen 5 host, or ''."""
+    host = receipt.get("host") if isinstance(receipt, dict) else None
+    model = host.get("cpu_model") if isinstance(host, dict) else None
+    problem = ""
+    if not (isinstance(model, str) and APPROVED_HOST.search(model)):
+        problem = f"observed CPU {model!r} is not the approved Zen 5 host (AMD Ryzen 7 9700X)"
+    return problem
+
+
+def regression_policy(value: str) -> tuple[str, str]:
+    """(policy, problem): an unset variable is report-only; anything else unknown fails."""
+    policy = value.strip() if isinstance(value, str) else ""
+    policy = policy or "report-only"
+    problem = ""
+    if policy not in REGRESSION_POLICIES:
+        problem = (f"regression policy {policy!r} is not implemented; only report-only exists until "
+                   "regression thresholds are qualified (#2752)")
+    return policy, problem
+
+
+def range_label(commits: object, first_parent: object) -> str:
+    """A main baseline's relation to the head, from the authorized range size, or '' when unknown.
+
+    commits counts the first-parent main commits the comparison spans: 1 is
+    the head alone against its first parent.
+    """
+    label = ""
+    if commits == "1":
+        label = "first parent"
+    elif isinstance(commits, str) and DECIMAL.fullmatch(commits) and isinstance(first_parent, str) and \
+            SHA.fullmatch(first_parent):
+        label = (f"range of {commits} first-parent main commits: the nearest earlier main commit with a valid "
+                 f"measurement, because first parent `{first_parent}` has none; the result covers the whole range "
+                 "and does not isolate one commit")
+    return label
+
+
+def classify(summary: object, binaries: object) -> list[str]:
+    """Reasons the lab summary is not a valid core measurement; empty when valid."""
+    reasons: list[str] = []
+    if not isinstance(summary, dict):
+        summary = {}
+        reasons.append("summary.json is missing or not an object")
+    if not isinstance(binaries, dict):
+        binaries = {}
+    if summary and summary.get("schema") != LAB_SCHEMA:
+        reasons.append(f"lab schema {summary.get('schema')!r} is not {LAB_SCHEMA}")
+    for role in ("baseline", "candidate"):
+        variant = summary.get(role) if isinstance(summary.get(role), dict) else {}
+        recorded = binaries.get(role) if isinstance(binaries.get(role), dict) else {}
+        digest = recorded.get("sha256")
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or variant.get("sha256") != digest:
+            reasons.append(f"{role} binary hash does not match the built binary")
+        if variant.get("failed") != 0 or type(variant.get("runs")) is not int or variant.get("runs", 0) < 1:
+            reasons.append(f"{role} has failed or missing timed runs")
+        if variant.get("deterministic") is not True:
+            reasons.append(f"{role} output was not byte-identical across its own runs")
+    plan = summary.get("plan") if isinstance(summary.get("plan"), dict) else {}
+    pairs = plan.get("complete_pairs")
+    if type(pairs) is not int or pairs < MIN_PAIRS:
+        reasons.append(f"{pairs!r} complete pairs; at least {MIN_PAIRS} are required")
+    verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    if verdict.get("metric") != "wall" or verdict.get("outcome") not in MEASURED_OUTCOMES:
+        reasons.append(f"wall-time verdict {verdict.get('outcome')!r} is not a complete measurement")
+    for key in ("ratio", "ci_low", "ci_high"):
+        if not isinstance(verdict.get(key), (int, float)) or isinstance(verdict.get(key), bool):
+            reasons.append(f"wall-time verdict has no numeric {key}")
+    return reasons
+
+
+def classify_throughput(summary: object, metadata: object, binaries: object) -> list[str]:
+    """Reasons the corpus evidence is not a complete run of THROUGHPUT_PROFILE on these binaries."""
+    reasons: list[str] = []
+    summary = summary if isinstance(summary, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    binaries = binaries if isinstance(binaries, dict) else {}
+    if not summary:
+        reasons.append("throughput summary.json is missing or not an object")
+    if not metadata:
+        reasons.append("throughput metadata.json is missing or not an object")
+    if summary and (summary.get("schema") != THROUGHPUT_SCHEMA or summary.get("valid") is not True
+                    or summary.get("guard_enabled") is not True):
+        reasons.append("throughput summary is not a valid guarded schema-2 comparison")
+    profile = THROUGHPUT_PROFILE
+    planned = {"schema": THROUGHPUT_SCHEMA, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
+               "rounds": profile["rounds"], "warmups": profile["warmups"], "cpu": profile["cpu"],
+               "workloads": profile["workloads"]}
+    for key, value in planned.items():
+        if metadata and metadata.get(key) != value:
+            reasons.append(f"throughput {key} {metadata.get(key)!r} is not the profile's {value!r}")
+    provenance = metadata.get("compiler_provenance")
+    provenance = provenance if isinstance(provenance, list) and len(provenance) == 2 else [{}, {}]
+    for role, row in zip(("baseline", "candidate"), provenance):
+        recorded = binaries.get(role) if isinstance(binaries.get(role), dict) else {}
+        digest = row.get("sha256") if isinstance(row, dict) else None
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or digest != recorded.get("sha256"):
+            reasons.append(f"throughput {role} compiler is not the measured {role} binary")
+    comparisons = summary.get("comparisons")
+    names = [row.get("name") for row in comparisons if isinstance(row, dict)] if isinstance(comparisons, list) else []
+    covered = {name.split("/", 1)[0] for name in names if isinstance(name, str)}
+    if summary and not set(profile["workloads"]) <= covered:
+        reasons.append(f"throughput comparisons cover {sorted(covered)}, not every profile workload")
+    for key in ("confirmed_regressions", "inconclusive_cases"):
+        if summary and type(summary.get(key)) is not int:
+            reasons.append(f"throughput summary has no integer {key}")
+    return reasons
+
+
+def throughput_digest(summary: object) -> dict:
+    """The report's view of a corpus summary: counts and each case's decision."""
+    summary = summary if isinstance(summary, dict) else {}
+    comparisons = summary.get("comparisons") if isinstance(summary.get("comparisons"), list) else []
+    return {"valid": summary.get("valid"), "confirmed_regressions": summary.get("confirmed_regressions"),
+            "inconclusive_cases": summary.get("inconclusive_cases"),
+            "cases": [{"name": row.get("name"), "decision": row.get("decision")}
+                      for row in comparisons if isinstance(row, dict)]}
+
+
+def classify_scaling(bundles: object, binaries: object) -> list[str]:
+    """Reasons the scaling bundles are not a complete SCALING_PROFILE run on the candidate binary.
+
+    bundles maps each series name to {"summary": scaling.json, "metadata": scaling-metadata.json}.
+    """
+    reasons: list[str] = []
+    bundles = bundles if isinstance(bundles, dict) else {}
+    binaries = binaries if isinstance(binaries, dict) else {}
+    candidate = binaries.get("candidate") if isinstance(binaries.get("candidate"), dict) else {}
+    digest = candidate.get("sha256")
+    for name in SCALING_PROFILE["series"]:
+        bundle = bundles.get(name) if isinstance(bundles.get(name), dict) else {}
+        summary = bundle.get("summary") if isinstance(bundle.get("summary"), dict) else {}
+        metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+        if not summary or not metadata:
+            reasons.append(f"scaling series {name} has no scaling.json or scaling-metadata.json")
+            continue
+        if summary.get("schema") != SCALING_SCHEMA or metadata.get("schema") != SCALING_SCHEMA:
+            reasons.append(f"scaling series {name} is not a {SCALING_SCHEMA} bundle")
+        if summary.get("status") != "valid":
+            reasons.append(f"scaling series {name} is {summary.get('status')!r}: {summary.get('reason')!r}")
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or metadata.get("compiler_sha256") != digest:
+            reasons.append(f"scaling series {name} compiler is not the measured candidate binary")
+        measured = [row for row in summary.get("series", []) if isinstance(row, dict) and isinstance(row.get("points"), list)] \
+            if isinstance(summary.get("series"), list) else []
+        if summary.get("status") == "valid" and not measured:
+            reasons.append(f"scaling series {name} has no measured points")
+    return reasons
+
+
+def scaling_digest(bundles: object) -> dict:
+    """The report's view of each scaling series: placement and every measured point."""
+    bundles = bundles if isinstance(bundles, dict) else {}
+    digest = {}
+    for name in SCALING_PROFILE["series"]:
+        bundle = bundles.get(name) if isinstance(bundles.get(name), dict) else {}
+        summary = bundle.get("summary") if isinstance(bundle.get("summary"), dict) else {}
+        metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+        series = summary.get("series") if isinstance(summary.get("series"), list) else []
+        digest[name] = {
+            "status": summary.get("status"), "cpu_set": metadata.get("cpu_set"),
+            "excluded_cpus": metadata.get("excluded_cpus"), "physical_cores": metadata.get("physical_cores"),
+            "logical_cpus": metadata.get("logical_cpus"),
+            "series": [{"name": row.get("name"), "inputs": row.get("inputs"),
+                        "points": [{key: point.get(key) for key in (
+                            "workers", "placement", "observed_workers", "wall_median", "speedup", "speedup_interval",
+                            "efficiency", "cpu_inflation", "rss_inflation")}
+                            for point in row.get("points", []) if isinstance(point, dict)]}
+                       for row in series if isinstance(row, dict) and isinstance(row.get("points"), list)],
+        }
+    return digest
+
+
+def number(value: object, form: str) -> str:
+    return form % value if isinstance(value, (int, float)) and not isinstance(value, bool) else "NA"
+
+
+def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) -> str:
+    """Readable per-candidate report: identities, verdict, core metrics and timings."""
+    identity = receipt.get("identity", {}) if isinstance(receipt, dict) else {}
+    timings = receipt.get("timings", {}) if isinstance(receipt, dict) else {}
+    summary = summary if isinstance(summary, dict) else {}
+    verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    mode = receipt.get("mode") if isinstance(receipt, dict) and receipt.get("mode") in MODES else "main"
+    lines = [
+        f"**{check_name(mode)}: {conclusion}** (performance policy: report-only; a slow result does not block)",
+        "",
+        verdict.get("text") or "No wall-time verdict.",
+        "",
+        "| Identity | Value |",
+        "| --- | --- |",
+    ]
+    for key in IDENTITY_KEYS:
+        lines.append(f"| {key} | `{identity.get(key, 'NA')}` |")
+    coverage = receipt.get("coverage") if isinstance(receipt, dict) else None
+    label = range_label(coverage.get("range"), coverage.get("first_parent")) if isinstance(coverage, dict) else ""
+    if mode == "main" and label:
+        lines += ["", f"Baseline: {label}."]
+    profile = receipt.get("profile", {}) if isinstance(receipt, dict) else {}
+    host = receipt.get("host", {}) if isinstance(receipt, dict) else {}
+    lines += ["", f"Profile `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}.",
+              f"Observed host: `{host.get('cpu_model', 'NA') if isinstance(host, dict) else 'NA'}`.", ""]
+    metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+    if metrics:
+        lines += ["| Metric | A median | B median | B/A | 95% CI | Outcome |", "| --- | --- | --- | --- | --- | --- |"]
+        for key in ("wall", "task_clock", "instructions", "cycles", "branch_misses", "page_faults", "peak_rss"):
+            row = metrics.get(key) if isinstance(metrics.get(key), dict) else {}
+            lines.append("| %s | %s | %s | %s | [%s, %s] | %s |" % (
+                key, number(row.get("a_median"), "%.6g"), number(row.get("b_median"), "%.6g"),
+                number(row.get("ratio"), "%.4f"), number(row.get("ci_low"), "%.4f"),
+                number(row.get("ci_high"), "%.4f"), row.get("outcome", "NA")))
+        lines.append("")
+    timings = timings if isinstance(timings, dict) else {}
+    builds = timings.get("build_seconds") if isinstance(timings.get("build_seconds"), dict) else {}
+    scaled = ", scaling %s s" % number(timings.get("scaling_seconds"), "%.0f") if "scaling_seconds" in timings else ""
+    lines.append("Host time: builds %s s, measurement %s s, corpus %s s%s, total %s s; queue delay before the host "
+                 "job %s s." % (
+        " + ".join(number(builds.get(key), "%.0f") for key in ("baseline", "candidate", "closure")),
+        number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("throughput_seconds"), "%.0f"),
+        scaled, number(timings.get("total_seconds"), "%.0f"),
+        number(timings.get("queue_delay_seconds"), "%.0f")))
+    corpus = receipt.get("throughput") if isinstance(receipt, dict) else None
+    if isinstance(corpus, dict):
+        cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
+        flagged = [f"{row.get('name')}: {row.get('decision')}" for row in cases if isinstance(row, dict)
+                   and row.get("decision") != "no substantial regression detected"]
+        lines += ["", f"Throughput corpus `{THROUGHPUT_PROFILE['name']}`: {len(cases)} cases, "
+                  f"{corpus.get('confirmed_regressions', 'NA')} confirmed regressions, "
+                  f"{corpus.get('inconclusive_cases', 'NA')} inconclusive (report-only)."
+                  + (" " + "; ".join(flagged) + "." if flagged else "")]
+    scaling = receipt.get("scaling") if isinstance(receipt, dict) else None
+    if isinstance(scaling, dict):
+        lines += ["", f"Multi-TU scaling `{SCALING_PROFILE['name']}` (report-only; speedup against the one-worker "
+                  "reference of the same inputs, with conservative 95% bounds; CPU and RSS are inflation over "
+                  "that reference):"]
+        for name in SCALING_PROFILE["series"]:
+            row = scaling.get(name) if isinstance(scaling.get(name), dict) else {}
+            lines += ["", f"Series `{name}`: {row.get('status', 'NA')} on CPU set `{row.get('cpu_set', 'NA')}` "
+                      f"({row.get('physical_cores', 'NA')} cores, {row.get('logical_cpus', 'NA')} logical CPUs"
+                      + (f"; housekeeping `{row.get('excluded_cpus')}` excluded" if row.get("excluded_cpus") else "")
+                      + ").", "", "| Inputs | Workers | Placement | Observed | Wall s | Speedup | 95% bounds | "
+                      "Efficiency | CPU | RSS |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+            for shape in row.get("series", []) if isinstance(row.get("series"), list) else []:
+                for point in shape.get("points", []) if isinstance(shape, dict) else []:
+                    if not isinstance(point, dict) or not point.get("workers"):
+                        continue
+                    bounds = point.get("speedup_interval") if isinstance(point.get("speedup_interval"), list) else []
+                    lines.append("| %s (%s) | %s | %s | %s | %s | %s | [%s, %s] | %s | %s | %s |" % (
+                        shape.get("name"), shape.get("inputs"), point.get("workers"), point.get("placement"),
+                        point.get("observed_workers"), number(point.get("wall_median"), "%.4f"),
+                        number(point.get("speedup"), "%.3f"), number(bounds[0] if len(bounds) == 2 else None, "%.3f"),
+                        number(bounds[1] if len(bounds) == 2 else None, "%.3f"), number(point.get("efficiency"), "%.3f"),
+                        number(point.get("cpu_inflation"), "%.3f"), number(point.get("rss_inflation"), "%.3f")))
+    reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
+    warnings = summary.get("warnings")
+    for item in (*notes, *(reasons if isinstance(reasons, list) else ()),
+                 *(warnings if isinstance(warnings, list) else ())):
+        lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
+def dumps(value: object) -> str:
+    return json.dumps(value, sort_keys=True, indent=2)

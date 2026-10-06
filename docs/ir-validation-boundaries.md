@@ -23,6 +23,70 @@ sees the same bits as one that reduces it. The C producer's single row
 emitter (`c_ir_emit_integer_value_at`) reduces an out-of-range spelling such as
 a bit-field clear mask `~mask` built at 64 bits for an 8-bit access.
 
+## SWITCH case images
+
+Canonical SWITCH equality compares the selector and each raw case key modulo
+the selector's declared integer width, independently of signedness. For an
+8-bit selector, keys 7 and 263 therefore name the same bit pattern; both a
+low-width all-ones key and `UINT64_MAX` match signed -1. A singleton key may
+retain high bits in its raw payload. Case keys must be distinct under this
+same equality; defensive uniqueness validation is tracked separately in
+[#2378](https://github.com/buster14a/buster/issues/2378). The final target remains
+the default, and different cases may share a destination.
+
+The native MIR selectors and direct emitters form matching selector/key images
+at the existing SWITCH boundary. Their 32/64-bit machine comparisons clear any
+extension beyond a narrower semantic width; 32-bit selectors compare at
+32 bits, and 64-bit selectors preserve the full image. Source keys and targets
+remain unchanged. LLVM's typed case constants, eBPF's image normalization and
+the direct Wasm emitter use the same equality. Wasm compares zero-extended
+selector-width images in its existing i32/i64 carrier, masking raw keys at
+the SWITCH boundary independently of signedness
+([#2385](https://github.com/buster14a/buster/issues/2385)).
+
+Registered `codegen_test_canonical_switch_key_images` redirects a lowered C
+SWITCH to its original typed ARGUMENT, bypassing C's integer promotion. It
+validates raw IR before each native consumer and requires successful emission
+with zero fallback in every allocator. Signed/unsigned 8/16/32/64-bit inputs
+cover singleton aliases, low/full-width all-ones keys, positive/default controls
+and a distinct high 64-bit key. Unsanitized desktop runs call the emitted
+function through a matching host C signature and check integer bit-vector
+expectations; sanitizer/mobile runs retain validation and emission controls.
+
+### Direct Wasm SWITCH execution
+
+Registered `compiler_driver_test_wasm_switch_images` commits typed ARGUMENT and
+SWITCH rows directly, preserving narrow types without C integer promotions.
+Signed/unsigned 8/16/32/64-bit functions cover raw singleton aliases,
+low/full-width all-ones keys, multiple distinct cases, shared destinations and
+the final default. The 64-bit control distinguishes 7 from `0x100000007`.
+Canonical preparation validates the module before emission; snapshots require
+the source selector, raw keys and target order to remain unchanged.
+
+Each Wasm32/Wasm64 module is emitted twice and must be byte-identical. An inline
+Node oracle uses independent BigInt bit-vector equality, thirteen literal
+expectations, exhaustive 8-bit inputs, wider boundaries, signed images and dirty
+carrier bits. Each pointer-width run requires 8,845 export calls. The existing
+bounded Node runner requires a normal zero exit, empty stderr and the exact
+terminal summary. SHA-256 and before/after file comparisons bind execution to
+the compiler's original bytes. Missing Node reports an execution skip.
+
+## Unary value categories
+
+Every `UNARY` operand and result is a `VALUE` at the operation's canonical
+type. A storage `PLACE` requires an explicit `LOAD` before integer, floating,
+Boolean or vector unary arithmetic; matching type IDs do not authorize an
+implicit load or an addressable unary result. Invalid categories are refused
+with `IR_VALIDATION_OPERATION` at the unary row.
+
+`ir_test_canonical_unary_categories` uses an original complete raw
+`LOCAL` -> `LOAD` -> `UNARY` -> void `RETURN` fixture for all ten operations.
+It preserves each valid family while independently replacing the operand,
+result or both with places, and includes invalid operand/result categories.
+Uncertified preparation must reject these controls at `CANONICAL_INPUT`,
+before CFG or completion publication and without mutating the source rows.
+Valid neighboring modules prepare, publish zero edges and revalidate.
+
 ## Scalar binary operation families
 
 Scalar arithmetic and numeric comparisons require the operation's family to
@@ -36,6 +100,70 @@ vector operations retain their separate rules.
 all 33 scalar arithmetic/comparison operations with matching and wrong-family
 operands. It pins `IR_VALIDATION_OPERATION` at the binary row for every
 wrong-family case and preserves Boolean, pointer and vector controls.
+
+## Binary value categories
+
+Every BINARY operand and result is `IR_VALUE_VALUE`. A place denotes object
+storage, even when its canonical type matches the desired arithmetic type;
+an explicit LOAD supplies that stored value. Scalar arithmetic/comparison,
+Boolean, pointer-comparison and vector families use this same category
+contract. Consumers must not infer an implicit load from a matching type.
+
+`ir_test_canonical_binary_categories` supplies raw complete-module LOCAL/LOAD
+rows independently of the frontend and builder. Across 33 scalar operations
+and eight Boolean/pointer/vector controls, it preserves value-only neighbors
+and rejects independent or combined place operands/results and an invalid
+result category at the BINARY row. Its unused result and void return keep
+return validation from masking the fault. Uncertified preparation must reject
+each malformed input before promotion/publication, retain exact row context,
+and leave completion markers unset.
+
+## Label provenance validation work
+
+Global label-address relocations resolve their function owner through a lazy,
+module-local scratch index. The first lookup indexes each function once and
+subsequent lookups use a half-full hash table. Duplicate symbol ownership keeps
+the first function in module order, including its lowered-state check. Modules
+without label relocations allocate no owner index. Symbol kind/definition,
+block bounds, addends, initializer extents and relocation overlap remain
+independent rejection conditions (#2444).
+
+Global label differences (`IrGlobalLabelDifference`) share that owner index:
+`ir_validate_label_differences` requires a lowered owner, both blocks in
+range, a byte initializer and a 1, 2, 4 or 8-byte slot that is still zero.
+
+Label sets and provenance paths retain their caller-supplied order. Validation
+borrows ordered arrays and constructs immutable radix-sorted scratch views for
+larger unordered arrays; sets of at most eight IDs use bounded small-set work.
+Uniqueness checks adjacent IDs, set relations merge sorted views, and shape
+validation uses indexed membership plus coverage marks sized to the aggregate
+set rather than the function's entire block universe. The complete value check
+reuses its shape proof instead of recomputing uniqueness (#2445).
+Each path's temporary block sort rewinds after updating coverage, so resident
+scratch is bounded by the aggregate set, the largest path set and the path-order
+view even when many paths share one unordered block array. The cumulative
+requested-byte counter still counts those repeated temporary copies.
+
+Path shape validation checks adjacent intervals in offset order after proving
+their extents cannot overflow. Exact subrange transfer walks sorted source and
+result views together, translating offsets and preserving size, label sets and
+non-label flags. Missing and extra result paths both fail; touching intervals
+remain disjoint (#2446). These views live only for their validation call and
+never certify future mutations or replace the strict canonical-input boundary.
+
+Transfer and standalone parameter-provenance checks first require backing for
+their nonempty block/path arrays, including nested path block sets and every
+aggregate/incoming operand. Malformed metadata therefore refuses before a
+provenance query can traverse it; this is a backing check rather than another
+complete shape or uniqueness proof (#2480).
+
+The optional allocation-diagnostic counters report actual element visits,
+membership/hash probes and requested scratch bytes for these mechanisms.
+Fixed radix-bucket setup, memory copies and allocator overhead are not counted
+as element comparisons. Geometric registered regressions constrain the work
+and compare independent malformed-input expectations. Whole-compiler timing
+and hosted noise are reported separately; a better scaling bound is not an
+end-to-end throughput measurement.
 
 ## A certificate describes one input
 
@@ -100,6 +228,22 @@ instruction/value rows and machine rows do not change size.
 
 ## Existing checks and limits of the evidence
 
+Parameter provenance validation selects its route once per function. When
+`label_metadata_count == 0`, every provenance lookup is the zero record, so
+validated incoming IDs/types establish the provenance predicate without another
+walk. Mutable parameters still require the exact count, predecessor order,
+incoming IDs/types, list exhaustion and `last_incoming` identity in the first
+walk, including a null tail for zero incoming values. Published parameters retain
+the independent CFG extent/topology proof and their incoming ID/type walk.
+Functions with any metadata retain the existing provenance calculation; the
+exported standalone mutable helper retains all of its checks and scratch work.
+`VALIDATION_PARAMETER_PROVENANCE_CHECKS` counts actual provenance calculations.
+The registered parameter fixture covers both representations, malformed
+structure, poisoned scratch, zero incoming values, empty metadata records and
+an actual label-set union with a deliberately incomplete destination. Removing
+the metadata-free calculation is a bounded work reduction, not a measured
+whole-compiler throughput or RSS result.
+
 | Boundary / owner | Existing checks reused | What a successful check does not establish |
 | --- | --- | --- |
 | Canonical input and promotion output / `ir_validate_canonical_module` | Required storage; instruction-chain ownership; block sealing and termination; one definition per value (a row or one block parameter, never both); value and operation types; call/return signatures; parameter/incoming types, counts and predecessor order; branch-target validity; global alignment, initializer and relocation ownership | This change does not add a whole-function canonical dominance proof or prove full CFG predecessor/successor symmetry. Those properties must not be inferred merely from valid IDs and parameter counts. |
@@ -114,6 +258,24 @@ machine scheduling must rebuild or remap their derived use/liveness/placement
 facts; the ownership inventory records their producer, lifetime and invalidation.
 This inventory is source-level reconciliation, not a claim that all remaining
 CFG, dominance, width and relocation hypotheses were reproduced or repaired.
+
+## Switch case keys
+
+SWITCH case keys must be distinct after reduction to the selector's integer
+width. Signed raw encodings keep their low-width bit pattern. Wider-than-64-bit
+selectors use the existing zero-extended 64-bit case payload. Repeated
+destinations are permitted; case order and the default-last target contract
+are preserved. This prevents duplicate constants in the LLVM switch consumer.
+It does not assert identical narrow-selector execution across native consumers,
+whose existing comparisons use 32/64-bit widths.
+
+Validation scans strictly ascending/descending normalized keys without scratch
+allocation. Unordered keys use a scratch copy and at most eight radix passes;
+validation never sorts caller-owned immediates or targets. The registered
+`ir_test_canonical_switch_keys` uses raw original ARGUMENT/SWITCH/RETURN rows,
+explicit valid/invalid keys and 4096-case permutations. It checks width aliases,
+signed/full-width endpoints, shared destinations, exact error context and
+uncertified preparation refusal before publication, with unchanged input arrays.
 
 ## Regression and measurement contract
 

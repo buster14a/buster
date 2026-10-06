@@ -1488,7 +1488,24 @@ static void ebpf_fe_emit_prologue(EbpfFunctionEmitter* emitter)
                       instruction, IR_SYMBOL_ID_INVALID);
             return;
         }
-        ebpf_fe_store_stack(emitter, slot, (u8)(EBPF_REG_1 + instruction->immediates[0]));
+        // Normalize a private copy: raw ABI registers may be captured by more
+        // than one ARGUMENT row, and R0 is not an incoming argument.
+        IrType* type = ebpf_fe_value_type(emitter, instruction->result);
+        u8 incoming = (u8)(EBPF_REG_1 + instruction->immediates[0]);
+        if (ebpf_type_is_integer(type) && ebpf_type_bits(type) < 64)
+        {
+            ebpf_fe_mov_reg(emitter, EBPF_REG_0, incoming);
+            if (type->kind == IR_TYPE_BOOLEAN)
+            {
+                ebpf_fe_alu_imm(emitter, EBPF_OP_AND, EBPF_REG_0, 1);
+            }
+            else
+            {
+                ebpf_fe_normalize(emitter, EBPF_REG_0, type, type->is_signed);
+            }
+            incoming = EBPF_REG_0;
+        }
+        ebpf_fe_store_stack(emitter, slot, incoming);
     }
 }
 
@@ -2615,6 +2632,12 @@ static bool ebpf_collect_global(EbpfContext* context, IrGlobal* global)
             }
             break;
         case IR_GLOBAL_INITIALIZER_BYTES:
+            if (global->label_difference_count)
+            {
+                ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_INSTRUCTION, ebpf_s8("eBPF label-difference global initializer is unsupported"), 0, 0,
+                          0, global->symbol);
+                return false;
+            }
             if (global->bytes.length > size)
             {
                 ebpf_fail(context, EBPF_ERROR_ENCODING, ebpf_s8("eBPF global initializer is larger than its object"), 0, 0, 0,

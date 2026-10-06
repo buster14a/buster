@@ -1,0 +1,367 @@
+{
+  "schema": "buster-performance-validation-v1",
+  "rule": "Every performance-validation test requires actual execution of its relevant workload on the approved Zen 5 benchmark host (AMD Ryzen 7 9700X). Without complete evidence matching the candidate, workload and configuration, performance validation is incomplete; hosted, simulated and static evidence is diagnostic.",
+  "routes": {
+    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752)",
+    "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request, #2769)",
+    "direct-workload": "9700x-direct-bench.yml job bench (benchmarks/9700x/*.c and *.data, #2704)"
+  },
+  "entries": [
+    {
+      "id": "build:bench_throughput",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "native compiler throughput corpus, paired baseline/candidate: the predeclared default CI corpus runs as profile throughput-corpus-v1 in every pull-request comparison (custom and real-source workload selections stay diagnostic); the scale subcommand's multi-TU -fcompile-jobs series (#424) runs as profile scaling-v1 inside the pull-request comparison when benchmarks/9700x/scaling.request changes",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "build:bench_throughput@main",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "the same throughput-corpus-v1 run for each commit after it lands on main",
+      "zen5": {
+        "route": "main-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "build:bench_throughput_ci",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "hosted CI throughput comparison (compiler-throughput.yml)",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Hosted timing is diagnostic. Use pull-compare for a 9700X result."
+      }
+    },
+    {
+      "id": "build:production_profile",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "PGO/LTO training and admission on the native throughput corpus",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Profile training is not a measurement; admitting a PGO compiler on performance grounds needs a 9700X comparison."
+      }
+    },
+    {
+      "id": "uarch_lab:compare",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "paired ABBA wall/CPU/RSS of two compilers on one frozen source",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "uarch_lab:compare@main",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "the same comparison for each commit after it lands on main",
+      "zen5": {
+        "route": "main-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "uarch_lab:retirement",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "native-retirement per-allocator-mode gate (#512)",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "native-retirement-performance-v1 remains blocked; no 9700X route exists for its cells."
+      }
+    },
+    {
+      "id": "uarch_lab:run",
+      "kind": "lab-mode",
+      "validation": "diagnostic",
+      "measures": "single-binary profile (where/when/what)",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "diagnostic only: its results may explain a change but never validate performance; a claim needs a Zen 5 route row"
+      }
+    },
+    {
+      "id": "ide:bench",
+      "kind": "ide-command",
+      "validation": "performance",
+      "measures": "`ide bench` frontend microbenchmark",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Runs inside uarch_lab's micro step only; a frontend claim needs pull-compare or a direct workload."
+      }
+    },
+    {
+      "id": "benchmarks/9700x/*.c",
+      "kind": "workload",
+      "validation": "performance",
+      "measures": "owner standalone workloads, process latency",
+      "zen5": {
+        "route": "direct-workload",
+        "status": "covered",
+        "consumer": "tools/bench_direct/run_workloads.py"
+      }
+    },
+    {
+      "id": "tool:benchmark_frontend_scaling.py",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "two trusted compilers on frontend scaling inputs",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Run locally or hosted it is diagnostic; a claim needs pull-compare evidence."
+      }
+    },
+    {
+      "id": "tool:selection_benchmark.py",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "selector replay and end-to-end object compilation",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "No 9700X route; a selector claim needs pull-compare evidence (end-to-end) until a targeted route exists."
+      }
+    },
+    {
+      "id": "tool:fast_ra_scaling.c",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "FAST register-allocation prepass scaling probe",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Port the probe to a benchmarks/9700x workload (input data allowed) or use pull-compare."
+      }
+    },
+    {
+      "id": "tool:machine_line_mark_scaling.c",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "scheduler line-mark repair scaling probe",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Port the probe to a benchmarks/9700x workload or use pull-compare."
+      }
+    },
+    {
+      "id": "tool:wild_linker_bench.c",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "linker experiment (#2645), link-only cells",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Linker timing on the 9700X has no route; results stay diagnostic."
+      }
+    },
+    {
+      "id": "tool:branch_miss_survey.py",
+      "kind": "tool",
+      "validation": "diagnostic",
+      "measures": "branch misprediction ranking of one run",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "diagnostic only: its results may explain a change but never validate performance; a claim needs a Zen 5 route row"
+      }
+    },
+    {
+      "id": "tool:cache_miss_survey.py",
+      "kind": "tool",
+      "validation": "diagnostic",
+      "measures": "cache-miss survey of one compile",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "diagnostic only: its results may explain a change but never validate performance; a claim needs a Zen 5 route row"
+      }
+    },
+    {
+      "id": "tool:bench_policy_reuse.py",
+      "kind": "tool",
+      "validation": "policy",
+      "measures": "benchmark-policy CI reuse decision",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "policy tooling; measures nothing"
+      }
+    },
+    {
+      "id": "tool:native_retirement_performance_binding.py",
+      "kind": "tool",
+      "validation": "policy",
+      "measures": "native-retirement performance binding validator",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "contract validation of a blocked gate; measures nothing"
+      }
+    },
+    {
+      "id": "tool:native_retirement_performance_schema.py",
+      "kind": "tool",
+      "validation": "policy",
+      "measures": "native-retirement census report schema",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "schema; measures nothing"
+      }
+    },
+    {
+      "id": "workflow:9700x-direct-bench.yml",
+      "kind": "workflow",
+      "validation": "performance",
+      "measures": "the only 9700X executor: workloads, pull-request and main comparisons",
+      "zen5": {
+        "route": "direct-workload",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "workflow:9700x-compiler-request.yml",
+      "kind": "workflow",
+      "validation": "policy",
+      "measures": "hosted push-to-main request marker",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "marker and queued-check bridge; measures nothing"
+      }
+    },
+    {
+      "id": "workflow:9700x-compiler-report.yml",
+      "kind": "workflow",
+      "validation": "policy",
+      "measures": "publication-only recovery of a past main comparison's commit report",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "republishes retained 9700X evidence; measures nothing"
+      }
+    },
+    {
+      "id": "workflow:bench-service-policy.yml",
+      "kind": "workflow",
+      "validation": "policy",
+      "measures": "required benchmark workflow policy check",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "policy check; measures nothing"
+      }
+    },
+    {
+      "id": "workflow:compiler-throughput.yml",
+      "kind": "workflow",
+      "validation": "performance",
+      "measures": "hosted compiler throughput comparison",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Hosted timing is diagnostic and never validates performance; request pull-compare."
+      }
+    },
+    {
+      "id": "workflow:compiler-throughput-requests.yml",
+      "kind": "workflow",
+      "validation": "performance",
+      "measures": "scheduled/manual hosted throughput comparisons",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Hosted timing is diagnostic and never validates performance."
+      }
+    },
+    {
+      "id": "workflow:throughput-harness-macos.yml",
+      "kind": "workflow",
+      "validation": "performance",
+      "measures": "macOS throughput harness self-test",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Zen 5 measurements do not establish macOS performance; native macOS timing is out of this route."
+      }
+    },
+    {
+      "id": "workflow:throughput-real-source.yml",
+      "kind": "workflow",
+      "validation": "performance",
+      "measures": "real-source throughput qualification on hosted runners",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Hosted timing is diagnostic; a qualification claim needs a 9700X profile."
+      }
+    },
+    {
+      "id": "workflow:production-profile.yml",
+      "kind": "workflow",
+      "validation": "performance",
+      "measures": "PGO/LTO profile production",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Profile production is not a measurement; see build:production_profile."
+      }
+    },
+    {
+      "id": "workflow:ir-layout-lab.yml",
+      "kind": "workflow",
+      "validation": "diagnostic",
+      "measures": "IR layout lab on a hosted VM (#2612)",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "diagnostic only: its results may explain a change but never validate performance; a claim needs a Zen 5 route row"
+      }
+    },
+    {
+      "id": "workflow:issue-708-benchmark.yml",
+      "kind": "workflow",
+      "validation": "performance",
+      "measures": "Windows paired matrix benchmark",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "consumer": "",
+        "resolution": "Windows performance is not established by Zen 5 Linux measurements; no route."
+      }
+    }
+  ]
+}

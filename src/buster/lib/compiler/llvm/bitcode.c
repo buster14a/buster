@@ -7,9 +7,13 @@
 // layout, llvm_bc_collect_instruction_constants builds the constant pool and
 // records each constant instruction's pool value id, llvm_bc_plan_function
 // assigns SSA ids from those records, and llvm_bc_emit_module writes the
-// records. LLVM's bitstream is LSB-first. The writer intentionally emits
+// records. llvm_bc_add_lifecycle_global and llvm_bc_lifecycle_initializer
+// preserve canonical module callbacks as LLVM appending registration arrays.
+// LLVM's bitstream is LSB-first. The writer intentionally emits
 // unabbreviated records: this keeps the implementation small and auditable,
 // while remaining a fully conforming, self-describing LLVM bitcode stream.
+// llvm_bc_linkage preserves weak definitions versus optional declarations;
+// llvm_bc_visibility keeps external hidden binding separate from linkage.
 //
 // Collection-time lookups stay O(1) expected as the module grows:
 // llvm_bc_add_constant deduplicates through the constant_slots hash index,
@@ -17,6 +21,11 @@
 // and llvm_bc_find_integer_count reads the integer_count_functions table. These
 // indexes only locate rows; pool and entity order, and therefore value IDs,
 // remain insertion order.
+// llvm_bc_plan_instruction_allocas reserves fixed local/ABI/bit-field storage
+// once per frame; llvm_bc_emit_function_body emits it after entry PHIs. Only
+// dynamic STACK_ALLOCATE records remain at their canonical instruction sites.
+// llvm_bc_plan_value_spills gives every non-place aggregate GEP base one entry
+// alloca, filled in llvm_bc_emit_instruction after the value's definition.
 // Test-only integer operand access lives at llvm_bitcode_test_integer_operand;
 // normal builds omit that private boundary entirely.
 
@@ -37,11 +46,14 @@ enum
 
     LLVM_BC_ATTRIBUTE_LIST = 2,
     LLVM_BC_ATTRIBUTE_GROUP = 3,
+    LLVM_BC_ATTRIBUTE_ENUM = 0,
     LLVM_BC_ATTRIBUTE_INTEGER = 1,
     LLVM_BC_ATTRIBUTE_TYPE = 6,
     LLVM_BC_ATTRIBUTE_ALIGNMENT = 1,
     LLVM_BC_ATTRIBUTE_BYVAL = 3,
     LLVM_BC_ATTRIBUTE_SRET = 29,
+    LLVM_BC_ATTRIBUTE_SIGNEXT = 24,
+    LLVM_BC_ATTRIBUTE_ZEROEXT = 34,
 
     LLVM_BC_MODULE_VERSION = 1,
     LLVM_BC_MODULE_TRIPLE = 2,
@@ -143,7 +155,17 @@ enum
     LLVM_BC_CALL_EXPLICIT_TYPE = 1 << 15,
 
     LLVM_BC_LINKAGE_EXTERNAL = 0,
+    LLVM_BC_LINKAGE_APPENDING = 2,
     LLVM_BC_LINKAGE_INTERNAL = 3,
+    LLVM_BC_LINKAGE_EXTERNAL_WEAK = 7,
+    LLVM_BC_LINKAGE_WEAK = 16,
+
+    LLVM_BC_VISIBILITY_DEFAULT = 0,
+    LLVM_BC_VISIBILITY_HIDDEN = 1,
+
+    LLVM_BC_GLOBAL_STRING = 1,
+    LLVM_BC_GLOBAL_CTORS = 2,
+    LLVM_BC_GLOBAL_DTORS = 3,
 
     LLVM_BC_VA_START = 0,
     LLVM_BC_VA_COPY = 1,
@@ -157,6 +179,8 @@ enum
 // Initial slot count of the open-addressed constant and name indexes. Both
 // stay power-of-two sized and at most half full.
 #define LLVM_BC_INDEX_MIN_CAPACITY 64
+// A half-full power-of-two index must fit its u32 slot count.
+#define LLVM_BC_INDEX_MAX_ENTRIES (UINT32_C(1) << 30)
 // Scalar ctlz/cttz/ctpop declarations, one per operation and width 1..64.
 #define LLVM_BC_INTEGER_COUNT_KIND_COUNT 3
 #define LLVM_BC_INTEGER_COUNT_MAX_WIDTH 64
@@ -259,10 +283,24 @@ struct LlvmBcGlobal
     u32 storage_type_id;
     u32 initializer_value_id;
     u32 alignment;
-    bool synthetic;
+    u8 synthetic_kind;
     bool declaration;
     bool read_only;
     bool is_thread_local;
+};
+
+typedef struct LlvmBcFixedAlloca LlvmBcFixedAlloca;
+struct LlvmBcFixedAlloca
+{
+    u32 storage_type_id;
+    u32 alignment;
+};
+
+typedef struct LlvmBcInstructionPlan LlvmBcInstructionPlan;
+struct LlvmBcInstructionPlan
+{
+    u32 value_count;
+    u32 fixed_alloca_count;
 };
 
 typedef struct LlvmBcFunction LlvmBcFunction;
@@ -283,7 +321,18 @@ struct LlvmBcFunction
     // constant instruction's own value, which value numbering reads instead
     // of searching the pool again. LLVM_BC_INVALID_ID elsewhere.
     u32* constant_value_ids;
-    u32* emitted_counts;
+    LlvmBcInstructionPlan* instruction_plans;
+    LlvmBcFixedAlloca* fixed_allocas;
+    u32 fixed_alloca_count;
+    u32 fixed_alloca_capacity;
+    u32 fixed_alloca_cursor;
+    u32 first_fixed_alloca_value_id;
+    // Array/record values used as INDEX/FIELD bases have no LLVM address.
+    // spill_value_ids maps such a canonical value to the entry alloca that
+    // receives it right after its definition (INVALID elsewhere); those
+    // allocas follow the cursor-consumed ones, starting at spill_alloca_first.
+    u32* spill_value_ids;
+    u32 spill_alloca_first;
     u32 first_local_value_id;
     u32 final_value_id;
     bool declaration;
@@ -1230,6 +1279,33 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_abi_attribute(LlvmBcContext* context, LlvmBcAbi
     signature->attribute_group_count += 1;
 }
 
+// Classify the source scalar, never the integer used to coerce an aggregate.
+// Explicit x86-64 conventions are already resolved by the signature builder.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_scalar_abi_extension(LlvmBcContext* context, IrType* type, IrAbiConvention convention)
+{
+    u32 extension = 0;
+    if (type && type->kind == IR_TYPE_ENUM && type->unqualified_type.value < context->program->types.count)
+    {
+        type = llvm_bc_ir_type(context, type->unqualified_type);
+    }
+    u32 width = type ? (type->kind == IR_TYPE_BOOLEAN ? 1u : type->bit_width) : 0;
+    if (type && type->kind == IR_TYPE_ENUM && !width)
+    {
+        width = type->layout.size < 4 ? (u32)type->layout.size * 8 : 32;
+    }
+    bool scalar = type && (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM);
+    bool extend = context->abi_target_valid &&
+                  ((context->abi_target.cpu_arch == CPU_ARCH_X86_64 &&
+                    (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 ||
+                     (convention == IR_ABI_CONVENTION_WIN64_X86_64 && type && type->kind == IR_TYPE_BOOLEAN))) ||
+                   (context->abi_target.cpu_arch == CPU_ARCH_AARCH64 && convention == IR_ABI_CONVENTION_DARWIN_AARCH64));
+    if (scalar && width && width < 32 && extend)
+    {
+        extension = type->kind == IR_TYPE_BOOLEAN || !type->is_signed ? LLVM_BC_ATTRIBUTE_ZEROEXT : LLVM_BC_ATTRIBUTE_SIGNEXT;
+    }
+    return extension;
+}
+
 BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcContext* context, IrType* type)
 {
     LlvmBcAbiSignature* signature = context->abi_signatures[type->id.value];
@@ -1253,6 +1329,11 @@ BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcCont
         IrType* return_type = llvm_bc_ir_type(context, type->return_type);
         signature->result = llvm_bc_abi_value(context, type->return_type, convention, true, &integers, &floats);
         bool indirect_result = signature->result.aggregate && signature->result.indirect;
+        u32 result_extension = llvm_bc_scalar_abi_extension(context, return_type, convention);
+        if (result_extension)
+        {
+            llvm_bc_abi_attribute(context, signature, 0, result_extension, 0, 0);
+        }
         u64* operands = arena_allocate(context->arena, u64, (u64)type->parameter_count + 3);
         u32 count = 0;
         operands[count++] = type->is_variadic;
@@ -1269,6 +1350,11 @@ BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcCont
             signature->parameters[index] = llvm_bc_abi_value(context, type->parameter_types[index], convention, false, &integers, &floats);
             LlvmBcAbiValue* abi = signature->parameters + index;
             operands[count++] = abi->type_id;
+            u32 parameter_extension = llvm_bc_scalar_abi_extension(context, parameter, convention);
+            if (parameter_extension)
+            {
+                llvm_bc_abi_attribute(context, signature, index + 1 + indirect_result, parameter_extension, 0, 0);
+            }
             if (abi->byval)
             {
                 llvm_bc_abi_attribute(context, signature, index + 1 + indirect_result, LLVM_BC_ATTRIBUTE_BYVAL, context->ir_type_ids[type->parameter_types[index].value],
@@ -1437,9 +1523,32 @@ static u32 llvm_bc_access_alignment(LlvmBcContext* context, IrFunction* function
 }
 
 // LLVM accepts only external or extern_weak linkage on a declaration.
-static u32 llvm_bc_linkage(IrSymbol* symbol, bool declaration)
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_linkage(IrSymbol* symbol, bool declaration)
 {
-    return !declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL ? LLVM_BC_LINKAGE_INTERNAL : LLVM_BC_LINKAGE_EXTERNAL;
+    u32 result;
+    if (!declaration && symbol && symbol->linkage == IR_LINKAGE_INTERNAL)
+    {
+        result = LLVM_BC_LINKAGE_INTERNAL;
+    }
+    else if (symbol && symbol->is_weak)
+    {
+        // WeakAny is wire value 16; legacy value 1 implies an old COMDAT.
+        // LLVM BitcodeWriter.cpp getEncodedLinkage, llvmorg-23.1.2.
+        result = declaration ? LLVM_BC_LINKAGE_EXTERNAL_WEAK : LLVM_BC_LINKAGE_WEAK;
+    }
+    else
+    {
+        result = LLVM_BC_LINKAGE_EXTERNAL;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_visibility(IrSymbol* symbol, bool declaration)
+{
+    // LLVM requires default visibility for internal definitions. Hidden
+    // external references keep their independent visibility and weak binding.
+    return symbol && symbol->is_hidden && (declaration || symbol->linkage != IR_LINKAGE_INTERNAL) ?
+           LLVM_BC_VISIBILITY_HIDDEN : LLVM_BC_VISIBILITY_DEFAULT;
 }
 
 static u32 llvm_bc_calling_convention(IrCallingConvention convention)
@@ -1779,8 +1888,51 @@ static void llvm_bc_mark_referenced_symbols(LlvmBcContext* context, u8* referenc
     }
 }
 
+// Called before entity value numbering; empty lists add no records or types.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_add_lifecycle_global(LlvmBcContext* context, u64 count, bool destructor)
+{
+    bool result = true;
+    if (count)
+    {
+        String8 name = destructor ? llvm_bc_s8("llvm.global_dtors") : llvm_bc_s8("llvm.global_ctors");
+        if (count > UINT32_MAX || context->global_count >= LLVM_BC_NAME_FUNCTION ||
+            (u64)context->global_count + context->function_count + 1 >= LLVM_BC_INVALID_ID ||
+            context->type_count > UINT32_MAX - 2 || context->name_slot_count >= LLVM_BC_INDEX_MAX_ENTRIES)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM lifecycle registration count exceeds record limits"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+            result = false;
+        }
+        else if (!llvm_bc_name_available(context, name, 0))
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM lifecycle registration name is already defined"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+            result = false;
+        }
+        else
+        {
+            u64 entry_types[4] = {0, context->i32_type_id, context->pointer_type_id, context->pointer_type_id};
+            u32 entry_type = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, entry_types, 4);
+            u32 storage_type = llvm_bc_array_type(context, count, entry_type);
+            llvm_bc_vec_reserve(context->arena, (void**)&context->globals, &context->global_capacity, context->global_count + 1,
+                                sizeof(*context->globals), BUSTER_ALIGN_OF(LlvmBcGlobal));
+            LlvmBcGlobal* global = context->globals + context->global_count;
+            *global = (LlvmBcGlobal){.name = name,
+                                     .canonical_type = IR_TYPE_ID_INVALID,
+                                     .value_id = LLVM_BC_INVALID_ID,
+                                     .storage_type_id = storage_type,
+                                     .initializer_value_id = LLVM_BC_INVALID_ID,
+                                     .synthetic_kind = destructor ? LLVM_BC_GLOBAL_DTORS : LLVM_BC_GLOBAL_CTORS};
+            llvm_bc_register_name(context, name, context->global_count);
+            context->global_count += 1;
+        }
+    }
+    return result;
+}
+
 static bool llvm_bc_collect_entities(LlvmBcContext* context)
 {
+    u64 initializer_counts[2] = {0};
     u32 symbol_count = context->program->symbols.count;
     context->symbol_value_ids = arena_allocate(context->arena, u32, symbol_count ? symbol_count : 1);
     context->symbol_seen = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
@@ -1796,6 +1948,10 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
         IrModule* module = context->modules + module_index;
+        for (u32 initializer_index = 0; initializer_index < module->initializer_count; initializer_index += 1)
+        {
+            initializer_counts[module->initializers[initializer_index].is_destructor ? 1 : 0] += 1;
+        }
         for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
         {
             IrGlobal* global = module->globals + global_index;
@@ -1905,7 +2061,7 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
                                          .storage_type_id = storage_type,
                                          .initializer_value_id = LLVM_BC_INVALID_ID,
                                          .alignment = 1,
-                                         .synthetic = true,
+                                         .synthetic_kind = LLVM_BC_GLOBAL_STRING,
                                          .read_only = true};
                 llvm_bc_register_name(context, name, context->global_count);
                 context->global_count += 1;
@@ -2000,6 +2156,12 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
                 }
             }
         }
+    }
+
+    if (!llvm_bc_add_lifecycle_global(context, initializer_counts[0], false) ||
+        !llvm_bc_add_lifecycle_global(context, initializer_counts[1], true))
+    {
+        return false;
     }
 
     u32 value_id = 0;
@@ -2125,6 +2287,13 @@ static u32 llvm_bc_add_constant(LlvmBcContext* context, u32 type_id, u32 code, u
                           : code == LLVM_BC_CST_STRING       ? llvm_bc_s8("LLVM string constant discovered after value numbering")
                                                              : llvm_bc_s8("LLVM constant expression discovered after value numbering");
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, message, 0, 0, 0, IR_SYMBOL_ID_INVALID);
+    }
+    else if (result == LLVM_BC_INVALID_ID &&
+             ((u64)context->module_value_count + context->constant_count >= LLVM_BC_INVALID_ID ||
+              context->constant_count >= LLVM_BC_INDEX_MAX_ENTRIES))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM constant count exceeds value or index limits"),
+                     0, 0, 0, IR_SYMBOL_ID_INVALID);
     }
     else if (result == LLVM_BC_INVALID_ID)
     {
@@ -2459,6 +2628,61 @@ static LlvmBcString* llvm_bc_string_for_instruction(LlvmBcContext* context, IrFu
     return 0;
 }
 
+// Entity IDs are final here, and constants are still unlocked. The private
+// lifecycle storage type is [count x {i32, ptr, ptr}]; no canonical rows change.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_lifecycle_initializer(LlvmBcContext* context, LlvmBcGlobal* global)
+{
+    u32 result = LLVM_BC_INVALID_ID;
+    LlvmBcTypeRecord array = context->types[global->storage_type_id];
+    u32 count = (u32)array.operands[0];
+    u32 entry_type = (u32)array.operands[1];
+    bool destructor = global->synthetic_kind == LLVM_BC_GLOBAL_DTORS;
+    u64* entries = arena_allocate(context->arena, u64, count);
+    u32 entry_count = 0;
+    u32 associated = llvm_bc_null_constant(context, context->pointer_type_id);
+    for (u32 module_index = 0; module_index < context->module_count && !llvm_bc_failed(context); module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 index = 0; index < module->initializer_count && !llvm_bc_failed(context); index += 1)
+        {
+            IrModuleInitializer initializer = module->initializers[index];
+            if (initializer.is_destructor == destructor)
+            {
+                IrSymbol* symbol = llvm_bc_ir_symbol(context, initializer.symbol);
+                if (entry_count >= count || !symbol || symbol->kind != IR_SYMBOL_FUNCTION || !symbol->is_definition ||
+                    (initializer.priority > UINT16_MAX && initializer.priority != IR_INITIALIZER_PRIORITY_NONE))
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
+                                 llvm_bc_s8("invalid canonical LLVM lifecycle registration"), 0, 0, 0, initializer.symbol);
+                }
+                else
+                {
+                    u32 priority = initializer.priority == IR_INITIALIZER_PRIORITY_NONE ? UINT16_MAX : initializer.priority;
+                    u64 values[3] = {llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, priority),
+                                     llvm_bc_address_constant(context, initializer.symbol, 0, initializer.symbol), associated};
+                    if (!llvm_bc_failed(context))
+                    {
+                        entries[entry_count++] = llvm_bc_add_constant(context, entry_type, LLVM_BC_CST_AGGREGATE, values, 3);
+                    }
+                }
+            }
+        }
+    }
+    if (!llvm_bc_failed(context))
+    {
+        if (entry_count != count)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM lifecycle registration count changed"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+        }
+        else
+        {
+            result = llvm_bc_add_constant(context, global->storage_type_id, LLVM_BC_CST_AGGREGATE, entries, count);
+        }
+    }
+    return result;
+}
+
 static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
 {
     for (u32 index = 0; index < context->global_count; index += 1)
@@ -2469,7 +2693,16 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
             record->initializer_value_id = LLVM_BC_INVALID_ID;
             continue;
         }
-        if (record->synthetic)
+        if (record->synthetic_kind == LLVM_BC_GLOBAL_CTORS || record->synthetic_kind == LLVM_BC_GLOBAL_DTORS)
+        {
+            record->initializer_value_id = llvm_bc_lifecycle_initializer(context, record);
+            if (llvm_bc_failed(context))
+            {
+                return false;
+            }
+            continue;
+        }
+        if (record->synthetic_kind == LLVM_BC_GLOBAL_STRING)
         {
             u64* bytes = arena_allocate(context->arena, u64, record->synthetic_bytes.length ? record->synthetic_bytes.length : 1);
             for (u64 byte = 0; byte < record->synthetic_bytes.length; byte += 1)
@@ -2486,6 +2719,12 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
         {
             llvm_bc_fail(context, LLVM_BITCODE_ERROR_INVALID_ARGUMENT, llvm_bc_s8("invalid LLVM bitcode global initializer"), 0, 0, 0,
                          record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
+            return false;
+        }
+        if (global->label_difference_count)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
+                         llvm_bc_s8("LLVM bitcode label-difference global initializer is unsupported"), 0, 0, 0, global->symbol);
             return false;
         }
         if (global->relocation_count && global->initializer_kind != IR_GLOBAL_INITIALIZER_BYTES)
@@ -3096,6 +3335,154 @@ static bool llvm_bc_assign_alias(LlvmBcContext* context, LlvmBcFunction* record,
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL void llvm_bc_plan_fixed_alloca(LlvmBcContext* context, LlvmBcFunction* record, u32 storage_type_id, u32 alignment)
+{
+    u32 encoded_alignment = llvm_bc_alignment(alignment);
+    if (storage_type_id >= context->type_count || encoded_alignment == UINT32_MAX || record->fixed_alloca_count == UINT32_MAX)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("invalid LLVM fixed allocation shape"), record->function,
+                     0, 0, record->function->symbol);
+    }
+    else
+    {
+        llvm_bc_vec_reserve(context->arena, (void**)&record->fixed_allocas, &record->fixed_alloca_capacity,
+                           record->fixed_alloca_count + 1, sizeof(*record->fixed_allocas), BUSTER_ALIGN_OF(LlvmBcFixedAlloca));
+        record->fixed_allocas[record->fixed_alloca_count++] = (LlvmBcFixedAlloca){storage_type_id, alignment};
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_plan_instruction_allocas(LlvmBcContext* context, LlvmBcFunction* record, IrInstruction* instruction)
+{
+    IrFunction* function = record->function;
+    u32 first = record->fixed_alloca_count;
+    switch (instruction->opcode)
+    {
+    case IR_OPCODE_LOCAL:
+    {
+        IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+        if (!type || instruction->result.value >= function->value_count)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("invalid LLVM local allocation result"), function,
+                         0, instruction, function->symbol);
+        }
+        else
+        {
+            IrValue* value = function->values + instruction->result.value;
+            llvm_bc_plan_fixed_alloca(context, record, context->ir_type_ids[type->id.value],
+                                     value->alignment ? value->alignment : type->layout.alignment);
+        }
+        break;
+    }
+    case IR_OPCODE_ARGUMENT:
+    {
+        LlvmBcAbiSignature* signature = context->abi_signatures[function->canonical_type.value];
+        LlvmBcAbiValue parameter = signature->parameters[instruction->immediates[0]];
+        if (parameter.aggregate && !parameter.indirect)
+        {
+            llvm_bc_plan_fixed_alloca(context, record, parameter.storage_type_id, parameter.alignment);
+        }
+        break;
+    }
+    case IR_OPCODE_CALL:
+    {
+        LlvmBcAbiSignature* signature = llvm_bc_call_signature(context, function, instruction);
+        if (signature)
+        {
+            if (signature->result.aggregate && signature->result.indirect)
+            {
+                llvm_bc_plan_fixed_alloca(context, record, signature->result.storage_type_id, signature->result.alignment);
+            }
+            for (u32 index = 1; index < instruction->operand_count && index <= signature->parameter_count; index += 1)
+            {
+                LlvmBcAbiValue parameter = signature->parameters[index - 1];
+                if (parameter.aggregate)
+                {
+                    llvm_bc_plan_fixed_alloca(context, record, parameter.storage_type_id, parameter.alignment);
+                }
+            }
+            if (signature->result.aggregate && !signature->result.indirect)
+            {
+                llvm_bc_plan_fixed_alloca(context, record, signature->result.storage_type_id, signature->result.alignment);
+            }
+        }
+        break;
+    }
+    case IR_OPCODE_RETURN:
+    {
+        LlvmBcAbiValue result = context->abi_signatures[function->canonical_type.value]->result;
+        if (instruction->operand_count && result.aggregate && !result.indirect)
+        {
+            llvm_bc_plan_fixed_alloca(context, record, result.storage_type_id, result.alignment);
+        }
+        break;
+    }
+    case IR_OPCODE_AGGREGATE:
+    {
+        IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+        if (llvm_bc_struct_has_bit_field(type))
+        {
+            llvm_bc_plan_fixed_alloca(context, record, context->ir_type_ids[type->id.value],
+                                     type->layout.alignment ? type->layout.alignment : 1);
+        }
+        break;
+    }
+    case IR_OPCODE_VA_START:
+    case IR_OPCODE_VA_COPY:
+        llvm_bc_plan_fixed_alloca(context, record, context->ir_type_ids[instruction->canonical_type.value], 8);
+        break;
+    default:
+        break;
+    }
+    return record->fixed_alloca_count - first;
+}
+
+// An INDEX/FIELD whose base is an aggregate value (an array compound literal)
+// rather than a place needs an address. Native code gives that value a stack
+// slot; here each such value gets exactly one alloca, so every use shares one
+// object. The aggregate is stored into it where the value is defined.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_plan_value_spills(LlvmBcContext* context, LlvmBcFunction* record)
+{
+    IrFunction* function = record->function;
+    record->spill_alloca_first = record->fixed_alloca_count;
+    u32 value_count = function->value_count;
+    u8* defined = arena_allocate(context->arena, u8, value_count ? value_count : 1);
+    memset(defined, 0, value_count ? value_count : 1);
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        IrInstruction* instruction = function->instructions + index;
+        if (instruction->result.value < value_count && instruction->opcode != IR_OPCODE_ARGUMENT)
+        {
+            defined[instruction->result.value] = 1;
+        }
+    }
+    for (u32 index = 0; index < function->instruction_count && !llvm_bc_failed(context); index += 1)
+    {
+        IrInstruction* instruction = function->instructions + index;
+        if ((instruction->opcode == IR_OPCODE_INDEX || instruction->opcode == IR_OPCODE_FIELD) && instruction->operand_count >= 1 &&
+            instruction->operands[0].value < value_count)
+        {
+            u32 base = instruction->operands[0].value;
+            IrValue* value = function->values + base;
+            if (value->category != IR_VALUE_PLACE && record->value_type_ids[base] != context->pointer_type_id &&
+                record->spill_value_ids[base] == LLVM_BC_INVALID_ID)
+            {
+                IrType* type = llvm_bc_ir_type(context, value->canonical_type);
+                if (!type || !defined[base])
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM GEP base is not an address"), function,
+                                 0, instruction, IR_SYMBOL_ID_INVALID);
+                }
+                else
+                {
+                    record->spill_value_ids[base] = record->fixed_alloca_count;
+                    llvm_bc_plan_fixed_alloca(context, record, record->value_type_ids[base], type->layout.alignment ? type->layout.alignment : 1);
+                }
+            }
+        }
+    }
+    return !llvm_bc_failed(context);
+}
+
 static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record)
 {
     IrFunction* function = record->function;
@@ -3155,9 +3542,14 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
                 return false;
             }
         }
-        record->emitted_counts = arena_allocate(context->arena, u32, function->instruction_count ? function->instruction_count : 1);
-        memset(record->emitted_counts, 0, (size_t)function->instruction_count * sizeof(*record->emitted_counts));
+        record->instruction_plans = arena_allocate(context->arena, LlvmBcInstructionPlan, function->instruction_count ? function->instruction_count : 1);
+        memset(record->instruction_plans, 0, (size_t)function->instruction_count * sizeof(*record->instruction_plans));
 
+        record->spill_value_ids = arena_allocate(context->arena, u32, value_count ? value_count : 1);
+        for (u32 index = 0; index < value_count; index += 1)
+        {
+            record->spill_value_ids[index] = LLVM_BC_INVALID_ID;
+        }
         record->first_local_value_id = context->module_value_count + context->constant_count;
         u8* argument_seen = arena_allocate(context->arena, u8, signature->parameter_count ? signature->parameter_count : 1);
         memset(argument_seen, 0, signature->parameter_count);
@@ -3191,6 +3583,11 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
                         record->value_ids[instruction->result.value] = record->first_local_value_id + argument + hidden_result;
                     }
                 }
+                record->instruction_plans[instruction_id.value].fixed_alloca_count = llvm_bc_plan_instruction_allocas(context, record, instruction);
+                if (llvm_bc_failed(context))
+                {
+                    return false;
+                }
                 if (instruction_id.value == block->last_instruction.value)
                 {
                     break;
@@ -3208,7 +3605,22 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
             }
         }
 
+        if (!llvm_bc_plan_value_spills(context, record))
+        {
+            return false;
+        }
         u32 next_value_id = record->first_local_value_id + signature->parameter_count + hidden_result;
+        IrCfgBlock const* entry_cfg = function->published_cfg->blocks + entry->id.value;
+        if (next_value_id > UINT32_MAX - entry_cfg->parameter_count ||
+            next_value_id + entry_cfg->parameter_count > UINT32_MAX - record->fixed_alloca_count)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM entry allocation numbering overflow"), function, entry,
+                         0, function->symbol);
+            return false;
+        }
+        record->first_fixed_alloca_value_id = next_value_id + entry_cfg->parameter_count;
+        next_value_id += record->fixed_alloca_count;
+        u32 fixed_alloca_index = 0;
         for (u32 block_index = 0; block_index < block_count; block_index += 1)
         {
             IrBlock* block = record->block_order[block_index];
@@ -3222,7 +3634,9 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
                                  function->symbol);
                     return false;
                 }
-                record->value_ids[parameter->value.value] = next_value_id++;
+                u32 parameter_value_id = block_index ? next_value_id : next_value_id - record->fixed_alloca_count;
+                record->value_ids[parameter->value.value] = parameter_value_id;
+                next_value_id += 1;
             }
             IrInstructionId instruction_id = block->first_instruction;
             u32 walked = 0;
@@ -3240,7 +3654,26 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
                 {
                     return false;
                 }
-                record->emitted_counts[instruction_id.value] = emitted;
+                u32 fixed_count = record->instruction_plans[instruction_id.value].fixed_alloca_count;
+                if (emitted < fixed_count)
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM fixed allocation count exceeds instruction plan"),
+                                 function, block, instruction, function->symbol);
+                    return false;
+                }
+                if (instruction->opcode == IR_OPCODE_LOCAL)
+                {
+                    if (record->value_ids[instruction->result.value] != LLVM_BC_INVALID_ID)
+                    {
+                        llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("duplicate LLVM local allocation result"),
+                                     function, block, instruction, function->symbol);
+                        return false;
+                    }
+                    record->value_ids[instruction->result.value] = record->first_fixed_alloca_value_id + fixed_alloca_index;
+                }
+                fixed_alloca_index += fixed_count;
+                emitted -= fixed_count;
+                record->instruction_plans[instruction_id.value].value_count = emitted;
                 if (emitted)
                 {
                     if ((instruction->result.value != IR_ID_UNDERLYING_INVALID &&
@@ -3272,7 +3705,7 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
             for (u32 index = 0; index < function->instruction_count; index += 1)
             {
                 IrInstruction* instruction = function->instructions + index;
-                if (instruction->result.value == IR_ID_UNDERLYING_INVALID || record->emitted_counts[index] ||
+                if (instruction->result.value == IR_ID_UNDERLYING_INVALID || record->instruction_plans[index].value_count ||
                     record->value_ids[instruction->result.value] != LLVM_BC_INVALID_ID)
                 {
                     continue;
@@ -3631,13 +4064,15 @@ static bool llvm_bc_emit_gep(LlvmBcContext* context, LlvmBcFunction* record, IrB
     }
     IrValueId base_id = instruction->operands[0];
     IrValue* base_value = function->values + base_id.value;
-    if (base_value->category != IR_VALUE_PLACE && llvm_bc_function_value_type_id(context, record, base_id) != context->pointer_type_id)
+    bool spilled = base_value->category != IR_VALUE_PLACE && llvm_bc_function_value_type_id(context, record, base_id) != context->pointer_type_id;
+    if (spilled && record->spill_value_ids[base_id.value] == LLVM_BC_INVALID_ID)
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM GEP base is not an address"), function, block,
                      instruction, IR_SYMBOL_ID_INVALID);
         return false;
     }
-    u32 base = llvm_bc_function_value_id(context, record, base_id);
+    u32 base = spilled ? record->first_fixed_alloca_value_id + record->spill_value_ids[base_id.value]
+                       : llvm_bc_function_value_id(context, record, base_id);
     if (base == LLVM_BC_INVALID_ID)
     {
         return false;
@@ -3707,13 +4142,22 @@ static bool llvm_bc_emit_gep(LlvmBcContext* context, LlvmBcFunction* record, IrB
     return !llvm_bc_failed(context);
 }
 
-BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_temporary(LlvmBcContext* context, LlvmBcAbiValue abi, u32* current_value_id)
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_temporary(LlvmBcContext* context, LlvmBcFunction* record, LlvmBcAbiValue abi)
 {
-    u32 size = llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
-    u64 operands[4] = {abi.storage_type_id, context->i32_type_id, size, (UINT64_C(1) << 6) | llvm_bc_alignment(abi.alignment)};
-    llvm_bc_record(&context->stream, LLVM_BC_FUNC_ALLOCA, operands, 4);
-    u32 result = *current_value_id;
-    *current_value_id += 1;
+    u32 result = LLVM_BC_INVALID_ID;
+    if (record->fixed_alloca_cursor < record->fixed_alloca_count)
+    {
+        LlvmBcFixedAlloca slot = record->fixed_allocas[record->fixed_alloca_cursor];
+        if (slot.storage_type_id == abi.storage_type_id && slot.alignment == abi.alignment)
+        {
+            result = record->first_fixed_alloca_value_id + record->fixed_alloca_cursor++;
+        }
+    }
+    if (result == LLVM_BC_INVALID_ID)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM fixed allocation use does not match its plan"),
+                     record->function, 0, 0, record->function->symbol);
+    }
     return result;
 }
 
@@ -3761,14 +4205,13 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_bit_field_aggregate(LlvmBcContext* context, Llvm
     u32 temporary = 0;
     if (valid && constants)
     {
-        u32 size = llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
+        llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
         u32 zero = llvm_bc_null_constant(context, array_type);
         if (emit)
         {
-            u64 operands[4] = {array_type, context->i32_type_id, size, (UINT64_C(1) << 6) | alignment};
-            llvm_bc_record(&context->stream, LLVM_BC_FUNC_ALLOCA, operands, 4);
-            temporary = *current_value_id;
-            *current_value_id += 1;
+            LlvmBcAbiValue storage = {.storage_type_id = array_type,
+                                      .alignment = aggregate->layout.alignment ? aggregate->layout.alignment : 1};
+            temporary = llvm_bc_abi_temporary(context, record, storage);
             llvm_bc_abi_store(context, temporary, zero, array_type, aggregate->layout.alignment, *current_value_id);
         }
     }
@@ -3910,10 +4353,10 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_bit_field_aggregate(LlvmBcContext* context, Llvm
     return valid ? count : LLVM_BC_INVALID_ID;
 }
 
-BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_convert(LlvmBcContext* context, LlvmBcAbiValue abi, u32 value, u32 source_type,
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_convert(LlvmBcContext* context, LlvmBcFunction* record, LlvmBcAbiValue abi, u32 value, u32 source_type,
                                             u32 destination_type, u32* current_value_id)
 {
-    u32 temporary = llvm_bc_abi_temporary(context, abi, current_value_id);
+    u32 temporary = llvm_bc_abi_temporary(context, record, abi);
     llvm_bc_abi_store(context, temporary, value, source_type, abi.alignment, *current_value_id);
     return llvm_bc_abi_load(context, temporary, destination_type, abi.alignment, current_value_id);
 }
@@ -3938,7 +4381,7 @@ static bool llvm_bc_emit_call(LlvmBcContext* context, LlvmBcFunction* record, Ir
     u32 result_pointer = LLVM_BC_INVALID_ID;
     if (indirect_result)
     {
-        result_pointer = llvm_bc_abi_temporary(context, abi->result, current_value_id);
+        result_pointer = llvm_bc_abi_temporary(context, record, abi->result);
     }
     u32* values = arena_allocate(context->arena, u32, instruction->operand_count);
     u32* types = arena_allocate(context->arena, u32, instruction->operand_count);
@@ -3951,13 +4394,13 @@ static bool llvm_bc_emit_call(LlvmBcContext* context, LlvmBcFunction* record, Ir
             LlvmBcAbiValue parameter = abi->parameters[argument - 1];
             if (parameter.indirect)
             {
-                u32 pointer = llvm_bc_abi_temporary(context, parameter, current_value_id);
+                u32 pointer = llvm_bc_abi_temporary(context, record, parameter);
                 llvm_bc_abi_store(context, pointer, value, type, parameter.alignment, *current_value_id);
                 value = pointer;
             }
             else
             {
-                value = llvm_bc_abi_convert(context, parameter, value, type, parameter.type_id, current_value_id);
+                value = llvm_bc_abi_convert(context, record, parameter, value, type, parameter.type_id, current_value_id);
             }
             type = parameter.type_id;
         }
@@ -3999,7 +4442,7 @@ static bool llvm_bc_emit_call(LlvmBcContext* context, LlvmBcFunction* record, Ir
         }
         else
         {
-            llvm_bc_abi_convert(context, abi->result, called_value, abi->result.type_id, canonical_type, current_value_id);
+            llvm_bc_abi_convert(context, record, abi->result, called_value, abi->result.type_id, canonical_type, current_value_id);
         }
     }
     return !llvm_bc_failed(context);
@@ -4039,7 +4482,7 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_va_instruction(LlvmBcContext* context, Llv
         if (produces_list)
         {
             LlvmBcAbiValue storage = {.storage_type_id = context->ir_type_ids[instruction->canonical_type.value], .alignment = 8};
-            destination = llvm_bc_abi_temporary(context, storage, current_value_id);
+            destination = llvm_bc_abi_temporary(context, record, storage);
         }
         u32 intrinsic = instruction->opcode == IR_OPCODE_VA_START ? LLVM_BC_VA_START :
                         instruction->opcode == IR_OPCODE_VA_COPY ? LLVM_BC_VA_COPY : LLVM_BC_VA_END;
@@ -4070,7 +4513,9 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
                                      u32* current_value_id)
 {
     IrFunction* function = record->function;
-    u32 expected_count = record->emitted_counts[ir_instruction_self_id(function, instruction).value];
+    LlvmBcInstructionPlan plan = record->instruction_plans[ir_instruction_self_id(function, instruction).value];
+    u32 expected_count = plan.value_count;
+    u32 initial_alloca_cursor = record->fixed_alloca_cursor;
     u32 initial_value_id = *current_value_id;
     u64 operands[24];
     u32 count = 0;
@@ -4092,7 +4537,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
             }
             else
             {
-                llvm_bc_abi_convert(context, parameter, value, parameter.type_id, canonical_type, current_value_id);
+                llvm_bc_abi_convert(context, record, parameter, value, parameter.type_id, canonical_type, current_value_id);
             }
         }
         break;
@@ -4110,20 +4555,16 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         break;
     case IR_OPCODE_LOCAL:
     {
-        IrType* allocated = llvm_bc_ir_type(context, instruction->canonical_type);
-        IrValue* result = function->values + instruction->result.value;
-        u32 alignment = llvm_bc_alignment(result->alignment ? result->alignment : allocated->layout.alignment);
-        u32 size = llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
-        if (alignment == UINT32_MAX)
+        IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+        IrValue* value = function->values + instruction->result.value;
+        LlvmBcAbiValue storage = {.storage_type_id = context->ir_type_ids[type->id.value],
+                                  .alignment = value->alignment ? value->alignment : type->layout.alignment};
+        u32 pointer = llvm_bc_abi_temporary(context, record, storage);
+        if (pointer != record->value_ids[instruction->result.value])
         {
-            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("invalid LLVM local alignment"), function, block, instruction,
-                         IR_SYMBOL_ID_INVALID);
-            return false;
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM local allocation id does not match its plan"),
+                         function, block, instruction, instruction->symbol);
         }
-        u64 record_operands[4] = {context->ir_type_ids[instruction->canonical_type.value], context->i32_type_id, size,
-                                  UINT64_C(1) << 6 | alignment};
-        llvm_bc_record(&context->stream, LLVM_BC_FUNC_ALLOCA, record_operands, 4);
-        *current_value_id += 1;
         break;
     }
     case IR_OPCODE_STACK_ALLOCATE:
@@ -4487,7 +4928,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
             {
                 if (result.aggregate)
                 {
-                    value = llvm_bc_abi_convert(context, result, value, type, result.type_id, current_value_id);
+                    value = llvm_bc_abi_convert(context, record, result, value, type, result.type_id, current_value_id);
                     type = result.type_id;
                 }
                 llvm_bc_push_value_and_type(operands, &count, *current_value_id, value, type);
@@ -4515,7 +4956,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
                      llvm_bc_s8("unsupported canonical opcode reached LLVM emission"), function, block, instruction, instruction->symbol);
         return false;
     }
-    if (*current_value_id - initial_value_id != expected_count)
+    if (*current_value_id - initial_value_id != expected_count || record->fixed_alloca_cursor - initial_alloca_cursor != plan.fixed_alloca_count)
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM instruction emission count changed after planning"), function,
                      block, instruction, instruction->symbol);
@@ -4527,6 +4968,14 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM instruction result id does not match the plan"), function,
                      block, instruction, instruction->symbol);
         return false;
+    }
+    if (instruction->result.value != IR_ID_UNDERLYING_INVALID && record->spill_value_ids[instruction->result.value] != LLVM_BC_INVALID_ID)
+    {
+        IrValueId result = instruction->result;
+        IrType* type = llvm_bc_ir_type(context, function->values[result.value].canonical_type);
+        llvm_bc_abi_store(context, record->first_fixed_alloca_value_id + record->spill_value_ids[result.value],
+                          llvm_bc_function_value_id(context, record, result), llvm_bc_function_value_type_id(context, record, result),
+                          type->layout.alignment ? type->layout.alignment : 1, *current_value_id);
     }
     if (context->stream.failed)
     {
@@ -4546,6 +4995,7 @@ static bool llvm_bc_emit_function_body(LlvmBcContext* context, LlvmBcFunction* r
     llvm_bc_record(&context->stream, LLVM_BC_FUNC_DECLAREBLOCKS, &block_count, 1);
     LlvmBcAbiValue abi_result = context->abi_signatures[function->canonical_type.value]->result;
     u32 current_value_id = record->first_local_value_id + signature->parameter_count + (abi_result.aggregate && abi_result.indirect);
+    record->fixed_alloca_cursor = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = record->block_order[block_index];
@@ -4576,6 +5026,18 @@ static bool llvm_bc_emit_function_body(LlvmBcContext* context, LlvmBcFunction* r
             }
             current_value_id += 1;
         }
+        if (!block_index && record->fixed_alloca_count)
+        {
+            u32 size = llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
+            for (u32 index = 0; index < record->fixed_alloca_count; index += 1)
+            {
+                LlvmBcFixedAlloca slot = record->fixed_allocas[index];
+                u64 operands[4] = {slot.storage_type_id, context->i32_type_id, size,
+                                   (UINT64_C(1) << 6) | llvm_bc_alignment(slot.alignment)};
+                llvm_bc_record(&context->stream, LLVM_BC_FUNC_ALLOCA, operands, 4);
+                current_value_id += 1;
+            }
+        }
         IrInstructionId instruction_id = block->first_instruction;
         u32 walked = 0;
         while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
@@ -4598,7 +5060,7 @@ static bool llvm_bc_emit_function_body(LlvmBcContext* context, LlvmBcFunction* r
             instruction_id.value = instruction_id.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
         }
     }
-    if (current_value_id != record->final_value_id)
+    if (current_value_id != record->final_value_id || record->fixed_alloca_cursor != record->spill_alloca_first)
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM function final value id does not match the plan"), function, 0,
                      0, function->symbol);
@@ -4630,10 +5092,19 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
         for (u32 index = 0; index < context->attribute_group_count; index += 1)
         {
             LlvmBcAttributeGroup* group = context->attribute_groups + index;
-            // Typed byval/sret attribute, followed by integer alignment.
-            u64 operands[8] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_TYPE, group->kind, group->type_id,
-                               LLVM_BC_ATTRIBUTE_INTEGER, LLVM_BC_ATTRIBUTE_ALIGNMENT, BUSTER_MAX(group->alignment, 1u)};
-            llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 8);
+            if (group->kind == LLVM_BC_ATTRIBUTE_SIGNEXT || group->kind == LLVM_BC_ATTRIBUTE_ZEROEXT)
+            {
+                // Enum attributes carry neither a storage type nor alignment.
+                u64 operands[4] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_ENUM, group->kind};
+                llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 4);
+            }
+            else
+            {
+                // Typed byval/sret attribute, followed by integer alignment.
+                u64 operands[8] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_TYPE, group->kind, group->type_id,
+                                   LLVM_BC_ATTRIBUTE_INTEGER, LLVM_BC_ATTRIBUTE_ALIGNMENT, BUSTER_MAX(group->alignment, 1u)};
+                llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 8);
+            }
         }
         llvm_bc_exit_block(&context->stream);
         llvm_bc_enter_block(&context->stream, LLVM_BC_PARAMATTR_BLOCK, 3);
@@ -4717,10 +5188,11 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             global->storage_type_id,
             2 | (global->read_only ? 1 : 0), // explicit storage type, optionally constant
             initializer,
-            llvm_bc_linkage(global->symbol, global->declaration),
+            global->synthetic_kind == LLVM_BC_GLOBAL_CTORS || global->synthetic_kind == LLVM_BC_GLOBAL_DTORS
+                ? LLVM_BC_LINKAGE_APPENDING : llvm_bc_linkage(global->symbol, global->declaration),
             alignment,
             section_ids[index],
-            0, // visibility
+            llvm_bc_visibility(global->symbol, global->declaration),
             global->is_thread_local ? 1 : 0,
         };
         llvm_bc_record(&context->stream, LLVM_BC_MODULE_GLOBALVAR, operands, 8);
@@ -4736,7 +5208,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             function->synthetic ? 0 : context->abi_signatures[function->canonical_type.value]->attribute_list_id,
             0, // alignment
             section_ids[context->global_count + index],
-            0, // visibility
+            llvm_bc_visibility(function->symbol, function->declaration),
         };
         llvm_bc_record(&context->stream, LLVM_BC_MODULE_FUNCTION, operands, 8);
     }

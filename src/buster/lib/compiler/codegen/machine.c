@@ -4,7 +4,8 @@
 // MachineOpcodeInfo metadata accessors, the chunked instruction stream and
 // function builder, parameter-edge normalization
 // (machine_function_split_parameter_edges), frequency-class stamping, the
-// verifier, baseline MIR_STACK placement, and replay serialization — and then includes the
+// verifier, checked frame arithmetic (machine_stack_frame_reserve/finish),
+// baseline MIR_STACK placement, and replay serialization — and then includes the
 // implementation files at the bottom in the backend-implementation-file
 // pattern (selection facts, the x86-64 and AArch64 selectors/encoders,
 // scheduling, FAST/QUALITY, and the separate predicate-bank allocator), so none of those
@@ -12,6 +13,8 @@
 // the end is the entry point codegen.c calls.
 
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/codegen_internal.h>
+#include <buster/lib/compiler/codegen/machine_frame_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
@@ -2261,7 +2264,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_parameter_edge_target(u32 const* old_to
     return split != UINT32_MAX ? split : old_to_new[destination_block];
 }
 
-bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function)
+bool machine_function_split_parameter_edges_with_canonical_map(Arena* arena, MachineFunction* function,
+                                                                u32** canonical_entries, u32 canonical_count)
 {
     bool result = function && function->target && function->target->unconditional_branch_opcode != MACHINE_OPCODE_INVALID;
     u32 split_count = 0;
@@ -2287,12 +2291,13 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
             u32 new_block_count = (u32)new_block_count64;
             u32 new_instruction_count = (u32)new_instruction_count64;
             u32 new_edge_count = (u32)new_edge_count64;
-            // Publishable storage precedes all temporary maps. No index or
-            // remapping array survives this pass, including on a failed remap.
+            // Publishable storage precedes all temporary maps. Only the caller's
+            // canonical projection survives; the edge/index scratch is reclaimed.
             MachineInstruction* instructions = arena_allocate(arena, MachineInstruction, new_instruction_count);
             MachineBlock* blocks = arena_allocate(arena, MachineBlock, new_block_count);
             MachineEdge* edges = arena_allocate(arena, MachineEdge, new_edge_count);
             MachineSwitchCase* switch_cases = arena_allocate(arena, MachineSwitchCase, function->switch_case_count);
+            u32* projected_entries = canonical_entries ? arena_allocate(arena, u32, canonical_count) : 0;
             MachineInlineAssembly* inline_assemblies = function->inline_assemblies;
             MachineInlineAssemblyRelocation* inline_assembly_relocations = function->inline_assembly_relocations;
             result = (!function->inline_assembly_count || function->inline_assemblies) &&
@@ -2356,6 +2361,19 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                     if (machine_function_parameter_edge_needs_split(function, function->edges + edge_index))
                     {
                         split_blocks[edge_index] = block_cursor++;
+                    }
+                }
+            }
+            if (canonical_entries)
+            {
+                result = result && canonical_count <= old_block_count;
+                for (u32 canonical_block = 0; result && canonical_block < canonical_count; canonical_block += 1)
+                {
+                    u32 old_block = *canonical_entries ? (*canonical_entries)[canonical_block] : canonical_block;
+                    result = old_block < old_block_count;
+                    if (result)
+                    {
+                        projected_entries[canonical_block] = old_to_new[old_block];
                     }
                 }
             }
@@ -2559,10 +2577,20 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                 function->switch_cases = switch_cases;
                 function->inline_assemblies = inline_assemblies;
                 function->inline_assembly_relocations = inline_assembly_relocations;
+                if (canonical_entries)
+                {
+                    *canonical_entries = projected_entries;
+                }
             }
             arena_set_position(arena, scratch_position);
         }
     }
+    return result;
+}
+
+bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function)
+{
+    bool result = machine_function_split_parameter_edges_with_canonical_map(arena, function, 0, 0);
     return result;
 }
 
@@ -3721,6 +3749,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
         case MACHINE_X64_VPCMP_K:
             valid = instruction->payload < 5;
             break;
+        case MACHINE_X64_VPERMT2B_K:
         case MACHINE_X64_VCOMPRESSB_K:
             valid = instruction->payload < 2;
             break;
@@ -4932,6 +4961,55 @@ BUSTER_GLOBAL_LOCAL u64 machine_function_edge_copy_temporary_size(MachineFunctio
     return result;
 }
 
+// Reserve an end-offset frame range without narrowing a wrapped addition or
+// alignment. Both MIR_STACK and the FAST/QUALITY layout consume this authority.
+bool machine_stack_frame_reserve(u64* running, u64 size, u32 alignment)
+{
+    bool valid = alignment && !(alignment & (alignment - 1u)) && *running <= UINT32_MAX &&
+                 size <= UINT32_MAX - *running;
+    if (valid)
+    {
+        u64 end = (*running + size + alignment - 1u) & ~(u64)(alignment - 1u);
+        valid = end <= UINT32_MAX;
+        if (valid)
+        {
+            *running = end;
+        }
+    }
+    return valid;
+}
+
+// The final allocation includes outgoing storage and push parity; encoder
+// limits apply before publishing any narrowed frame size. AArch64 retains its
+// unsigned-offset range, while x86-64 frame references require signed disp32.
+bool machine_stack_frame_finish(MachineFunction const* function, u64 running, u32 push_area, u32 push_count,
+                                                     u32* frame_size)
+{
+    u32 push_parity = (push_count & 1u) ? 8u : 0u;
+    u64 size = ((running - push_area + push_parity + 15u) & ~(u64)15u) - push_parity + function->outgoing_bytes;
+    bool valid = size <= UINT32_MAX && running <= size + push_area;
+    if (function->target == machine_target_aarch64())
+    {
+        u64 area = size + 8u * push_count;
+        valid &= area <= UINT32_MAX - 16u;
+        if (function->windows_aarch64_frame)
+        {
+            u32 saves = codegen_a64_windows_save_area_size(push_count) +
+                        (function->windows_aarch64_variadic ? MACHINE_A64_VA_GP_SAVE_BYTES : 0u);
+            valid &= area <= UINT32_MAX - saves;
+        }
+    }
+    else
+    {
+        valid &= running <= INT32_MAX && size <= INT32_MAX;
+    }
+    if (valid)
+    {
+        *frame_size = (u32)size;
+    }
+    return valid;
+}
+
 // MIR_STACK placement: every virtual register owns one 8-byte frame slot
 // and every operand round-trips through the target's fixed per-slot scratch
 // register. This is the selector/encoder verification mode, not an
@@ -4975,23 +5053,27 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
         // short by exactly that many bytes and leave the deepest slots under the
         // stack pointer, where the next call's shadow space overwrites them.
         u32 push_area = function->target && function->target->saves_precede_frame_pointer ? 0u : 8u * push_count;
-        u32 running = push_area;
-        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+        u64 running = push_area;
+        bool frame_capacity = true;
+        for (u32 register_index = 0; frame_capacity && register_index < function->virtual_register_count; register_index += 1)
         {
             // Vector values own 64-byte homes; the sixteen-byte offset rounding
             // mirrors the canonical frame layout's vector clamp, and every
             // access is the unaligned vmovdqu8 either way.
             if (function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR)
             {
-                running = ((running + 15u) & ~15u) + 64u;
+                frame_capacity = machine_stack_frame_reserve(&running, 64u, 16u);
             }
             else
             {
-                running += 8;
+                frame_capacity = machine_stack_frame_reserve(&running, 8u, 1u);
             }
-            placement.virtual_register_offsets[register_index] = running;
+            if (frame_capacity)
+            {
+                placement.virtual_register_offsets[register_index] = (u32)running;
+            }
         }
-        for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
+        for (u32 slot_index = 0; frame_capacity && slot_index < function->stack_slot_count; slot_index += 1)
         {
             // The outgoing argument area is placed at the bottom of the frame
             // below, where a call's stack pointer lands on its base.
@@ -5002,19 +5084,18 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
             // The frame base is sixteen-aligned, so a slot whose start offset is
             // a multiple of its alignment is aligned in memory.
             u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
-            running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
-            placement.stack_slot_offsets[slot_index] = running;
+            frame_capacity = machine_stack_frame_reserve(&running, function->stack_slot_sizes[slot_index], slot_alignment);
+            if (frame_capacity)
+            {
+                placement.stack_slot_offsets[slot_index] = (u32)running;
+            }
         }
         u64 edge_copy_temporary_size = machine_function_edge_copy_temporary_size(function);
-        if (edge_copy_temporary_size > UINT32_MAX - running)
-        {
-            return placement;
-        }
-        placement.edge_copy_temporary_offset = running;
-        running += (u32)edge_copy_temporary_size;
+        placement.edge_copy_temporary_offset = (u32)running;
+        frame_capacity = frame_capacity && machine_stack_frame_reserve(&running, edge_copy_temporary_size, 1u);
         MachineBuilderStream edits;
         machine_stream_initialize(&edits, sizeof(MachineEdit));
-        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        for (u32 instruction_index = 0; frame_capacity && instruction_index < function->instruction_count; instruction_index += 1)
         {
             MachineInstruction* instruction = function->instructions + instruction_index;
             MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
@@ -5213,9 +5294,9 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
         // post-save allocation; where they precede it, `push_area` is zero and
         // the whole run is frame. Round to the smallest allocation that covers
         // the slots while restoring sixteen-byte alignment after the pushes.
-        u32 push_parity = (push_count & 1u) ? 8u : 0u;
-        placement.frame_size = ((running - push_area + push_parity + 15u) & ~15u) - push_parity + function->outgoing_bytes;
-        if (function->outgoing_bytes)
+        frame_capacity = frame_capacity && machine_stack_frame_finish(function, running, push_area, push_count, &placement.frame_size);
+        placement.capacity_exceeded = !frame_capacity;
+        if (frame_capacity && function->outgoing_bytes)
         {
             placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
         }
@@ -5225,7 +5306,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
         // deepest values live under the stack pointer where the next call's shadow
         // space and return address overwrite them. Refuse the placement instead:
         // the function falls back to the canonical emitter rather than miscompile.
-        if (running <= placement.frame_size + push_area)
+        if (frame_capacity)
         {
             // Pushes that precede the frame pointer sit between it and the caller's
             // frame, so every incoming stack argument is that much further up.
