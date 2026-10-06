@@ -40,9 +40,11 @@ feature author, constructs and validates the combined candidate.
 
 Build concurrency permits up to 6 queued candidates to run speculative
 combined-head validation concurrently; it does not authorize 6 merges. Since
-#1986 each `ci.yml` group needs four macOS jobs, so six groups hold at most 24
-of the 50 observed macOS runners and leave room for pull-request and main
-validation. A
+#2657 each `ci.yml` group needs five macOS jobs (four after #1986, six after
+#2659), so six groups hold at most 30 of the 50 observed macOS runners,
+leaving 20 for pull-request and main validation. That headroom is not measured; the
+[runner-queue guidance](ci-runner-queue.md) still says to lower build
+concurrency if macOS starvation or cancellation waste grows. A
 later candidate may have the preceding unmerged synthetic commit as its base.
 Both admission jobs keep that exact group pending until the base lands on main;
 they never grant success while the predecessor is speculative. The merge limit
@@ -69,8 +71,11 @@ wait policy from independently checked-out main, checks that the predecessor
 did not change admission or rebinding policy, and requires the queue ref to
 retain the same group identity at admission. Its bounded 310-minute job accommodates the
 five-hour wait.
-The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
-not a `merge_group` workflow, so the queue does not schedule it.
+The self-hosted 9700X direct workload workflow is not a `merge_group` workflow.
+Its standalone workload path runs only for the owner's pull requests. Its
+compiler comparison starts from a hosted `merge_group` marker; it is an
+optional prerequisite of this admission, not a required check (see
+[9700X compiler comparison](#9700x-compiler-comparison-2752)).
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed
@@ -92,8 +97,8 @@ only as part of the reviewed queue rollout; never remove an existing requirement
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
-| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
-| Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
+| Native retirement merge admission | native-retirement-admission.yml (PR/main); trusted reconciler (merge group) | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
+| Main integration admission | merge-queue-admission.yml (PR/main); trusted reconciler (merge group) | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
 
 `CI complete` also runs the [merge-parent preservation guard](merge-parent-preservation.md) over merges introduced by each PR candidate, merge-group candidate, and main push. It uses the event's exact base commit and does not require a feature branch to be updated when `main` advances.
 
@@ -113,12 +118,12 @@ persisted checkout credentials. GitHub's normal fork approval rules still apply.
 
 ## Event-driven reconciliation (#1807)
 
-The same trusted reconciler is the staged producer for
-`Native retirement merge admission` (#1811). While a group's
-`api-migration-policy.yml` still defines the native-admission job, the
-reconciler shadow-evaluates the native gate and publishes nothing. After a
-separate producer-transition PR moves the PR/main job into its own workflow,
-the reconciler publishes an exact-head check with the marker
+The same trusted reconciler is the merge-group producer for
+`Native retirement merge admission` (#1811). The PR/main job lives in
+`native-retirement-admission.yml`, which has no `merge_group` trigger. While a
+group's own `api-migration-policy.yml` still defines the native-admission job
+(`native_owner`), the reconciler only shadow-evaluates the native gate and
+publishes nothing. Otherwise it publishes an exact-head check with the marker
 `buster-native-retirement-admission-v1:<head>`. It requires the queued base to
 be live main and the trusted checkout to be that base, then validates the
 native gate and policy twice with intervening identity checks. Pending never
@@ -127,9 +132,9 @@ check can finish before the six other workflows because it validates its own
 exact-tree publication contract independently. Activation requires shadow
 validation and a live queue trace before relying on the new producer.
 
-The legacy `merge_group` job holds a hosted Ubuntu runner for up to 310 minutes.
-It spends most of that time in `run_gate`'s 30-second sleep loop waiting for the
-predecessor and the six gates. It does almost no verification. The
+The retired legacy `merge_group` job held a hosted Ubuntu runner for up to 310
+minutes. It spent most of that time in `run_gate`'s 30-second sleep loop waiting
+for the predecessor and the six gates, and did almost no verification. The
 `merge-queue-reconcile.yml` workflow replaces that wait with short passes:
 
 - **Triggers.** A completed `merge_group` run of any of the six required
@@ -175,37 +180,120 @@ predecessor and the six gates. It does almost no verification. The
   authority. The CI fail-fast watcher (`recover-ci.py`) accepts only a run that
   carries this exact-head marker, because the run has no workflow check suite.
 - **One producer per group (`group_owner`).** The group's own
-  `merge-queue-admission.yml` decides the producer. While it still declares
-  `merge_group`, the legacy job produces the check. The reconciler then only
-  shadow-evaluates the group and writes nothing. Its uploaded
-  `merge-queue-reconcile-*` artifact records the decision it would have
-  published. This deterministic split lets both versions coexist during rollout
-  without racing.
+  `merge-queue-admission.yml` decides the producer. A group that still declares
+  `merge_group` there (queued before activation) keeps the legacy job; the
+  reconciler then only shadow-evaluates it and writes nothing, recording the
+  decision in its `merge-queue-reconcile-*` artifact and job log. This
+  deterministic split lets both versions coexist during rollout without racing.
+  `run_gate` (`check-group`) remains in the tool only for such groups.
 
 ### Activation and measurement
 
-The reconciler must be on main before any group depends on it. So activation
-takes a second PR, merged after this one lands: it removes `merge_group`
-and the group-only steps from `merge-queue-admission.yml`. Readiness checks on
-pull requests and main pushes keep the same job name. The first group
-containing that PR is the first one reconciled by trusted main. Before merging
-it, compare the shadow artifacts with the legacy verdicts for the same heads.
-After merging, record a live two-entry M → G1 → G2 trace: revisions, run and
-attempt IDs, reconciler passes per group, API reads, admission latency after the
-last gate completes, and the runner minutes that are no longer held. The
-offline fixtures do not substitute for that trace.
+Activation removes `merge_group` and the group-only steps from
+`merge-queue-admission.yml` and moves the native PR/main job out of
+`api-migration-policy.yml` into `native-retirement-admission.yml`. Readiness
+checks on pull requests and main pushes keep the same job names, so the
+required-check inventory (eight checks, app 15368) is unchanged. Both files are
+trust-implementation paths, so the change is a `bootstrap` transition that
+needs a maintainer dispatch of `native-retirement-integration.yml`. The first
+group containing it is reconciled by the older trusted main, which already
+publishes for groups whose own workflows lack the legacy producers.
+
+Land activation only after the shadow decisions match the legacy verdicts for
+the same heads (recorded on #1807). After landing, record a live two-entry
+M → G1 → G2 trace: revisions, run and attempt IDs, reconciler passes per group,
+API reads, admission latency after the last gate completes, and the runner
+minutes that are no longer held. The offline fixtures do not substitute for
+that trace.
 
 Report admission time in three separate parts:
 
 - **Verification work:** a reconciler pass, measured in seconds.
 - **Orchestration wait:** time for a predecessor or gate. After activation, no
-  runner is held during this wait.
+  admission runner is held during this wait.
 - **Build/test queue delay:** runner assignment for the six gates themselves.
 
-This change does not explain or fix host-specific assignment delay (#1805). The
-native-retirement admission producer is tracked in #1818. The rebinding
-workflow keeps #1907's in-job predecessor wait; its runner-held wait remains
-tracked in #1811.
+This change does not explain or fix host-specific assignment delay (#1805).
+The rebinding workflow keeps #1907's in-job predecessor wait (`wait-base`) in
+`Reconstruct candidate closure ephemerally`; that remaining runner-held wait is
+tracked on #1807.
+
+## 9700X compiler comparison (#2752)
+
+Every main queue candidate can be benchmarked on the Ryzen 7 9700X before it
+lands. The hosted `9700x-compiler-request.yml` marker runs on
+`merge_group: checks_requested` without a path filter. Its completion starts
+the compiler comparison jobs of `9700x-direct-bench.yml` from `main`; see
+[the 9700X admission guide](../benchmarks/9700x/ADMISSION.md#merge-group-compiler-comparison)
+for the authorization, host and publication contract. The result is the check
+`9700X compiler benchmark` with external ID
+`buster-9700x-compiler-bench-v1:<head>` on the exact group head. Merging uses
+merge commits, so the landed main commit is that head and carries the check
+and its link to the run and evidence. The main push does not run the
+comparison again. A commit pushed directly to main has no such check: that is
+a visible coverage gap, not a benchmarked change.
+
+Each candidate is compared with the group's first parent, the immediate
+predecessor it lands on. GitHub builds a later group on the preceding
+synthetic merge, so the pairing is exact while the predecessor is still
+speculative. This reconciler admits the group only once that first parent is
+main. A replaced group has a new head and is measured afresh; the old head's
+check never transfers. Measurement therefore runs ahead of admission rather
+than waiting for the predecessor to land, at the cost of host time spent on
+groups GitHub later replaces. The harness skips a group whose queue ref has
+already moved. The host runs one job at a time; ordinary hosted CI keeps its
+existing concurrency.
+
+The reconciler consults the check only when the administrator variable
+`BENCH_COMPILER_ADMISSION` is `require`. Unset or `off` keeps admission
+unchanged and records `"compiler_benchmark": {"policy": "off"}` in the
+admission report. A candidate cannot change the setting. With `require`, after
+the six gates pass, `compiler_benchmark` reads the exact head's check runs from
+the GitHub Actions app. The marked run with the highest ID decides:
+
+- absent or still running: the group stays pending;
+- a completed success: admitted, provided its details URL names an attempt of
+  `.github/workflows/9700x-direct-bench.yml` started by `workflow_run`;
+- any other conclusion: a terminal rejection, because the candidate was not
+  benchmarked. Re-enqueueing builds and measures a new group.
+
+The second collection re-reads the check and stays pending if a newer attempt
+appeared. The pull-request comparison (#2769) publishes under a different name
+and marker, `9700X compiler benchmark (pull request)`, so it never counts
+toward admission. A merge group is always measured as its own candidate. Success means a valid measurement, never a performance judgement;
+slow results are admitted and published like fast ones.
+
+The reconciler runs on every required merge-group workflow completion, on main
+pushes and on its 15-minute sweep. The bench workflow's own completion is not
+a trigger. A `workflow_run`-started run is expected to report `main` as its
+branch, which the reconciler's queue-branch filter excludes; confirm that in
+the live trace. A front group whose six gates have
+already passed can therefore wait up to one sweep after its check is
+published; record that latency in the live trace.
+
+Rollout, in order, each step through the normal queue and trusted main:
+
+1. Land this source with all three variables unset. Nothing changes.
+2. Set `BENCH_COMPILER_ENABLED=true` (with `BENCH_DIRECT_ENABLED=true`). Pilot
+   the 90-minute job bound and record benchmark duration, runner queue delay
+   and added merge latency from the check reports.
+3. Only then set `BENCH_COMPILER_ADMISSION=require`, and record the setting
+   change. Setting it back to `off` is the recorded, explicit operational
+   override when the host is unavailable. A merge during `off` is a coverage
+   exception, not a benchmarked change.
+
+Groups whose pull request is not authored by the owner are refused before the
+runner and published as failures. Under `require` they cannot be admitted
+until a reviewed change widens the host trust boundary or the administrator
+records an `off` exception. This applies to bot-authored catch-up pull
+requests.
+
+Regression enforcement is a later phase. `BENCH_COMPILER_REGRESSION_POLICY`
+accepts only `report-only` (or unset), and any other value fails closed. An
+`enforce` mode needs qualified A/A noise and build repeatability, per-workload
+and aggregate budgets, confidence and unavailable-data rules, cumulative
+history so a moving baseline cannot hide gradual regressions, and a separately
+reviewed rollout with an auditable return to report-only.
 
 ## Exact identities and fail-closed evidence
 
@@ -473,6 +561,8 @@ python3 -B tools/merge_queue_admission_test.py -v
 python3 -B tools/merge_queue_admission.py audit-workflows .
 python3 -B tools/merge_queue_admission.py check-ruleset .github/main-merge-queue.ruleset.json
 python3 -B tools/merge_queue_admission.py check-ruleset /tmp/live-main-ruleset.json
+python3 -B tools/bench_direct/compiler_test.py
+python3 -B tools/bench_direct/authorize_compiler_test.py
 # One bounded pass; publishes only for reconciler-owned groups (needs checks: write).
 GH_TOKEN=... python3 -B tools/merge_queue_admission.py reconcile --repo-root . \
   --repository buster14a/buster --details-url URL --output /tmp/reconcile.json

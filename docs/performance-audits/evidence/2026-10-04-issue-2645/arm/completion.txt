@@ -1,0 +1,4 @@
+arm_fixture_failures=0
+arm_configure_exit=0
+arm_build_exit=0
+No ARM benchmark or native-linker replacement. Full Buster ARM support requires successful build/runtime checks; preserve unsupported diagnostics.

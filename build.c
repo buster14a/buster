@@ -11,6 +11,10 @@
 //   instruction_counter_open                     STEP_INSTRUCTIONS hardware
 //                                                counters (Linux only)
 //   build_gcc_*, build_compiler_discovery_*      GCC selection and identity checks
+//   generate_build_directory_*, generate_add     generate's guarded replacement of
+//                                                its build directory (verdict,
+//                                                marker, prepare) and
+//                                                generate_guard_self_test
 //   build_artifact_fanout_*, self_host_*         self-host stages, stage
 //                                                comparison, and the
 //                                                provenance-checked artifact
@@ -22,15 +26,13 @@
 //   tools/matrix_phase.c                       optional desktop phase observation
 //   matrix_superbuild_*                          the test_all_combinations
 //                                                superbuild scheduler
+//   tools/binary_coverage.c                      exact ELF inventory; execution unmeasured
 //   matrix_coverage_*                            authoritative desktop
 //                                                expected/detected/executed
 //                                                coverage and lane policy
 //   xed_import_*, assembly_import_*              x86 metadata importer (XED)
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
-//   bench_service_recipe                        fixed validate-buster service recipe
-//   bench_service_zen5_*                        served zen5-calibration-v1 recipe (tools/bench_service/zen5_recipe.c)
-//   bench_service_broker_add                    Linux broker, static entry/payload gates and regression probes
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
@@ -70,7 +72,6 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include "tools/bench_service/sgid_sandbox_test.h"
 #endif
 
 #include <buster/lib/string.c>
@@ -91,13 +92,6 @@
 typedef enum BuildCommand
 {
     BUILD_COMMAND_NONE,
-    BUILD_COMMAND_BENCH_SERVICE,
-    BUILD_COMMAND_BENCH_SERVICE_BROKER,
-    BUILD_COMMAND_BENCH_SERVICE_RECIPE,
-    BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
-    BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE,
-    BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE,
-    BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_PRODUCTION_PROFILE,
@@ -113,6 +107,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_TIMING_SUMMARY,
     BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
     BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST,
+    BUILD_COMMAND_GENERATE_GUARD_SELF_TEST,
     BUILD_COMMAND_LUA_STAGING_SELF_TEST,
     BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST,
     BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST,
@@ -145,6 +140,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
+    BUILD_COMMAND_BINARY_COVERAGE_INVENTORY,
     BUILD_COMMAND_MATRIX_PHASE_RUN,
     BUILD_COMMAND_TEST_UNITS_PARTITIONED,
     BUILD_COMMAND_COUNT,
@@ -1531,70 +1527,17 @@ BUSTER_GLOBAL_LOCAL void make_directory_recursive(Arena* arena, String8 path)
     }
 }
 
-BUSTER_GLOBAL_LOCAL void remove_path_recursive(Arena* arena, String8 path)
+// Removes `path` and everything under it through the library's iterative,
+// link-safe walk (os_directory_delete), so tree depth never becomes stack depth
+// and symbolic links are removed rather than followed. A non-directory at
+// `path` is deleted as a file. Returns true only when nothing remains at
+// `path` (including when it never existed); false when any entry could not be
+// removed.
+BUSTER_GLOBAL_LOCAL bool remove_path_recursive(Arena* arena, String8 path)
 {
-    String8 path_z = string_duplicate_arena(arena, path, true);
-#if BUSTER_WINDOWS
-    TemporalArena temp = scratch_begin(&arena, 1);
-    String16 path_w = string16_from_string8(temp.arena, path_z, true);
-    DWORD attributes = GetFileAttributesW(path_w.pointer);
-    if (attributes != INVALID_FILE_ATTRIBUTES)
-    {
-        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT))
-        {
-            String8 pattern = path_join(temp.arena, path_z, S8("*"));
-            String16 pattern_w = string16_from_string8(temp.arena, pattern, true);
-            WIN32_FIND_DATAW find_data;
-            HANDLE find = FindFirstFileW(pattern_w.pointer, &find_data);
-            if (find != INVALID_HANDLE_VALUE)
-            {
-                do
-                {
-                    String8 name =
-                        string8_from_string16(temp.arena, (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
-                    if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
-                    {
-                        remove_path_recursive(arena, path_join(temp.arena, path_z, name));
-                    }
-                } while (FindNextFileW(find, &find_data));
-                FindClose(find);
-            }
-            RemoveDirectoryW(path_w.pointer);
-        }
-        else
-        {
-            DeleteFileW(path_w.pointer);
-        }
-    }
-    scratch_end(temp);
-#else
-    struct stat st;
-    if (lstat((const char*)path_z.pointer, &st) == 0)
-    {
-        if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode))
-        {
-            DIR* directory = opendir((const char*)path_z.pointer);
-            if (directory)
-            {
-                struct dirent* entry;
-                while ((entry = readdir(directory)) != 0)
-                {
-                    String8 name = string_from_pointer((char8*)entry->d_name);
-                    if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
-                    {
-                        remove_path_recursive(arena, path_join(arena, path_z, name));
-                    }
-                }
-                closedir(directory);
-            }
-            rmdir((const char*)path_z.pointer);
-        }
-        else
-        {
-            unlink((const char*)path_z.pointer);
-        }
-    }
-#endif
+    BUSTER_UNUSED(arena);
+    bool result = os_directory_delete(path) || os_file_delete(path);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, String8 compiler, bool cmake_override, String8 expected_error)
@@ -1719,10 +1662,330 @@ BUSTER_GLOBAL_LOCAL String8 generate_config(Generate generate)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate generate)
+// --- generate build-directory guard ---------------------------------------
+// `generate` replaces its build directory: it removes whatever is there and
+// configures a fresh tree. --build-directory is user input, so the removal
+// must first prove the target is disposable (generate_build_directory_verdict).
+// Nothing is deleted unless the target is missing, empty, a tree this driver
+// or CMake generated for this repository, or inside the repository's ignored
+// build/ scratch directory, and it is never the repository, an ancestor of it,
+// a source tree, or the home directory.
+#define GENERATE_BUILD_TREE_MARKER ".buster-build-tree"
+
+typedef enum GenerateTreeVerdict
 {
-    remove_path_recursive(arena, generate.build_directory);
-    make_directory_recursive(arena, generate.build_directory);
+    GENERATE_TREE_ACCEPTED_MISSING,
+    GENERATE_TREE_ACCEPTED_EMPTY,
+    GENERATE_TREE_ACCEPTED_MARKER,
+    GENERATE_TREE_ACCEPTED_CMAKE_CACHE,
+    GENERATE_TREE_ACCEPTED_BUILD_SCRATCH,
+    GENERATE_TREE_REFUSED_EMPTY_PATH,
+    GENERATE_TREE_REFUSED_NO_REPOSITORY,
+    GENERATE_TREE_REFUSED_REPOSITORY_ROOT,
+    GENERATE_TREE_REFUSED_ANCESTOR,
+    GENERATE_TREE_REFUSED_SOURCE_TREE,
+    GENERATE_TREE_REFUSED_HOME,
+    GENERATE_TREE_REFUSED_NOT_DIRECTORY,
+    GENERATE_TREE_REFUSED_UNRECOGNIZED,
+} GenerateTreeVerdict;
+
+typedef enum GeneratePathKind
+{
+    GENERATE_PATH_MISSING,
+    GENERATE_PATH_DIRECTORY,
+    GENERATE_PATH_OTHER,
+} GeneratePathKind;
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_string(String8 cache, String8 name, String8* value);
+
+BUSTER_GLOBAL_LOCAL bool generate_tree_accepted(GenerateTreeVerdict verdict)
+{
+    bool result = verdict < GENERATE_TREE_REFUSED_EMPTY_PATH;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 generate_tree_verdict_reason(GenerateTreeVerdict verdict)
+{
+    String8 result = S8("it is not recognized as a previous build tree for this repository");
+    switch (verdict)
+    {
+    case GENERATE_TREE_REFUSED_EMPTY_PATH:
+        result = S8("the build directory path is empty");
+        break;
+    case GENERATE_TREE_REFUSED_NO_REPOSITORY:
+        result = S8("the repository root could not be resolved");
+        break;
+    case GENERATE_TREE_REFUSED_REPOSITORY_ROOT:
+        result = S8("it is the repository root");
+        break;
+    case GENERATE_TREE_REFUSED_ANCESTOR:
+        result = S8("it contains the repository or the home directory");
+        break;
+    case GENERATE_TREE_REFUSED_SOURCE_TREE:
+        result = S8("it is, or is inside, a repository source tree");
+        break;
+    case GENERATE_TREE_REFUSED_HOME:
+        result = S8("it is the home directory");
+        break;
+    case GENERATE_TREE_REFUSED_NOT_DIRECTORY:
+        result = S8("it exists but is not a directory");
+        break;
+    case GENERATE_TREE_REFUSED_UNRECOGNIZED:
+    default:
+        break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 generate_path_trimmed_length(String8 path)
+{
+    u64 result = path.length;
+    while (result > 1 && path_is_separator(path.pointer[result - 1]))
+    {
+        result -= 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL char8 generate_path_fold(char8 c)
+{
+    char8 result = c == '\\' ? '/' : c;
+#if BUSTER_WINDOWS
+    result = ascii_to_lower(result);
+#endif
+    return result;
+}
+
+// True when `path` is `directory` or lies below it. Lexical: callers pass
+// canonical absolute paths.
+BUSTER_GLOBAL_LOCAL bool generate_path_within(String8 path, String8 directory)
+{
+    u64 path_length = path.pointer ? generate_path_trimmed_length(path) : 0;
+    u64 directory_length = directory.pointer ? generate_path_trimmed_length(directory) : 0;
+    bool result = directory_length != 0 && directory_length <= path_length;
+    for (u64 i = 0; result && i < directory_length; i += 1)
+    {
+        result = generate_path_fold(path.pointer[i]) == generate_path_fold(directory.pointer[i]);
+    }
+    if (result && path_length > directory_length)
+    {
+        result = path_is_separator(path.pointer[directory_length]) || path_is_separator(path.pointer[directory_length - 1]);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool generate_path_same(String8 left, String8 right)
+{
+    bool result = generate_path_within(left, right) && generate_path_within(right, left);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL GeneratePathKind generate_path_kind(Arena* arena, String8 path)
+{
+    GeneratePathKind result = GENERATE_PATH_MISSING;
+    String8 path_z = string_duplicate_arena(arena, path, true);
+#if BUSTER_WINDOWS
+    TemporalArena temp = scratch_begin(&arena, 1);
+    String16 path_w = string16_from_string8(temp.arena, path_z, true);
+    DWORD attributes = GetFileAttributesW(path_w.pointer);
+    if (attributes != INVALID_FILE_ATTRIBUTES)
+    {
+        result = (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT) ? GENERATE_PATH_DIRECTORY : GENERATE_PATH_OTHER;
+    }
+    else
+    {
+        DWORD error = GetLastError();
+        result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? GENERATE_PATH_MISSING : GENERATE_PATH_OTHER;
+    }
+    scratch_end(temp);
+#else
+    struct stat st;
+    if (lstat((const char*)path_z.pointer, &st) == 0)
+    {
+        result = S_ISDIR(st.st_mode) ? GENERATE_PATH_DIRECTORY : GENERATE_PATH_OTHER;
+    }
+    else if (errno != ENOENT)
+    {
+        result = GENERATE_PATH_OTHER;
+    }
+#endif
+    return result;
+}
+
+// An unreadable directory counts as non-empty so the caller fails closed.
+BUSTER_GLOBAL_LOCAL bool generate_directory_has_entries(Arena* arena, String8 path)
+{
+    bool result = false;
+    String8 path_z = string_duplicate_arena(arena, path, true);
+#if BUSTER_WINDOWS
+    TemporalArena temp = scratch_begin(&arena, 1);
+    String8 pattern = path_join(temp.arena, path_z, S8("*"));
+    String16 pattern_w = string16_from_string8(temp.arena, pattern, true);
+    WIN32_FIND_DATAW find_data;
+    HANDLE find = FindFirstFileW(pattern_w.pointer, &find_data);
+    result = find == INVALID_HANDLE_VALUE;
+    if (find != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            String8 name = string8_from_string16(temp.arena, (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
+            result = !string_equal(name, S8(".")) && !string_equal(name, S8(".."));
+        } while (!result && FindNextFileW(find, &find_data));
+        FindClose(find);
+    }
+    scratch_end(temp);
+#else
+    DIR* directory = opendir((const char*)path_z.pointer);
+    result = directory == 0;
+    if (directory)
+    {
+        struct dirent* entry;
+        while (!result && (entry = readdir(directory)) != 0)
+        {
+            String8 name = string_from_pointer((char8*)entry->d_name);
+            result = !string_equal(name, S8(".")) && !string_equal(name, S8(".."));
+        }
+        closedir(directory);
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool generate_cache_names_repository(Arena* arena, String8 directory, String8 repository_root)
+{
+    bool result = false;
+    String8 cache_path = path_join(arena, directory, S8("CMakeCache.txt"));
+    ByteSlice cache_bytes = file_read(arena, cache_path, (FileReadOptions){.map_required = 0});
+    String8 cache = BYTE_SLICE_TO_STRING(8, cache_bytes);
+    String8 home_directory = {0};
+    if (cache.pointer && build_artifact_fanout_cache_string(cache, S8("CMAKE_HOME_DIRECTORY"), &home_directory) && home_directory.length)
+    {
+        String8 resolved = os_path_absolute(arena, string_duplicate_arena(arena, home_directory, true), true);
+        result = generate_path_same(resolved.length ? resolved : home_directory, repository_root);
+    }
+    return result;
+}
+
+// Decides whether `generate` may delete `build_directory`. `repository_root`
+// and `home` must be canonical absolute paths (`home` may be empty). Reads the
+// file system but modifies nothing.
+BUSTER_GLOBAL_LOCAL GenerateTreeVerdict generate_build_directory_verdict(Arena* arena, String8 build_directory, String8 repository_root, String8 home)
+{
+    GenerateTreeVerdict result = GENERATE_TREE_REFUSED_UNRECOGNIZED;
+    GeneratePathKind kind = build_directory.length ? generate_path_kind(arena, build_directory) : GENERATE_PATH_OTHER;
+    if (!build_directory.length)
+    {
+        result = GENERATE_TREE_REFUSED_EMPTY_PATH;
+    }
+    else if (!repository_root.length)
+    {
+        result = GENERATE_TREE_REFUSED_NO_REPOSITORY;
+    }
+    else if (kind == GENERATE_PATH_MISSING)
+    {
+        result = GENERATE_TREE_ACCEPTED_MISSING;
+    }
+    else
+    {
+        // Resolve links and dot components so `.`, `..` and aliases cannot hide
+        // the repository from the comparisons below.
+        String8 target = os_path_absolute(arena, string_duplicate_arena(arena, build_directory, true), true);
+        String8 protected_trees[] = {S8(".git"), S8(".github"), S8("cmake"), S8("docs"), S8("src"), S8("tests"), S8("tools")};
+        bool source_tree = false;
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(protected_trees) && !source_tree; i += 1)
+        {
+            source_tree = generate_path_within(target, path_join(arena, repository_root, protected_trees[i]));
+        }
+        String8 scratch = path_join(arena, repository_root, S8("build"));
+        String8 scratch_resolved = os_path_absolute(arena, scratch, true);
+        if (!target.length || generate_path_kind(arena, target) != GENERATE_PATH_DIRECTORY)
+        {
+            result = GENERATE_TREE_REFUSED_NOT_DIRECTORY;
+        }
+        else if (generate_path_same(target, repository_root))
+        {
+            result = GENERATE_TREE_REFUSED_REPOSITORY_ROOT;
+        }
+        else if (generate_path_within(repository_root, target) || (home.length && generate_path_within(home, target) && !generate_path_same(target, home)))
+        {
+            result = GENERATE_TREE_REFUSED_ANCESTOR;
+        }
+        else if (home.length && generate_path_same(target, home))
+        {
+            result = GENERATE_TREE_REFUSED_HOME;
+        }
+        else if (source_tree)
+        {
+            result = GENERATE_TREE_REFUSED_SOURCE_TREE;
+        }
+        else if (!generate_directory_has_entries(arena, target))
+        {
+            result = GENERATE_TREE_ACCEPTED_EMPTY;
+        }
+        else if (generate_path_kind(arena, path_join(arena, target, S8(GENERATE_BUILD_TREE_MARKER))) == GENERATE_PATH_OTHER)
+        {
+            result = GENERATE_TREE_ACCEPTED_MARKER;
+        }
+        else if (generate_cache_names_repository(arena, target, repository_root))
+        {
+            result = GENERATE_TREE_ACCEPTED_CMAKE_CACHE;
+        }
+        else if (generate_path_within(target, scratch_resolved.length ? scratch_resolved : scratch))
+        {
+            result = GENERATE_TREE_ACCEPTED_BUILD_SCRATCH;
+        }
+    }
+    return result;
+}
+
+// Verifies, removes the previous tree, recreates the directory and stamps it
+// with the marker so a failed or partial configure is still recognized next
+// time. Reports the reason and returns false, leaving the target untouched,
+// when the guard refuses; returns false after reporting if removal is partial.
+BUSTER_GLOBAL_LOCAL bool generate_build_directory_prepare_in(Arena* arena, String8 build_directory, String8 repository_root, String8 home)
+{
+    GenerateTreeVerdict verdict = generate_build_directory_verdict(arena, build_directory, repository_root, home);
+    bool result = generate_tree_accepted(verdict);
+    if (!result)
+    {
+        string_print(S8("error: refusing to replace build directory '{S8}': {S8}; generate deletes its build directory, so pass a missing or empty directory, or a previously generated build tree\n"),
+                     build_directory, generate_tree_verdict_reason(verdict));
+    }
+    else if (!remove_path_recursive(arena, build_directory))
+    {
+        string_print(S8("error: could not completely remove the previous build directory '{S8}'; close programs using it or remove it manually\n"), build_directory);
+        result = false;
+    }
+    else
+    {
+        make_directory_recursive(arena, build_directory);
+        String8 marker = path_join(arena, build_directory, S8(GENERATE_BUILD_TREE_MARKER));
+        result = file_write(marker, BUSTER_SLICE_TO_BYTE_SLICE(S8("Buster build tree: `generate` may delete and recreate this directory.\n")));
+        if (!result)
+        {
+            string_print(S8("error: could not write {S8}\n"), marker);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool generate_build_directory_prepare(Arena* arena, String8 build_directory)
+{
+    // `cmake -B` uses the current directory as the source tree, so it is the
+    // repository this generation belongs to.
+    String8 repository_root = os_path_absolute(arena, S8("."), true);
+#if BUSTER_WINDOWS
+    String8 home_variable = os_get_environment_variable(S8("USERPROFILE"));
+#else
+    String8 home_variable = os_get_environment_variable(S8("HOME"));
+#endif
+    String8 home = home_variable.length ? os_path_absolute(arena, string_duplicate_arena(arena, home_variable, true), true) : (String8){0};
+    bool result = generate_build_directory_prepare_in(arena, build_directory, repository_root, home);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void generate_command_add(Arena* arena, BuildStep* step, Generate generate)
+{
     if (generate.cmake_profile_set)
     {
         make_directory_recursive(arena, path_parent(arena, generate.cmake_profile));
@@ -1847,6 +2110,19 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
                 .use_process_environment = 1,
             },
     };
+}
+
+// Plans the CMake configure step after the guarded replacement of the build
+// directory. Returns false, having printed why, when the directory may not be
+// replaced; the caller must then fail instead of running the graph.
+BUSTER_GLOBAL_LOCAL bool generate_add(Arena* arena, BuildStep* step, Generate generate)
+{
+    bool result = generate_build_directory_prepare(arena, generate.build_directory);
+    if (result)
+    {
+        generate_command_add(arena, step, generate);
+    }
+    return result;
 }
 
 typedef struct CmakeBuildOptions CmakeBuildOptions;
@@ -2175,6 +2451,7 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_fingerprint(String8 cache, 
         S8("BUSTER_INSTRUMENT"),
         S8("BUSTER_LINK_LIBC"),
         S8("BUSTER_LTO"),
+        S8("BUSTER_NATIVE_TARGET"),
         S8("BUSTER_SANITIZE"),
         S8("BUSTER_SINGLE_THREADED"),
         S8("BUSTER_TIME_TRACE"),
@@ -4685,7 +4962,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
         generate.config = config;
         generate.config_set = true;
         BuildStep* generate_step = step_add(arena);
-        generate_add(arena, generate_step, generate);
+        if (!generate_add(arena, generate_step, generate))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
     }
     String8 ide_name =
 #if BUSTER_WINDOWS
@@ -16763,25 +17043,29 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_add(Arena* arena, String8 bui
 {
     String8 config = cmake_build_config(options);
     String8 cmake_cache = path_join(arena, build_directory, S8("CMakeCache.txt"));
+    bool generated = true;
     if (!path_exists(arena, cmake_cache))
     {
         generate.build_directory = build_directory;
         generate.config = config;
         generate.config_set = true;
         BuildStep* generate_step = step_add(arena);
-        generate_add(arena, generate_step, generate);
+        generated = generate_add(arena, generate_step, generate);
     }
-    String8 targets[] = {S8("ide")};
-    build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
-    BuildStep* step = step_add(arena);
-    ProcessRun* run = run_add(arena, step);
-    TestModeMatrixOptions* action_options = arena_allocate(arena, TestModeMatrixOptions, 1);
-    *action_options = (TestModeMatrixOptions){
-        .build_directory = build_directory,
-        .config = config,
-    };
-    *run = (ProcessRun){.callback = test_mode_matrix_action, .callback_data = action_options};
-    return PROCESS_RESULT_SUCCESS;
+    if (generated)
+    {
+        String8 targets[] = {S8("ide")};
+        build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
+        BuildStep* step = step_add(arena);
+        ProcessRun* run = run_add(arena, step);
+        TestModeMatrixOptions* action_options = arena_allocate(arena, TestModeMatrixOptions, 1);
+        *action_options = (TestModeMatrixOptions){
+            .build_directory = build_directory,
+            .config = config,
+        };
+        *run = (ProcessRun){.callback = test_mode_matrix_action, .callback_data = action_options};
+    }
+    return generated ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 // --- QuickJS compatibility harness ---------------------------------------
@@ -18745,6 +19029,141 @@ BUSTER_GLOBAL_LOCAL ProcessResult musl_directory_self_test(Arena* arena)
     }
     string_print(S8("MUSL_DIRECTORY_SELF_TEST status={S8} files_per_order={u64} symlink_checked={u32}\n"), passed ? S8("pass") : S8("fail"), (u64)FILE_COUNT,
                  (u32)symlink_checked);
+    return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
+// generate_guard_self_test: the build-directory guard of `generate` against
+// sentinel trees. The verdict function is exercised directly with an explicit
+// repository root and home directory (a fake repository inside a claimed
+// scratch directory), so no CMake run and no real checkout path is involved.
+BUSTER_GLOBAL_LOCAL bool generate_guard_self_test_verdict(Arena* arena, String8 label, String8 directory, String8 root, String8 home,
+                                                          GenerateTreeVerdict expected)
+{
+    GenerateTreeVerdict actual = generate_build_directory_verdict(arena, directory, root, home);
+    bool result = actual == expected;
+    if (!result)
+    {
+        string_print(S8("error: generate guard self-test: {S8}: verdict {u32}, expected {u32}\n"), label, (u32)actual, (u32)expected);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult generate_guard_self_test(Arena* arena)
+{
+    String8 scratch = {0};
+    bool passed = summary_self_test_claim_directory(arena, S8("generate-guard"), &scratch);
+    if (passed)
+    {
+        String8 base = os_path_absolute(arena, scratch, true);
+        String8 root = path_join(arena, base, S8("repo"));
+        String8 home = path_join(arena, base, S8("home"));
+        String8 root_trees[] = {S8("src"), S8("src/nested"), S8("tests"), S8("tools"), S8("docs"), S8("build"), S8("build/tree")};
+        make_directory_recursive(arena, home);
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(root_trees); i += 1)
+        {
+            make_directory_recursive(arena, path_join(arena, root, root_trees[i]));
+        }
+        root = os_path_absolute(arena, root, true);
+        home = os_path_absolute(arena, home, true);
+        passed = root.length && home.length;
+
+        // The reported repro: a checkout-like tree that is not a build tree.
+        String8 victim = path_join(arena, base, S8("victim"));
+        String8 victim_config = path_join(arena, victim, S8(".git/config"));
+        String8 victim_source = path_join(arena, victim, S8("src/main.c"));
+        make_directory_recursive(arena, path_join(arena, victim, S8(".git")));
+        make_directory_recursive(arena, path_join(arena, victim, S8("src")));
+        passed = summary_self_test_write_text(victim_config, S8("[core]\n")) && summary_self_test_write_text(victim_source, S8("int x;\n")) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("checkout-like tree"), victim, root, home, GENERATE_TREE_REFUSED_UNRECOGNIZED) && passed;
+        passed = !generate_build_directory_prepare_in(arena, victim, root, home) && passed;
+        passed = path_exists(arena, victim_config) && path_exists(arena, victim_source) && !path_exists(arena, path_join(arena, victim, S8(GENERATE_BUILD_TREE_MARKER))) && passed;
+
+        // Forbidden targets, including spellings that reach them indirectly.
+        passed = generate_guard_self_test_verdict(arena, S8("repository root"), root, root, home, GENERATE_TREE_REFUSED_REPOSITORY_ROOT) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("repository root with trailing separator"), path_join(arena, root, S8("")), root, home,
+                                                  GENERATE_TREE_REFUSED_REPOSITORY_ROOT) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("repository root via dot components"), path_join(arena, root, S8("src/..")), root, home,
+                                                  GENERATE_TREE_REFUSED_REPOSITORY_ROOT) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("ancestor of the repository"), base, root, home, GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("parent of the repository"), path_join(arena, root, S8("..")), root, home,
+                                                  GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("home directory"), home, root, home, GENERATE_TREE_REFUSED_HOME) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("ancestor of home"), base, root, path_join(arena, home, S8("")), GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("src tree"), path_join(arena, root, S8("src")), root, home, GENERATE_TREE_REFUSED_SOURCE_TREE) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("inside src tree"), path_join(arena, root, S8("src/nested")), root, home,
+                                                  GENERATE_TREE_REFUSED_SOURCE_TREE) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("tests tree"), path_join(arena, root, S8("tests")), root, home, GENERATE_TREE_REFUSED_SOURCE_TREE) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("tools tree"), path_join(arena, root, S8("tools")), root, home, GENERATE_TREE_REFUSED_SOURCE_TREE) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("empty path"), (String8){0}, root, home, GENERATE_TREE_REFUSED_EMPTY_PATH) && passed;
+        // The real working directory spelled `.` and `..` must be refused too.
+        String8 real_root = os_path_absolute(arena, S8("."), true);
+        passed = generate_guard_self_test_verdict(arena, S8("dot is the checkout"), S8("."), real_root, (String8){0}, GENERATE_TREE_REFUSED_REPOSITORY_ROOT) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("dot-dot is above the checkout"), S8(".."), real_root, (String8){0}, GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+#if !BUSTER_WINDOWS
+        passed = generate_guard_self_test_verdict(arena, S8("filesystem root"), S8("/"), real_root, (String8){0}, GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+#endif
+        String8 plain_file = path_join(arena, base, S8("plain-file"));
+        passed = summary_self_test_write_text(plain_file, S8("not a directory")) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("regular file"), plain_file, root, home, GENERATE_TREE_REFUSED_NOT_DIRECTORY) && passed;
+        passed = !generate_build_directory_prepare_in(arena, plain_file, root, home) && path_exists(arena, plain_file) && passed;
+
+        // A nonexistent and an empty directory carry nothing to lose.
+        String8 missing = path_join(arena, base, S8("missing"));
+        String8 empty = path_join(arena, base, S8("empty"));
+        make_directory_recursive(arena, empty);
+        passed = generate_guard_self_test_verdict(arena, S8("missing"), missing, root, home, GENERATE_TREE_ACCEPTED_MISSING) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("empty"), empty, root, home, GENERATE_TREE_ACCEPTED_EMPTY) && passed;
+
+        // Previously generated trees: this driver's marker, a CMake cache for
+        // this repository, and the repository's ignored build/ scratch tree.
+        String8 marked = path_join(arena, base, S8("marked"));
+        String8 marked_keep = path_join(arena, base, S8("marked-keep"));
+        make_directory_recursive(arena, path_join(arena, marked, S8("deep/er")));
+        make_directory_recursive(arena, marked_keep);
+        String8 marked_keep_file = path_join(arena, marked_keep, S8("keep.txt"));
+        passed = summary_self_test_write_text(path_join(arena, marked, S8(GENERATE_BUILD_TREE_MARKER)), S8("marker\n")) && passed;
+        passed = summary_self_test_write_text(path_join(arena, marked, S8("deep/er/object.o")), S8("object")) && passed;
+        passed = summary_self_test_write_text(marked_keep_file, S8("outside the tree")) && passed;
+#if BUSTER_LINUX || BUSTER_APPLE
+        // A link inside the old tree must be removed as a link, not followed.
+        passed = symlink((const char*)marked_keep.pointer, (const char*)path_join(arena, marked, S8("deep/link")).pointer) == 0 && passed;
+#endif
+        passed = generate_guard_self_test_verdict(arena, S8("marker tree"), marked, root, home, GENERATE_TREE_ACCEPTED_MARKER) && passed;
+
+        String8 cached = path_join(arena, base, S8("cached"));
+        make_directory_recursive(arena, cached);
+        String8 cache_text = string_format(arena, S8("CMAKE_CACHEFILE_DIR:INTERNAL={S8}\nCMAKE_HOME_DIRECTORY:INTERNAL={S8}\n"), cached, root);
+        passed = summary_self_test_write_text(path_join(arena, cached, S8("CMakeCache.txt")), cache_text) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("cmake cache of this repository"), cached, root, home, GENERATE_TREE_ACCEPTED_CMAKE_CACHE) && passed;
+
+        String8 foreign = path_join(arena, base, S8("foreign"));
+        make_directory_recursive(arena, foreign);
+        String8 foreign_text = string_format(arena, S8("CMAKE_HOME_DIRECTORY:INTERNAL={S8}\n"), path_join(arena, base, S8("another-repository")));
+        passed = summary_self_test_write_text(path_join(arena, foreign, S8("CMakeCache.txt")), foreign_text) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("cmake cache of another source tree"), foreign, root, home, GENERATE_TREE_REFUSED_UNRECOGNIZED) && passed;
+
+        String8 scratch_tree = path_join(arena, root, S8("build/tree"));
+        passed = summary_self_test_write_text(path_join(arena, scratch_tree, S8("anything.txt")), S8("generated")) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("build scratch tree"), scratch_tree, root, home, GENERATE_TREE_ACCEPTED_BUILD_SCRATCH) && passed;
+
+        // Replacing an accepted tree removes all of it and stamps the marker.
+        passed = generate_build_directory_prepare_in(arena, marked, root, home) && passed;
+        passed = !path_exists(arena, path_join(arena, marked, S8("deep/er/object.o"))) && path_exists(arena, path_join(arena, marked, S8(GENERATE_BUILD_TREE_MARKER))) &&
+                 path_exists(arena, marked_keep_file) && passed;
+        passed = generate_build_directory_prepare_in(arena, cached, root, home) && !path_exists(arena, path_join(arena, cached, S8("CMakeCache.txt"))) &&
+                 path_exists(arena, path_join(arena, cached, S8(GENERATE_BUILD_TREE_MARKER))) && passed;
+        passed = generate_build_directory_prepare_in(arena, missing, root, home) && path_exists(arena, path_join(arena, missing, S8(GENERATE_BUILD_TREE_MARKER))) && passed;
+        passed = generate_build_directory_prepare_in(arena, empty, root, home) && path_exists(arena, path_join(arena, empty, S8(GENERATE_BUILD_TREE_MARKER))) && passed;
+        // The stamped directory is itself recognized the next time around.
+        passed = generate_guard_self_test_verdict(arena, S8("stamped empty tree"), empty, root, home, GENERATE_TREE_ACCEPTED_MARKER) && passed;
+        // The previous tree was removed before any new content: failure to
+        // remove is reported, and an absent path is not a failure.
+        passed = remove_path_recursive(arena, path_join(arena, base, S8("never-existed"))) && passed;
+        passed = remove_path_recursive(arena, plain_file) && !path_exists(arena, plain_file) && passed;
+
+        passed = remove_path_recursive(arena, scratch) && passed;
+    }
+    string_print(S8("GENERATE_GUARD_SELF_TEST status={S8}\n"), passed ? S8("pass") : S8("fail"));
     return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
@@ -22252,7 +22671,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult x86_completion_census_prepare_output_action(Ar
     return path_exists(arena, plan->output_path) ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL void x86_completion_census_add(Arena* arena, String8 build_directory, bool ci)
+BUSTER_GLOBAL_LOCAL bool x86_completion_census_add(Arena* arena, String8 build_directory, bool ci)
 {
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS)
     String8 ide_name =
@@ -22308,7 +22727,8 @@ BUSTER_GLOBAL_LOCAL void x86_completion_census_add(Arena* arena, String8 build_d
     };
 
     BuildStep* generate_step = step_add(arena);
-    generate_add(arena, generate_step, canonical);
+    // A refused generation fails the command; the steps below stay unexecuted.
+    bool result = generate_add(arena, generate_step, canonical);
     BuildStep* capture_step = step_add(arena);
     ProcessRun* capture_run = run_add(arena, capture_step);
     *capture_run = (ProcessRun){
@@ -22357,7 +22777,9 @@ BUSTER_GLOBAL_LOCAL void x86_completion_census_add(Arena* arena, String8 build_d
     BuildStep* unsupported_step = step_add(arena);
     ProcessRun* unsupported_run = run_add(arena, unsupported_step);
     *unsupported_run = (ProcessRun){.callback = x86_completion_census_validate_action};
+    bool result = true;
 #endif
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void x86_completion_census_add_existing(Arena* arena, BuildArtifactFanout* fanout)
@@ -23156,6 +23578,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
+        case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         {
             result = true;
@@ -23184,6 +23607,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_BINARY_COVERAGE_INVENTORY, .owns_arguments = true},
         {.command = BUILD_COMMAND_BUILD, .owns_arguments = false},
         {.command = BUILD_COMMAND_GENERATE, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_ALL_COMBINATIONS, .owns_arguments = false},
@@ -23254,7 +23678,7 @@ struct MatrixSuperbuildSelfHostPlan
 
 #define MATRIX_COVERAGE_MAX_ROWS 32
 #define MATRIX_COVERAGE_MAX_TREES (BUILD_COMPILER_COUNT * 2)
-#define MATRIX_COVERAGE_POLICY_VERSION 1
+#define MATRIX_COVERAGE_POLICY_VERSION 2
 typedef struct MatrixCoverageTarget MatrixCoverageTarget;
 struct MatrixCoverageTarget
 {
@@ -23319,6 +23743,9 @@ struct MatrixCoverageManifest
 // self-host/analysis/audit consumers. Sanitized and portability trees never
 // share that producer. Keep row IDs in the original full-matrix namespace so
 // the unsharded policy fingerprints remain independent anti-shrink anchors.
+// Policy v2 (#2657): sanitized Clang Release is the checks-enabled (#2656)
+// sanitizer runtime and fuzz owner; sanitized Clang Debug is compile-link
+// portability coverage. sanitized-debug is no longer a selectable owner.
 BUSTER_GLOBAL_LOCAL String8 matrix_coverage_shard_current(void)
 {
     String8 result = os_get_environment_variable(S8("BUSTER_MATRIX_SHARD"));
@@ -23331,7 +23758,7 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_shard_current(void)
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_shard_valid(String8 shard)
 {
     bool result = string_equal(shard, S8("combinations")) || string_equal(shard, S8("release")) || string_equal(shard, S8("checks")) ||
-                  string_equal(shard, S8("sanitized-debug")) || string_equal(shard, S8("sanitized-release")) || string_equal(shard, S8("portability"));
+                  string_equal(shard, S8("sanitized-release")) || string_equal(shard, S8("portability"));
     return result;
 }
 BUSTER_GLOBAL_LOCAL String8 matrix_coverage_row_shard(MatrixCoverageRow row)
@@ -23339,9 +23766,16 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_row_shard(MatrixCoverageRow row)
     String8 result = S8("portability");
     if (row.compiler == BUILD_COMPILER_CLANG)
     {
-        result = row.sanitize ? (row.optimize ? S8("sanitized-release") : S8("sanitized-debug")) :
-                               (row.optimize ? S8("release") : S8("portability"));
+        result = row.optimize ? (row.sanitize ? S8("sanitized-release") : S8("release")) : S8("portability");
     }
+    return result;
+}
+// Only optimized Clang trees execute the runtime suite. Every Debug row and
+// every non-Clang row is compile-and-link coverage; the sanitizer runtime
+// obligation belongs to the checks-enabled sanitized Release tree.
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_row_execution(BuildCompiler compiler, bool optimize)
+{
+    String8 result = compiler == BUILD_COMPILER_CLANG && optimize ? S8("runtime") : S8("compile-link");
     return result;
 }
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_row_selected(MatrixCoverageRow row, String8 shard)
@@ -23502,11 +23936,11 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_add_tree(Arena* arena, MatrixCover
     {
         bool optimize = first_optimize + optimize_i;
         String8 configuration = optimize ? S8("Release") : S8("Debug");
-        bool fuzz = fuzz_available && ((sanitize && !optimize) || (!sanitize && optimize));
+        bool fuzz = fuzz_available && optimize;
         bool unity = compiler == BUILD_COMPILER_CLANG && !sanitize && optimize;
         u32 row_index = plan->row_count;
         result = matrix_coverage_plan_add_row(arena, plan, lane, compiler, configuration, optimize, sanitize, fuzz, unity,
-                                              compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link"), S8(""));
+                                              matrix_coverage_row_execution(compiler, optimize), S8(""));
         if (result)
         {
             tree.row_indices[tree.row_count++] = row_index;
@@ -23558,7 +23992,7 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_sanitizer_runtime_reason(MatrixCover
 BUSTER_GLOBAL_LOCAL u64 matrix_coverage_policy_fingerprint(MatrixCoveragePlan* plan)
 {
     u64 hash = 1469598103934665603ULL;
-    hash = build_artifact_fanout_hash_string(hash, S8("matrix-policy-v1"));
+    hash = build_artifact_fanout_hash_string(hash, S8("matrix-policy-v2"));
     for (u32 row_i = 0; row_i < plan->row_count; row_i += 1)
     {
         MatrixCoverageRow row = plan->rows[row_i];
@@ -23624,13 +24058,18 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_build_for_target(Arena* arena, Mat
             {
                 u32 first_optimize = is_clang && !sanitize ? 1 : 0;
                 u32 optimize_count = is_clang && sanitize ? 2 : 1;
-                bool split_configs = fuzz_supported && optimize_count > 1;
+                // Sanitized Debug and Release always get separate trees so
+                // their independent shard owners never share one mutable
+                // CMake directory, including on hosts without fuzz support.
+                bool split_configs = optimize_count > 1;
                 u32 tree_count = split_configs ? optimize_count : 1;
                 for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
                 {
                     u32 tree_first_optimize = split_configs ? first_optimize + tree_i : first_optimize;
                     u32 tree_optimize_count = split_configs ? 1 : optimize_count;
-                    bool fuzz_available = fuzz_supported && ((sanitize && !tree_first_optimize) || (!sanitize && tree_first_optimize));
+                    // Fuzz-enabled binaries are built only where they run:
+                    // the unsanitized canonical and sanitized Release trees.
+                    bool fuzz_available = fuzz_supported && tree_first_optimize;
                     result = matrix_coverage_plan_add_tree(arena, plan, lane, compiler, sanitize, fuzz_available, tree_first_optimize, tree_optimize_count) && result;
                 }
             }
@@ -23660,7 +24099,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_validate(MatrixCoveragePlan* plan)
         for (u32 previous_i = 0; previous_i < row_i; previous_i += 1)
             result = result && !string_equal(row.id, plan->rows[previous_i].id);
         result = result && string_equal(row.execution, row.exclusion.length ? S8("none") :
-                                                      (row.compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link")));
+                                                      matrix_coverage_row_execution(row.compiler, row.optimize));
     }
     for (u32 tree_i = 0; tree_i < plan->tree_count; tree_i += 1)
     {
@@ -23670,11 +24109,11 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_validate(MatrixCoveragePlan* plan)
         {
             u32 row_index = tree.row_indices[tree_row_i];
             MatrixCoverageRow row = row_index < plan->row_count ? plan->rows[row_index] : (MatrixCoverageRow){0};
-            bool expected_fuzz = tree.fuzz_available && ((tree.sanitize && !row.optimize) || (!tree.sanitize && row.optimize));
+            bool expected_fuzz = tree.fuzz_available && row.optimize;
             result = result && row_index < plan->row_count && !row.exclusion.length && row.compiler == tree.compiler && row.sanitize == tree.sanitize &&
                      row.optimize == tree.first_optimize + tree_row_i && row.fuzz == expected_fuzz &&
                      row.unity == (row.compiler == BUILD_COMPILER_CLANG && !row.sanitize && row.optimize) &&
-                     string_equal(row.execution, row.compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link"));
+                     string_equal(row.execution, matrix_coverage_row_execution(row.compiler, row.optimize));
             result = result && row_index < BUSTER_ARRAY_LENGTH(scheduled) && !scheduled[row_index];
             if (row_index < BUSTER_ARRAY_LENGTH(scheduled))
                 scheduled[row_index] = true;
@@ -23696,10 +24135,9 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_partition_validate(MatrixCoveragePlan* 
         String8 owner = matrix_coverage_row_shard(plan->rows[tree.row_indices[0]]);
         for (u32 row_i = 0; row_i < tree.row_count; row_i += 1)
         {
-            String8 next_owner = matrix_coverage_row_shard(plan->rows[tree.row_indices[row_i]]);
-            // Apple multi-config sanitizer trees are retained in grouped checks.
-            bool same_group = !string_equal(owner, S8("release")) && !string_equal(next_owner, S8("release"));
-            result = result && (string_equal(owner, next_owner) || (tree.sanitize && tree.optimize_count == 2 && same_group));
+            // Every tree has exactly one owner shard: no two owners may
+            // configure, build or test the same directory.
+            result = result && string_equal(owner, matrix_coverage_row_shard(plan->rows[tree.row_indices[row_i]]));
         }
     }
     return result;
@@ -23820,8 +24258,8 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_policy_self_test(Arena* arena)
                 if (sanitize_supported)
                 {
                     expected_required += 2;
-                    family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, fuzz_supported, true, S8("")) &&
-                             matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), true, false, true, S8("")) && family;
+                    family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, false, true, S8("")) &&
+                             matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), true, fuzz_supported, true, S8("")) && family;
                 }
                 else
                 {
@@ -23847,6 +24285,51 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_policy_self_test(Arena* arena)
         {
             MatrixCoverageRow row = plan.rows[row_i];
             result = result && (matrix_coverage_row_selected(row, S8("release")) != matrix_coverage_row_selected(row, S8("checks")));
+        }
+        // #2659: one configuration per tree, so split owners (including the
+        // macOS sanitizer owners) never share a CMake directory.
+        for (u32 tree_i = 0; tree_i < plan.tree_count; tree_i += 1)
+        {
+            result = result && plan.trees[tree_i].row_count == 1 && plan.trees[tree_i].optimize_count == 1;
+        }
+        // #2657: sanitized Debug is build-only portability coverage and the
+        // checks-enabled sanitized Release tree is the only sanitizer runtime.
+        u32 runtime_count = 0;
+        u32 sanitized_runtime_count = 0;
+        for (u32 row_i = 0; row_i < plan.row_count; row_i += 1)
+        {
+            MatrixCoverageRow row = plan.rows[row_i];
+            bool runtime = !row.exclusion.length && string_equal(row.execution, S8("runtime"));
+            runtime_count += runtime;
+            sanitized_runtime_count += runtime && row.sanitize;
+            result = result && (!runtime || (row.compiler == BUILD_COMPILER_CLANG && row.optimize));
+            result = result && (!(row.sanitize && !row.optimize && !row.exclusion.length) ||
+                                (string_equal(row.execution, S8("compile-link")) && !row.fuzz &&
+                                 string_equal(matrix_coverage_row_shard(row), S8("portability"))));
+        }
+        result = result && runtime_count == 1u + sanitize_supported && sanitized_runtime_count == (sanitize_supported ? 1u : 0u) &&
+                 !matrix_coverage_shard_valid(S8("sanitized-debug")) &&
+                 matrix_coverage_selected_count(&plan, S8("sanitized-release")) == (sanitize_supported ? 1u : 0u) &&
+                 matrix_coverage_selected_count(&plan, S8("portability")) == expected_required - 1u - sanitize_supported;
+        MatrixCoveragePlan shared_tree = plan;
+        for (u32 tree_i = 0; tree_i < shared_tree.tree_count; tree_i += 1)
+        {
+            MatrixCoverageTreePlan* tree = &shared_tree.trees[tree_i];
+            if (tree->sanitize && tree_i + 1 < shared_tree.tree_count && shared_tree.trees[tree_i + 1].sanitize)
+            {
+                // Merge the sanitized Release row into the Debug tree: a
+                // shared Debug;Release tree has two owners and is rejected.
+                tree->row_indices[tree->row_count++] = shared_tree.trees[tree_i + 1].row_indices[0];
+                tree->optimize_count = 2;
+                tree->fuzz_available = shared_tree.trees[tree_i + 1].fuzz_available;
+                for (u32 move_i = tree_i + 1; move_i + 1 < shared_tree.tree_count; move_i += 1)
+                {
+                    shared_tree.trees[move_i] = shared_tree.trees[move_i + 1];
+                }
+                shared_tree.tree_count -= 1;
+                result = result && matrix_coverage_plan_validate(&shared_tree) && !matrix_coverage_partition_validate(&shared_tree);
+                break;
+            }
         }
         MatrixCoverageObligations release_obligations = matrix_coverage_obligations_for_lane(false, true, &plan, S8("release"));
         MatrixCoverageObligations checks_obligations = matrix_coverage_obligations_for_lane(false, true, &plan, S8("checks"));
@@ -24265,7 +24748,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_manifest_write(Arena* arena, MatrixCove
     String8 phase = complete ? S8("complete") : S8("planned");
     string8_list_push(arena, &lines, S8("{"));
     string8_list_push(arena, &lines, S8("  \"schema\": 1,"));
-    string8_list_push(arena, &lines, S8("  \"partition_version\": 2,"));
+    string8_list_push(arena, &lines, S8("  \"partition_version\": 3,"));
     string8_list_push(arena, &lines, string_format(arena, S8("  \"kind\": {S8},"), matrix_coverage_json_escape(arena, S8("desktop-matrix-coverage"))));
     string8_list_push(arena, &lines, S8("  \"hash_algorithm\": \"sha256\","));
     string8_list_push(arena, &lines, string_format(arena, S8("  \"mode\": {S8},"), matrix_coverage_json_escape(arena, manifest->mode)));
@@ -24687,9 +25170,13 @@ struct MatrixSuperbuildAllocationCase
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_low_core_allocation_tests(void)
 {
     BUSTER_GLOBAL_LOCAL MatrixSuperbuildAllocationCase cases[] = {
-        // Shared sanitized Debug;Release tree, GCC, Zig on three Apple-Silicon CPUs.
-        {.name = S8_INITIALIZER("macOS arm64 checks"), .thread_count = 3, .tree_count = 3,
-         .runs_tests = {1, 0, 0}, .expected_jobs = {3, 1, 1}, .expected_test_jobs = {3, 1, 1}},
+        // Grouped diagnostic checks on three Apple-Silicon CPUs: sanitized
+        // Debug, sanitized Release, GCC, Zig. Test phases serialize.
+        {.name = S8_INITIALIZER("macOS arm64 checks"), .thread_count = 3, .tree_count = 4,
+         .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}, .expected_test_jobs = {3, 3, 1, 1}},
+        // An isolated macOS sanitized owner receives the whole host budget.
+        {.name = S8_INITIALIZER("macOS arm64 sanitized owner"), .thread_count = 3, .tree_count = 1,
+         .runs_tests = {1}, .expected_jobs = {3}, .expected_test_jobs = {3}},
         // Sanitized Debug, sanitized Release, GCC, Zig. The two test phases run
         // one after the other, each with all four CPUs.
         {.name = S8_INITIALIZER("Linux checks"), .thread_count = 4, .tree_count = 4,
@@ -24706,10 +25193,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_low_core_allocation_tests(vo
         {.name = S8_INITIALIZER("Windows arm64 checks"), .thread_count = 4, .tree_count = 1,
          .runs_tests = {0}, .expected_jobs = {4}, .expected_test_jobs = {4}},
         // Sharing would let the concurrent self-host worker oversubscribe.
-        {.name = S8_INITIALIZER("four-CPU Apple full matrix"), .thread_count = 4, .self_host_jobs = 1, .tree_count = 4,
-         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1}},
-        {.name = S8_INITIALIZER("three-CPU Apple full matrix"), .thread_count = 3, .self_host_jobs = 1, .tree_count = 4,
-         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1}},
+        {.name = S8_INITIALIZER("four-CPU Apple full matrix"), .thread_count = 4, .self_host_jobs = 1, .tree_count = 5,
+         .unity_only = {0, 0, 1, 0, 0}, .runs_tests = {1, 1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1, 1}},
+        {.name = S8_INITIALIZER("three-CPU Apple full matrix"), .thread_count = 3, .self_host_jobs = 1, .tree_count = 5,
+         .unity_only = {0, 0, 1, 0, 0}, .runs_tests = {1, 1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1, 1}, .expected_test_jobs = {1, 1, 1, 1, 1}},
         // Larger hosts keep the weighted legacy schedule.
         {.name = S8_INITIALIZER("sixteen-CPU checks"), .thread_count = 16, .tree_count = 4,
          .runs_tests = {1, 1, 0, 0}, .expected_jobs = {4, 4, 4, 4}, .expected_test_jobs = {4, 4, 4, 4}},
@@ -25101,9 +25588,8 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
 }
 
 BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments);
-BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments);
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena);
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments);
+
+#include "tools/binary_coverage.c"
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
@@ -25181,7 +25667,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         {
             return PROCESS_RESULT_FAILED;
         }
-        ProcessResult focused_test_result = musl_directory_self_test(arena);
+        ProcessResult focused_test_result = binary_coverage_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            // Inventory the running delivery driver, not a source-coverage substitute.
+            // The report remains incomplete: no instruction/edge/MC/DC collector.
+            String8 inventory_arguments[] = {S8("/proc/self/exe")};
+            focused_test_result = binary_coverage_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inventory_arguments));
+        }
+#endif
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            focused_test_result = musl_directory_self_test(arena);
+        }
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            focused_test_result = generate_guard_self_test(arena);
+        }
 #if BUSTER_LINUX || BUSTER_APPLE
         if (focused_test_result == PROCESS_RESULT_SUCCESS)
         {
@@ -25210,11 +25713,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         // Exercise the shared-library runner on every native desktop matrix host.
         String8 throughput_self_test[] = {S8("self-test")};
         bench_throughput_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(throughput_self_test));
-        bench_service_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(throughput_self_test));
-#if !BUSTER_WINDOWS
-        String8 service_sanitized_test[] = {S8("self-test"), S8("--sanitize")};
-        bench_service_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(service_sanitized_test));
-#endif
     }
 
     bool cmake_profile = environment_flag_is_on(S8("BUSTER_CMAKE_PROFILE"));
@@ -25325,7 +25823,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                 : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
-        generate_add(arena, generate_step, generate);
+        if (!generate_add(arena, generate_step, generate))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
         matrix_phase_wrap(arena, generate_step->last_process, matrix_phase_find_tree(build_directory), S8("configure"), S8(""), 0);
         if (cmake_profile)
         {
@@ -25341,7 +25842,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                 .compiler = compiler,
                 .generate = generate,
                 .sanitize = row.sanitize,
-                .run_tests = compiler == BUILD_COMPILER_CLANG,
+                .run_tests = string_equal(row.execution, S8("runtime")),
             };
         }
     }
@@ -36866,9 +37367,9 @@ BUSTER_GLOBAL_LOCAL void machine_info_print(void)
 // Compiler construction stays in the existing generate/build commands. This
 // command builds the small native measurement tool, then forwards its argv
 // without shell parsing. Only the shared foundation modules are linked.
-BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 arguments, bool service)
+BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments)
 {
-    make_directory_recursive(arena, service ? S8("build/bench-service-tools") : S8("build/throughput-tools"));
+    make_directory_recursive(arena, S8("build/throughput-tools"));
     bool sanitize = arguments.length == 2 && string_equal(arguments.pointer[0], S8("self-test")) && string_equal(arguments.pointer[1], S8("--sanitize"));
     bool self_test = sanitize || (arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test")));
 #if BUSTER_WINDOWS
@@ -36876,33 +37377,15 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
 #else
     String8 executable = sanitize ? S8("build/throughput-tools/throughput-tests-sanitized") : self_test ? S8("build/throughput-tools/throughput-tests") : S8("build/throughput-tools/throughput");
 #endif
-    if (service)
-    {
-        String8 name = sanitize ? S8("service-tests-sanitized") : self_test ? S8("service-tests") : S8("service");
-#if BUSTER_WINDOWS
-        String8 suffix = S8(".exe");
-#else
-        String8 suffix = S8("");
-#endif
-        executable = string_format(arena, S8("build/bench-service-tools/{S8}{S8}"), name, suffix);
-    }
-#if BUSTER_LINUX
-    char driver_path[4096] = {0};
-    ssize_t driver_length = service && self_test ? readlink("/proc/self/exe", driver_path, sizeof(driver_path)) : -1;
-    bool driver_resolved = driver_length > 0 && (size_t)driver_length < sizeof(driver_path);
-    if (driver_resolved) driver_path[driver_length] = 0;
-    String8 service_test_driver = driver_resolved ?
-        string_duplicate_arena(arena, string_from_pointer(driver_path), true) : S8("/usr/bin/false");
-#endif
     // Resolve before opening the arena-backed argument builder: lookup also
     // allocates. Windows CreateProcess does not search PATH for this argument.
     String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
-    String8 test_root = service ? S8("build/bench-service-tests") : (sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests"));
+    String8 test_root = sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests");
     // Throughput fixtures write fixed paths that the tool refuses to reuse
     // (admit-workload rejects an existing --output), so a rerun over the
     // previous root fails. Clear the driver-owned root before the argument
     // builder opens: the removal allocates from the same arena.
-    if (self_test && !service)
+    if (self_test)
     {
         remove_path_recursive(arena, test_root);
     }
@@ -36919,7 +37402,7 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     os_argument_builder_append(&builder, S8("-funsigned-char"));
     os_argument_builder_append(&builder, S8("-Isrc"));
     os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
-    os_argument_builder_append(&builder, (service ? (self_test ? S8("tools/bench_service/tests.c") : S8("tools/bench_service/main.c")) : (self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"))));
+    os_argument_builder_append(&builder, self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"));
     os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
     if (sanitize)
     {
@@ -36927,11 +37410,6 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
         os_argument_builder_append(&builder, S8("-DBUSTER_SANITIZE=1"));
         os_argument_builder_append(&builder, S8("-fsanitize=address,undefined"));
         os_argument_builder_append(&builder, S8("-fno-sanitize-recover=all"));
-        // ASan gives every inlined callee's locals a distinct frame slot, so
-        // inlining the single-call bq_test_* cases into bq_test_run_all grew
-        // its frame past the default 8 MiB main-thread stack (#1980).
-        // Out-of-line cases release their frames between tests.
-        if (service) os_argument_builder_append(&builder, S8("-fno-inline-functions"));
     }
 #if BUSTER_WINDOWS
     os_argument_builder_append(&builder, S8("-Wno-microsoft-enum-forward-reference"));
@@ -36950,12 +37428,6 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     if (self_test)
     {
         os_argument_builder_append(&builder, test_root);
-#if BUSTER_LINUX
-        if (service)
-        {
-            os_argument_builder_append(&builder, service_test_driver);
-        }
-#endif
     }
     else
     {
@@ -36966,3731 +37438,6 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     }
     *measure = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
                             .spawn_options = {.use_process_environment = 1}};
-}
-
-BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments)
-{
-    native_foundation_tool_add(arena, arguments, false);
-}
-
-/* Fixed service recipe ----------------------------------------------------
- *
- * This is the build-driver half of the service handoff.  The worker supplies
- * exactly six values below; all executables, build flags and output names are
- * constants owned by this file.  In particular, no service request reaches
- * the argument builder as a command, option or path other than the validated
- * subject identities and the materializer-owned roots.
- */
-#define BENCH_SERVICE_RECIPE_ARGUMENT_COUNT 6u
-#define BENCH_SERVICE_RECIPE_PATH_CAP 2048u
-#define BENCH_SERVICE_RECIPE_MANIFEST_CAP 32768u
-#define BENCH_SERVICE_RECIPE_BUNDLE_CAP (8u * 1024u * 1024u)
-#define BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP 4096u
-#define BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP (64ull * 1024 * 1024)
-#define BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
-#define BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP 256u
-#define BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP 192u
-/* The source-owned frozen-tree receipt mirrors the observer's node, depth,
- * path, and hash bounds. Its separate serialized cap is the bundle file cap. */
-#define BENCH_SERVICE_RECIPE_RECEIPT_NODE_CAP 100000u
-#define BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP 1024u
-#define BENCH_SERVICE_RECIPE_RECEIPT_FILE_CAP (128ull * 1024 * 1024)
-#define BENCH_SERVICE_RECIPE_RECEIPT_HASH_CAP (2ull * 1024 * 1024 * 1024)
-#define BENCH_SERVICE_RECIPE_RECEIPT_BYTES_CAP BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP
-#define BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME "validate-buster-v1.base-build.inventory"
-#define BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME "validate-buster-v1.candidate-build.inventory"
-#define BENCH_SERVICE_RECIPE_CPU "2"
-#define BENCH_SERVICE_RECIPE_MEMORY "8589934592"
-#define BENCH_SERVICE_RECIPE_SWAP "0"
-#define BENCH_SERVICE_RECIPE_TASKS "256"
-#define BENCH_SERVICE_RECIPE_RUNTIME "3600000000us"
-#define BENCH_SERVICE_RECIPE_MANIFEST_NAME "validate-buster-v1.manifest"
-#define BENCH_SERVICE_RECIPE_BUNDLE_NAME "validate-buster-v1.bundle"
-#ifndef BENCH_SERVICE_RECIPE_DRIVER
-#define BENCH_SERVICE_RECIPE_DRIVER "/usr/local/libexec/buster-bench-build"
-#endif
-#ifndef BENCH_SERVICE_RECIPE_THROUGHPUT
-#define BENCH_SERVICE_RECIPE_THROUGHPUT "/usr/local/libexec/buster-bench-throughput"
-#endif
-#ifndef RENAME_NOREPLACE
-#define RENAME_NOREPLACE 1u
-#endif
-
-#if BUSTER_LINUX
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_temp_name(char const* prefix, char output[128])
-{
-    char const digits[] = "0123456789abcdef";
-    u8 entropy[16] = {0};
-    int source = open("/dev/urandom", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    u32 used = 0;
-    bool ok = source >= 0;
-    while (ok && used < sizeof(entropy))
-    {
-        ssize_t count = read(source, entropy + used, sizeof(entropy) - used);
-        if (count < 0 && errno == EINTR) continue;
-        ok = count > 0;
-        if (ok) used += (u32)count;
-    }
-    if (source >= 0 && close(source) != 0) ok = false;
-    u32 prefix_length = prefix ? (u32)strlen(prefix) : 0;
-    ok = ok && prefix_length + 1 + sizeof(entropy) * 2 + 5 < 128;
-    if (ok)
-    {
-        memcpy(output, prefix, prefix_length);
-        output[prefix_length] = '.';
-        for (u32 index = 0; index < sizeof(entropy); index += 1)
-        {
-            output[prefix_length + 1 + index * 2] = digits[entropy[index] >> 4];
-            output[prefix_length + 2 + index * 2] = digits[entropy[index] & 15];
-        }
-        memcpy(output + prefix_length + 1 + sizeof(entropy) * 2, ".tmp", 5);
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_entry_matches(int parent, char const* name,
-                                                             struct stat const* expected)
-{
-    struct stat actual = {0};
-    bool ok = parent >= 0 && name && expected && fstatat(parent, name, &actual, AT_SYMLINK_NOFOLLOW) == 0 &&
-              actual.st_dev == expected->st_dev && actual.st_ino == expected->st_ino &&
-              S_ISREG(actual.st_mode) && actual.st_nlink >= 1;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_unlink_if_same(int parent, char const* name,
-                                                              struct stat const* expected)
-{
-    bool ok = !name || !name[0] || bench_service_recipe_entry_matches(parent, name, expected);
-    if (ok && name && name[0]) ok = unlinkat(parent, name, 0) == 0;
-    return ok;
-}
-#endif
-
-/* This override is only assigned by the deterministic recipe self-test below.
- * The production command has no environment or request-controlled executable
- * path: it always uses the two constants above. */
-BUSTER_GLOBAL_LOCAL String8 bench_service_recipe_driver_override;
-BUSTER_GLOBAL_LOCAL String8 bench_service_recipe_throughput_override;
-/* Self-test seam: model coordinator cancellation/crash after the trusted throughput
- * directory is renamed but before its bundle index is written.  Production
- * never assigns this flag; recovery must bind the already-published tree on
- * the next fixed-recipe invocation. */
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_cancel_after_publish;
-#if BUSTER_LINUX
-/* Only the local synthetic recipe fixtures provide a candidate GID on hosts
- * without the installed account. Production resolves the fixed account. */
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_candidate_gid_set;
-BUSTER_GLOBAL_LOCAL gid_t bench_service_recipe_test_candidate_gid;
-BUSTER_GLOBAL_LOCAL u64 bench_service_recipe_test_receipt_bytes_cap;
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_receipt_race;
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_receipt_partial_cap;
-#endif
-
-typedef struct BenchServiceRecipeManifest BenchServiceRecipeManifest;
-typedef struct BenchServiceRecipeStage BenchServiceRecipeStage;
-
-struct BenchServiceRecipeManifest
-{
-    String8 path;
-    String8 job_id;
-    String8 attempt_token;
-    String8 workspace_root;
-    String8 base_revision;
-    String8 candidate_revision;
-    String8 result_root;
-    String8 driver;
-    String8 throughput;
-    String8 base_source;
-    String8 base_build;
-    String8 candidate_source;
-    String8 candidate_stage_build;
-    String8 throughput_output;
-    String8 candidate_build;
-    String8 base_binary;
-    String8 candidate_stage_binary;
-    String8 candidate_binary;
-    int result_directory;
-    int base_build_directory;
-    int candidate_build_directory;
-    /* The descriptor-backed implementation is Linux-only, but this record is
-     * parsed by the portable build driver on every supported host. */
-    u64 result_device;
-    u64 result_inode;
-    char base_digest[SHA256_HEX_CAPACITY];
-    char candidate_digest[SHA256_HEX_CAPACITY];
-    char bundle_digest[SHA256_HEX_CAPACITY];
-};
-
-struct BenchServiceRecipeStage
-{
-    BenchServiceRecipeManifest* manifest;
-    ProcessRun* run;
-    String8 name;
-};
-
-#if BUSTER_LINUX
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_tree(Arena* arena, String8 workspace_root, String8 attempt_root,
-                                                    String8 result_root, String8 base_source, String8 base_build,
-                                                    String8 candidate_source, String8 candidate_build,
-                                                    String8 job_id, String8 attempt_token, String8 base_revision,
-                                                    String8 candidate_revision);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_binary_digest(int build_directory, char output[SHA256_HEX_CAPACITY]);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_digest_equal(char const left[SHA256_HEX_CAPACITY],
-                                                            char const right[SHA256_HEX_CAPACITY]);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_stage(String8 candidate_subject,
-                                                                       String8 candidate_stage_build);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_visibility(Arena* arena,
-                                                                            BenchServiceRecipeManifest* manifest);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_throughput_output(Arena* arena,
-                                                                         String8 candidate_stage_build,
-                                                                         String8 throughput_output);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_candidate(Arena* arena,
-                                                                 BenchServiceRecipeManifest* manifest);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_throughput(Arena* arena,
-                                                                  BenchServiceRecipeManifest* manifest);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_cleanup_throughput_temps(Arena* arena,
-                                                                        BenchServiceRecipeManifest* manifest);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int directory, bool candidate_visible);
-BUSTER_GLOBAL_LOCAL int bench_service_recipe_reopen_directory(int directory);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_frozen_receipt(Arena* arena, BenchServiceRecipeManifest* manifest,
-                                                             String8 stage);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_path(String8 path);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sync_tree(Arena* arena, int directory);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_index(Arena* arena, BenchServiceRecipeManifest* manifest);
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_recover_published(Arena* arena,
-                                                                BenchServiceRecipeManifest* manifest);
-#endif
-
-BUSTER_GLOBAL_LOCAL char const* bench_service_recipe_process_name(ProcessResult result)
-{
-    char const* names[PROCESS_RESULT_COUNT] = {
-        [PROCESS_RESULT_SUCCESS] = "success",
-        [PROCESS_RESULT_FAILED] = "failed",
-        [PROCESS_RESULT_FAILED_TRY_AGAIN] = "failed-try-again",
-        [PROCESS_RESULT_CRASH] = "crash",
-        [PROCESS_RESULT_NOT_EXISTENT] = "not-existent",
-        [PROCESS_RESULT_RUNNING] = "running",
-        [PROCESS_RESULT_UNKNOWN] = "unknown",
-    };
-    char const* result_name = result < PROCESS_RESULT_COUNT && names[result] ? names[result] : "unknown";
-    return result_name;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_manifest_names(String8 stage, bool final,
-                                                              char target[96], char temporary[128])
-{
-    bool known = string_equal(stage, S8("prepare")) || string_equal(stage, S8("base-generate")) ||
-                 string_equal(stage, S8("base-build")) || string_equal(stage, S8("candidate-generate")) ||
-                 string_equal(stage, S8("candidate-build")) || string_equal(stage, S8("throughput"));
-    int target_length = known ? snprintf(target, 96, final ? BENCH_SERVICE_RECIPE_MANIFEST_NAME :
-                                         "validate-buster-v1.%.*s.manifest", (int)stage.length, stage.pointer) : -1;
-    int temporary_length = target_length > 0 ? snprintf(temporary, 128, "%s.tmp", target) : -1;
-    return known && target_length > 0 && (u32)target_length < 96 && temporary_length > 0 && (u32)temporary_length < 128;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_atomic_manifest(BenchServiceRecipeManifest* manifest, String8 stage,
-                                                               bool final, String8 body)
-{
-    bool ok = body.length <= BENCH_SERVICE_RECIPE_MANIFEST_CAP && manifest && manifest->result_directory >= 0;
-#if BUSTER_LINUX
-    int parent = -1;
-    int descriptor = -1;
-    char target[96] = {0}, temporary[128] = {0};
-    struct stat temporary_info = {0}, published_info = {0};
-    ok = ok && bench_service_recipe_manifest_names(stage, final, target, temporary);
-    ok = ok && bench_service_recipe_temp_name(final ? BENCH_SERVICE_RECIPE_MANIFEST_NAME : target, temporary);
-    if (ok)
-    {
-        struct stat info = {0};
-        ok = fstat(manifest->result_directory, &info) == 0 && S_ISDIR(info.st_mode) && info.st_dev == manifest->result_device &&
-             info.st_ino == manifest->result_inode && (parent = fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3)) >= 0;
-    }
-    if (ok)
-    {
-        /* O_EXCL|O_NOFOLLOW makes a stale or planted temporary a hard,
-         * reviewable failure.  The directory fd is held from preparation, so
-         * path replacement cannot redirect publication to another namespace. */
-        descriptor = openat(parent, temporary,
-                            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        ok = descriptor >= 0;
-    }
-    for (u64 offset = 0; ok && offset < body.length;)
-    {
-        ssize_t wrote = write(descriptor, body.pointer + offset, (size_t)(body.length - offset));
-        if (wrote < 0 && errno == EINTR) continue;
-        ok = wrote > 0;
-        if (ok) offset += (u64)wrote;
-    }
-    if (descriptor >= 0)
-    {
-        if (ok && fchmod(descriptor, 0400) != 0) ok = false;
-        if (ok && fsync(descriptor) != 0) ok = false;
-        if (ok && fstat(descriptor, &temporary_info) != 0) ok = false;
-        if (ok) ok = S_ISREG(temporary_info.st_mode) && temporary_info.st_nlink == 1 &&
-                       bench_service_recipe_entry_matches(parent, temporary, &temporary_info);
-    }
-    /* linkat is the no-replace publication primitive available on every
-     * supported Linux filesystem.  renameat would silently replace a planted
-     * result (or a prior durable stage), which would make a crash/race look
-     * like a successful retry. */
-    if (ok && linkat(parent, temporary, parent, target, 0) != 0) ok = false;
-    if (ok && fstatat(parent, target, &published_info, AT_SYMLINK_NOFOLLOW) != 0) ok = false;
-    if (ok) ok = published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
-                       S_ISREG(published_info.st_mode);
-    if (ok && !bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info)) ok = false;
-    if (ok && fsync(parent) != 0) ok = false;
-    if (!ok && parent >= 0 && temporary[0]) bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info);
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    descriptor = -1;
-    if (parent >= 0)
-    {
-        if (close(parent) != 0) ok = false;
-        parent = -1;
-    }
-#else
-    ok = false;
-#endif
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_manifest_write(Arena* arena, BenchServiceRecipeManifest* manifest,
-                                                              String8 stage, ProcessResult result)
-{
-    char const* process = bench_service_recipe_process_name(result);
-    char const* status = result == PROCESS_RESULT_SUCCESS ? string_equal(stage, S8("throughput")) ? "succeeded" : "running" : "failed";
-    String8 base_digest = manifest->base_digest[0] ? string_from_pointer(manifest->base_digest) : S8("");
-    String8 candidate_digest = manifest->candidate_digest[0] ? string_from_pointer(manifest->candidate_digest) : S8("");
-    String8 bundle_digest = manifest->bundle_digest[0] ? string_from_pointer(manifest->bundle_digest) : S8("");
-    String8 body = string_format(arena,
-        S8("schema=1\nrecipe=validate-buster-v1\nstatus={S8}\nstage={S8}\nprocess-result={S8}\n"
-           "job-id={S8}\nattempt-token={S8}\nworkspace-root={S8}\nresult-root={S8}\n"
-           "base-revision={S8}\ncandidate-revision={S8}\ndriver={S8}\nthroughput={S8}\n"
-           "trusted-source-scope=operator-installed-read-only\n"
-           "namespace-policy=private-workspace-post-run-identity\n"
-           "generate-policy=Release clang no-include-tests no-developer-targets no-check-optional-warnings no-fuzz no-sanitize no-time-trace no-instrument no-lto\n"
-           "build-policy=Release target=ide jobs=1\nthroughput-policy=profile=smoke mode=all pairs=1 warmups=1 guard=off\n"
-           "base-source={S8}\nbase-build={S8}\ncandidate-source={S8}\ncandidate-stage-build={S8}\n"
-           "throughput-output={S8}\ncandidate-build={S8}\n"
-           "base-binary={S8}\ncandidate-binary={S8}\nbase-binary-sha256={S8}\ncandidate-binary-sha256={S8}\n"
-           "bundle-sha256={S8}\n"),
-        string_from_pointer(status), stage, string_from_pointer(process), manifest->job_id, manifest->attempt_token, manifest->workspace_root, manifest->result_root,
-        manifest->base_revision, manifest->candidate_revision, manifest->driver, manifest->throughput, manifest->base_source,
-        manifest->base_build, manifest->candidate_source, manifest->candidate_stage_build, manifest->throughput_output,
-        manifest->candidate_build,
-        manifest->base_binary, manifest->candidate_binary,
-        base_digest, candidate_digest, bundle_digest);
-    bool final = string_equal(stage, S8("throughput")) ||
-                 (result != PROCESS_RESULT_SUCCESS && result != PROCESS_RESULT_RUNNING);
-    return bench_service_recipe_atomic_manifest(manifest, stage, final, body);
-}
-
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* arena, void* data)
-{
-    BenchServiceRecipeStage* stage = data;
-    ProcessResult result = stage->run ? stage->run->result : PROCESS_RESULT_UNKNOWN;
-    bool simulated_crash = false;
-    /* Names the first failed post-stage check in the unit journal; the stage
-     * manifest records only process-result=failed. */
-    String8 failed_check = {0};
-#if BUSTER_LINUX
-    if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("base-build")))
-    {
-        failed_check = !bench_service_recipe_binary_digest(stage->manifest->base_build_directory,
-                                                           stage->manifest->base_digest) ? S8("binary-digest") :
-                       !bench_service_recipe_lock_tree(arena, stage->manifest->base_build_directory, true) ? S8("lock-tree") :
-                       !bench_service_recipe_frozen_receipt(arena, stage->manifest, stage->name) ? S8("frozen-receipt") : (String8){0};
-    }
-    else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("candidate-build")))
-    {
-        failed_check = !bench_service_recipe_promote_candidate(arena, stage->manifest) ? S8("promote-candidate") :
-                       !bench_service_recipe_lock_tree(arena, stage->manifest->candidate_build_directory, true) ? S8("lock-tree") :
-                       !bench_service_recipe_prepare_candidate_visibility(arena, stage->manifest) ? S8("candidate-visibility") :
-                       !bench_service_recipe_prepare_throughput_output(arena, stage->manifest->candidate_stage_build,
-                                                                       stage->manifest->throughput_output) ? S8("throughput-output") :
-                       !bench_service_recipe_frozen_receipt(arena, stage->manifest, stage->name) ? S8("frozen-receipt") : (String8){0};
-    }
-    else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("throughput")))
-    {
-        char base_digest[SHA256_HEX_CAPACITY] = {0};
-        char candidate_digest[SHA256_HEX_CAPACITY] = {0};
-        bool stale = bench_service_recipe_cleanup_throughput_temps(arena, stage->manifest);
-        bool tree = stale && bench_service_recipe_tree(arena, stage->manifest->workspace_root,
-                                              path_join(arena, stage->manifest->workspace_root,
-                                                        string_format(arena, S8("job-{S8}-attempt-{S8}"), stage->manifest->job_id,
-                                                                      stage->manifest->attempt_token)),
-                                              stage->manifest->result_root, stage->manifest->base_source,
-                                              stage->manifest->base_build, stage->manifest->candidate_source,
-                                              stage->manifest->candidate_build, stage->manifest->job_id,
-                                              stage->manifest->attempt_token, stage->manifest->base_revision,
-                                              stage->manifest->candidate_revision);
-        bool digests = bench_service_recipe_binary_digest(stage->manifest->base_build_directory, base_digest) &&
-                       bench_service_recipe_binary_digest(stage->manifest->candidate_build_directory, candidate_digest) &&
-                       bench_service_recipe_digest_equal(stage->manifest->base_digest, base_digest) &&
-                       bench_service_recipe_digest_equal(stage->manifest->candidate_digest, candidate_digest);
-        bool promoted = tree && digests && bench_service_recipe_promote_throughput(arena, stage->manifest);
-        simulated_crash = promoted && bench_service_recipe_test_cancel_after_publish;
-        if (simulated_crash)
-        {
-            bench_service_recipe_test_cancel_after_publish = false;
-            result = PROCESS_RESULT_FAILED;
-        }
-        bool indexed = promoted && !simulated_crash && bench_service_recipe_bundle_index(arena, stage->manifest);
-        if (!simulated_crash)
-        {
-            failed_check = !stale ? S8("throughput-temporaries") : !tree ? S8("attempt-tree") : !digests ? S8("binary-digests") :
-                           !promoted ? S8("promote-throughput") : !indexed ? S8("bundle-index") : (String8){0};
-        }
-    }
-    if (failed_check.length)
-    {
-        string_print(S8("error: {S8} post-stage check failed: {S8}\n"), stage->name, failed_check);
-        result = PROCESS_RESULT_FAILED;
-    }
-    if (!simulated_crash && result != PROCESS_RESULT_SUCCESS && stage->manifest && stage->manifest->result_directory >= 0)
-    {
-        bool stale = !string_equal(stage->name, S8("throughput")) ||
-                     bench_service_recipe_cleanup_throughput_temps(arena, stage->manifest);
-        if (!stale || !bench_service_recipe_bundle_index(arena, stage->manifest)) result = PROCESS_RESULT_FAILED;
-    }
-#endif
-    bool recorded = !simulated_crash && bench_service_recipe_manifest_write(arena, stage->manifest, stage->name, result);
-    if (!recorded && !simulated_crash) result = PROCESS_RESULT_FAILED;
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_decimal(String8 value)
-{
-    IntegerParsingU64 parsed = string8_parse_u64_decimal(value);
-    return parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == value.length && parsed.value != 0;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_revision(String8 value)
-{
-    bool ok = value.length == 40 || value.length == 64;
-    for (u64 i = 0; ok && i < value.length; i += 1)
-    {
-        u8 c = (u8)value.pointer[i];
-        ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_path(String8 value)
-{
-    bool ok = value.length > 0 && value.length < BENCH_SERVICE_RECIPE_PATH_CAP && path_is_absolute(value);
-    u64 component_start = 0;
-    if (ok && value.pointer[0] == '/') component_start = 1;
-    for (u64 i = component_start; ok && i <= value.length; i += 1)
-    {
-        if (i == value.length || value.pointer[i] == '/')
-        {
-            u64 length = i - component_start;
-            ok = length != 0 && !(length == 1 && value.pointer[component_start] == '.') &&
-                 !(length == 2 && value.pointer[component_start] == '.' && value.pointer[component_start + 1] == '.');
-            component_start = i + 1;
-        }
-        else
-        {
-            u8 c = (u8)value.pointer[i];
-            ok = c != '\\' && c != '\n' && c != '\r' && c != 0;
-        }
-    }
-    return ok;
-}
-
-#if BUSTER_LINUX
-BUSTER_GLOBAL_LOCAL int bench_service_recipe_open_directory(String8 path)
-{
-    bool valid = path.length > 0 && path.length < BENCH_SERVICE_RECIPE_PATH_CAP && path_is_absolute(path);
-    int current = -1;
-    if (valid)
-    {
-        current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    }
-    u64 offset = 1;
-    while (current >= 0 && offset < path.length)
-    {
-        u64 end = offset;
-        while (end < path.length && path.pointer[end] != '/') end += 1;
-        char name[BENCH_SERVICE_RECIPE_PATH_CAP];
-        u64 length = end - offset;
-        bool component = length > 0 && length < sizeof(name);
-        if (component)
-        {
-            memcpy(name, path.pointer + offset, (size_t)length);
-            name[length] = 0;
-            int next = openat(current, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-            close(current);
-            current = next;
-        }
-        else
-        {
-            close(current);
-            current = -1;
-        }
-        offset = end + 1;
-    }
-    if (current >= 0)
-    {
-        struct stat info = {0};
-        if (fstat(current, &info) != 0 || !S_ISDIR(info.st_mode))
-        {
-            close(current);
-            current = -1;
-        }
-    }
-    return current;
-}
-
-/* A pinned directory descriptor can predate the entries a later walk must see.
- * btrfs (Linux 6.5+) fixes a directory's last readdir index when its open file
- * is created, so walking a dup of a prepare-time descriptor silently omits
- * everything the stages created; any consumed offset hides entries on every
- * filesystem. Walks therefore read a fresh open file of the same pinned inode. */
-BUSTER_GLOBAL_LOCAL int bench_service_recipe_reopen_directory(int directory)
-{
-    int result = directory >= 0 ? openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    struct stat pinned = {0}, fresh = {0};
-    bool same = result >= 0 && fstat(directory, &pinned) == 0 && fstat(result, &fresh) == 0 &&
-                pinned.st_dev == fresh.st_dev && pinned.st_ino == fresh.st_ino;
-    if (!same && result >= 0)
-    {
-        close(result);
-        result = -1;
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_private_directory(int descriptor, bool writable)
-{
-    struct stat info = {0};
-    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
-                    (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 077) == 0;
-    if (ok && !writable) ok = (info.st_mode & 0222) == 0;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_candidate_directory(int descriptor)
-{
-    struct stat info = {0};
-    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
-              (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 0222) == 0 &&
-              (info.st_mode & 0050) == 0050;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_candidate_traverse_directory(int descriptor)
-{
-    struct stat info = {0};
-    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
-              (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 0022) == 0 &&
-              (info.st_mode & 0010) == 0010;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_realpath(String8 path, char output[BENCH_SERVICE_RECIPE_PATH_CAP])
-{
-    bool ok = path.length > 0 && path.length < BENCH_SERVICE_RECIPE_PATH_CAP && path_is_absolute(path) &&
-              !memchr(path.pointer, 0, (size_t)path.length);
-    if (ok)
-    {
-        char input[BENCH_SERVICE_RECIPE_PATH_CAP];
-        char* resolved = NULL;
-        memcpy(input, path.pointer, (size_t)path.length);
-        input[path.length] = 0;
-        resolved = realpath(input, NULL);
-        ok = resolved && strlen(resolved) < BENCH_SERVICE_RECIPE_PATH_CAP && !strcmp(input, resolved);
-        if (ok) memcpy(output, resolved, strlen(resolved) + 1);
-        free(resolved);
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prefix(String8 path, char output[BENCH_SERVICE_RECIPE_PATH_CAP],
-                                                      u8 bytes[4096], u32* size)
-{
-    bool ok = path.length > 0 && path.length < BENCH_SERVICE_RECIPE_PATH_CAP && path_is_absolute(path) &&
-              !memchr(path.pointer, 0, (size_t)path.length);
-    char input[BENCH_SERVICE_RECIPE_PATH_CAP];
-    int original = -1;
-    int resolved_fd = -1;
-    if (ok)
-    {
-        memcpy(input, path.pointer, (size_t)path.length);
-        input[path.length] = 0;
-        original = open(input, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-        ok = original >= 0;
-    }
-    if (ok)
-    {
-        char* resolved = realpath(input, NULL);
-        ok = resolved && strlen(resolved) < BENCH_SERVICE_RECIPE_PATH_CAP && !strcmp(input, resolved);
-        if (ok)
-        {
-            memcpy(output, resolved, strlen(resolved) + 1);
-            resolved_fd = open(resolved, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-        }
-        free(resolved);
-    }
-    struct stat original_info = {0}, resolved_info = {0};
-    if (ok) ok = resolved_fd >= 0 && fstat(original, &original_info) == 0 && fstat(resolved_fd, &resolved_info) == 0 &&
-                     S_ISREG(original_info.st_mode) && original_info.st_nlink == 1 && (original_info.st_mode & 0222) == 0 &&
-                     (original_info.st_uid == 0 || original_info.st_uid == geteuid()) && original_info.st_dev == resolved_info.st_dev &&
-                     original_info.st_ino == resolved_info.st_ino;
-    u32 used = 0;
-    while (ok && used < 4095)
-    {
-        ssize_t count = read(original, bytes + used, 4095 - used);
-        if (count < 0 && errno == EINTR) continue;
-        if (count < 0) ok = false;
-        else if (!count) break;
-        else used += (u32)count;
-    }
-    if (resolved_fd >= 0 && close(resolved_fd) != 0) ok = false;
-    if (original >= 0 && close(original) != 0) ok = false;
-    *size = ok ? used : 0;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_trusted_source(String8 path)
-{
-    char resolved[BENCH_SERVICE_RECIPE_PATH_CAP];
-    bool ok = bench_service_recipe_realpath(path, resolved);
-    int descriptor = ok ? bench_service_recipe_open_directory(string_from_pointer(resolved)) : -1;
-    struct stat info = {0};
-    if (ok) ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
-                    (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 0222) == 0 &&
-                    (info.st_mode & 0050) == 0050;
-    if (descriptor >= 0) close(descriptor);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_line(u8 const* bytes, u32 size, String8 expected)
-{
-    bool found = false;
-    for (u32 offset = 0; !found && offset + expected.length <= size; offset += 1)
-    {
-        found = !memcmp(bytes + offset, expected.pointer, (size_t)expected.length) &&
-                (offset + expected.length == size || bytes[offset + expected.length] == '\n');
-    }
-    return found;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_source_manifest(Arena* arena, String8 path, String8 revision)
-{
-    u8 bytes[4096] = {0};
-    char resolved[BENCH_SERVICE_RECIPE_PATH_CAP];
-    u32 size = 0;
-    String8 header = string_format(arena, S8("BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision={S8}\n"), revision);
-    bool ok = bench_service_recipe_prefix(path, resolved, bytes, &size) && size >= header.length &&
-              !memcmp(bytes, header.pointer, (size_t)header.length);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_workspace_identity(Arena* arena, String8 path, String8 job_id,
-                                                                  String8 attempt_token, String8 base_revision,
-                                                                  String8 candidate_revision)
-{
-    u8 bytes[4096] = {0};
-    char resolved[BENCH_SERVICE_RECIPE_PATH_CAP];
-    u32 size = 0;
-    String8 job_line = string_format(arena, S8("job={S8}"), job_id);
-    String8 token_line = string_format(arena, S8("token={S8}"), attempt_token);
-    String8 recipe_line = S8("recipe=validate-buster-v1");
-    String8 base_line = string_format(arena, S8("base={S8}"), base_revision);
-    String8 candidate_line = string_format(arena, S8("candidate={S8}"), candidate_revision);
-    bool ok = bench_service_recipe_prefix(path, resolved, bytes, &size) && size >= 16 &&
-              !memcmp(bytes, "BQ-WORKSPACE-V1\n", 16) && bench_service_recipe_line(bytes, size, job_line) &&
-              bench_service_recipe_line(bytes, size, token_line) && bench_service_recipe_line(bytes, size, recipe_line) &&
-              bench_service_recipe_line(bytes, size, base_line) && bench_service_recipe_line(bytes, size, candidate_line);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_tree(Arena* arena, String8 workspace_root, String8 attempt_root,
-                                                    String8 result_root, String8 base_source, String8 base_build,
-                                                    String8 candidate_source, String8 candidate_build,
-                                                    String8 job_id, String8 attempt_token, String8 base_revision,
-                                                    String8 candidate_revision)
-{
-    char workspace_real[BENCH_SERVICE_RECIPE_PATH_CAP], actual[BENCH_SERVICE_RECIPE_PATH_CAP];
-    bool ok = bench_service_recipe_realpath(workspace_root, workspace_real);
-    String8 canonical_workspace = ok ? string_from_pointer(workspace_real) : (String8){0};
-    String8 canonical_attempt = ok ? path_join(arena, canonical_workspace,
-                                               string_format(arena, S8("job-{S8}-attempt-{S8}"), job_id, attempt_token)) : (String8){0};
-    String8 canonical_result = ok ? path_join(arena, canonical_workspace,
-                                              string_format(arena, S8("results/job-{S8}-attempt-{S8}"), job_id, attempt_token)) : (String8){0};
-    String8 canonical_base_source = ok ? path_join(arena, canonical_attempt, S8("base/source")) : (String8){0};
-    String8 canonical_base_build = ok ? path_join(arena, canonical_attempt, S8("base/build")) : (String8){0};
-    String8 canonical_candidate_source = ok ? path_join(arena, canonical_attempt, S8("candidate/source")) : (String8){0};
-    String8 canonical_candidate_build = ok ? path_join(arena, canonical_attempt, S8("candidate/build")) : (String8){0};
-    String8 actual_paths[] = {attempt_root, result_root, base_source, base_build, candidate_source, candidate_build};
-    String8 expected_paths[] = {canonical_attempt, canonical_result, canonical_base_source, canonical_base_build,
-                                canonical_candidate_source, canonical_candidate_build};
-    for (u32 i = 0; ok && i < BUSTER_ARRAY_LENGTH(actual_paths); i += 1)
-    {
-        ok = bench_service_recipe_realpath(actual_paths[i], actual) &&
-             string_equal(string_from_pointer(actual), expected_paths[i]);
-    }
-    String8 base_manifest = path_join(arena, base_source, S8(".source-manifest"));
-    String8 candidate_manifest = path_join(arena, candidate_source, S8(".source-manifest"));
-    String8 identity = path_join(arena, attempt_root, S8(".identity"));
-    int workspace_descriptor = ok ? bench_service_recipe_open_directory(canonical_workspace) : -1;
-    int attempt_descriptor = ok ? bench_service_recipe_open_directory(canonical_attempt) : -1;
-    int result_descriptor = ok ? bench_service_recipe_open_directory(canonical_result) : -1;
-    int base_build_descriptor = ok ? bench_service_recipe_open_directory(canonical_base_build) : -1;
-    int candidate_build_descriptor = ok ? bench_service_recipe_open_directory(canonical_candidate_build) : -1;
-    ok = ok && (bench_service_recipe_private_directory(workspace_descriptor, true) ||
-                bench_service_recipe_candidate_traverse_directory(workspace_descriptor)) &&
-         (bench_service_recipe_private_directory(attempt_descriptor, true) ||
-          bench_service_recipe_candidate_traverse_directory(attempt_descriptor)) &&
-         bench_service_recipe_private_directory(result_descriptor, true) &&
-         (bench_service_recipe_private_directory(base_build_descriptor, true) ||
-          bench_service_recipe_candidate_directory(base_build_descriptor)) &&
-         (bench_service_recipe_private_directory(candidate_build_descriptor, true) ||
-          bench_service_recipe_candidate_directory(candidate_build_descriptor)) &&
-         bench_service_recipe_trusted_source(base_source) && bench_service_recipe_trusted_source(candidate_source) &&
-         bench_service_recipe_source_manifest(arena, base_manifest, base_revision) &&
-         bench_service_recipe_source_manifest(arena, candidate_manifest, candidate_revision) &&
-         bench_service_recipe_workspace_identity(arena, identity, job_id, attempt_token, base_revision, candidate_revision);
-    if (workspace_descriptor >= 0) close(workspace_descriptor);
-    if (attempt_descriptor >= 0) close(attempt_descriptor);
-    if (result_descriptor >= 0) close(result_descriptor);
-    if (base_build_descriptor >= 0) close(base_build_descriptor);
-    if (candidate_build_descriptor >= 0) close(candidate_build_descriptor);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_binary_digest(int build_directory, char output[SHA256_HEX_CAPACITY])
-{
-    int release = build_directory >= 0 ? openat(build_directory, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    int binary = release >= 0 ? openat(release, "ide", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
-    struct stat info = {0};
-    bool ok = binary >= 0 && fstat(binary, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
-              (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 0111) != 0;
-    Sha256 digest;
-    sha256_init(&digest);
-    u8 bytes[64 * 1024];
-    while (ok)
-    {
-        ssize_t count = read(binary, bytes, sizeof(bytes));
-        if (count < 0 && errno == EINTR) continue;
-        if (count < 0) ok = false;
-        else if (!count) break;
-        else sha256_add(&digest, bytes, (u64)count);
-    }
-    if (ok) sha256_finish_hex(&digest, (char8*)output);
-    if (binary >= 0) close(binary);
-    if (release >= 0) close(release);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL int bench_service_recipe_create_inherited_group_directory(int parent, char const* name,
-                                                                               mode_t mode)
-{
-    struct stat parent_info = {0}, child_info = {0};
-    bool ok = parent >= 0 && fstat(parent, &parent_info) == 0 && S_ISDIR(parent_info.st_mode) &&
-              parent_info.st_uid == geteuid() && (parent_info.st_mode & S_ISGID) != 0 &&
-              (mode & S_ISGID) != 0 && (mode & 0007) == 0;
-    int child = -1;
-    if (ok)
-    {
-        /* The setgid parent supplies group and SGID without requesting either
-         * in mkdir/chmod, which the real RestrictSUIDSGID sandbox rejects. */
-        mode_t previous_umask = umask(0007);
-        int status = mkdirat(parent, name, mode & 0777);
-        int saved_errno = errno;
-        umask(previous_umask);
-        errno = saved_errno;
-        if (status == 0) child = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    }
-    ok = child >= 0 && fstat(child, &child_info) == 0 && S_ISDIR(child_info.st_mode) &&
-         child_info.st_uid == geteuid() && child_info.st_gid == parent_info.st_gid &&
-         (child_info.st_mode & 07777) == mode;
-    if (!ok)
-    {
-        if (child >= 0) close(child);
-        child = -1;
-    }
-    return child;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_stage(String8 candidate_subject,
-                                                                       String8 candidate_stage_build)
-{
-    int parent = bench_service_recipe_open_directory(candidate_subject);
-    int stage = parent >= 0 ? openat(parent, "staging", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    bool ok = parent >= 0;
-    if (stage < 0 && ok && errno == ENOENT)
-    {
-        stage = bench_service_recipe_create_inherited_group_directory(parent, "staging", 02770);
-        ok = stage >= 0 && fsync(parent) == 0;
-    }
-    struct stat info = {0};
-    if (ok)
-    {
-        ok = stage >= 0 && fstat(stage, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
-             (info.st_mode & 007) == 0 && (info.st_mode & 02770) == 02770;
-    }
-    if (ok && fsync(stage) != 0) ok = false;
-    if (stage >= 0 && close(stage) != 0) ok = false;
-    if (parent >= 0 && close(parent) != 0) ok = false;
-    (void)candidate_stage_build;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_verify_visible_directory(String8 path, mode_t mode)
-{
-    int descriptor = bench_service_recipe_open_directory(path);
-    struct stat info = {0};
-    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
-              (info.st_uid == 0 || info.st_uid == geteuid());
-    if (ok) ok = (info.st_mode & 07777) == mode && fsync(descriptor) == 0;
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_visibility(Arena* arena,
-                                                                            BenchServiceRecipeManifest* manifest)
-{
-    String8 attempt = manifest ? path_join(arena, manifest->workspace_root,
-                                           string_format(arena, S8("job-{S8}-attempt-{S8}"), manifest->job_id,
-                                                         manifest->attempt_token)) : (String8){0};
-    String8 base = path_join(arena, attempt, S8("base"));
-    String8 candidate = path_join(arena, attempt, S8("candidate"));
-    String8 paths[] = {manifest ? manifest->workspace_root : (String8){0}, attempt, base, candidate,
-                       manifest ? manifest->base_source : (String8){0},
-                       manifest ? manifest->candidate_source : (String8){0}};
-    mode_t modes[] = {02710, 02710, 02710, 02710, 0550, 0550};
-    bool ok = manifest != NULL;
-    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(paths); index += 1)
-        ok = bench_service_recipe_verify_visible_directory(paths[index], modes[index]);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_throughput_output(Arena* arena,
-                                                                         String8 candidate_stage_build,
-                                                                         String8 throughput_output)
-{
-    String8 expected = path_join(arena, candidate_stage_build, S8("throughput-results"));
-    int parent = bench_service_recipe_open_directory(candidate_stage_build);
-    int descriptor = -1;
-    bool ok = parent >= 0 && string_equal(expected, throughput_output);
-    if (ok)
-    {
-        descriptor = openat(parent, "throughput-results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        if (descriptor < 0 && errno == ENOENT)
-        {
-            descriptor = bench_service_recipe_create_inherited_group_directory(parent, "throughput-results", 02770);
-            ok = descriptor >= 0 && fsync(parent) == 0;
-        }
-    }
-    struct stat info = {0};
-    if (ok)
-    {
-        ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
-             (info.st_mode & 007) == 0 && (info.st_mode & 02770) == 02770;
-    }
-    if (ok) ok = fsync(descriptor) == 0;
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    if (parent >= 0 && close(parent) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_candidate(Arena* arena,
-                                                                 BenchServiceRecipeManifest* manifest)
-{
-    int stage = manifest ? bench_service_recipe_open_directory(manifest->candidate_stage_build) : -1;
-    int release_source = stage >= 0 ? openat(stage, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    int source = release_source >= 0 ? openat(release_source, "ide", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
-    struct stat source_info = {0}, source_after = {0};
-    bool ok = source >= 0 && fstat(source, &source_info) == 0 && S_ISREG(source_info.st_mode) &&
-              source_info.st_nlink == 1 && source_info.st_size > 0 &&
-              (u64)source_info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP &&
-              (source_info.st_mode & 0111) != 0;
-    int parent = manifest && manifest->candidate_build_directory >= 0 ?
-                 fcntl(manifest->candidate_build_directory, F_DUPFD_CLOEXEC, 3) : -1;
-    int release = -1;
-    if (ok && parent >= 0)
-    {
-        release = openat(parent, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        if (release < 0 && errno == ENOENT)
-        {
-            ok = mkdirat(parent, "Release", 0700) == 0 && fsync(parent) == 0;
-            if (ok) release = openat(parent, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        }
-        struct stat release_info = {0};
-        ok = ok && release >= 0 && fstat(release, &release_info) == 0 && S_ISDIR(release_info.st_mode) &&
-             release_info.st_uid == geteuid() && (release_info.st_mode & 077) == 0;
-    }
-    char temporary[128] = {0};
-    struct stat temporary_info = {0}, published_info = {0};
-    int descriptor = ok && bench_service_recipe_temp_name("ide", temporary) ?
-                     openat(release, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0500) : -1;
-    ok = ok && descriptor >= 0;
-    Sha256 digest;
-    sha256_init(&digest);
-    u8 bytes[64 * 1024];
-    u64 copied = 0;
-    while (ok && copied < (u64)source_info.st_size)
-    {
-        ssize_t count = read(source, bytes, sizeof(bytes));
-        if (count < 0 && errno == EINTR) continue;
-        ok = count > 0;
-        if (ok)
-        {
-            sha256_add(&digest, bytes, (u64)count);
-            u64 offset = 0;
-            while (ok && offset < (u64)count)
-            {
-                ssize_t wrote = write(descriptor, bytes + offset, (size_t)((u64)count - offset));
-                if (wrote < 0 && errno == EINTR) continue;
-                ok = wrote > 0;
-                if (ok) offset += (u64)wrote;
-            }
-            if (ok) copied += (u64)count;
-        }
-    }
-    if (ok) ok = copied == (u64)source_info.st_size && fstat(source, &source_after) == 0 &&
-                  source_after.st_dev == source_info.st_dev && source_after.st_ino == source_info.st_ino &&
-                  source_after.st_size == source_info.st_size && fchmod(descriptor, 0500) == 0 &&
-                  fsync(descriptor) == 0 && fstat(descriptor, &temporary_info) == 0 &&
-                  S_ISREG(temporary_info.st_mode) && temporary_info.st_nlink == 1;
-    char candidate_digest[SHA256_HEX_CAPACITY] = {0};
-    if (ok) sha256_finish_hex(&digest, (char8*)candidate_digest);
-    if (ok && linkat(release, temporary, release, "ide", 0) != 0) ok = false;
-    if (ok)
-    {
-        ok = fstatat(release, "ide", &published_info, AT_SYMLINK_NOFOLLOW) == 0 &&
-             published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
-             S_ISREG(published_info.st_mode) && published_info.st_uid == geteuid() && published_info.st_nlink == 2;
-    }
-    if (ok && !bench_service_recipe_unlink_if_same(release, temporary, &temporary_info)) ok = false;
-    if (ok)
-    {
-        struct stat final_info = {0};
-        ok = fstatat(release, "ide", &final_info, AT_SYMLINK_NOFOLLOW) == 0 &&
-             final_info.st_dev == temporary_info.st_dev && final_info.st_ino == temporary_info.st_ino &&
-             S_ISREG(final_info.st_mode) && final_info.st_uid == geteuid() && final_info.st_nlink == 1;
-    }
-    if (ok && fsync(release) != 0) ok = false;
-    if (!ok && release >= 0 && temporary[0]) bench_service_recipe_unlink_if_same(release, temporary, &temporary_info);
-    if (ok && manifest)
-    {
-        char verified[SHA256_HEX_CAPACITY] = {0};
-        ok = bench_service_recipe_binary_digest(manifest->candidate_build_directory, verified) &&
-             bench_service_recipe_digest_equal(candidate_digest, verified);
-        if (ok) memcpy(manifest->candidate_digest, verified, sizeof(manifest->candidate_digest));
-    }
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    if (source >= 0 && close(source) != 0) ok = false;
-    if (release_source >= 0 && close(release_source) != 0) ok = false;
-    if (stage >= 0 && close(stage) != 0) ok = false;
-    if (release >= 0 && close(release) != 0) ok = false;
-    if (parent >= 0 && close(parent) != 0) ok = false;
-    (void)arena;
-    return ok;
-}
-
-typedef struct BenchServiceRecipeCopyFrame BenchServiceRecipeCopyFrame;
-struct BenchServiceRecipeCopyFrame
-{
-    DIR* source;
-    int destination;
-};
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_throughput_temp_name(char const* name)
-{
-    u32 length = name ? (u32)strlen(name) : 0;
-    bool ok = length == 47 && !strncmp(name, "throughput.", 11) && !strcmp(name + 43, ".tmp");
-    for (u32 index = 11; ok && index < 43; index += 1)
-    {
-        u8 value = (u8)name[index];
-        ok = (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_cleanup_throughput_temps(Arena* arena,
-                                                                        BenchServiceRecipeManifest* manifest)
-{
-    int parent = manifest ? bench_service_recipe_reopen_directory(manifest->result_directory) : -1;
-    DIR* stream = parent >= 0 ? fdopendir(parent) : NULL;
-    bool ok = stream != NULL;
-    if (!stream && parent >= 0) close(parent);
-    while (ok)
-    {
-        errno = 0;
-        struct dirent* entry = readdir(stream);
-        if (!entry)
-        {
-            ok = errno == 0;
-            break;
-        }
-        if (bench_service_recipe_throughput_temp_name(entry->d_name))
-        {
-            struct stat info = {0};
-            int directory = dirfd(stream);
-            ok = directory >= 0 && fstatat(directory, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
-                 S_ISDIR(info.st_mode) && info.st_uid == geteuid() && (info.st_mode & 077) == 0;
-            if (ok)
-            {
-                String8 path = path_join(arena, manifest->result_root, string_from_pointer((char8*)entry->d_name));
-                remove_path_recursive(arena, path);
-                struct stat remaining = {0};
-                ok = fstatat(directory, entry->d_name, &remaining, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT &&
-                     fsync(directory) == 0;
-            }
-        }
-    }
-    if (stream && closedir(stream) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_throughput(Arena* arena,
-                                                                  BenchServiceRecipeManifest* manifest)
-{
-    BenchServiceRecipeCopyFrame* frames = arena_allocate(arena, BenchServiceRecipeCopyFrame,
-                                                           BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-    int source_root = manifest ? bench_service_recipe_open_directory(manifest->throughput_output) : -1;
-    int parent = manifest && manifest->result_directory >= 0 ? fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3) : -1;
-    int destination_root = -1;
-    DIR* source_stream = NULL;
-    char temporary[128] = {0};
-    bool temporary_created = false;
-    bool published = false;
-    u32 depth = 0, entries = 0, files = 0;
-    u64 total = 0;
-    bool ok = source_root >= 0 && parent >= 0;
-    struct stat source_info = {0}, destination_info = {0}, final_info = {0};
-    if (ok)
-    {
-        ok = fstat(source_root, &source_info) == 0 && S_ISDIR(source_info.st_mode) &&
-             (source_info.st_mode & 0002) == 0;
-    }
-    if (ok)
-    {
-        errno = 0;
-        bool final_present = fstatat(parent, "throughput", &final_info, AT_SYMLINK_NOFOLLOW) == 0;
-        ok = !final_present && errno == ENOENT && bench_service_recipe_temp_name("throughput", temporary) &&
-             mkdirat(parent, temporary, 0700) == 0;
-        temporary_created = ok;
-        if (ok && fsync(parent) != 0) ok = false;
-        destination_root = ok ? openat(parent, temporary, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        ok = ok && destination_root >= 0 && fstat(destination_root, &destination_info) == 0 &&
-             S_ISDIR(destination_info.st_mode) && destination_info.st_uid == geteuid() &&
-             (destination_info.st_mode & 077) == 0;
-    }
-    if (ok)
-    {
-        source_stream = fdopendir(source_root);
-        if (source_stream)
-        {
-            source_root = -1;
-            frames[0] = (BenchServiceRecipeCopyFrame){.source = source_stream, .destination = destination_root};
-            depth = 1;
-            destination_root = -1;
-        }
-        else
-        {
-            ok = false;
-        }
-    }
-    while (ok && depth)
-    {
-        BenchServiceRecipeCopyFrame* frame = frames + depth - 1;
-        errno = 0;
-        struct dirent* entry = readdir(frame->source);
-        if (!entry)
-        {
-            int current = dirfd(frame->source);
-            int destination = frame->destination;
-            /* Flush each source/destination pair before its frame is closed.
-             * The rename below is allowed only after every destination
-             * directory, including nested children and the root, is durable. */
-            ok = errno == 0 && current >= 0 && destination >= 0 && fsync(current) == 0 && fsync(destination) == 0 &&
-                 closedir(frame->source) == 0 && close(destination) == 0;
-            frame->source = NULL;
-            frame->destination = -1;
-            if (ok) depth -= 1;
-        }
-        else if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
-        {
-        }
-        else
-        {
-            int source_parent = dirfd(frame->source);
-            entries += 1;
-            struct stat info = {0};
-            ok = entries <= BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP && source_parent >= 0 &&
-                 bench_service_recipe_bundle_path(string_from_pointer((char8*)entry->d_name)) &&
-                 fstatat(source_parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
-            if (ok && S_ISDIR(info.st_mode))
-            {
-                int source_child = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP ?
-                                   openat(source_parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-                int destination_child = ok ? mkdirat(frame->destination, entry->d_name, 0700) == 0 ?
-                                                  openat(frame->destination, entry->d_name,
-                                                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1 : -1;
-                struct stat opened = {0}, destination_child_info = {0};
-                ok = source_child >= 0 && destination_child >= 0 && fstat(source_child, &opened) == 0 &&
-                     opened.st_dev == info.st_dev && opened.st_ino == info.st_ino &&
-                     fstat(destination_child, &destination_child_info) == 0 &&
-                     destination_child_info.st_uid == geteuid() && (destination_child_info.st_mode & 077) == 0;
-                if (ok)
-                {
-                    DIR* child_stream = fdopendir(source_child);
-                    if (child_stream)
-                    {
-                        source_child = -1;
-                        if (depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP)
-                        {
-                            frames[depth] = (BenchServiceRecipeCopyFrame){.source = child_stream,
-                                                                            .destination = destination_child};
-                            depth += 1;
-                            destination_child = -1;
-                        }
-                        else
-                        {
-                            ok = false;
-                            closedir(child_stream);
-                        }
-                    }
-                    else
-                    {
-                        ok = false;
-                    }
-                }
-                if (source_child >= 0) close(source_child);
-                if (destination_child >= 0) close(destination_child);
-            }
-            else if (ok && S_ISREG(info.st_mode))
-            {
-                int source_file = openat(source_parent, entry->d_name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-                struct stat opened = {0};
-                int destination_file = -1;
-                u64 copied = 0;
-                ok = files < BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP && info.st_nlink == 1 && info.st_size >= 0 &&
-                     (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP &&
-                     (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP - total && source_file >= 0 &&
-                     fstat(source_file, &opened) == 0 && opened.st_dev == info.st_dev && opened.st_ino == info.st_ino;
-                destination_file = ok ? openat(frame->destination, entry->d_name,
-                                               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
-                ok = ok && destination_file >= 0;
-                u8 bytes[64 * 1024];
-                while (ok && copied < (u64)info.st_size)
-                {
-                    ssize_t count = read(source_file, bytes, sizeof(bytes));
-                    if (count < 0 && errno == EINTR) continue;
-                    ok = count > 0;
-                    if (ok)
-                    {
-                        u64 offset = 0;
-                        while (ok && offset < (u64)count)
-                        {
-                            ssize_t wrote = write(destination_file, bytes + offset, (size_t)((u64)count - offset));
-                            if (wrote < 0 && errno == EINTR) continue;
-                            ok = wrote > 0;
-                            if (ok) offset += (u64)wrote;
-                        }
-                        if (ok) copied += (u64)count;
-                    }
-                }
-                struct stat source_after = {0}, destination_file_info = {0};
-                ok = ok && copied == (u64)info.st_size && fstat(source_file, &source_after) == 0 &&
-                     source_after.st_dev == info.st_dev && source_after.st_ino == info.st_ino &&
-                     source_after.st_size == info.st_size && fchmod(destination_file, 0400) == 0 &&
-                     fsync(destination_file) == 0 && fstat(destination_file, &destination_file_info) == 0 &&
-                     S_ISREG(destination_file_info.st_mode) && destination_file_info.st_nlink == 1 &&
-                     destination_file_info.st_uid == geteuid() && (destination_file_info.st_mode & 0222) == 0;
-                if (destination_file >= 0 && close(destination_file) != 0) ok = false;
-                if (source_file >= 0 && close(source_file) != 0) ok = false;
-                destination_file = -1;
-                source_file = -1;
-                if (ok)
-                {
-                    files += 1;
-                    total += copied;
-                }
-            }
-            else if (ok)
-            {
-                ok = false;
-            }
-        }
-    }
-    while (depth)
-    {
-        if (frames[depth - 1].source) closedir(frames[depth - 1].source);
-        if (frames[depth - 1].destination >= 0) close(frames[depth - 1].destination);
-        depth -= 1;
-    }
-    if (source_root >= 0) close(source_root);
-    if (destination_root >= 0) close(destination_root);
-    if (ok && parent >= 0)
-    {
-        /* The complete trusted staging tree is published as one directory
-         * entry.  RENAME_NOREPLACE keeps a prior durable result immutable and
-         * makes restart/crash recovery deterministic. */
-#if defined(__NR_renameat2)
-        ok = syscall(__NR_renameat2, parent, temporary, parent, "throughput", RENAME_NOREPLACE) == 0;
-#else
-        ok = false;
-#endif
-        published = ok;
-        if (ok)
-        {
-            ok = fstatat(parent, "throughput", &final_info, AT_SYMLINK_NOFOLLOW) == 0 &&
-                 S_ISDIR(final_info.st_mode) && final_info.st_uid == geteuid() &&
-                 (final_info.st_mode & 077) == 0 && fsync(parent) == 0;
-        }
-    }
-    if (!published && temporary_created && parent >= 0)
-    {
-        String8 temporary_path = path_join(arena, manifest->result_root, string_from_pointer(temporary));
-        remove_path_recursive(arena, temporary_path);
-        fsync(parent);
-    }
-    if (parent >= 0 && close(parent) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_digest_equal(char const left[SHA256_HEX_CAPACITY],
-                                                            char const right[SHA256_HEX_CAPACITY])
-{
-    return left[0] && right[0] && !memcmp(left, right, SHA256_HEX_CAPACITY - 1);
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int directory, bool candidate_visible)
-{
-    typedef struct BenchServiceRecipeLockFrame BenchServiceRecipeLockFrame;
-    struct BenchServiceRecipeLockFrame { DIR* stream; };
-    BenchServiceRecipeLockFrame* frames = arena_allocate(arena, BenchServiceRecipeLockFrame,
-                                                           BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-    int root = bench_service_recipe_reopen_directory(directory);
-    DIR* stream = root >= 0 ? fdopendir(root) : NULL;
-    u32 depth = stream ? 1 : 0;
-    bool ok = stream != NULL;
-    if (ok)
-    {
-        memset(frames, 0, sizeof(*frames) * BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-        frames[0].stream = stream;
-        struct stat root_info = {0};
-        mode_t root_mode = 0;
-        ok = fstat(directory, &root_info) == 0;
-        if (ok)
-        {
-            root_mode = root_info.st_mode & 0777;
-            root_mode = candidate_visible ? 0550 : root_mode & ~0222;
-            ok = (root_info.st_mode & 07777) == root_mode || fchmod(directory, root_mode) == 0;
-        }
-        ok = ok &&
-             fsync(directory) == 0;
-    }
-    else if (root >= 0)
-    {
-        close(root);
-    }
-    while (ok && depth)
-    {
-        BenchServiceRecipeLockFrame* frame = frames + depth - 1;
-        errno = 0;
-        struct dirent* entry = readdir(frame->stream);
-        if (!entry)
-        {
-            if (errno) ok = false;
-            else
-            {
-                ok = fsync(dirfd(frame->stream)) == 0;
-                closedir(frame->stream);
-                frame->stream = NULL;
-                depth -= 1;
-            }
-        }
-        else if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
-        {
-        }
-        else
-        {
-            int parent = dirfd(frame->stream);
-            struct stat info = {0};
-            ok = parent >= 0 && fstatat(parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
-                 (S_ISDIR(info.st_mode) || (S_ISREG(info.st_mode) && info.st_nlink == 1)) &&
-                 (info.st_uid == 0 || info.st_uid == geteuid());
-            int child = ok ? openat(parent, entry->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
-                                    (S_ISDIR(info.st_mode) ? O_DIRECTORY : 0)) : -1;
-            mode_t child_mode = info.st_mode & 0777;
-            if (candidate_visible)
-            {
-                child_mode = S_ISDIR(info.st_mode) ? 0550 : (info.st_mode & 0111) ? 0550 : 0440;
-            }
-            else
-            {
-                child_mode &= ~0222;
-            }
-            ok = ok && child >= 0 && ((info.st_mode & 07777) == child_mode || fchmod(child, child_mode) == 0);
-            if (ok && S_ISDIR(info.st_mode))
-            {
-                ok = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP;
-                DIR* child_stream = ok ? fdopendir(child) : NULL;
-                if (!child_stream && child >= 0) close(child);
-                ok = ok && child_stream != NULL;
-                if (ok)
-                {
-                    BenchServiceRecipeLockFrame* next = frames + depth;
-                    memset(next, 0, sizeof(*next));
-                    next->stream = child_stream;
-                    depth += 1;
-                }
-            }
-            else if (child >= 0)
-            {
-                if (fsync(child) != 0 || close(child) != 0) ok = false;
-            }
-        }
-    }
-    while (depth)
-    {
-        if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
-        depth -= 1;
-    }
-    return ok;
-}
-
-typedef struct BenchServiceRecipeReceiptFrame BenchServiceRecipeReceiptFrame;
-typedef struct BenchServiceRecipeReceiptNode BenchServiceRecipeReceiptNode;
-struct BenchServiceRecipeReceiptFrame
-{
-    DIR* stream;
-    struct stat identity;
-    char path[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP + 1];
-};
-struct BenchServiceRecipeReceiptNode
-{
-    BenchServiceRecipeReceiptNode* next;
-    struct stat identity;
-    char path[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP + 1];
-};
-
-/* A receipt is a source-owned assertion about a frozen build tree, not an
- * independent observation.  The stage callback cannot advance the graph to
- * throughput until this complete file is published and its parent is synced. */
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_same(struct stat const* before, struct stat const* after)
-{
-    bool ok = before->st_dev == after->st_dev && before->st_ino == after->st_ino &&
-              before->st_mode == after->st_mode && before->st_nlink == after->st_nlink &&
-              before->st_uid == after->st_uid && before->st_gid == after->st_gid &&
-              before->st_size == after->st_size &&
-              before->st_mtim.tv_sec == after->st_mtim.tv_sec &&
-              before->st_mtim.tv_nsec == after->st_mtim.tv_nsec &&
-              before->st_ctim.tv_sec == after->st_ctim.tv_sec &&
-              before->st_ctim.tv_nsec == after->st_ctim.tv_nsec;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_policy(struct stat const* info, bool directory,
-                                                             gid_t candidate_gid)
-{
-    bool ok = info && (directory ? S_ISDIR(info->st_mode) : S_ISREG(info->st_mode)) &&
-              (info->st_uid == 0 || info->st_uid == geteuid()) &&
-              (info->st_gid == 0 || info->st_gid == getegid() || info->st_gid == candidate_gid) &&
-              (directory ? info->st_nlink >= 1 : info->st_nlink == 1) &&
-              (info->st_mode & 07777) == (directory ? 0550 : (info->st_mode & 0111) ? 0550 : 0440) &&
-              info->st_size >= 0 && (u64)info->st_size <= BENCH_SERVICE_RECIPE_RECEIPT_FILE_CAP;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_write(int descriptor, char const* bytes, u64 length,
-                                                            u64* written, Sha256* digest)
-{
-    u64 cap = bench_service_recipe_test_receipt_bytes_cap &&
-              bench_service_recipe_test_receipt_bytes_cap < BENCH_SERVICE_RECIPE_RECEIPT_BYTES_CAP ?
-              bench_service_recipe_test_receipt_bytes_cap : BENCH_SERVICE_RECIPE_RECEIPT_BYTES_CAP;
-    bool ok = descriptor >= 0 && bytes && written && *written <= cap && length <= cap - *written;
-    if (!ok && bench_service_recipe_test_receipt_bytes_cap && written && *written > 0 &&
-        *written <= cap && length > cap - *written)
-        bench_service_recipe_test_receipt_partial_cap = true;
-    for (u64 offset = 0; ok && offset < length;)
-    {
-        ssize_t count = write(descriptor, bytes + offset, (size_t)(length - offset));
-        if (count < 0 && errno == EINTR) continue;
-        ok = count > 0;
-        if (ok) offset += (u64)count;
-    }
-    if (ok)
-    {
-        *written += length;
-        if (digest) sha256_add(digest, (u8 const*)bytes, length);
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_boot(char output[37])
-{
-    int descriptor = open("/proc/sys/kernel/random/boot_id", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    char bytes[40] = {0};
-    u32 used = 0;
-    bool ok = descriptor >= 0;
-    while (ok && used < sizeof(bytes))
-    {
-        ssize_t count = read(descriptor, bytes + used, sizeof(bytes) - used);
-        if (count < 0 && errno == EINTR) continue;
-        ok = count >= 0;
-        if (!count) break;
-        if (ok) used += (u32)count;
-    }
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    ok = ok && used == 37 && bytes[36] == '\n';
-    for (u32 index = 0; ok && index < 36; index += 1)
-    {
-        u8 value = (u8)bytes[index];
-        bool hyphen = index == 8 || index == 13 || index == 18 || index == 23;
-        ok = hyphen ? value == '-' :
-             (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
-    }
-    if (ok)
-    {
-        memcpy(output, bytes, 36);
-        output[36] = 0;
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_node(int descriptor, char const* path,
-                                                           struct stat const* info, char const* digest,
-                                                           u64* written, Sha256* nodes)
-{
-    char hex[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP * 2 + 1];
-    char line[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP * 2 + 512];
-    char const digits[] = "0123456789abcdef";
-    u64 length = path ? strlen(path) : 0;
-    bool ok = length > 0 && length <= BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP &&
-              info && info->st_size >= 0 &&
-              info->st_mtim.tv_nsec >= 0 && info->st_mtim.tv_nsec < 1000000000 &&
-              info->st_ctim.tv_nsec >= 0 && info->st_ctim.tv_nsec < 1000000000;
-    for (u64 index = 0; ok && index < length; index += 1)
-    {
-        u8 value = (u8)path[index];
-        hex[index * 2] = digits[value >> 4];
-        hex[index * 2 + 1] = digits[value & 15];
-    }
-    if (ok) hex[length * 2] = 0;
-    int count = ok ? snprintf(line, sizeof(line),
-        "node\t%s\t%c\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%llu\t%lld.%09ld\t%lld.%09ld\t%s\n",
-        hex, S_ISDIR(info->st_mode) ? 'd' : 'f',
-        (unsigned long long)info->st_dev, (unsigned long long)info->st_ino,
-        (unsigned long long)info->st_nlink, (unsigned)(info->st_mode & 07777),
-        (unsigned)info->st_uid, (unsigned)info->st_gid, (unsigned long long)info->st_size,
-        (long long)info->st_mtim.tv_sec, (long)info->st_mtim.tv_nsec,
-        (long long)info->st_ctim.tv_sec, (long)info->st_ctim.tv_nsec, digest ? digest : "-") : -1;
-    ok = ok && count > 0 && (size_t)count < sizeof(line);
-    if (ok) ok = bench_service_recipe_receipt_write(descriptor, line, (u64)count, written, nodes);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_file(int parent, char const* name,
-                                                           struct stat const* expected,
-                                                           u64* hashed, char digest[SHA256_HEX_CAPACITY])
-{
-    int descriptor = openat(parent, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-    struct stat before = {0}, after = {0}, path_after = {0};
-    bool executable = (expected->st_mode & 0111) != 0;
-    bool ok = descriptor >= 0 && fstat(descriptor, &before) == 0 &&
-              bench_service_recipe_receipt_same(expected, &before);
-    Sha256 sha;
-    sha256_init(&sha);
-    u8 bytes[64 * 1024];
-    u64 total = 0;
-    if (ok && executable)
-    {
-        ok = expected->st_size >= 0 && (u64)expected->st_size <= BENCH_SERVICE_RECIPE_RECEIPT_FILE_CAP &&
-             (u64)expected->st_size <= BENCH_SERVICE_RECIPE_RECEIPT_HASH_CAP - *hashed;
-        while (ok)
-        {
-            ssize_t count = read(descriptor, bytes, sizeof(bytes));
-            if (count < 0 && errno == EINTR) continue;
-            ok = count >= 0;
-            if (!count) break;
-            if (ok)
-            {
-                total += (u64)count;
-                ok = total <= (u64)expected->st_size;
-                if (ok) sha256_add(&sha, bytes, (u64)count);
-            }
-        }
-        ok = ok && total == (u64)expected->st_size;
-    }
-    if (ok && bench_service_recipe_test_receipt_race && executable && !strcmp(name, "ide"))
-    {
-        bench_service_recipe_test_receipt_race = false;
-        ok = fchmod(descriptor, 0440) == 0;
-    }
-    if (ok) ok = fstat(descriptor, &after) == 0 &&
-                 fstatat(parent, name, &path_after, AT_SYMLINK_NOFOLLOW) == 0 &&
-                 bench_service_recipe_receipt_same(expected, &after) &&
-                 bench_service_recipe_receipt_same(expected, &path_after);
-    if (ok && executable)
-    {
-        sha256_finish_hex(&sha, (char8*)digest);
-        *hashed += total;
-    }
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_root(String8 path, int pinned,
-                                                           struct stat const* expected)
-{
-    int canonical = path.length ? bench_service_recipe_open_directory(path) : -1;
-    struct stat pinned_info = {0}, canonical_info = {0};
-    bool ok = canonical >= 0 && fstat(pinned, &pinned_info) == 0 &&
-              fstat(canonical, &canonical_info) == 0 &&
-              bench_service_recipe_receipt_same(expected, &pinned_info) &&
-              bench_service_recipe_receipt_same(expected, &canonical_info) &&
-              pinned_info.st_dev == canonical_info.st_dev && pinned_info.st_ino == canonical_info.st_ino;
-    if (canonical >= 0 && close(canonical) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_record(Arena* arena,
-                                                             BenchServiceRecipeReceiptNode** head,
-                                                             char const* path, struct stat const* identity)
-{
-    u64 length = path ? strlen(path) : 0;
-    bool ok = arena && arena->position <= arena->reserved_size &&
-              arena->reserved_size - arena->position >=
-                  sizeof(BenchServiceRecipeReceiptNode) + BUSTER_ALIGN_OF(BenchServiceRecipeReceiptNode) &&
-              head && identity && length > 0 && length <= BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP;
-    if (ok)
-    {
-        BenchServiceRecipeReceiptNode* node = arena_allocate(arena, BenchServiceRecipeReceiptNode, 1);
-        node->identity = *identity;
-        memcpy(node->path, path, (size_t)length + 1);
-        node->next = *head;
-        *head = node;
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_verify(BenchServiceRecipeReceiptNode* nodes,
-                                                             int build, String8 path,
-                                                             struct stat const* root_info)
-{
-    bool ok = bench_service_recipe_receipt_root(path, build, root_info);
-    for (BenchServiceRecipeReceiptNode* node = nodes; ok && node; node = node->next)
-    {
-        int current = openat(build, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        ok = current >= 0;
-        if (ok && strcmp(node->path, "."))
-        {
-            char const* component = node->path;
-            while (ok && component[0])
-            {
-                char const* separator = strchr(component, '/');
-                u64 length = separator ? (u64)(separator - component) : strlen(component);
-                char name[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP + 1];
-                ok = length > 0 && length <= BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP;
-                if (ok)
-                {
-                    memcpy(name, component, (size_t)length);
-                    name[length] = 0;
-                    if (separator)
-                    {
-                        int child = openat(current, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-                        if (close(current) != 0) ok = false;
-                        current = child;
-                        ok = ok && current >= 0;
-                        component = separator + 1;
-                    }
-                    else
-                    {
-                        struct stat actual = {0};
-                        ok = fstatat(current, name, &actual, AT_SYMLINK_NOFOLLOW) == 0 &&
-                             bench_service_recipe_receipt_same(&node->identity, &actual);
-                        component += length;
-                    }
-                }
-            }
-        }
-        else if (ok)
-        {
-            struct stat actual = {0};
-            ok = fstat(current, &actual) == 0 && bench_service_recipe_receipt_same(&node->identity, &actual);
-        }
-        if (current >= 0 && close(current) != 0) ok = false;
-    }
-    if (ok) ok = nodes != NULL && bench_service_recipe_receipt_root(path, build, root_info);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_frozen_receipt(Arena* arena, BenchServiceRecipeManifest* manifest,
-                                                             String8 stage)
-{
-    u64 arena_position = arena ? arena->position : 0;
-    bool base = string_equal(stage, S8("base-build"));
-    bool candidate = string_equal(stage, S8("candidate-build"));
-    int build = manifest ? base ? manifest->base_build_directory : manifest->candidate_build_directory : -1;
-    String8 path = manifest ? base ? manifest->base_build : manifest->candidate_build : (String8){0};
-    char const* expected_digest = manifest ? base ? manifest->base_digest : manifest->candidate_digest : "";
-    char const* target = base ? BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME : BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME;
-    int parent = -1, temporary_fd = -1, root = -1;
-    DIR* stream = NULL;
-    char temporary[128] = {0}, boot[37] = {0};
-    struct stat result_info = {0}, temporary_info = {0}, published_info = {0}, root_info = {0};
-    struct passwd* candidate_account = bench_service_recipe_test_candidate_gid_set ? NULL :
-                                       getpwnam("buster-bench-candidate");
-    gid_t candidate_gid = bench_service_recipe_test_candidate_gid_set ?
-                          bench_service_recipe_test_candidate_gid : candidate_account ? candidate_account->pw_gid : (gid_t)-1;
-    bool ok = (base || candidate) && manifest && manifest->result_directory >= 0 && build >= 0 &&
-              candidate_gid != (gid_t)-1 && expected_digest[0] &&
-              bench_service_recipe_receipt_boot(boot) &&
-              fstat(manifest->result_directory, &result_info) == 0 &&
-              (u64)result_info.st_dev == manifest->result_device &&
-              (u64)result_info.st_ino == manifest->result_inode && S_ISDIR(result_info.st_mode);
-    if (ok)
-    {
-        parent = fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3);
-        ok = parent >= 0 && bench_service_recipe_temp_name(target, temporary);
-        if (ok) temporary_fd = openat(parent, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        ok = ok && temporary_fd >= 0;
-    }
-    /* Like every walk, read a fresh OFD so the inventory cannot inherit a
-     * consumed or btrfs-stale readdir position (bench_service_recipe_reopen_directory). */
-    if (ok) root = openat(build, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    ok = ok && root >= 0 && fstat(root, &root_info) == 0 && S_ISDIR(root_info.st_mode) &&
-         bench_service_recipe_receipt_policy(&root_info, true, candidate_gid) &&
-         bench_service_recipe_receipt_root(path, build, &root_info);
-    u64 frame_bytes = sizeof(BenchServiceRecipeReceiptFrame) * BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP;
-    ok = ok && arena && arena->position <= arena->reserved_size &&
-         arena->reserved_size - arena->position >= frame_bytes + BUSTER_ALIGN_OF(BenchServiceRecipeReceiptFrame);
-    BenchServiceRecipeReceiptFrame* frames = ok ? arena_allocate(arena, BenchServiceRecipeReceiptFrame,
-                                                                  BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP) : NULL;
-    if (frames) memset(frames, 0, (size_t)frame_bytes);
-    if (ok)
-    {
-        stream = fdopendir(root);
-        ok = stream != NULL;
-        if (ok) root = -1;
-    }
-    u32 depth = ok ? 1 : 0, count = 0;
-    bool binary_seen = false;
-    BenchServiceRecipeReceiptNode* nodes = NULL;
-    u64 written = 0, hashed = 0;
-    Sha256 node_lines;
-    sha256_init(&node_lines);
-    if (ok)
-    {
-        frames[0].stream = stream;
-        frames[0].identity = root_info;
-        char header[BENCH_SERVICE_RECIPE_PATH_CAP + 1024];
-        int length = snprintf(header, sizeof(header),
-            "BQ-FROZEN-TREE-V1\nstage=%.*s\njob-id=%.*s\nattempt-token=%.*s\n"
-            "base-revision=%.*s\ncandidate-revision=%.*s\nbuild-root=%.*s\n"
-            "boot-id=%s\nbinary-sha256=%s\n",
-            (int)stage.length, stage.pointer, (int)manifest->job_id.length, manifest->job_id.pointer,
-            (int)manifest->attempt_token.length, manifest->attempt_token.pointer,
-            (int)manifest->base_revision.length, manifest->base_revision.pointer,
-            (int)manifest->candidate_revision.length, manifest->candidate_revision.pointer,
-            (int)path.length, path.pointer, boot, expected_digest);
-        ok = length > 0 && (size_t)length < sizeof(header) &&
-             bench_service_recipe_receipt_write(temporary_fd, header, (u64)length, &written, NULL);
-    }
-    while (ok && depth)
-    {
-        BenchServiceRecipeReceiptFrame* frame = frames + depth - 1;
-        if (!frame->path[0])
-        {
-            /* The root path is represented by '.' in the node ledger. */
-            ok = bench_service_recipe_receipt_node(temporary_fd, ".", &root_info, NULL, &written, &node_lines);
-            if (ok) ok = bench_service_recipe_receipt_record(arena, &nodes, ".", &root_info);
-            if (ok) count += 1;
-            frame->path[0] = '.';
-            frame->path[1] = 0;
-            continue;
-        }
-        errno = 0;
-        struct dirent* entry = readdir(frame->stream);
-        if (!entry)
-        {
-            struct stat after = {0}, path_after = {0};
-            ok = errno == 0 && fstat(dirfd(frame->stream), &after) == 0 &&
-                 bench_service_recipe_receipt_same(&frame->identity, &after);
-            if (ok && depth > 1)
-            {
-                BenchServiceRecipeReceiptFrame* previous = frames + depth - 2;
-                char const* name = strrchr(frame->path, '/');
-                name = name ? name + 1 : frame->path;
-                ok = fstatat(dirfd(previous->stream), name, &path_after, AT_SYMLINK_NOFOLLOW) == 0 &&
-                     bench_service_recipe_receipt_same(&frame->identity, &path_after);
-            }
-            if (closedir(frame->stream) != 0) ok = false;
-            frame->stream = NULL;
-            depth -= 1;
-        }
-        else if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
-        {
-            char relative[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP + 1];
-            int length = snprintf(relative, sizeof(relative), depth == 1 ? "%s" : "%s/%s",
-                                  depth == 1 ? entry->d_name : frame->path,
-                                  depth == 1 ? "" : entry->d_name);
-            ok = length > 0 && (size_t)length < sizeof(relative) &&
-                 count < BENCH_SERVICE_RECIPE_RECEIPT_NODE_CAP;
-            struct stat info = {0};
-            if (ok) ok = fstatat(dirfd(frame->stream), entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
-                         bench_service_recipe_receipt_policy(&info, S_ISDIR(info.st_mode), candidate_gid);
-            int child = ok ? openat(dirfd(frame->stream), entry->d_name,
-                                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK |
-                                    (S_ISDIR(info.st_mode) ? O_DIRECTORY : 0)) : -1;
-            struct stat opened = {0};
-            ok = ok && child >= 0 && fstat(child, &opened) == 0 &&
-                 bench_service_recipe_receipt_same(&info, &opened);
-            if (ok && S_ISDIR(info.st_mode))
-            {
-                ok = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP;
-                DIR* child_stream = ok ? fdopendir(child) : NULL;
-                if (!child_stream && child >= 0) close(child);
-                if (ok) ok = child_stream != NULL;
-                if (ok)
-                {
-                    ok = bench_service_recipe_receipt_node(temporary_fd, relative, &info, NULL, &written, &node_lines);
-                    if (ok) ok = bench_service_recipe_receipt_record(arena, &nodes, relative, &info);
-                    if (ok)
-                    {
-                        BenchServiceRecipeReceiptFrame* next = frames + depth;
-                        next->stream = child_stream;
-                        next->identity = info;
-                        memcpy(next->path, relative, (size_t)length + 1);
-                        count += 1;
-                        depth += 1;
-                    }
-                    else if (closedir(child_stream) != 0) ok = false;
-                }
-            }
-            else if (child >= 0)
-            {
-                char digest[SHA256_HEX_CAPACITY] = {0};
-                ok = ok && bench_service_recipe_receipt_file(dirfd(frame->stream), entry->d_name,
-                                                               &info, &hashed, digest);
-                if (close(child) != 0) ok = false;
-                if (ok)
-                {
-                    ok = bench_service_recipe_receipt_node(temporary_fd, relative, &info,
-                                                            digest[0] ? digest : NULL, &written, &node_lines);
-                    if (ok) ok = bench_service_recipe_receipt_record(arena, &nodes, relative, &info);
-                    if (ok) count += 1;
-                    if (ok && !strcmp(relative, "Release/ide"))
-                    {
-                        ok = digest[0] && bench_service_recipe_digest_equal(digest, expected_digest);
-                        if (ok) binary_seen = true;
-                    }
-                }
-            }
-        }
-    }
-    while (depth)
-    {
-        if (frames[depth - 1].stream && closedir(frames[depth - 1].stream) != 0) ok = false;
-        depth -= 1;
-    }
-    if (root >= 0 && close(root) != 0) ok = false;
-    if (ok) ok = count > 0 && binary_seen &&
-                 bench_service_recipe_receipt_verify(nodes, build, path, &root_info);
-    char nodes_digest[SHA256_HEX_CAPACITY] = {0};
-    if (ok)
-    {
-        struct timespec now = {0};
-        ok = clock_gettime(CLOCK_MONOTONIC, &now) == 0 && now.tv_sec >= 0 &&
-             now.tv_nsec >= 0 && now.tv_nsec < 1000000000;
-        if (ok)
-        {
-            sha256_finish_hex(&node_lines, (char8*)nodes_digest);
-            char footer[512];
-            int length = snprintf(footer, sizeof(footer),
-                                  "node-count=%u\nhashed-executable-bytes=%llu\nnode-lines-sha256=%s\n"
-                                  "scan-complete-monotonic-us=%llu\n",
-                                  count, (unsigned long long)hashed, nodes_digest,
-                                  (unsigned long long)now.tv_sec * 1000000ull + (unsigned long long)now.tv_nsec / 1000ull);
-            ok = length > 0 && (size_t)length < sizeof(footer) &&
-                 bench_service_recipe_receipt_write(temporary_fd, footer, (u64)length, &written, NULL);
-        }
-    }
-    if (ok) ok = fchmod(temporary_fd, 0400) == 0 && fsync(temporary_fd) == 0 &&
-                 fstat(temporary_fd, &temporary_info) == 0 && S_ISREG(temporary_info.st_mode) &&
-                 temporary_info.st_nlink == 1 && temporary_info.st_size == (off_t)written &&
-                 bench_service_recipe_entry_matches(parent, temporary, &temporary_info) &&
-                 bench_service_recipe_receipt_verify(nodes, build, path, &root_info);
-    if (ok) ok = linkat(parent, temporary, parent, target, 0) == 0 &&
-                 fstatat(parent, target, &published_info, AT_SYMLINK_NOFOLLOW) == 0 &&
-                 published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
-                 S_ISREG(published_info.st_mode);
-    if (ok) ok = bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info) && fsync(parent) == 0;
-    if (!ok && parent >= 0 && temporary[0] && temporary_info.st_ino)
-    {
-        if (bench_service_recipe_entry_matches(parent, temporary, &temporary_info))
-            bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info);
-    }
-    if (!ok && parent >= 0 && temporary[0] && !temporary_info.st_ino)
-    {
-        struct stat partial = {0};
-        if (fstatat(parent, temporary, &partial, AT_SYMLINK_NOFOLLOW) == 0 &&
-            S_ISREG(partial.st_mode) && partial.st_nlink == 1 && temporary_fd >= 0)
-        {
-            struct stat opened = {0};
-            if (fstat(temporary_fd, &opened) == 0 && opened.st_dev == partial.st_dev && opened.st_ino == partial.st_ino)
-                unlinkat(parent, temporary, 0);
-        }
-    }
-    if (temporary_fd >= 0 && close(temporary_fd) != 0) ok = false;
-    if (parent >= 0)
-    {
-        if (!ok && fsync(parent) != 0) ok = false;
-        if (close(parent) != 0) ok = false;
-    }
-    if (arena) arena_set_position(arena, arena_position);
-    return ok;
-}
-
-typedef struct BenchServiceRecipeBundleEntry BenchServiceRecipeBundleEntry;
-struct BenchServiceRecipeBundleEntry
-{
-    String8 path;
-    u64 size;
-    char digest[SHA256_HEX_CAPACITY];
-};
-
-typedef struct BenchServiceRecipeBundleFrame BenchServiceRecipeBundleFrame;
-struct BenchServiceRecipeBundleFrame
-{
-    DIR* stream;
-    char path[BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP + 1];
-    u32 depth;
-};
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sync_tree(Arena* arena, int directory)
-{
-    BenchServiceRecipeBundleFrame* frames = arena_allocate(arena, BenchServiceRecipeBundleFrame,
-                                                            BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-    int root = bench_service_recipe_reopen_directory(directory);
-    DIR* stream = root >= 0 ? fdopendir(root) : NULL;
-    bool ok = stream != NULL;
-    u32 depth = ok ? 1 : 0;
-    memset(frames, 0, sizeof(*frames) * BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-    if (ok) frames[0].stream = stream;
-    else if (root >= 0) close(root);
-    while (ok && depth)
-    {
-        BenchServiceRecipeBundleFrame* frame = frames + depth - 1;
-        errno = 0;
-        struct dirent* entry = readdir(frame->stream);
-        if (!entry)
-        {
-            int current = dirfd(frame->stream);
-            ok = !errno && current >= 0 && fsync(current) == 0;
-            if (ok)
-            {
-                closedir(frame->stream);
-                frame->stream = NULL;
-                depth -= 1;
-            }
-        }
-        else if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
-        {
-        }
-        else
-        {
-            int parent = dirfd(frame->stream);
-            struct stat info = {0};
-            ok = parent >= 0 && fstatat(parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
-            if (ok && S_ISDIR(info.st_mode))
-            {
-                int child = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP ?
-                            openat(parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-                struct stat opened = {0};
-                DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
-                ok = child_stream != NULL && fstat(child, &opened) == 0 && opened.st_dev == info.st_dev &&
-                     opened.st_ino == info.st_ino && (info.st_mode & 022) == 0;
-                if (!child_stream && child >= 0) close(child);
-                if (ok)
-                {
-                    frames[depth].stream = child_stream;
-                    depth += 1;
-                }
-                else if (child_stream)
-                {
-                    closedir(child_stream);
-                }
-            }
-            else if (ok && S_ISREG(info.st_mode))
-            {
-                int descriptor = openat(parent, entry->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-                struct stat opened = {0};
-                ok = descriptor >= 0 && fstat(descriptor, &opened) == 0 && opened.st_dev == info.st_dev &&
-                     opened.st_ino == info.st_ino && opened.st_nlink == 1 && opened.st_size == info.st_size &&
-                     fsync(descriptor) == 0;
-                if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-            }
-            else if (ok)
-            {
-                ok = false;
-            }
-        }
-    }
-    while (depth)
-    {
-        if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
-        depth -= 1;
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_path(String8 path)
-{
-    bool ok = path.length > 0 && path.length <= BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP && path.pointer[0] != '/';
-    u64 component = 0;
-    for (u64 index = 0; ok && index <= path.length; index += 1)
-    {
-        if (index == path.length || path.pointer[index] == '/')
-        {
-            u64 length = index - component;
-            ok = length && !(length == 1 && path.pointer[component] == '.') &&
-                 !(length == 2 && path.pointer[component] == '.' && path.pointer[component + 1] == '.');
-            component = index + 1;
-        }
-        else
-        {
-            u8 value = (u8)path.pointer[index];
-            ok = value >= 0x21 && value <= 0x7e && value != '\\';
-        }
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_reserved(String8 path)
-{
-    String8 names[] = {S8(BENCH_SERVICE_RECIPE_MANIFEST_NAME), S8(BENCH_SERVICE_RECIPE_BUNDLE_NAME),
-                       S8("validate-buster-v1.outcome")};
-    bool reserved = false;
-    for (u32 index = 0; !reserved && index < BUSTER_ARRAY_LENGTH(names); index += 1)
-    {
-        reserved = string_equal(path, names[index]);
-    }
-    return reserved;
-}
-
-BUSTER_GLOBAL_LOCAL int bench_service_recipe_bundle_compare(BenchServiceRecipeBundleEntry const* left,
-                                                              BenchServiceRecipeBundleEntry const* right)
-{
-    u64 shared = left->path.length < right->path.length ? left->path.length : right->path.length;
-    u64 index = 0;
-    while (index < shared && left->path.pointer[index] == right->path.pointer[index]) index += 1;
-    int result = index == shared ? left->path.length < right->path.length ? -1 : left->path.length != right->path.length :
-                 (u8)left->path.pointer[index] < (u8)right->path.pointer[index] ? -1 : 1;
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_digest(int directory, char const* name,
-                                                             u64* size, char output[SHA256_HEX_CAPACITY])
-{
-    int descriptor = directory >= 0 ? openat(directory, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
-    struct stat info = {0};
-    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
-              info.st_size >= 0 && (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP &&
-              (info.st_uid == 0 || info.st_uid == geteuid());
-    Sha256 digest;
-    sha256_init(&digest);
-    u8 bytes[64 * 1024];
-    u64 total = 0;
-    while (ok)
-    {
-        ssize_t count = read(descriptor, bytes, sizeof(bytes));
-        if (count < 0 && errno == EINTR) continue;
-        if (count < 0) ok = false;
-        else if (!count) break;
-        else
-        {
-            sha256_add(&digest, bytes, (u64)count);
-            total += (u64)count;
-        }
-    }
-    if (ok)
-    {
-        struct stat after = {0};
-        ok = fstat(descriptor, &after) == 0 && after.st_dev == info.st_dev && after.st_ino == info.st_ino &&
-             after.st_size == info.st_size && total == (u64)info.st_size;
-        if (ok) sha256_finish_hex(&digest, (char8*)output);
-    }
-    if (size) *size = ok ? total : 0;
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_atomic(BenchServiceRecipeManifest* manifest, String8 body)
-{
-    bool ok = manifest && manifest->result_directory >= 0 && body.length <= BENCH_SERVICE_RECIPE_BUNDLE_CAP;
-    int parent = -1;
-    int descriptor = -1;
-    char temporary[128] = {0};
-    struct stat temporary_info = {0}, published_info = {0};
-    if (ok)
-    {
-        struct stat info = {0};
-        ok = fstat(manifest->result_directory, &info) == 0 && S_ISDIR(info.st_mode) &&
-             (u64)info.st_dev == manifest->result_device && (u64)info.st_ino == manifest->result_inode &&
-             (parent = fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3)) >= 0;
-    }
-    if (ok)
-    {
-        ok = bench_service_recipe_temp_name(BENCH_SERVICE_RECIPE_BUNDLE_NAME, temporary);
-        descriptor = ok ? openat(parent, temporary,
-                                 O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
-        ok = descriptor >= 0;
-    }
-    for (u64 offset = 0; ok && offset < body.length;)
-    {
-        ssize_t wrote = write(descriptor, body.pointer + offset, (size_t)(body.length - offset));
-        if (wrote < 0 && errno == EINTR) continue;
-        ok = wrote > 0;
-        if (ok) offset += (u64)wrote;
-    }
-    if (descriptor >= 0)
-    {
-        if (ok && fchmod(descriptor, 0400) != 0) ok = false;
-        if (ok && fsync(descriptor) != 0) ok = false;
-        if (ok && fstat(descriptor, &temporary_info) != 0) ok = false;
-        if (ok) ok = S_ISREG(temporary_info.st_mode) && temporary_info.st_nlink == 1 &&
-                       bench_service_recipe_entry_matches(parent, temporary, &temporary_info);
-    }
-    if (ok && linkat(parent, temporary, parent,
-                     BENCH_SERVICE_RECIPE_BUNDLE_NAME, 0) != 0) ok = false;
-    if (ok && fstatat(parent, BENCH_SERVICE_RECIPE_BUNDLE_NAME, &published_info, AT_SYMLINK_NOFOLLOW) != 0) ok = false;
-    if (ok) ok = published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
-                       S_ISREG(published_info.st_mode);
-    if (ok && !bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info)) ok = false;
-    if (ok && fsync(parent) != 0) ok = false;
-    if (!ok && parent >= 0 && temporary[0]) bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info);
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    descriptor = -1;
-    if (parent >= 0 && close(parent) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_index(Arena* arena, BenchServiceRecipeManifest* manifest)
-{
-    BenchServiceRecipeBundleEntry* entries = arena_allocate(arena, BenchServiceRecipeBundleEntry,
-                                                              BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP);
-    BenchServiceRecipeBundleFrame* frames = arena_allocate(arena, BenchServiceRecipeBundleFrame,
-                                                            BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-    int root = manifest && manifest->result_directory >= 0 ?
-               openat(manifest->result_directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    DIR* stream = root >= 0 ? fdopendir(root) : NULL;
-    bool ok = stream != NULL;
-    u32 depth = ok ? 1 : 0;
-    u32 entry_count = 0;
-    u32 file_count = 0;
-    u64 total = 0;
-    bool synced = manifest && manifest->result_directory >= 0 &&
-                  bench_service_recipe_sync_tree(arena, manifest->result_directory);
-    memset(frames, 0, sizeof(*frames) * BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-    ok = ok && synced;
-    if (ok)
-    {
-        frames[0].stream = stream;
-        frames[0].depth = 1;
-    }
-    if (!stream && root >= 0) close(root);
-    while (ok && depth)
-    {
-        BenchServiceRecipeBundleFrame* frame = frames + depth - 1;
-        errno = 0;
-        struct dirent* entry = readdir(frame->stream);
-        if (!entry)
-        {
-            if (errno) ok = false;
-            else
-            {
-                closedir(frame->stream);
-                frame->stream = NULL;
-                depth -= 1;
-            }
-        }
-        else if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
-        {
-        }
-        else
-        {
-            entry_count += 1;
-            ok = entry_count <= BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP;
-            char relative[BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP + 1];
-            int length = ok ? snprintf(relative, sizeof(relative), frame->path[0] ? "%s/%s" : "%s",
-                                       frame->path[0] ? frame->path : entry->d_name,
-                                       frame->path[0] ? entry->d_name : "") : -1;
-            ok = ok && length > 0 && (u32)length <= BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP &&
-                 bench_service_recipe_bundle_path(string_from_pointer(relative));
-            struct stat info = {0};
-            int parent = ok ? dirfd(frame->stream) : -1;
-            ok = ok && fstatat(parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
-            if (ok && S_ISDIR(info.st_mode))
-            {
-                ok = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP &&
-                     (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 022) == 0;
-                int child = ok ? openat(parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-                DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
-                if (!child_stream && child >= 0) close(child);
-                if (ok) ok = child_stream != NULL;
-                if (ok)
-                {
-                    BenchServiceRecipeBundleFrame* next = frames + depth;
-                    memset(next, 0, sizeof(*next));
-                    next->stream = child_stream;
-                    next->depth = frame->depth + 1;
-                    memcpy(next->path, relative, (size_t)length + 1);
-                    depth += 1;
-                }
-            }
-            else if (ok && S_ISREG(info.st_mode))
-            {
-                String8 path = string_from_pointer(relative);
-                if (!bench_service_recipe_bundle_reserved(path))
-                {
-                    u64 file_size = 0;
-                    char digest[SHA256_HEX_CAPACITY] = {0};
-                    ok = info.st_size >= 0 && (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP &&
-                         (info.st_uid == 0 || info.st_uid == geteuid()) &&
-                         (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP - total &&
-                         bench_service_recipe_bundle_digest(parent, entry->d_name, &file_size, digest);
-                    if (ok)
-                    {
-                        entries[file_count].path = string_duplicate_arena(arena, path, true);
-                        entries[file_count].size = file_size;
-                        memcpy(entries[file_count].digest, digest, sizeof(digest));
-                        file_count += 1;
-                        total += file_size;
-                    }
-                }
-            }
-            else if (ok)
-            {
-                ok = false;
-            }
-        }
-    }
-    if (depth)
-    {
-        while (depth)
-        {
-            if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
-            depth -= 1;
-        }
-    }
-    if (ok)
-    {
-        for (u32 index = 1; index < file_count; index += 1)
-        {
-            BenchServiceRecipeBundleEntry value = entries[index];
-            u32 position = index;
-            while (position && bench_service_recipe_bundle_compare(&value, entries + position - 1) < 0)
-            {
-                entries[position] = entries[position - 1];
-                position -= 1;
-            }
-            entries[position] = value;
-        }
-        String8List lines = {0};
-        string8_list_push(arena, &lines, S8("BQ-BUNDLE-V1\n"));
-        string8_list_push(arena, &lines, string_format(arena, S8("entries={u32}\nbytes={u64}\n"), file_count, total));
-        for (u32 index = 0; ok && index < file_count; index += 1)
-        {
-            string8_list_push(arena, &lines,
-                              string_format(arena, S8("{S8} {u64} {S8}\n"),
-                                            string_from_pointer(entries[index].digest), entries[index].size,
-                                            entries[index].path));
-        }
-        String8 body = string_join_arena(arena, string8_list_to_slice(arena, lines), false);
-        ok = body.length <= BENCH_SERVICE_RECIPE_BUNDLE_CAP && bench_service_recipe_bundle_atomic(manifest, body);
-        if (ok)
-        {
-            u64 index_size = 0;
-            ok = bench_service_recipe_bundle_digest(manifest->result_directory,
-                                                    BENCH_SERVICE_RECIPE_BUNDLE_NAME, &index_size,
-                                                    manifest->bundle_digest);
-            ok = ok && index_size == body.length;
-        }
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_recover_published(Arena* arena,
-                                                                BenchServiceRecipeManifest* manifest)
-{
-    struct stat final_manifest = {0}, throughput_info = {0};
-    int throughput = -1;
-    bool no_final_manifest = false;
-    bool ok = manifest && manifest->result_directory >= 0;
-    if (ok)
-    {
-        errno = 0;
-        no_final_manifest = fstatat(manifest->result_directory, BENCH_SERVICE_RECIPE_MANIFEST_NAME,
-                                    &final_manifest, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
-        throughput = no_final_manifest ? openat(manifest->result_directory, "throughput",
-                                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        ok = no_final_manifest && throughput >= 0 && fstat(throughput, &throughput_info) == 0 &&
-             S_ISDIR(throughput_info.st_mode) && (throughput_info.st_uid == 0 || throughput_info.st_uid == geteuid()) &&
-             (throughput_info.st_mode & 077) == 0;
-    }
-    if (ok)
-    {
-        char base_digest[SHA256_HEX_CAPACITY] = {0};
-        char candidate_digest[SHA256_HEX_CAPACITY] = {0};
-        bool digests = bench_service_recipe_binary_digest(manifest->base_build_directory, base_digest) &&
-                       bench_service_recipe_binary_digest(manifest->candidate_build_directory, candidate_digest);
-        if (digests)
-        {
-            memcpy(manifest->base_digest, base_digest, sizeof(manifest->base_digest));
-            memcpy(manifest->candidate_digest, candidate_digest, sizeof(manifest->candidate_digest));
-        }
-        ok = bench_service_recipe_bundle_index(arena, manifest) &&
-             bench_service_recipe_manifest_write(arena, manifest, S8("throughput"), PROCESS_RESULT_FAILED);
-    }
-    if (throughput >= 0 && close(throughput) != 0) ok = false;
-    return ok;
-}
-#endif
-
-BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_process_add(Arena* arena, BuildStep* step, SliceString8 arguments,
-                                                                  String8 working_directory, BenchServiceRecipeStage* stage)
-{
-    ProcessRun* run = run_add(arena, step);
-    /* Stage metadata is allocated immediately before the builder is flushed
-     * in the fixed graph below.  That allocation leaves one zero String8 at
-     * the builder tail; never pass a null argv entry to exec. */
-    u64 argument_count = arguments.length;
-    while (argument_count && !arguments.pointer[argument_count - 1].pointer && !arguments.pointer[argument_count - 1].length)
-        argument_count -= 1;
-    String8* stable_arguments = arena_allocate(arena, String8, argument_count);
-    memcpy(stable_arguments, arguments.pointer, (size_t)(argument_count * sizeof(*stable_arguments)));
-    SliceString8 stable_slice = {.pointer = stable_arguments, .length = argument_count};
-    *run = (ProcessRun){.arguments = stable_slice, .working_directory = working_directory,
-                        .timeout_seconds = 3600, .flags = PROCESS_RUN_FLAG_PRINT_COMMAND,
-                        .cleanup_callback = bench_service_recipe_stage_cleanup, .cleanup_data = stage,
-                        .spawn_options = {.use_process_environment = 1}};
-    stage->run = run;
-    return run;
-}
-
-typedef enum BenchServiceRecipeIdentity BenchServiceRecipeIdentity;
-enum BenchServiceRecipeIdentity
-{
-    BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
-    BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE,
-    BENCH_SERVICE_RECIPE_IDENTITY_INVALID,
-};
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_append(Arena* arena, String8List* wrapped,
-                                                               BenchServiceRecipeIdentity identity)
-{
-    bool ok = identity == BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED || identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE;
-    if (ok)
-    {
-        String8 account = identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE ? S8("buster-bench-candidate") : S8("buster-bench");
-        String8 umask = identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE ? S8("0007") : S8("0077");
-        string8_list_push(arena, wrapped, string_format(arena, S8("--uid={S8}"), account));
-        string8_list_push(arena, wrapped, string_format(arena, S8("--gid={S8}"), account));
-        string8_list_push(arena, wrapped, string_format(arena, S8("--property=UMask={S8}"), umask));
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* arena, BuildStep* step,
-                                                                          SliceString8 arguments,
-                                                                          String8 working_directory,
-                                                                          String8 read_only_paths,
-                                                                          String8 read_write_path,
-                                                                          String8 result_root,
-                                                                          BenchServiceRecipeIdentity identity,
-                                                                          BenchServiceRecipeStage* stage);
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_test(Arena* arena)
-{
-    String8List trusted = {0}, candidate = {0}, invalid = {0};
-    bool ok = bench_service_recipe_identity_append(arena, &trusted, BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED) &&
-              bench_service_recipe_identity_append(arena, &candidate, BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE) &&
-              !bench_service_recipe_identity_append(arena, &invalid, BENCH_SERVICE_RECIPE_IDENTITY_INVALID);
-    SliceString8 trusted_identity = string8_list_to_slice(arena, trusted);
-    SliceString8 candidate_identity = string8_list_to_slice(arena, candidate);
-    ok = ok && invalid.count == 0 && trusted_identity.length == 3 && candidate_identity.length == 3 &&
-         string_equal(trusted_identity.pointer[0], S8("--uid=buster-bench")) &&
-         string_equal(candidate_identity.pointer[0], S8("--uid=buster-bench-candidate"));
-    BuildGraph saved_graph = program.build_graph;
-    program.build_graph = (BuildGraph){0};
-    String8 production_arguments[] = {S8(BENCH_SERVICE_RECIPE_DRIVER), S8("generate")};
-    BenchServiceRecipeManifest test_manifest = {.job_id = S8("1"), .attempt_token = S8("2"),
-        .base_revision = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        .candidate_revision = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
-    BenchServiceRecipeStage base_stage = {.manifest = &test_manifest, .name = S8("base-generate")};
-    BenchServiceRecipeStage candidate_stage = {.manifest = &test_manifest, .name = S8("throughput")};
-    ProcessRun* base = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
-        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED, &base_stage);
-    ProcessRun* candidate_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
-        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE, &candidate_stage);
-    ProcessRun* invalid_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
-        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_INVALID, &candidate_stage);
-    SliceString8 base_arguments = base ? base->arguments : (SliceString8){0};
-    SliceString8 candidate_arguments = candidate_run ? candidate_run->arguments : (SliceString8){0};
-    SliceString8 invalid_arguments = invalid_run ? invalid_run->arguments : (SliceString8){0};
-    ok = ok && base_arguments.length == 7 && candidate_arguments.length == 7 &&
-         string_equal(base_arguments.pointer[0], S8("/usr/local/libexec/buster-bench-systemd-broker")) &&
-         string_equal(candidate_arguments.pointer[0], base_arguments.pointer[0]) &&
-         string_equal(base_arguments.pointer[1], S8("start-stage")) &&
-         string_equal(base_arguments.pointer[2], S8("1")) &&
-         string_equal(base_arguments.pointer[3], S8("2")) &&
-         string_equal(base_arguments.pointer[4], S8("base-generate")) &&
-         string_equal(candidate_arguments.pointer[4], S8("throughput")) &&
-         string_equal(base_arguments.pointer[5], test_manifest.base_revision) &&
-         string_equal(candidate_arguments.pointer[6], test_manifest.candidate_revision) &&
-         invalid_arguments.length == 1 && string_equal(invalid_arguments.pointer[0], S8("/usr/bin/false"));
-    String8 additional_names[] = {S8("base-build"), S8("candidate-generate"), S8("candidate-build")};
-    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(additional_names); index += 1)
-    {
-        BenchServiceRecipeStage additional = {.manifest = &test_manifest, .name = additional_names[index]};
-        BenchServiceRecipeIdentity additional_identity = index == 0 ? BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED :
-                                                            BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE;
-        ProcessRun* run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-            (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
-            S8("/workspace"), S8("/result"), additional_identity, &additional);
-        ok = run && run->arguments.length == 7 &&
-             string_equal(run->arguments.pointer[4], additional_names[index]);
-    }
-    BenchServiceRecipeStage unknown_stage = {.manifest = &test_manifest, .name = S8("shell")};
-    ProcessRun* unknown = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
-        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED, &unknown_stage);
-    ok = ok && unknown && unknown->arguments.length == 1 &&
-         string_equal(unknown->arguments.pointer[0], S8("/usr/bin/false"));
-    program.build_graph = saved_graph;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* arena, BuildStep* step,
-                                                                          SliceString8 arguments,
-                                                                          String8 working_directory,
-                                                                          String8 read_only_paths,
-                                                                          String8 read_write_path,
-                                                                          String8 result_root,
-                                                                          BenchServiceRecipeIdentity identity,
-                                                                          BenchServiceRecipeStage* stage)
-{
-    String8 driver = arguments.length ? arguments.pointer[0] : (String8){0};
-    bool production_driver = string_equal(driver, S8(BENCH_SERVICE_RECIPE_DRIVER)) ||
-                             string_equal(driver, S8(BENCH_SERVICE_RECIPE_THROUGHPUT));
-    bool base_stage = stage && (string_equal(stage->name, S8("base-generate")) ||
-                                string_equal(stage->name, S8("base-build")));
-    bool candidate_stage = stage && (string_equal(stage->name, S8("candidate-generate")) ||
-                                     string_equal(stage->name, S8("candidate-build")) ||
-                                     string_equal(stage->name, S8("throughput")));
-    bool identity_ok = (base_stage && identity == BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED) ||
-                       (candidate_stage && identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE);
-    String8List wrapped = {0};
-    if (production_driver && identity_ok && stage->manifest)
-    {
-        string8_list_push(arena, &wrapped, S8("/usr/local/libexec/buster-bench-systemd-broker"));
-        string8_list_push(arena, &wrapped, S8("start-stage"));
-        string8_list_push(arena, &wrapped, stage->manifest->job_id);
-        string8_list_push(arena, &wrapped, stage->manifest->attempt_token);
-        string8_list_push(arena, &wrapped, stage->name);
-        string8_list_push(arena, &wrapped, stage->manifest->base_revision);
-        string8_list_push(arena, &wrapped, stage->manifest->candidate_revision);
-    }
-    else if (identity_ok)
-    {
-        for (u64 index = 0; index < arguments.length; index += 1)
-            string8_list_push(arena, &wrapped, arguments.pointer[index]);
-    }
-    else
-    {
-        string8_list_push(arena, &wrapped, S8("/usr/bin/false"));
-    }
-    (void)read_only_paths;
-    (void)read_write_path;
-    (void)result_root;
-    SliceString8 stable = string8_list_to_slice(arena, wrapped);
-    return bench_service_recipe_process_add(arena, step, stable, working_directory, stage);
-}
-
-BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_candidate_process_add(Arena* arena, BuildStep* step,
-                                                                             SliceString8 arguments,
-                                                                             String8 working_directory,
-                                                                             String8 baseline_source,
-                                                                             String8 baseline_build,
-                                                                             String8 candidate_source,
-                                                                             String8 candidate_build,
-                                                                             String8 result_root,
-                                                                             BenchServiceRecipeStage* stage)
-{
-    String8List paths = {0};
-    string8_list_push(arena, &paths, baseline_source);
-    string8_list_push(arena, &paths, S8(" "));
-    string8_list_push(arena, &paths, baseline_build);
-    string8_list_push(arena, &paths, S8(" "));
-    string8_list_push(arena, &paths, candidate_source);
-    String8 read_only = string_join_arena(arena, string8_list_to_slice(arena, paths), false);
-    (void)candidate_source;
-    return bench_service_recipe_sandbox_process_add(arena, step, arguments, working_directory, read_only,
-                                                    candidate_build, result_root,
-                                                    BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE, stage);
-}
-
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceString8 arguments)
-{
-    ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length != BENCH_SERVICE_RECIPE_ARGUMENT_COUNT)
-    {
-        string_print(S8("error: bench_service_recipe requires JOB_ID ATTEMPT_TOKEN WORKSPACE_ROOT BASE_REVISION CANDIDATE_REVISION RESULT_ROOT\n"));
-    }
-    else
-    {
-        String8 job_id = arguments.pointer[0];
-        String8 attempt_token = arguments.pointer[1];
-        String8 workspace_root = arguments.pointer[2];
-        String8 base_revision = arguments.pointer[3];
-        String8 candidate_revision = arguments.pointer[4];
-        String8 result_root = arguments.pointer[5];
-        String8 attempt_root = path_join(arena, workspace_root, string_format(arena, S8("job-{S8}-attempt-{S8}"), job_id, attempt_token));
-        String8 expected_result = path_join(arena, workspace_root,
-                                            string_format(arena, S8("results/job-{S8}-attempt-{S8}"), job_id, attempt_token));
-        bool valid = BUSTER_LINUX && bench_service_recipe_decimal(job_id) && bench_service_recipe_decimal(attempt_token) &&
-                     bench_service_recipe_path(workspace_root) && bench_service_recipe_revision(base_revision) &&
-                     bench_service_recipe_revision(candidate_revision) && bench_service_recipe_path(result_root) &&
-                     string_equal(result_root, expected_result);
-        if (!valid)
-        {
-            string_print(S8("error: invalid fixed validate-buster-v1 recipe identity or path\n"));
-        }
-        else
-        {
-            String8 base_source = path_join(arena, attempt_root, S8("base/source"));
-            String8 base_build = path_join(arena, attempt_root, S8("base/build"));
-            String8 candidate_source = path_join(arena, attempt_root, S8("candidate/source"));
-            String8 candidate_subject = path_join(arena, attempt_root, S8("candidate"));
-            String8 candidate_stage_build = path_join(arena, candidate_subject, S8("staging"));
-            String8 throughput_output = path_join(arena, candidate_stage_build, S8("throughput-results"));
-            String8 candidate_build = path_join(arena, attempt_root, S8("candidate/build"));
-            String8 base_binary = path_join(arena, base_build, S8("Release/ide"));
-            String8 candidate_binary = path_join(arena, candidate_build, S8("Release/ide"));
-            String8 candidate_stage_binary = path_join(arena, candidate_stage_build, S8("Release/ide"));
-            String8 driver = bench_service_recipe_driver_override.length ? bench_service_recipe_driver_override : S8(BENCH_SERVICE_RECIPE_DRIVER);
-            String8 throughput = bench_service_recipe_throughput_override.length ? bench_service_recipe_throughput_override : S8(BENCH_SERVICE_RECIPE_THROUGHPUT);
-            BenchServiceRecipeManifest* manifest = arena_allocate(arena, BenchServiceRecipeManifest, 1);
-            *manifest = (BenchServiceRecipeManifest){
-                .path = path_join(arena, result_root, S8("validate-buster-v1.manifest")), .job_id = job_id,
-                .attempt_token = attempt_token, .workspace_root = workspace_root, .base_revision = base_revision,
-                .candidate_revision = candidate_revision, .result_root = result_root, .driver = driver,
-                .throughput = throughput, .base_source = base_source, .base_build = base_build,
-                .candidate_source = candidate_source, .candidate_stage_build = candidate_stage_build,
-                .throughput_output = throughput_output, .candidate_build = candidate_build, .base_binary = base_binary,
-                .candidate_stage_binary = candidate_stage_binary, .candidate_binary = candidate_binary,
-                .result_directory = -1, .base_build_directory = -1,
-                .candidate_build_directory = -1};
-            bool sources = path_exists(arena, result_root) && path_exists(arena, base_source) && path_exists(arena, candidate_source) &&
-                           driver.length > 0;
-#if BUSTER_LINUX
-            bool stage_ok = bench_service_recipe_prepare_candidate_stage(candidate_subject, candidate_stage_build);
-            bool output_ok = stage_ok && bench_service_recipe_prepare_throughput_output(arena, candidate_stage_build,
-                                                                                          throughput_output);
-            bool tree_ok = output_ok && bench_service_recipe_tree(arena, workspace_root, attempt_root, result_root, base_source, base_build,
-                                                           candidate_source, candidate_build, job_id, attempt_token, base_revision,
-                                                           candidate_revision);
-            sources = sources && stage_ok && output_ok && tree_ok;
-            if (sources)
-            {
-                manifest->result_directory = bench_service_recipe_open_directory(result_root);
-                manifest->base_build_directory = bench_service_recipe_open_directory(base_build);
-                manifest->candidate_build_directory = bench_service_recipe_open_directory(candidate_build);
-                struct stat result_info = {0};
-                sources = manifest->result_directory >= 0 && manifest->base_build_directory >= 0 &&
-                          manifest->candidate_build_directory >= 0 && fstat(manifest->result_directory, &result_info) == 0 &&
-                          bench_service_recipe_private_directory(manifest->result_directory, true) &&
-                          (bench_service_recipe_private_directory(manifest->base_build_directory, true) ||
-                           bench_service_recipe_candidate_directory(manifest->base_build_directory)) &&
-                          (bench_service_recipe_private_directory(manifest->candidate_build_directory, true) ||
-                           bench_service_recipe_candidate_directory(manifest->candidate_build_directory)) &&
-                          S_ISDIR(result_info.st_mode);
-                if (sources)
-                {
-                    manifest->result_device = result_info.st_dev;
-                    manifest->result_inode = result_info.st_ino;
-                }
-            }
-#endif
-            bool published = false;
-#if BUSTER_LINUX
-            if (sources)
-            {
-                struct stat throughput_info = {0};
-                errno = 0;
-                published = fstatat(manifest->result_directory, "throughput", &throughput_info,
-                                    AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(throughput_info.st_mode) &&
-                            (throughput_info.st_uid == 0 || throughput_info.st_uid == geteuid()) &&
-                            (throughput_info.st_mode & 077) == 0;
-            }
-#endif
-            bool recovered = false;
-#if BUSTER_LINUX
-            recovered = sources && published && bench_service_recipe_recover_published(arena, manifest);
-#endif
-            bool recorded = !published && sources &&
-                            bench_service_recipe_manifest_write(arena, manifest, S8("prepare"), PROCESS_RESULT_RUNNING);
-            if (!recorded && !recovered)
-            {
-                string_print(S8("error: fixed recipe could not establish its durable running manifest\n"));
-            }
-            else if (recorded)
-            {
-                OsArgumentBuilder builder = os_argument_builder_start(arena);
-                os_argument_builder_append(&builder, driver);
-                os_argument_builder_append(&builder, S8("generate"));
-                os_argument_builder_append(&builder, S8("--build-directory"));
-                os_argument_builder_append(&builder, base_build);
-                os_argument_builder_append(&builder, S8("--config"));
-                os_argument_builder_append(&builder, S8("Release"));
-                os_argument_builder_append(&builder, S8("--cc"));
-                os_argument_builder_append(&builder, S8("clang"));
-                os_argument_builder_append(&builder, S8("--no-include-tests"));
-                os_argument_builder_append(&builder, S8("--no-developer-targets"));
-                os_argument_builder_append(&builder, S8("--no-check-optional-warnings"));
-                os_argument_builder_append(&builder, S8("--no-fuzz"));
-                os_argument_builder_append(&builder, S8("--no-sanitize"));
-                os_argument_builder_append(&builder, S8("--no-time-trace"));
-                os_argument_builder_append(&builder, S8("--no-instrument"));
-                os_argument_builder_append(&builder, S8("--no-lto"));
-                SliceString8 base_generate_arguments = os_argument_builder_flush(&builder);
-                BenchServiceRecipeStage* base_generate_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
-                *base_generate_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("base-generate")};
-                String8 base_read_only_paths = string_format(arena, S8("{S8} {S8}"), base_source, candidate_source);
-                bench_service_recipe_sandbox_process_add(arena, step_add(arena), base_generate_arguments, base_source,
-                                                          base_read_only_paths,
-                                                          base_build, result_root, BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
-                                                          base_generate_stage);
-
-                builder = os_argument_builder_start(arena);
-                os_argument_builder_append(&builder, driver);
-                os_argument_builder_append(&builder, S8("build"));
-                os_argument_builder_append(&builder, S8("--build-directory"));
-                os_argument_builder_append(&builder, base_build);
-                os_argument_builder_append(&builder, S8("--config"));
-                os_argument_builder_append(&builder, S8("Release"));
-                os_argument_builder_append(&builder, S8("-t"));
-                os_argument_builder_append(&builder, S8("ide"));
-                os_argument_builder_append(&builder, S8("--"));
-                os_argument_builder_append(&builder, S8("-j1"));
-                SliceString8 base_build_arguments = os_argument_builder_flush(&builder);
-                BenchServiceRecipeStage* base_build_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
-                *base_build_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("base-build")};
-                String8 base_build_read_only_paths = string_format(arena, S8("{S8} {S8}"), base_source, candidate_source);
-                bench_service_recipe_sandbox_process_add(arena, step_add(arena), base_build_arguments, base_source,
-                                                         base_build_read_only_paths,
-                                                         base_build, result_root, BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
-                                                         base_build_stage);
-
-                builder = os_argument_builder_start(arena);
-                os_argument_builder_append(&builder, driver);
-                os_argument_builder_append(&builder, S8("generate"));
-                os_argument_builder_append(&builder, S8("--build-directory"));
-                os_argument_builder_append(&builder, candidate_stage_build);
-                os_argument_builder_append(&builder, S8("--config"));
-                os_argument_builder_append(&builder, S8("Release"));
-                os_argument_builder_append(&builder, S8("--cc"));
-                os_argument_builder_append(&builder, S8("clang"));
-                os_argument_builder_append(&builder, S8("--no-include-tests"));
-                os_argument_builder_append(&builder, S8("--no-developer-targets"));
-                os_argument_builder_append(&builder, S8("--no-check-optional-warnings"));
-                os_argument_builder_append(&builder, S8("--no-fuzz"));
-                os_argument_builder_append(&builder, S8("--no-sanitize"));
-                os_argument_builder_append(&builder, S8("--no-time-trace"));
-                os_argument_builder_append(&builder, S8("--no-instrument"));
-                os_argument_builder_append(&builder, S8("--no-lto"));
-                SliceString8 candidate_generate_arguments = os_argument_builder_flush(&builder);
-                BenchServiceRecipeStage* candidate_generate_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
-                *candidate_generate_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("candidate-generate")};
-                bench_service_recipe_candidate_process_add(arena, step_add(arena), candidate_generate_arguments,
-                                                           candidate_source, base_source, base_build, candidate_source,
-                                                           candidate_stage_build, result_root, candidate_generate_stage);
-
-                builder = os_argument_builder_start(arena);
-                os_argument_builder_append(&builder, driver);
-                os_argument_builder_append(&builder, S8("build"));
-                os_argument_builder_append(&builder, S8("--build-directory"));
-                os_argument_builder_append(&builder, candidate_stage_build);
-                os_argument_builder_append(&builder, S8("--config"));
-                os_argument_builder_append(&builder, S8("Release"));
-                os_argument_builder_append(&builder, S8("-t"));
-                os_argument_builder_append(&builder, S8("ide"));
-                os_argument_builder_append(&builder, S8("--"));
-                os_argument_builder_append(&builder, S8("-j1"));
-                SliceString8 candidate_build_arguments = os_argument_builder_flush(&builder);
-                BenchServiceRecipeStage* candidate_build_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
-                *candidate_build_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("candidate-build")};
-                bench_service_recipe_candidate_process_add(arena, step_add(arena), candidate_build_arguments,
-                                                           candidate_source, base_source, base_build, candidate_source,
-                                                           candidate_stage_build, result_root, candidate_build_stage);
-
-                builder = os_argument_builder_start(arena);
-                os_argument_builder_append(&builder, bench_service_recipe_throughput_override.length ?
-                                                     bench_service_recipe_throughput_override : S8(BENCH_SERVICE_RECIPE_THROUGHPUT));
-                os_argument_builder_append(&builder, S8("run"));
-                os_argument_builder_append(&builder, S8("--baseline"));
-                os_argument_builder_append(&builder, base_binary);
-                os_argument_builder_append(&builder, S8("--candidate"));
-                os_argument_builder_append(&builder, candidate_binary);
-                os_argument_builder_append(&builder, S8("--output"));
-                os_argument_builder_append(&builder, throughput_output);
-                os_argument_builder_append(&builder, S8("--baseline-id"));
-                os_argument_builder_append(&builder, base_revision);
-                os_argument_builder_append(&builder, S8("--candidate-id"));
-                os_argument_builder_append(&builder, candidate_revision);
-                os_argument_builder_append(&builder, S8("--profile"));
-                os_argument_builder_append(&builder, S8("smoke"));
-                os_argument_builder_append(&builder, S8("--mode"));
-                os_argument_builder_append(&builder, S8("all"));
-                os_argument_builder_append(&builder, S8("--pairs"));
-                os_argument_builder_append(&builder, S8("1"));
-                os_argument_builder_append(&builder, S8("--warmups"));
-                os_argument_builder_append(&builder, S8("1"));
-                os_argument_builder_append(&builder, S8("--no-guard"));
-                SliceString8 throughput_arguments = os_argument_builder_flush(&builder);
-                BenchServiceRecipeStage* throughput_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
-                *throughput_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("throughput")};
-                String8 throughput_read_only_paths = string_format(arena, S8("{S8} {S8} {S8} {S8}"), base_source, base_build,
-                                                                   candidate_source, candidate_build);
-                bench_service_recipe_sandbox_process_add(arena, step_add(arena), throughput_arguments, candidate_source,
-                                                         throughput_read_only_paths, throughput_output, result_root,
-                                                         BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE, throughput_stage);
-                result = PROCESS_RESULT_SUCCESS;
-            }
-        }
-    }
-    return result;
-}
-
-#include "tools/bench_service/zen5_recipe.c"
-
-#if BUSTER_LINUX
-typedef struct BenchServiceRecipeTestFixture BenchServiceRecipeTestFixture;
-struct BenchServiceRecipeTestFixture
-{
-    char root[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char workspace[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char attempt[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char result[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char base_source[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char base_build[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char candidate_source[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char candidate_build[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char base_binary[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char candidate_binary[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char identity[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char base_manifest[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char candidate_manifest[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char wrong_result[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char sentinel[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char manifest[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char temporary[BENCH_SERVICE_RECIPE_PATH_CAP];
-};
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_write(char const* path, char const* bytes, mode_t mode)
-{
-    int descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, mode);
-    bool ok = descriptor >= 0;
-    size_t length = bytes ? strlen(bytes) : 0;
-    for (size_t offset = 0; ok && offset < length;)
-    {
-        ssize_t count = write(descriptor, bytes + offset, length - offset);
-        if (count < 0 && errno == EINTR) continue;
-        ok = count > 0;
-        if (ok) offset += (size_t)count;
-    }
-    if (ok) ok = fsync(descriptor) == 0;
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    if (ok) ok = chmod(path, mode) == 0;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_mkdir(char const* path, mode_t mode)
-{
-    bool ok = mkdir(path, mode) == 0 || errno == EEXIST;
-    struct stat info = {0};
-    if (ok) ok = stat(path, &info) == 0 && S_ISDIR(info.st_mode) && chmod(path, mode) == 0;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_contains(char const* path, char const* needle)
-{
-    char bytes[BENCH_SERVICE_RECIPE_MANIFEST_CAP + 1];
-    int descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-    size_t used = 0;
-    bool ok = descriptor >= 0;
-    while (ok && used < BENCH_SERVICE_RECIPE_MANIFEST_CAP)
-    {
-        ssize_t count = read(descriptor, bytes + used, BENCH_SERVICE_RECIPE_MANIFEST_CAP - used);
-        if (count < 0 && errno == EINTR) continue;
-        if (count < 0) ok = false;
-        else if (!count) break;
-        else used += (size_t)count;
-    }
-    if (ok)
-    {
-        char extra;
-        ok = read(descriptor, &extra, 1) == 0;
-    }
-    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
-    if (ok)
-    {
-        bytes[used] = 0;
-        ok = strstr(bytes, needle) != NULL;
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_no_receipt_temporary(char const* directory)
-{
-    DIR* stream = opendir(directory);
-    bool ok = stream != NULL;
-    if (stream)
-    {
-        errno = 0;
-        struct dirent* entry = NULL;
-        while (ok && (entry = readdir(stream)) != NULL)
-        {
-            char const* name = entry->d_name;
-            u64 length = strlen(name);
-            bool receipt = !strncmp(name, BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME,
-                                    strlen(BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME)) ||
-                           !strncmp(name, BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME,
-                                    strlen(BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME));
-            ok = !receipt || length < 4 || strcmp(name + length - 4, ".tmp") != 0;
-            if (ok) errno = 0;
-        }
-        if (errno) ok = false;
-        if (closedir(stream) != 0) ok = false;
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_child_path(char output[BENCH_SERVICE_RECIPE_PATH_CAP],
-                                                               char const* parent, char const* child)
-{
-    size_t parent_length = parent ? strlen(parent) : 0;
-    size_t child_length = child ? strlen(child) : 0;
-    bool ok = parent && child && parent_length > 0 && parent_length + 1 + child_length < BENCH_SERVICE_RECIPE_PATH_CAP;
-    if (ok)
-    {
-        memcpy(output, parent, parent_length);
-        output[parent_length] = '/';
-        memcpy(output + parent_length + 1, child, child_length + 1);
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_fixture_make(BenchServiceRecipeTestFixture* fixture, u32 serial,
-                                                                 char const* base_revision, char const* candidate_revision)
-{
-    *fixture = (BenchServiceRecipeTestFixture){0};
-    char root_template[BENCH_SERVICE_RECIPE_PATH_CAP] = "/tmp/buster-bench-recipe-XXXXXX";
-    bool ok = mkdtemp(root_template) != NULL;
-    if (ok) snprintf(fixture->root, sizeof(fixture->root), "%s", root_template);
-    int length = ok ? snprintf(fixture->workspace, sizeof(fixture->workspace), "%s/workspaces", fixture->root) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->workspace) && bench_service_recipe_test_mkdir(fixture->workspace, 02710);
-    length = ok ? snprintf(fixture->attempt, sizeof(fixture->attempt), "%s/job-1-attempt-2", fixture->workspace) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->attempt) && bench_service_recipe_test_mkdir(fixture->attempt, 02710);
-    char base[BENCH_SERVICE_RECIPE_PATH_CAP], candidate[BENCH_SERVICE_RECIPE_PATH_CAP], results[BENCH_SERVICE_RECIPE_PATH_CAP];
-    length = ok ? snprintf(base, sizeof(base), "%s/base", fixture->attempt) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(base) && bench_service_recipe_test_mkdir(base, 02710);
-    length = ok ? snprintf(candidate, sizeof(candidate), "%s/candidate", fixture->attempt) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(candidate) && bench_service_recipe_test_mkdir(candidate, 02710);
-    length = ok ? snprintf(fixture->base_source, sizeof(fixture->base_source), "%s/source", base) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_source) && bench_service_recipe_test_mkdir(fixture->base_source, 0700);
-    length = ok ? snprintf(fixture->base_build, sizeof(fixture->base_build), "%s/build", base) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_build) && bench_service_recipe_test_mkdir(fixture->base_build, 0700);
-    length = ok ? snprintf(fixture->candidate_source, sizeof(fixture->candidate_source), "%s/source", candidate) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->candidate_source) && bench_service_recipe_test_mkdir(fixture->candidate_source, 0700);
-    length = ok ? snprintf(fixture->candidate_build, sizeof(fixture->candidate_build), "%s/build", candidate) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->candidate_build) && bench_service_recipe_test_mkdir(fixture->candidate_build, 0700);
-    length = ok ? snprintf(results, sizeof(results), "%s/results", fixture->workspace) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(results) && bench_service_recipe_test_mkdir(results, 0700);
-    length = ok ? snprintf(fixture->result, sizeof(fixture->result), "%s/job-1-attempt-2", results) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->result) && bench_service_recipe_test_mkdir(fixture->result, 0700);
-    length = ok ? snprintf(fixture->identity, sizeof(fixture->identity), "%s/.identity", fixture->attempt) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->identity);
-    if (ok)
-    {
-        char identity[1024];
-        int identity_length = snprintf(identity, sizeof(identity),
-                                       "BQ-WORKSPACE-V1\njob=1\ntoken=2\nrecipe=validate-buster-v1\nbase=%s\ncandidate=%s\n",
-                                       base_revision, candidate_revision);
-        ok = identity_length > 0 && (size_t)identity_length < sizeof(identity) &&
-             bench_service_recipe_test_write(fixture->identity, identity, 0400);
-    }
-    length = ok ? snprintf(fixture->base_manifest, sizeof(fixture->base_manifest), "%s/.source-manifest", fixture->base_source) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_manifest);
-    length = ok ? snprintf(fixture->candidate_manifest, sizeof(fixture->candidate_manifest), "%s/.source-manifest", fixture->candidate_source) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->candidate_manifest);
-    if (ok)
-    {
-        char manifest[512];
-        int manifest_length = snprintf(manifest, sizeof(manifest), "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n",
-                                       base_revision);
-        ok = manifest_length > 0 && (size_t)manifest_length < sizeof(manifest) &&
-             bench_service_recipe_test_write(fixture->base_manifest, manifest, 0400);
-        manifest_length = snprintf(manifest, sizeof(manifest), "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n",
-                                   candidate_revision);
-        ok = ok && manifest_length > 0 && (size_t)manifest_length < sizeof(manifest) &&
-             bench_service_recipe_test_write(fixture->candidate_manifest, manifest, 0400);
-        ok = ok && chmod(fixture->base_source, 0550) == 0 && chmod(fixture->candidate_source, 0550) == 0;
-    }
-    length = ok ? snprintf(fixture->base_binary, sizeof(fixture->base_binary), "%s/Release/ide", fixture->base_build) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_binary);
-    length = ok ? snprintf(fixture->candidate_binary, sizeof(fixture->candidate_binary), "%s/Release/ide", fixture->candidate_build) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->candidate_binary);
-    length = ok ? snprintf(fixture->manifest, sizeof(fixture->manifest), "%s/validate-buster-v1.manifest", fixture->result) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->manifest);
-    length = ok ? snprintf(fixture->temporary, sizeof(fixture->temporary), "%s/validate-buster-v1.manifest.tmp", fixture->result) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->temporary);
-    length = ok ? snprintf(fixture->sentinel, sizeof(fixture->sentinel), "%s/sentinel", fixture->root) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->sentinel);
-    length = ok ? snprintf(fixture->wrong_result, sizeof(fixture->wrong_result), "%s/wrong-result-%u", fixture->workspace, serial) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->wrong_result);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_test_run(Arena* arena, BenchServiceRecipeTestFixture const* fixture,
-                                                                String8 result_root)
-{
-    String8 arguments[] = {S8("1"), S8("2"), string_from_pointer(fixture->workspace),
-                           S8("1111111111111111111111111111111111111111"),
-                           S8("2222222222222222222222222222222222222222"), result_root};
-    program.build_graph = (BuildGraph){0};
-    ProcessResult added = bench_service_recipe_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
-    ProcessResult result = added == PROCESS_RESULT_SUCCESS ? entry_point() : added;
-    program.build_graph = (BuildGraph){0};
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL void bench_service_recipe_test_fixture_cleanup(Arena* arena, BenchServiceRecipeTestFixture const* fixture)
-{
-    /* The fixture deliberately models read-only materialized sources. Restore
-     * parent write permission before deleting the private test tree so a
-     * failed case cannot leave source manifests behind in /tmp. */
-    chmod(fixture->base_source, 0700);
-    chmod(fixture->candidate_source, 0700);
-    chmod(fixture->base_manifest, 0600);
-    chmod(fixture->candidate_manifest, 0600);
-    chmod(fixture->base_build, 0700);
-    chmod(fixture->candidate_build, 0700);
-    chmod(fixture->base_binary, 0700);
-    chmod(fixture->candidate_binary, 0700);
-    char base_release[BENCH_SERVICE_RECIPE_PATH_CAP], candidate_release[BENCH_SERVICE_RECIPE_PATH_CAP];
-    if (bench_service_recipe_test_child_path(base_release, fixture->base_build, "Release")) chmod(base_release, 0700);
-    if (bench_service_recipe_test_child_path(candidate_release, fixture->candidate_build, "Release")) chmod(candidate_release, 0700);
-    char base_nested[BENCH_SERVICE_RECIPE_PATH_CAP];
-    if (bench_service_recipe_test_child_path(base_nested, fixture->base_build, "CMakeFiles/nested")) chmod(base_nested, 0700);
-    if (bench_service_recipe_test_child_path(base_nested, fixture->base_build, "CMakeFiles")) chmod(base_nested, 0700);
-    remove_path_recursive(arena, string_from_pointer(fixture->root));
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_script_setup(Arena* arena, char script_root[BENCH_SERVICE_RECIPE_PATH_CAP])
-{
-    char root_template[BENCH_SERVICE_RECIPE_PATH_CAP] = "/tmp/buster-bench-recipe-scripts-XXXXXX";
-    bool ok = mkdtemp(root_template) != NULL;
-    if (ok) snprintf(script_root, BENCH_SERVICE_RECIPE_PATH_CAP, "%s", root_template);
-    char driver[BENCH_SERVICE_RECIPE_PATH_CAP], throughput[BENCH_SERVICE_RECIPE_PATH_CAP];
-    int driver_length = ok ? snprintf(driver, sizeof(driver), "%s/driver", script_root) : -1;
-    int throughput_length = ok ? snprintf(throughput, sizeof(throughput), "%s/throughput", script_root) : -1;
-    char driver_script[4096], throughput_script[4096];
-    int driver_script_length = snprintf(driver_script, sizeof(driver_script),
-        "#!/bin/sh\n"
-        "set -eu\n"
-        "mode=\"${1:-}\"\n"
-        "build=\"\"\n"
-        "while [ $# -gt 0 ]; do\n"
-        "  if [ \"$1\" = \"--build-directory\" ]; then build=\"$2\"; shift 2; else shift; fi\n"
-        "done\n"
-        "[ -n \"$build\" ] || exit 40\n"
-        "if [ \"$mode\" = generate ]; then\n"
-        "  if [ \"$build\" != \"${build%%/candidate/staging}\" ]; then rm -rf \"$build/throughput-results\"; fi\n"
-        "  mkdir -p \"$build/Release\"; exit 0\n"
-        "fi\n"
-        "if [ \"$mode\" = build ]; then\n"
-        "  if [ -e \"%s/fail\" ] && [ \"$build\" != \"${build%%/candidate/staging}\" ]; then exit 42; fi\n"
-        "  printf '#!/bin/sh\\nexit 0\\n' > \"$build/Release/ide\"\n"
-        "  chmod 0755 \"$build/Release/ide\"\n"
-        "  if [ \"$build\" != \"${build%%/base/build}\" ]; then mkdir -p \"$build/CMakeFiles/nested\"; printf 'metadata\\n' > \"$build/CMakeFiles/nested/data.txt\"; fi\n"
-        "  exit 0\n"
-        "fi\n"
-        "exit 41\n", script_root);
-    int throughput_script_length = snprintf(throughput_script, sizeof(throughput_script),
-        "#!/bin/sh\n"
-        "set -eu\n"
-        "baseline=\"\"\n"
-        "candidate=\"\"\n"
-        "output=\"\"\n"
-        "while [ $# -gt 0 ]; do\n"
-        "  if [ \"$1\" = \"--baseline\" ]; then baseline=\"$2\"; shift 2; elif [ \"$1\" = \"--candidate\" ]; then candidate=\"$2\"; shift 2; elif [ \"$1\" = \"--output\" ]; then output=\"$2\"; shift 2; else shift; fi\n"
-        "done\n"
-        "[ -n \"$output\" ] || exit 40\n"
-        "mkdir -p \"$output\" && printf 'started\\n' > \"$output/.throughput-started\"\n"
-        "[ -n \"$output\" ] && mkdir -p \"$output/nested\" && printf 'synthetic-throughput\\n' > \"$output/result.txt\" && printf 'synthetic-nested-throughput\\n' > \"$output/nested/result.txt\"\n"
-        "if [ -e \"%s/invalid-output\" ]; then printf 'invalid\\n' > \"$output/bad name\"; fi\n"
-        "if [ -e \"%s/tamper\" ]; then printf 'tampered\\n' > \"$baseline\"; chmod 0555 \"$baseline\"; fi\n"
-        "if [ -e \"%s/candidate-tamper\" ]; then printf 'tampered\\n' > \"$candidate\"; chmod 0555 \"$candidate\"; fi\n"
-        "exit 0\n", script_root, script_root, script_root);
-    ok = ok && driver_length > 0 && (size_t)driver_length < sizeof(driver) && throughput_length > 0 &&
-         (size_t)throughput_length < sizeof(throughput) && driver_script_length > 0 &&
-         (size_t)driver_script_length < sizeof(driver_script) && throughput_script_length > 0 &&
-         (size_t)throughput_script_length < sizeof(throughput_script) && bench_service_recipe_test_write(driver, driver_script, 0700) &&
-         bench_service_recipe_test_write(throughput, throughput_script, 0700);
-    if (ok)
-    {
-        bench_service_recipe_driver_override = string_duplicate_arena(arena, string_from_pointer(driver), true);
-        bench_service_recipe_throughput_override = string_duplicate_arena(arena, string_from_pointer(throughput), true);
-        bench_service_recipe_test_candidate_gid = getegid();
-        bench_service_recipe_test_candidate_gid_set = true;
-    }
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_candidate_mode(char const* path, bool directory, bool executable)
-{
-    struct stat info = {0};
-    bool ok = path && lstat(path, &info) == 0 && (directory ? S_ISDIR(info.st_mode) : S_ISREG(info.st_mode)) &&
-              info.st_uid == geteuid() && (info.st_mode & 0022) == 0;
-    if (ok && directory) ok = (info.st_mode & 0050) == 0050;
-    if (ok && !directory) ok = (info.st_mode & 0040) == 0040 && (!executable || (info.st_mode & 0010) == 0010);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_candidate_traverse_mode(char const* path)
-{
-    struct stat info = {0};
-    bool ok = path && lstat(path, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
-              (info.st_mode & 0022) == 0 && (info.st_mode & 0010) == 0010;
-    return ok;
-}
-
-#if defined(__x86_64__) || defined(__aarch64__)
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sgid_test_mode(char const* path, mode_t mode, gid_t group)
-{
-    struct stat info = {0};
-    bool ok = lstat(path, &info) == 0 && info.st_uid == geteuid() && info.st_gid == group &&
-              (info.st_mode & 07777) == mode;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sgid_test_child(Arena* arena)
-{
-    char root[] = "/tmp/buster-recipe-sgid-XXXXXX";
-    bool ok = mkdtemp(root) != NULL;
-    gid_t group = getegid();
-    bool distinct = false;
-    if (ok) ok = bq_test_sgid_fixture_group(root, &group, &distinct);
-    char visible[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, private_tree[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    char visible_nested[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, private_nested[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    char visible_exe[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, private_exe[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    char visible_data[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, private_data[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    char stage[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, output[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    char visible_control[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    ok = ok && bench_service_recipe_test_child_path(visible, root, "visible") &&
-         bench_service_recipe_test_child_path(private_tree, root, "private") &&
-         bench_service_recipe_test_child_path(visible_nested, visible, "nested") &&
-         bench_service_recipe_test_child_path(private_nested, private_tree, "nested") &&
-         bench_service_recipe_test_child_path(visible_exe, visible_nested, "executable") &&
-         bench_service_recipe_test_child_path(private_exe, private_nested, "executable") &&
-         bench_service_recipe_test_child_path(visible_data, visible_nested, "data") &&
-         bench_service_recipe_test_child_path(private_data, private_nested, "data") &&
-         bench_service_recipe_test_child_path(stage, root, "staging") &&
-         bench_service_recipe_test_child_path(output, stage, "throughput-results") &&
-         bench_service_recipe_test_child_path(visible_control, root, "visible-control");
-    /* Arrange special bits before the filter so freezing must remove them. */
-    if (ok)
-    {
-        ok = bench_service_recipe_test_mkdir(visible, 02770) &&
-             bench_service_recipe_test_mkdir(private_tree, 02770) &&
-             bench_service_recipe_test_mkdir(visible_nested, 02700) &&
-             bench_service_recipe_test_mkdir(private_nested, 02700) &&
-             bench_service_recipe_test_mkdir(visible_control, 02710) &&
-             bench_service_recipe_test_write(visible_exe, "x", 06755) &&
-             bench_service_recipe_test_write(private_exe, "x", 06755) &&
-             bench_service_recipe_test_write(visible_data, "d", 02640) &&
-             bench_service_recipe_test_write(private_data, "d", 02640) &&
-             bench_service_recipe_sgid_test_mode(visible_nested, 02700, group) &&
-             bench_service_recipe_sgid_test_mode(private_exe, 06755, group);
-    }
-    int parent = ok ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    if (ok) ok = parent >= 0 && bq_test_install_sgid_restriction();
-    if (!ok) fprintf(stderr, "SGID_SANDBOX_TEST recipe setup/filter failed errno=%d\n", errno);
-    if (ok)
-    {
-        mode_t modes[] = {02710, 02750, 02700, 02770};
-        mode_t masks[] = {0077, 0022, 0000, 0777};
-        int controlled = bench_service_recipe_create_inherited_group_directory(parent, "controlled", 02770);
-        ok = controlled >= 0 && bq_test_sgid_controls(parent, "controlled");
-        if (controlled >= 0) close(controlled);
-        for (u32 m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
-        {
-            for (u32 u = 0; u < BUSTER_ARRAY_LENGTH(masks); u += 1)
-            {
-                char name[32];
-                snprintf(name, sizeof(name), "mode-%u-umask-%u", m, u);
-                mode_t old = umask(masks[u]);
-                int child = bench_service_recipe_create_inherited_group_directory(parent, name, modes[m]);
-                mode_t observed = umask(masks[u]);
-                umask(old);
-                struct stat info = {0};
-                bool made = child >= 0 && fstat(child, &info) == 0 && info.st_uid == geteuid() &&
-                            info.st_gid == group && (info.st_mode & 07777) == modes[m] && observed == masks[u];
-                if (!made) fprintf(stderr, "SGID_SANDBOX_TEST recipe mode=%o umask=%o errno=%d\n", modes[m], masks[u], errno);
-                ok = ok && made;
-                if (child >= 0) close(child);
-                old = umask(masks[u]);
-                child = bench_service_recipe_create_inherited_group_directory(parent, name, modes[m]);
-                int collision_errno = errno;
-                observed = umask(masks[u]);
-                umask(old);
-                ok = ok && child < 0 && collision_errno == EEXIST && observed == masks[u];
-                if (child >= 0) close(child);
-                if (unlinkat(parent, name, AT_REMOVEDIR) != 0) ok = false;
-            }
-        }
-        mode_t old = umask(0022);
-        int invalid = bench_service_recipe_create_inherited_group_directory(-1, "invalid", 02770);
-        mode_t observed = umask(old);
-        ok = ok && invalid < 0 && observed == 0022;
-        if (invalid >= 0) close(invalid);
-        int missing = openat(parent, "missing", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        ok = ok && missing < 0 && errno == ENOENT && mkdirat(parent, "no-sgid", 0700) == 0;
-        int no_sgid = openat(parent, "no-sgid", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        ok = ok && no_sgid >= 0 && fchmod(no_sgid, 0700) == 0;
-        old = umask(0077);
-        int refused = bench_service_recipe_create_inherited_group_directory(no_sgid, "child", 02770);
-        observed = umask(old);
-        ok = ok && refused < 0 && observed == 0077;
-        if (refused >= 0) close(refused);
-        if (no_sgid >= 0) close(no_sgid);
-        if (unlinkat(parent, "no-sgid", AT_REMOVEDIR) != 0) ok = false;
-
-        ok = ok && bench_service_recipe_prepare_candidate_stage(string_from_pointer(root), string_from_pointer(stage)) &&
-             bench_service_recipe_prepare_throughput_output(arena, string_from_pointer(stage), string_from_pointer(output)) &&
-             bench_service_recipe_sgid_test_mode(stage, 02770, group) &&
-             bench_service_recipe_sgid_test_mode(output, 02770, group) &&
-             bench_service_recipe_verify_visible_directory(string_from_pointer(visible_control), 02710);
-        if (chmod(visible_control, 0700) != 0) ok = false;
-        ok = ok && !bench_service_recipe_verify_visible_directory(string_from_pointer(visible_control), 02710) &&
-             bench_service_recipe_sgid_test_mode(visible_control, 0700, group);
-        int visible_fd = open(visible, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        int private_fd = open(private_tree, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        ok = ok && visible_fd >= 0 && private_fd >= 0;
-        for (u32 repeat = 0; ok && repeat < 2; repeat += 1)
-        {
-            ok = bench_service_recipe_lock_tree(arena, visible_fd, true) &&
-                 bench_service_recipe_lock_tree(arena, private_fd, false) &&
-                 bench_service_recipe_sgid_test_mode(visible, 0550, group) &&
-                 bench_service_recipe_sgid_test_mode(visible_nested, 0550, group) &&
-                 bench_service_recipe_sgid_test_mode(visible_exe, 0550, group) &&
-                 bench_service_recipe_sgid_test_mode(visible_data, 0440, group) &&
-                 bench_service_recipe_sgid_test_mode(private_tree, 0550, group) &&
-                 bench_service_recipe_sgid_test_mode(private_nested, 0500, group) &&
-                 bench_service_recipe_sgid_test_mode(private_exe, 0555, group) &&
-                 bench_service_recipe_sgid_test_mode(private_data, 0440, group);
-            if (!ok) fprintf(stderr, "SGID_SANDBOX_TEST recipe tree lock repeat=%u errno=%d\n", repeat, errno);
-        }
-        if (visible_fd >= 0) close(visible_fd);
-        if (private_fd >= 0) close(private_fd);
-        if (unlinkat(parent, "controlled", AT_REMOVEDIR) != 0) ok = false;
-    }
-    if (parent >= 0) close(parent);
-    if (visible_nested[0] && access(visible_nested, F_OK) == 0) chmod(visible_nested, 0700);
-    if (private_nested[0] && access(private_nested, F_OK) == 0) chmod(private_nested, 0700);
-    if (visible[0] && access(visible, F_OK) == 0) chmod(visible, 0700);
-    if (private_tree[0] && access(private_tree, F_OK) == 0) chmod(private_tree, 0700);
-    if (root[0] && access(root, F_OK) == 0)
-    {
-        remove_path_recursive(arena, string_from_pointer(root));
-        if (access(root, F_OK) == 0 || errno != ENOENT) ok = false;
-    }
-    char const* required = getenv("BQ_REQUIRE_DISTINCT_GROUP");
-    if (required && !strcmp(required, "1") && !distinct) ok = false;
-    printf("SGID_SANDBOX_TEST recipe result=%s group=%s\n", ok ? "pass" : "fail",
-           distinct ? "different-primary" : "unsupported-different-primary");
-    fflush(stdout);
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sgid_sandbox_test(Arena* arena)
-{
-    pid_t child = fork();
-    bool ok = child >= 0;
-    if (child == 0) _exit(bench_service_recipe_sgid_test_child(arena) ? 0 : 1);
-    if (child > 0)
-    {
-        int status = 0;
-        ok = waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    }
-    return ok;
-}
-#endif
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_exhaust_directory(int directory)
-{
-    /* dup shares the open file, so reading it to the end consumes the pinned
-     * descriptor's own readdir position. */
-    int duplicate = directory >= 0 ? dup(directory) : -1;
-    DIR* stream = duplicate >= 0 ? fdopendir(duplicate) : NULL;
-    bool ok = stream != NULL;
-    if (!stream && duplicate >= 0) close(duplicate);
-    while (ok)
-    {
-        errno = 0;
-        struct dirent* entry = readdir(stream);
-        if (!entry)
-        {
-            ok = errno == 0;
-            break;
-        }
-    }
-    if (stream && closedir(stream) != 0) ok = false;
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_mode(char const* path, mode_t mode)
-{
-    struct stat info = {0};
-    bool ok = lstat(path, &info) == 0 && (info.st_mode & 07777) == mode;
-    return ok;
-}
-
-/* The post-stage walks run on descriptors pinned before the stages created
- * anything. btrfs (Linux 6.5+) never lists entries created after a directory's
- * open file, which reproduced as #880 attempt N2; an exhausted readdir position
- * hides them portably. Both walks must still reach every entry. */
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_pinned_walk_test(Arena* arena, char const* script_root)
-{
-    char build[BENCH_SERVICE_RECIPE_PATH_CAP], nested[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char data[BENCH_SERVICE_RECIPE_PATH_CAP], nested_data[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char tool[BENCH_SERVICE_RECIPE_PATH_CAP], result[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char stale[BENCH_SERVICE_RECIPE_PATH_CAP], temporary[128] = {0};
-    bool ok = bench_service_recipe_test_child_path(build, script_root, "pinned-build") &&
-              bench_service_recipe_test_child_path(nested, build, "nested") &&
-              bench_service_recipe_test_child_path(data, build, "data") &&
-              bench_service_recipe_test_child_path(nested_data, nested, "data") &&
-              bench_service_recipe_test_child_path(tool, nested, "tool") &&
-              bench_service_recipe_test_child_path(result, script_root, "pinned-result") &&
-              mkdir(build, 0700) == 0 && mkdir(result, 0700) == 0;
-    int build_fd = ok ? open(build, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    int result_fd = ok ? open(result, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    ok = ok && build_fd >= 0 && result_fd >= 0 && mkdir(nested, 0700) == 0 &&
-         bench_service_recipe_test_write(data, "data\n", 0600) &&
-         bench_service_recipe_test_write(nested_data, "data\n", 0600) &&
-         bench_service_recipe_test_write(tool, "tool\n", 0700) &&
-         bench_service_recipe_temp_name("throughput", temporary) &&
-         bench_service_recipe_test_child_path(stale, result, temporary) && mkdir(stale, 0700) == 0 &&
-         bench_service_recipe_test_exhaust_directory(build_fd) &&
-         bench_service_recipe_test_exhaust_directory(result_fd);
-    BenchServiceRecipeManifest manifest = {.result_root = string_from_pointer((char8*)result),
-                                           .result_directory = result_fd, .base_build_directory = -1,
-                                           .candidate_build_directory = -1};
-    ok = ok && bench_service_recipe_lock_tree(arena, build_fd, true) &&
-         bench_service_recipe_test_mode(build, 0550) && bench_service_recipe_test_mode(nested, 0550) &&
-         bench_service_recipe_test_mode(data, 0440) && bench_service_recipe_test_mode(nested_data, 0440) &&
-         bench_service_recipe_test_mode(tool, 0550) &&
-         bench_service_recipe_cleanup_throughput_temps(arena, &manifest) && access(stale, F_OK) != 0 && errno == ENOENT;
-    string_print(S8("BENCH_SERVICE_RECIPE_PINNED_WALK_TEST result={S8}\n"), ok ? S8("pass") : S8("fail"));
-    if (build_fd >= 0) close(build_fd);
-    if (result_fd >= 0) close(result_fd);
-    chmod(nested, 0700);
-    chmod(build, 0700);
-    remove_path_recursive(arena, string_from_pointer((char8*)build));
-    remove_path_recursive(arena, string_from_pointer((char8*)result));
-    return ok;
-}
-
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
-{
-    char script_root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    bool ok = bench_service_recipe_test_script_setup(arena, script_root);
-    u32 cases = 1;
-#if defined(__x86_64__) || defined(__aarch64__)
-    bool sandbox_ok = bench_service_recipe_sgid_sandbox_test(arena);
-    ok = ok && sandbox_ok;
-    cases += 1;
-#else
-    string_print(S8("SGID_SANDBOX_TEST recipe status=unsupported-architecture\n"));
-#endif
-    ok = ok && bench_service_recipe_identity_test(arena);
-    ok = ok && bench_service_recipe_pinned_walk_test(arena, script_root);
-    cases += 1;
-    char const* base_revision = "1111111111111111111111111111111111111111";
-    char const* candidate_revision = "2222222222222222222222222222222222222222";
-    char fail_marker[BENCH_SERVICE_RECIPE_PATH_CAP], tamper_marker[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char invalid_output_marker[BENCH_SERVICE_RECIPE_PATH_CAP];
-    char candidate_tamper_marker[BENCH_SERVICE_RECIPE_PATH_CAP];
-    int fail_length = ok ? snprintf(fail_marker, sizeof(fail_marker), "%s/fail", script_root) : -1;
-    int tamper_length = ok ? snprintf(tamper_marker, sizeof(tamper_marker), "%s/tamper", script_root) : -1;
-    int invalid_output_length = ok ? snprintf(invalid_output_marker, sizeof(invalid_output_marker), "%s/invalid-output", script_root) : -1;
-    int candidate_tamper_length = ok ? snprintf(candidate_tamper_marker, sizeof(candidate_tamper_marker), "%s/candidate-tamper", script_root) : -1;
-    ok = ok && fail_length > 0 && (size_t)fail_length < sizeof(fail_marker) && tamper_length > 0 &&
-         (size_t)tamper_length < sizeof(tamper_marker) && candidate_tamper_length > 0 &&
-         (size_t)candidate_tamper_length < sizeof(candidate_tamper_marker) && invalid_output_length > 0 &&
-         (size_t)invalid_output_length < sizeof(invalid_output_marker);
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        ok = bench_service_recipe_test_fixture_make(&fixture, 1, base_revision, candidate_revision);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool positive_status = bench_service_recipe_test_contains(fixture.manifest, "status=succeeded");
-        bool positive_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
-        bool positive_namespace = bench_service_recipe_test_contains(fixture.manifest, "namespace-policy=private-workspace-post-run-identity");
-        bool positive_base_digest = bench_service_recipe_test_contains(fixture.manifest, "base-binary-sha256=");
-        bool positive_candidate_digest = bench_service_recipe_test_contains(fixture.manifest, "candidate-binary-sha256=");
-        bool positive_manifest = access(fixture.manifest, F_OK) == 0;
-        char positive_throughput_line[BENCH_SERVICE_RECIPE_PATH_CAP + 32];
-        char positive_candidate_line[BENCH_SERVICE_RECIPE_PATH_CAP + 32];
-        int positive_throughput_length = snprintf(positive_throughput_line, sizeof(positive_throughput_line),
-                                                  "throughput-output=%s/candidate/staging/throughput-results",
-                                                  fixture.attempt);
-        int positive_candidate_length = snprintf(positive_candidate_line, sizeof(positive_candidate_line),
-                                                 "candidate-build=%s/candidate/build", fixture.attempt);
-        bool positive_manifest_paths = positive_throughput_length > 0 &&
-                                       (size_t)positive_throughput_length < sizeof(positive_throughput_line) &&
-                                       positive_candidate_length > 0 && (size_t)positive_candidate_length < sizeof(positive_candidate_line) &&
-                                       bench_service_recipe_test_contains(fixture.manifest, positive_throughput_line) &&
-                                       bench_service_recipe_test_contains(fixture.manifest, positive_candidate_line);
-        char positive_bundle_path[BENCH_SERVICE_RECIPE_PATH_CAP];
-        int positive_bundle_length = snprintf(positive_bundle_path, sizeof(positive_bundle_path),
-                                              "%s/%s", fixture.result, BENCH_SERVICE_RECIPE_BUNDLE_NAME);
-        struct stat bundle_info = {0};
-        bool positive_bundle = positive_bundle_length > 0 && (size_t)positive_bundle_length < sizeof(positive_bundle_path) &&
-                               lstat(positive_bundle_path, &bundle_info) == 0 && S_ISREG(bundle_info.st_mode) &&
-                               (bundle_info.st_mode & 0222) == 0 &&
-                               bench_service_recipe_test_contains(positive_bundle_path, "BQ-BUNDLE-V1\n") &&
-                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/result.txt") &&
-                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/nested/result.txt");
-        bool positive_bundle_digest = !bench_service_recipe_test_contains(fixture.manifest, "bundle-sha256=\n");
-        char base_receipt[BENCH_SERVICE_RECIPE_PATH_CAP], candidate_receipt[BENCH_SERVICE_RECIPE_PATH_CAP];
-        bool receipt_paths = bench_service_recipe_test_child_path(base_receipt, fixture.result,
-                                                                  BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME) &&
-                             bench_service_recipe_test_child_path(candidate_receipt, fixture.result,
-                                                                  BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME);
-        bool positive_receipts = receipt_paths &&
-                                 bench_service_recipe_test_contains(base_receipt, "BQ-FROZEN-TREE-V1\nstage=base-build\njob-id=1\nattempt-token=2\n") &&
-                                 bench_service_recipe_test_contains(candidate_receipt, "BQ-FROZEN-TREE-V1\nstage=candidate-build\njob-id=1\nattempt-token=2\n") &&
-                                 bench_service_recipe_test_contains(base_receipt, "node-count=6\n") &&
-                                 bench_service_recipe_test_contains(candidate_receipt, "node-count=3\n") &&
-                                 bench_service_recipe_test_contains(base_receipt, "434d616b6546696c65732f6e65737465642f646174612e747874") &&
-                                 bench_service_recipe_test_contains(base_receipt, "scan-complete-monotonic-us=") &&
-                                 bench_service_recipe_test_contains(candidate_receipt, "node-lines-sha256=") &&
-                                 bench_service_recipe_test_contains(positive_bundle_path, BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME) &&
-                                 bench_service_recipe_test_contains(positive_bundle_path, BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME);
-        bool positive_tmp = access(fixture.temporary, F_OK) != 0;
-        struct stat manifest_info = {0};
-        bool positive_mode = stat(fixture.manifest, &manifest_info) == 0 && (manifest_info.st_mode & 0222) == 0;
-        char attempt_candidate[BENCH_SERVICE_RECIPE_PATH_CAP], attempt_base[BENCH_SERVICE_RECIPE_PATH_CAP];
-        bool candidate_parent_mode = bench_service_recipe_test_child_path(attempt_candidate, fixture.attempt, "candidate") &&
-                                     bench_service_recipe_test_child_path(attempt_base, fixture.attempt, "base") &&
-                                     bench_service_recipe_test_candidate_traverse_mode(fixture.workspace) &&
-                                     bench_service_recipe_test_candidate_traverse_mode(fixture.attempt) &&
-                                     bench_service_recipe_test_candidate_traverse_mode(attempt_candidate) &&
-                                     bench_service_recipe_test_candidate_traverse_mode(attempt_base);
-        char base_release[BENCH_SERVICE_RECIPE_PATH_CAP], candidate_release[BENCH_SERVICE_RECIPE_PATH_CAP];
-        bool candidate_tree_mode = bench_service_recipe_test_child_path(base_release, fixture.base_build, "Release") &&
-                                   bench_service_recipe_test_child_path(candidate_release, fixture.candidate_build, "Release") &&
-                                   bench_service_recipe_test_candidate_mode(fixture.base_source, true, false) &&
-                                   bench_service_recipe_test_candidate_mode(fixture.candidate_source, true, false) &&
-                                   bench_service_recipe_test_candidate_mode(fixture.base_build, true, false) &&
-                                   bench_service_recipe_test_candidate_mode(fixture.candidate_build, true, false) &&
-                                   bench_service_recipe_test_candidate_mode(base_release, true, false) &&
-                                   bench_service_recipe_test_candidate_mode(candidate_release, true, false) &&
-                                   bench_service_recipe_test_candidate_mode(fixture.base_binary, false, true) &&
-                                   bench_service_recipe_test_candidate_mode(fixture.candidate_binary, false, true);
-        ok = ok && result == PROCESS_RESULT_SUCCESS && positive_status && positive_stage && positive_namespace && positive_manifest_paths && positive_receipts && positive_base_digest &&
-             positive_candidate_digest && positive_manifest && positive_bundle && positive_bundle_digest && positive_tmp && positive_mode &&
-             candidate_parent_mode && candidate_tree_mode;
-        chmod(fixture.base_source, 0700);
-        chmod(fixture.candidate_source, 0700);
-        chmod(fixture.base_build, 0700);
-        chmod(fixture.candidate_build, 0700);
-        chmod(fixture.base_binary, 0700);
-        chmod(fixture.candidate_binary, 0700);
-        if (bench_service_recipe_test_child_path(base_release, fixture.base_build, "Release")) chmod(base_release, 0700);
-        if (bench_service_recipe_test_child_path(candidate_release, fixture.candidate_build, "Release")) chmod(candidate_release, 0700);
-        char base_nested[BENCH_SERVICE_RECIPE_PATH_CAP];
-        if (bench_service_recipe_test_child_path(base_nested, fixture.base_build, "CMakeFiles/nested")) chmod(base_nested, 0700);
-        if (bench_service_recipe_test_child_path(base_nested, fixture.base_build, "CMakeFiles")) chmod(base_nested, 0700);
-        remove_path_recursive(arena, string_from_pointer(fixture.attempt));
-        bool retained = access(fixture.attempt, F_OK) != 0 && access(fixture.manifest, F_OK) == 0 &&
-                        bench_service_recipe_test_contains(fixture.manifest, "status=succeeded") &&
-                        bench_service_recipe_test_contains(fixture.manifest, "result-root=");
-        ok = ok && retained;
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        ok = bench_service_recipe_test_fixture_make(&fixture, 2, base_revision, candidate_revision) &&
-             bench_service_recipe_test_write(fail_marker, "fail\n", 0600);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool failed_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
-        bool failed_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=candidate-build");
-        bool failed_process = bench_service_recipe_test_contains(fixture.manifest, "process-result=failed");
-        bool failed_manifest = access(fixture.manifest, F_OK) == 0;
-        ok = ok && result == PROCESS_RESULT_FAILED && failed_status && failed_stage && failed_process && failed_manifest;
-        unlink(fail_marker);
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    for (u32 scenario = 0; ok && scenario < 4; scenario += 1)
-    {
-        /* Base and candidate publication collisions, bounded serialization,
-         * and an actual post-hash metadata mutation all stop the graph before
-         * the synthetic throughput executable can write its start marker. */
-        BenchServiceRecipeTestFixture fixture;
-        bool fixture_ok = bench_service_recipe_test_fixture_make(&fixture, 13 + scenario,
-                                                                 base_revision, candidate_revision);
-        bool candidate_collision = scenario == 1;
-        char receipt[BENCH_SERVICE_RECIPE_PATH_CAP], start[BENCH_SERVICE_RECIPE_PATH_CAP];
-        fixture_ok = fixture_ok && bench_service_recipe_test_child_path(
-            receipt, fixture.result, candidate_collision ? BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME :
-                                             BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME) &&
-            bench_service_recipe_test_child_path(start, fixture.attempt,
-                                                "candidate/staging/throughput-results/.throughput-started");
-        if (fixture_ok && scenario < 2) fixture_ok = bench_service_recipe_test_write(receipt, "planted\n", 0400);
-        bench_service_recipe_test_receipt_bytes_cap = scenario == 2 ? 512 : 0;
-        bench_service_recipe_test_receipt_race = scenario == 3;
-        bench_service_recipe_test_receipt_partial_cap = false;
-        ProcessResult result = fixture_ok ? bench_service_recipe_test_run(arena, &fixture,
-                                                     string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool partial_cap = scenario != 2 || bench_service_recipe_test_receipt_partial_cap;
-        bench_service_recipe_test_receipt_bytes_cap = 0;
-        bench_service_recipe_test_receipt_race = false;
-        bench_service_recipe_test_receipt_partial_cap = false;
-        bool failed_stage = bench_service_recipe_test_contains(fixture.manifest,
-                                      candidate_collision ? "stage=candidate-build\n" : "stage=base-build\n");
-        bool failed_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed\n") &&
-                             bench_service_recipe_test_contains(fixture.manifest, "process-result=failed\n");
-        bool receipt_state = scenario < 2 ? bench_service_recipe_test_contains(receipt, "planted\n") :
-                                               access(receipt, F_OK) != 0;
-        ok = fixture_ok && result == PROCESS_RESULT_FAILED && failed_stage && failed_status && receipt_state && partial_cap &&
-             access(start, F_OK) != 0 && bench_service_recipe_test_no_receipt_temporary(fixture.result);
-        cases += 1;
-        if (fixture.root[0]) bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        ok = bench_service_recipe_test_fixture_make(&fixture, 4, base_revision, candidate_revision) &&
-             bench_service_recipe_test_write(candidate_tamper_marker, "tamper\n", 0600);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool tamper_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
-        bool tamper_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
-        bool tamper_manifest = access(fixture.manifest, F_OK) == 0;
-        ok = ok && result != PROCESS_RESULT_SUCCESS && tamper_status &&
-             tamper_stage && tamper_manifest;
-        unlink(candidate_tamper_marker);
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        ok = bench_service_recipe_test_fixture_make(&fixture, 3, base_revision, candidate_revision) &&
-             bench_service_recipe_test_write(tamper_marker, "tamper\n", 0600);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool tamper_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
-        bool tamper_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
-        bool tamper_manifest = access(fixture.manifest, F_OK) == 0;
-        ok = ok && result != PROCESS_RESULT_SUCCESS && tamper_status &&
-             tamper_stage && tamper_manifest;
-        unlink(tamper_marker);
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        char wrong_source_manifest[512];
-        int wrong_source_length = snprintf(wrong_source_manifest, sizeof(wrong_source_manifest),
-                                           "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=3333333333333333333333333333333333333333\n");
-        ok = bench_service_recipe_test_fixture_make(&fixture, 5, base_revision, candidate_revision) &&
-             wrong_source_length > 0 && (size_t)wrong_source_length < sizeof(wrong_source_manifest) &&
-             chmod(fixture.candidate_manifest, 0600) == 0 &&
-             bench_service_recipe_test_write(fixture.candidate_manifest, wrong_source_manifest, 0600) &&
-             chmod(fixture.candidate_manifest, 0400) == 0;
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        ok = ok && result == PROCESS_RESULT_FAILED && access(fixture.manifest, F_OK) != 0;
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        ok = bench_service_recipe_test_fixture_make(&fixture, 6, base_revision, candidate_revision);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.wrong_result)) : PROCESS_RESULT_FAILED;
-        ok = ok && result == PROCESS_RESULT_FAILED && access(fixture.manifest, F_OK) != 0 && access(fixture.wrong_result, F_OK) != 0;
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        ok = bench_service_recipe_test_fixture_make(&fixture, 7, base_revision, candidate_revision) &&
-             bench_service_recipe_test_write(fixture.sentinel, "sentinel\n", 0600) && symlink(fixture.sentinel, fixture.temporary) == 0;
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        struct stat temporary_info = {0};
-        ok = ok && result == PROCESS_RESULT_FAILED && lstat(fixture.temporary, &temporary_info) == 0 && S_ISLNK(temporary_info.st_mode) &&
-             bench_service_recipe_test_contains(fixture.sentinel, "sentinel") && access(fixture.manifest, F_OK) == 0 &&
-             bench_service_recipe_test_contains(fixture.manifest, "status=failed");
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        char throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP];
-        ok = bench_service_recipe_test_fixture_make(&fixture, 8, base_revision, candidate_revision) &&
-             bench_service_recipe_test_write(invalid_output_marker, "invalid\n", 0600) &&
-             bench_service_recipe_test_child_path(throughput_path, fixture.result, "throughput") == true;
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        struct stat throughput_info = {0};
-        bool no_final_tree = lstat(throughput_path, &throughput_info) != 0;
-        bool invalid_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
-        ok = ok && result == PROCESS_RESULT_FAILED && invalid_status && no_final_tree;
-        unlink(invalid_output_marker);
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        char throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP], sentinel_path[BENCH_SERVICE_RECIPE_PATH_CAP];
-        ok = bench_service_recipe_test_fixture_make(&fixture, 9, base_revision, candidate_revision) &&
-             bench_service_recipe_test_child_path(throughput_path, fixture.result, "throughput") &&
-             mkdir(throughput_path, 0700) == 0 &&
-             bench_service_recipe_test_child_path(sentinel_path, throughput_path, "restart-sentinel") &&
-             bench_service_recipe_test_write(sentinel_path, "durable\n", 0400);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool preserved = bench_service_recipe_test_contains(sentinel_path, "durable") &&
-                         bench_service_recipe_test_contains(fixture.manifest, "status=failed");
-        ok = ok && result == PROCESS_RESULT_FAILED && preserved;
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        char staging_path[BENCH_SERVICE_RECIPE_PATH_CAP], throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP];
-        ok = bench_service_recipe_test_fixture_make(&fixture, 11, base_revision, candidate_revision) &&
-             bench_service_recipe_test_child_path(staging_path, fixture.attempt, "candidate/staging") &&
-             mkdir(staging_path, 02770) == 0 && fchmodat(AT_FDCWD, staging_path, 02770, 0) == 0 &&
-             bench_service_recipe_test_child_path(throughput_path, staging_path, "throughput-results") &&
-             symlink(fixture.sentinel, throughput_path) == 0;
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        struct stat throughput_info = {0};
-        bool retained_link = lstat(throughput_path, &throughput_info) == 0 && S_ISLNK(throughput_info.st_mode);
-        ok = ok && result == PROCESS_RESULT_FAILED && retained_link && access(fixture.manifest, F_OK) != 0;
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        char temporary[128] = {0}, temporary_path[BENCH_SERVICE_RECIPE_PATH_CAP], temporary_file[BENCH_SERVICE_RECIPE_PATH_CAP];
-        ok = bench_service_recipe_test_fixture_make(&fixture, 10, base_revision, candidate_revision) &&
-             bench_service_recipe_temp_name("throughput", temporary) &&
-             bench_service_recipe_test_child_path(temporary_path, fixture.result, temporary) &&
-             mkdir(temporary_path, 0700) == 0 &&
-             bench_service_recipe_test_child_path(temporary_file, temporary_path, "partial.txt") &&
-             bench_service_recipe_test_write(temporary_file, "partial\n", 0400);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool recovered = result == PROCESS_RESULT_SUCCESS && access(temporary_path, F_OK) != 0 &&
-                         bench_service_recipe_test_contains(fixture.manifest, "status=succeeded");
-        ok = ok && recovered;
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    if (ok)
-    {
-        BenchServiceRecipeTestFixture fixture;
-        char prepare_manifest[BENCH_SERVICE_RECIPE_PATH_CAP], throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP];
-        char throughput_file[BENCH_SERVICE_RECIPE_PATH_CAP];
-        char bundle_path[BENCH_SERVICE_RECIPE_PATH_CAP];
-        ok = bench_service_recipe_test_fixture_make(&fixture, 12, base_revision, candidate_revision) &&
-             bench_service_recipe_test_child_path(prepare_manifest, fixture.result, "validate-buster-v1.prepare.manifest") &&
-             bench_service_recipe_test_child_path(throughput_path, fixture.result, "throughput") &&
-             bench_service_recipe_test_child_path(throughput_file, throughput_path, "result.txt") &&
-             bench_service_recipe_test_child_path(bundle_path, fixture.result, BENCH_SERVICE_RECIPE_BUNDLE_NAME);
-        bench_service_recipe_test_cancel_after_publish = ok;
-        ProcessResult interrupted = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool interrupted_prefix = interrupted == PROCESS_RESULT_FAILED && access(throughput_path, F_OK) == 0 &&
-                                  access(prepare_manifest, F_OK) == 0 && access(bundle_path, F_OK) != 0 &&
-                                  access(fixture.manifest, F_OK) != 0 &&
-                                  bench_service_recipe_test_contains(prepare_manifest, "process-result=running");
-        if (interrupted_prefix) unlink(prepare_manifest);
-        ProcessResult restarted = interrupted_prefix ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
-        bool recovered = restarted == PROCESS_RESULT_FAILED && access(throughput_path, F_OK) == 0 &&
-                         bench_service_recipe_test_contains(throughput_file, "synthetic-throughput") &&
-                         bench_service_recipe_test_contains(fixture.manifest, "status=failed") &&
-                         bench_service_recipe_test_contains(bundle_path, "throughput/result.txt") &&
-                         bench_service_recipe_test_contains(bundle_path, "throughput/nested/result.txt");
-        ok = ok && interrupted_prefix && recovered;
-        bench_service_recipe_test_cancel_after_publish = false;
-        cases += 1;
-        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
-    }
-    unlink(fail_marker);
-    unlink(tamper_marker);
-    unlink(candidate_tamper_marker);
-    unlink(invalid_output_marker);
-    bench_service_recipe_driver_override = (String8){0};
-    bench_service_recipe_throughput_override = (String8){0};
-    bench_service_recipe_test_candidate_gid_set = false;
-    if (script_root[0]) remove_path_recursive(arena, string_from_pointer(script_root));
-    string_print(S8("BENCH_SERVICE_RECIPE_SELF_TEST cases={u32} result={S8}\n"), cases, ok ? S8("pass") : S8("fail"));
-    return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-}
-
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments)
-{
-    char script_root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    bool ok = arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT &&
-              bench_service_recipe_test_script_setup(arena, script_root);
-    ProcessResult result = PROCESS_RESULT_FAILED;
-    if (ok)
-    {
-        program.build_graph = (BuildGraph){0};
-        ProcessResult added = bench_service_recipe_add(arena, arguments);
-        result = added == PROCESS_RESULT_SUCCESS ? entry_point() : added;
-        program.build_graph = (BuildGraph){0};
-    }
-    if (ok)
-    {
-        String8 manifest = string_duplicate_arena(arena, path_join(arena, arguments.pointer[5],
-                                                                   S8("validate-buster-v1.manifest")), true);
-        String8 bundle = string_duplicate_arena(arena, path_join(arena, arguments.pointer[5],
-                                                                 S8(BENCH_SERVICE_RECIPE_BUNDLE_NAME)), true);
-        ok = result == PROCESS_RESULT_SUCCESS &&
-             bench_service_recipe_test_contains((char const*)manifest.pointer, "status=succeeded") &&
-             access((char const*)bundle.pointer, F_OK) == 0;
-    }
-    bench_service_recipe_driver_override = (String8){0};
-    bench_service_recipe_throughput_override = (String8){0};
-    bench_service_recipe_test_candidate_gid_set = false;
-    if (script_root[0]) remove_path_recursive(arena, string_from_pointer(script_root));
-    string_print(S8("BENCH_SERVICE_RECIPE_MATERIALIZED_SELF_TEST result={S8}\n"), ok ? S8("pass") : S8("fail"));
-    return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-}
-#else
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
-{
-    BUSTER_UNUSED(arena);
-    string_print(S8("BENCH_SERVICE_RECIPE_SELF_TEST result=unsupported\n"));
-    return PROCESS_RESULT_FAILED;
-}
-
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments)
-{
-    BUSTER_UNUSED(arena);
-    BUSTER_UNUSED(arguments);
-    string_print(S8("BENCH_SERVICE_RECIPE_MATERIALIZED_SELF_TEST result=unsupported\n"));
-    return PROCESS_RESULT_FAILED;
-}
-#endif
-
-#include "tools/bench_service/zen5_recipe_test.c"
-
-BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
-{
-    native_foundation_tool_add(arena, arguments, true);
-}
-
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceString8 arguments)
-{
-    bool self_test = arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test"));
-    ProcessResult result = arguments.length == 0 || self_test ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-#if BUSTER_LINUX
-    if (result == PROCESS_RESULT_SUCCESS)
-    {
-        make_directory_recursive(arena, S8("build/bench-service-tools"));
-        String8 executable = S8("build/bench-service-tools/systemd-broker");
-        String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
-        ProcessRun* compile = run_add(arena, step_add(arena));
-        OsArgumentBuilder builder = os_argument_builder_start(arena);
-        os_argument_builder_append(&builder, compiler);
-        os_argument_builder_append(&builder, S8("-std=c11"));
-        os_argument_builder_append(&builder, S8("-O2"));
-        os_argument_builder_append(&builder, S8("-Wall"));
-        os_argument_builder_append(&builder, S8("-Wextra"));
-        os_argument_builder_append(&builder, S8("-Werror"));
-        os_argument_builder_append(&builder, S8("-fwrapv"));
-        os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
-        os_argument_builder_append(&builder, S8("-funsigned-char"));
-        os_argument_builder_append(&builder, S8("tools/bench_service/systemd_broker.c"));
-        os_argument_builder_append(&builder, S8("-o"));
-        os_argument_builder_append(&builder, executable);
-        *compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
-                                .spawn_options = {.use_process_environment = 1}};
-        // The effective-credential gate must run before any dynamic loader or
-        // candidate-controlled payload. The installed broker also verifies its
-        // ELF program headers; a dynamic substitute is not an installable gate.
-        String8 gate_sources[] = {S8("tools/bench_service/credential_gate.c"),
-                                  S8("tools/bench_service/broker_entry_gate.c")};
-        String8 gate_outputs[] = {S8("build/bench-service-tools/credential-gate"),
-                                  S8("build/bench-service-tools/broker-entry-gate")};
-        for (u32 gate = 0; gate < BUSTER_ARRAY_LENGTH(gate_sources); gate += 1)
-        {
-            ProcessRun* gate_compile = run_add(arena, step_add(arena));
-            builder = os_argument_builder_start(arena);
-            os_argument_builder_append(&builder, compiler);
-            os_argument_builder_append(&builder, S8("-std=c11"));
-            os_argument_builder_append(&builder, S8("-O2"));
-            os_argument_builder_append(&builder, S8("-Wall"));
-            os_argument_builder_append(&builder, S8("-Wextra"));
-            os_argument_builder_append(&builder, S8("-Werror"));
-            os_argument_builder_append(&builder, S8("-fwrapv"));
-            os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
-            os_argument_builder_append(&builder, S8("-funsigned-char"));
-            os_argument_builder_append(&builder, S8("-static"));
-            os_argument_builder_append(&builder, S8("-Wl,-z,noexecstack"));
-            os_argument_builder_append(&builder, gate_sources[gate]);
-            // The entry gate hashes the local account sources it binds.
-            if (gate == 1)
-            {
-                os_argument_builder_append(&builder, S8("-Isrc"));
-                os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
-            }
-            os_argument_builder_append(&builder, S8("-o"));
-            os_argument_builder_append(&builder, gate_outputs[gate]);
-            *gate_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
-                                         .spawn_options = {.use_process_environment = 1}};
-        }
-        ProcessRun* live_compile = run_add(arena, step_add(arena));
-        builder = os_argument_builder_start(arena);
-        os_argument_builder_append(&builder, compiler);
-        os_argument_builder_append(&builder, S8("-std=c11"));
-        os_argument_builder_append(&builder, S8("-O2"));
-        os_argument_builder_append(&builder, S8("-Wall"));
-        os_argument_builder_append(&builder, S8("-Wextra"));
-        os_argument_builder_append(&builder, S8("-Werror"));
-        os_argument_builder_append(&builder, S8("-fwrapv"));
-        os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
-        os_argument_builder_append(&builder, S8("-funsigned-char"));
-        os_argument_builder_append(&builder, S8("tools/bench_service/systemd_broker_live_test.c"));
-        os_argument_builder_append(&builder, S8("-o"));
-        os_argument_builder_append(&builder, S8("build/bench-service-tools/systemd-broker-live-test"));
-        *live_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
-                                     .spawn_options = {.use_process_environment = 1}};
-        if (self_test)
-        {
-            String8 fixture_sources[] = {S8("tools/bench_service/credential_gate_test.c"),
-                                         S8("tools/bench_service/credential_gate_elf_test.c"),
-                                         S8("tools/bench_service/credential_gate.c"),
-                                         S8("tools/bench_service/systemd_broker_account_test.c"),
-                                         S8("tools/bench_service/broker_entry_gate_test.c")};
-            String8 fixture_outputs[] = {S8("build/bench-service-tools/credential-gate-test"),
-                                         S8("build/bench-service-tools/credential-gate-elf-test"),
-                                         S8("build/bench-service-tools/credential-gate-dynamic-negative"),
-                                         S8("build/bench-service-tools/systemd-broker-account-test"),
-                                         S8("build/bench-service-tools/broker-entry-gate-test")};
-            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixture_sources); fixture += 1)
-            {
-                ProcessRun* fixture_compile = run_add(arena, step_add(arena));
-                builder = os_argument_builder_start(arena);
-                os_argument_builder_append(&builder, compiler);
-                os_argument_builder_append(&builder, S8("-std=c11"));
-                os_argument_builder_append(&builder, S8("-O2"));
-                os_argument_builder_append(&builder, S8("-Wall"));
-                os_argument_builder_append(&builder, S8("-Wextra"));
-                os_argument_builder_append(&builder, S8("-Werror"));
-                os_argument_builder_append(&builder, S8("-fwrapv"));
-                os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
-                os_argument_builder_append(&builder, S8("-funsigned-char"));
-                os_argument_builder_append(&builder, fixture_sources[fixture]);
-                // broker_entry_gate_test.c includes the gate, which hashes.
-                if (fixture == 4)
-                {
-                    os_argument_builder_append(&builder, S8("-Isrc"));
-                    os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
-                }
-                os_argument_builder_append(&builder, S8("-o"));
-                os_argument_builder_append(&builder, fixture_outputs[fixture]);
-                *fixture_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
-                                                .working_directory = S8("."),
-                                                .spawn_options = {.use_process_environment = 1}};
-            }
-            ProcessRun* group_compile = run_add(arena, step_add(arena));
-            builder = os_argument_builder_start(arena);
-            os_argument_builder_append(&builder, compiler);
-            os_argument_builder_append(&builder, S8("-std=c11"));
-            os_argument_builder_append(&builder, S8("-O2"));
-            os_argument_builder_append(&builder, S8("-Wall"));
-            os_argument_builder_append(&builder, S8("-Wextra"));
-            os_argument_builder_append(&builder, S8("-Werror"));
-            os_argument_builder_append(&builder, S8("-fwrapv"));
-            os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
-            os_argument_builder_append(&builder, S8("-funsigned-char"));
-            os_argument_builder_append(&builder, S8("tools/bench_service/systemd_broker_group_test.c"));
-            os_argument_builder_append(&builder, S8("-o"));
-            os_argument_builder_append(&builder, S8("build/bench-service-tools/systemd-broker-group-test"));
-            *group_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
-                                          .working_directory = S8("."),
-                                          .spawn_options = {.use_process_environment = 1}};
-        }
-        if (self_test)
-        {
-            ProcessRun* test = run_add(arena, step_add(arena));
-            String8 command[] = {executable, S8("self-test")};
-            *test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
-                                 .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
-            ProcessRun* gate_test = run_add(arena, step_add(arena));
-            String8 gate_command[] = {S8("build/bench-service-tools/credential-gate"), S8("--self-test")};
-            *gate_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(gate_command),
-                                      .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
-            ProcessRun* gate_identity_test = run_add(arena, step_add(arena));
-            String8 gate_identity_command[] = {S8("build/bench-service-tools/credential-gate-test")};
-            *gate_identity_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(gate_identity_command),
-                                               .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
-            ProcessRun* gate_elf_test = run_add(arena, step_add(arena));
-            String8 gate_elf_command[] = {S8("build/bench-service-tools/credential-gate-elf-test"),
-                                         S8("build/bench-service-tools/credential-gate"),
-                                         S8("build/bench-service-tools/credential-gate-dynamic-negative")};
-            *gate_elf_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(gate_elf_command),
-                                          .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
-            ProcessRun* entry_test = run_add(arena, step_add(arena));
-            String8 entry_command[] = {S8("build/bench-service-tools/broker-entry-gate-test"),
-                                       S8("build/bench-service-tools/broker-entry-gate"), executable};
-            *entry_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(entry_command),
-                                       .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
-            ProcessRun* account_test = run_add(arena, step_add(arena));
-            String8 account_command[] = {S8("build/bench-service-tools/systemd-broker-account-test")};
-            *account_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(account_command),
-                                         .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
-            ProcessRun* identities = run_add(arena, step_add(arena));
-            String8 identity_command[] = {S8("build/bench-service-tools/systemd-broker-live-test"), S8("--self-test")};
-            *identities = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(identity_command),
-                                      .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
-            ProcessRun* group_test = run_add(arena, step_add(arena));
-            String8 group_command[] = {S8("build/bench-service-tools/systemd-broker-group-test")};
-            *group_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(group_command),
-                                        .working_directory = S8("."),
-                                        .spawn_options = {.use_process_environment = 1}};
-        }
-    }
-#else
-    (void)arena;
-    (void)self_test;
-    result = PROCESS_RESULT_FAILED;
-#endif
-    return result;
 }
 
 // A same-runner CI comparison. A separately checked-out baseline is required;
@@ -40789,13 +37536,6 @@ ProcessResult process_arguments(void)
 
 BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
-        [BUILD_COMMAND_BENCH_SERVICE] = S8_INITIALIZER("bench_service"),
-        [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
-        [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
-        [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
-        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE] = S8_INITIALIZER("bench_service_zen5_recipe"),
-        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE] = S8_INITIALIZER("bench_service_zen5_capture"),
-        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_zen5_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
@@ -40811,6 +37551,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_TIMING_SUMMARY] = S8_INITIALIZER("test_timing_summary"),
         [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
         [BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST] = S8_INITIALIZER("musl_directory_self_test"),
+        [BUILD_COMMAND_GENERATE_GUARD_SELF_TEST] = S8_INITIALIZER("generate_guard_self_test"),
         [BUILD_COMMAND_LUA_STAGING_SELF_TEST] = S8_INITIALIZER("lua_staging_self_test"),
         [BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST] = S8_INITIALIZER("compatibility_spawn_self_test"),
         [BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST] = S8_INITIALIZER("compiler_discovery_self_test"),
@@ -40843,6 +37584,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
+        [BUILD_COMMAND_BINARY_COVERAGE_INVENTORY] = S8_INITIALIZER("binary_coverage_inventory"),
         [BUILD_COMMAND_MATRIX_PHASE_RUN] = S8_INITIALIZER("matrix_phase_run"),
         [BUILD_COMMAND_TEST_UNITS_PARTITIONED] = S8_INITIALIZER("test_units_partitioned"),
     };
@@ -40941,6 +37683,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY: result = binary_coverage_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
             default: BUSTER_UNREACHABLE(); break;
         }
@@ -40950,12 +37693,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
         String8 argument = arguments.pointer[argument_i];
-        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
-            command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
-            command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
-            command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE || command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE ||
-            command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST ||
-            command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
+        if (command == BUILD_COMMAND_BENCH_THROUGHPUT || command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
             string8_list_push(arena, &throughput_arguments, argument);
             argument_i += 1;
@@ -41841,7 +38579,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     String8 matrix_shard = matrix_coverage_shard_current();
     if (result == PROCESS_RESULT_SUCCESS && combination_matrix && !matrix_coverage_shard_valid(matrix_shard))
     {
-        string_print(S8("error: BUSTER_MATRIX_SHARD must be all, release, checks, sanitized-debug, sanitized-release or portability\n"));
+        string_print(S8("error: BUSTER_MATRIX_SHARD must be all, release, checks, sanitized-release or portability\n"));
         result = PROCESS_RESULT_FAILED;
     }
     if (result == PROCESS_RESULT_SUCCESS && combination_matrix)
@@ -41851,11 +38589,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         MatrixCoveragePlan plan = {0};
         bool selected = matrix_coverage_plan_build_for_target(arena, &plan, lane, target) &&
                         matrix_coverage_selected_count(&plan, matrix_shard) > 0;
-        bool shared_sanitizer = target.apple && (string_equal(matrix_shard, S8("sanitized-debug")) ||
-                                                string_equal(matrix_shard, S8("sanitized-release")));
-        if (!selected || shared_sanitizer || !matrix_coverage_test_admission_valid(matrix_shard))
+        if (!selected || !matrix_coverage_test_admission_valid(matrix_shard))
         {
-            string_print(S8("error: matrix selector or test admission is unavailable for this host; Apple sanitizer trees require grouped checks\n"));
+            string_print(S8("error: matrix selector or test admission is unavailable for this host\n"));
             result = PROCESS_RESULT_FAILED;
         }
     }
@@ -41906,44 +38642,6 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             result = bench_throughput_ci_add(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
-        case BUILD_COMMAND_BENCH_SERVICE:
-        {
-            bench_service_add(arena, string8_list_to_slice(arena, throughput_arguments));
-        }
-        break;
-        case BUILD_COMMAND_BENCH_SERVICE_BROKER:
-        {
-            result = bench_service_broker_add(arena, string8_list_to_slice(arena, throughput_arguments));
-        }
-        break;
-        case BUILD_COMMAND_BENCH_SERVICE_RECIPE:
-        {
-            result = bench_service_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
-        }
-        break;
-        case BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST:
-        {
-            SliceString8 recipe_self_test_arguments = string8_list_to_slice(arena, throughput_arguments);
-            result = recipe_self_test_arguments.length ?
-                     bench_service_recipe_materialized_self_test(arena, recipe_self_test_arguments) :
-                     bench_service_recipe_self_test(arena);
-        }
-        break;
-        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE:
-        {
-            result = bench_service_zen5_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
-        }
-        break;
-        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE:
-        {
-            result = bench_service_zen5_capture_add(arena, string8_list_to_slice(arena, throughput_arguments));
-        }
-        break;
-        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST:
-        {
-            result = bench_service_zen5_recipe_self_test(arena, string8_list_to_slice(arena, throughput_arguments));
-        }
-        break;
         case BUILD_COMMAND_BENCH_THROUGHPUT:
         {
             bench_throughput_add(arena, string8_list_to_slice(arena, throughput_arguments));
@@ -41953,7 +38651,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         {
             generate.cmake_arguments = string8_list_to_slice(arena, generate_cmake_arguments);
             BuildStep* generate_step = step_add(arena);
-            generate_add(arena, generate_step, generate);
+            if (!generate_add(arena, generate_step, generate))
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
         }
         break;
         case BUILD_COMMAND_BUILD:
@@ -42013,6 +38714,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST:
         {
             result = musl_directory_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_GENERATE_GUARD_SELF_TEST:
+        {
+            result = generate_guard_self_test(arena);
         }
         break;
         case BUILD_COMMAND_LUA_STAGING_SELF_TEST:
@@ -42088,7 +38794,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_X86_64_COMPLETION_CENSUS:
         {
-            x86_completion_census_add(arena, build_directory, false);
+            if (!x86_completion_census_add(arena, build_directory, false))
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
         }
         break;
         case BUILD_COMMAND_TEST_CJSON:
@@ -42154,6 +38863,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
+        case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
