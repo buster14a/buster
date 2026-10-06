@@ -28825,6 +28825,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArg
     return result;
 }
 
+// One function with `count` labels and `count` gotos, the gotos spread over
+// the labels with a stride coprime to every tested count, so no lookup is
+// answered by the first or last array row (issue #1313).
+BUSTER_GLOBAL_LOCAL String8 c_test_label_lookup_source(Arena* arena, u32 count)
+{
+    u64 capacity = (u64)count * 48 + 64;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int f(int x) { "));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("L"));
+        c_test_append_u32(bytes, capacity, &length, index);
+        c_test_append_source(bytes, capacity, &length, S8(": x += 1; if (x < 0) goto L"));
+        c_test_append_u32(bytes, capacity, &length, (u32)(((u64)index * 7 + 3) % count));
+        c_test_append_source(bytes, capacity, &length, S8("; "));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("return x; }\n"));
+    return (String8){.pointer = bytes, .length = length};
+}
+
+// Label-find probes for one lowering of the family at this size; UINT64_MAX
+// when the source did not lower cleanly.
+BUSTER_GLOBAL_LOCAL u64 c_test_label_lookup_work(u32 count)
+{
+    u64 work = UINT64_MAX;
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1), .flags = {.no_pool = true}});
+    if (arena)
+    {
+        String8 source = c_test_label_lookup_source(arena, count);
+        CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParseResult parse = c_parse(arena, preprocess);
+        if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+        {
+            u64 before = c_test_ir_label_find_probes();
+            CIRLowerResult lowered = c_lower_to_ir(arena, S8("label-lookup.c"), preprocess, parse, target_native);
+            if (!lowered.diagnostic_count && lowered.canonical_ir_certified)
+            {
+                work = c_test_ir_label_find_probes() - before;
+            }
+        }
+        arena_destroy(arena, 1);
+    }
+    return work;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_lookup_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SMALL = 500, LARGE = 2000 };
+    u64 small = c_test_label_lookup_work(SMALL);
+    u64 large = c_test_label_lookup_work(LARGE);
+    // Every label statement, goto and duplicate check is one lookup, and a
+    // lookup is answered in a bounded number of probes, so 4x the labels is
+    // about 4x the probes. A linear scan grows 16x.
+    BUSTER_TEST_RAW(arguments, small != UINT64_MAX && large != UINT64_MAX && small >= SMALL && large <= small * 6 && large <= LARGE * 16,
+                    string_format(arguments->arena, S8("label find probes small={u64} large={u64}"), small, large));
+    return result;
+}
+
 // `sizeof(c ? (c ? ( ... 1) : 2) : 2)` nested `depth` deep, spelled into one
 // constant-expression context (issue #2765). The strict operand type walk once
 // refused anything past 64 levels, which surfaced as a false "not a true
@@ -44195,6 +44257,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     C_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
+    C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);

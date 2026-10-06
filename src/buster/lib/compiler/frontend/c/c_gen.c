@@ -2162,6 +2162,22 @@ struct CIrLabel
     IrBlockId block;
 };
 
+// Open-addressed index over one CIrLabel array, keyed on the label spelling.
+// slots holds label indices (C_IR_LABEL_SLOT_EMPTY when free) and its length
+// slot_mask + 1 is a power of two of at least twice the array capacity, so a
+// probe chain always ends. A null slots table means "no index": lookups then
+// scan the array.
+#define C_IR_LABEL_SLOT_EMPTY UINT32_MAX
+#define C_IR_LABEL_HASH_OFFSET 2166136261u
+#define C_IR_LABEL_HASH_PRIME 16777619u
+#define C_IR_LABEL_SLOT_MINIMUM 16u
+typedef struct CIrLabelIndex CIrLabelIndex;
+struct CIrLabelIndex
+{
+    u32* slots;
+    u32 slot_mask;
+};
+
 typedef struct CIrConstantOperator CIrConstantOperator;
 struct CIrConstantOperator
 {
@@ -3005,6 +3021,7 @@ struct CIntegerIrBuilder
     u32 vla_value_count;
     IrBlockId current_block;
     CIrLabel* labels;
+    CIrLabelIndex label_index;
     u32 label_count;
     CPreprocessResult preprocess;
     CParseResult parse;
@@ -15431,7 +15448,7 @@ struct CIrLowerTypedefState
 };
 
 typedef struct CIrLowerBodyState CIrLowerBodyState;
-BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, String8 name);
+BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, CIrLabelIndex const* index, String8 name);
 BUSTER_C_INTERNAL void c_ir_lower_body_step(CIntegerIrBuilder* builder);
 
 BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder);
@@ -15744,6 +15761,7 @@ struct CIrLowerBodyState
     CIrSwitchCase* switch_cases;
     CIrSubstatementCase* substatement_cases;
     CIrLabel* labels;
+    CIrLabelIndex label_index;
     IrSourceRange declaration_source;
     IrSourceRange child_source;
     IrSourceRange statement_unreachable_source;
@@ -31569,7 +31587,7 @@ c_ir_expression_core_loop:
                 return;
             }
             CToken label_token = builder->preprocess.tokens[index + 1];
-            CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, label_token));
+            CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, label_token));
             if (!label)
             {
                 builder->failure_message = string_format(builder->arena, S8("label '{S8}' is not defined in this function"), c_token_spelling(builder->preprocess.spelling_base, label_token));
@@ -35176,7 +35194,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
     if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
         builder->preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
     {
-        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start + 1]));
+        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start + 1]));
         if (label && start + 2 == end)
         {
             return c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
@@ -37973,17 +37991,90 @@ BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
     return result;
 }
 
-BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, String8 name)
+#if BUSTER_INCLUDE_TESTS
+// Slot visits plus array rows compared by c_ir_label_find, for the growth
+// regression c_test_label_lookup_work_growth.
+BUSTER_GLOBAL_LOCAL u64 c_ir_label_find_probe_total;
+#define C_IR_LABEL_FIND_PROBE() (c_ir_label_find_probe_total += 1)
+#else
+#define C_IR_LABEL_FIND_PROBE() ((void)0)
+#endif
+
+// Slot count of the index for an array of `label_capacity` labels: the least
+// power of two, at least C_IR_LABEL_SLOT_MINIMUM, holding twice the capacity.
+BUSTER_C_INTERNAL u32 c_ir_label_slot_count(u32 label_capacity)
 {
-    for (u32 index = 0; index < label_count; index += 1)
+    u32 result = C_IR_LABEL_SLOT_MINIMUM;
+    while (result < (u64)label_capacity * 2 && result < (1u << 31))
     {
-        if (string_equal(labels[index].name, name))
+        result *= 2;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_label_hash(String8 name)
+{
+    u32 hash = C_IR_LABEL_HASH_OFFSET;
+    for (u64 byte_index = 0; byte_index < name.length; byte_index += 1)
+    {
+        hash = (hash ^ name.pointer[byte_index]) * C_IR_LABEL_HASH_PRIME;
+    }
+    return hash ^ (hash >> 15);
+}
+
+// Record labels[label_index], already stored, in the index.
+BUSTER_C_INTERNAL void c_ir_label_index_insert(CIrLabel const* labels, CIrLabelIndex* index, u32 label_index)
+{
+    u32 slot = c_ir_label_hash(labels[label_index].name) & index->slot_mask;
+    while (index->slots[slot] != C_IR_LABEL_SLOT_EMPTY)
+    {
+        slot = (slot + 1) & index->slot_mask;
+    }
+    index->slots[slot] = label_index;
+}
+
+// The first label of `labels` spelled `name`: through the index when one
+// exists, otherwise by scanning the array (the definition the index answers).
+BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, CIrLabelIndex const* index, String8 name)
+{
+    CIrLabel* result = 0;
+    if (index->slots)
+    {
+        u32 slot = c_ir_label_hash(name) & index->slot_mask;
+        while (!result && index->slots[slot] != C_IR_LABEL_SLOT_EMPTY)
         {
-            return &labels[index];
+            C_IR_LABEL_FIND_PROBE();
+            CIrLabel* candidate = labels + index->slots[slot];
+            if (string_equal(candidate->name, name))
+            {
+                result = candidate;
+            }
+            else
+            {
+                slot = (slot + 1) & index->slot_mask;
+            }
         }
     }
-    return 0;
+    else
+    {
+        for (u32 position = 0; !result && position < label_count; position += 1)
+        {
+            C_IR_LABEL_FIND_PROBE();
+            if (string_equal(labels[position].name, name))
+            {
+                result = labels + position;
+            }
+        }
+    }
+    return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED u64 c_test_ir_label_find_probes(void)
+{
+    return c_ir_label_find_probe_total;
+}
+#endif
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
@@ -40067,7 +40158,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_labels_parse(CIntegerIrBuilder* buil
                 return false;
             }
         }
-        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
+        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
         if (!label)
         {
             builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is not defined in this function"),
@@ -41089,7 +41180,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
                               c_parse_label_candidate_at(&builder->parse, &builder->preprocess, declaration.body_start, index);
         }
     }
-    bool initialized = c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel));
+    bool initialized = c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel)) &&
+                       c_ir_lower_scratch_reservation(builder, sizeof(u32), c_ir_label_slot_count(label_capacity), BUSTER_ALIGN_OF(u32));
     if (initialized)
     {
         initialized = c_ir_lower_body_initialize_labels_run(builder, state, label_capacity, candidate_cursor);
@@ -41104,6 +41196,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
     u32 body_end = declaration.body_start + declaration.body_token_count;
     state->labels = arena_allocate(builder->scratch_arena, CIrLabel, label_capacity ? label_capacity : 1);
     state->label_count = 0;
+    u32 label_slot_count = c_ir_label_slot_count(label_capacity);
+    state->label_index.slot_mask = label_slot_count - 1;
+    state->label_index.slots = arena_allocate(builder->scratch_arena, u32, label_slot_count);
+    memset(state->label_index.slots, 0xff, sizeof(u32) * label_slot_count);
     for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
     {
         if (builder->label_candidates_valid)
@@ -41132,7 +41228,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         {
             continue;
         }
-        if (c_ir_label_find(state->labels, state->label_count, c_token_spelling(builder->preprocess.spelling_base, token)))
+        if (c_ir_label_find(state->labels, state->label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, token)))
         {
             builder->failure_message = string_format(builder->arena, S8("duplicate label '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, token));
             builder->failure_token_index = index;
@@ -41141,21 +41237,24 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         // Labels have function scope, including labels inside a GNU
         // statement expression. Its nested body walk must reuse the block
         // already published by the outer walk at this exact source token.
-        CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, token));
+        CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, token));
         IrBlockId block = existing_label && existing_label->token_index == index ? existing_label->block : c_ir_block_create(builder);
         if (block.value == IR_ID_UNDERLYING_INVALID)
         {
             return false;
         }
-        state->labels[state->label_count++] = (CIrLabel){
+        state->labels[state->label_count] = (CIrLabel){
             .name = c_token_spelling(builder->preprocess.spelling_base, token),
             .token_index = index,
             .block = block,
         };
+        c_ir_label_index_insert(state->labels, &state->label_index, state->label_count);
+        state->label_count += 1;
     }
     if (!builder->labels)
     {
         builder->labels = state->labels;
+        builder->label_index = state->label_index;
         builder->label_count = state->label_count;
     }
     if (state->label_count && !c_ir_predeclare_labeled_automatic_locals(builder, declaration.body_start, body_end))
@@ -41175,8 +41274,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
             builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
         {
             String8 label_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
-            if (c_ir_label_find(state->labels, state->label_count, label_name) ||
-                c_ir_label_find(builder->labels, builder->label_count, label_name))
+            if (c_ir_label_find(state->labels, state->label_count, &state->label_index, label_name) ||
+                c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, label_name))
             {
                 builder->label_metadata_enabled = true;
             }
@@ -41873,7 +41972,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
                 c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
             {
-                CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, first));
+                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, first));
                 IrBlock* current = &builder->function->blocks[builder->current_block.value];
                 if (!label)
                 {
@@ -42680,7 +42779,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     builder->failure_message = S8("malformed goto statement");
                     return false;
                 }
-                CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
+                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
                 CScopeId label_scope = c_parse_scope_for_token(
                     &builder->parse,
                     builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
@@ -44496,7 +44595,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     IrType* cast = ir_type_from_id(&program->types, label_cast_type);
                     cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
                 }
-                CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
+                CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
                 if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
                                                                    (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label || !relocations ||
                     !relocation_count || *relocation_count >= relocation_capacity || !builder->function)
@@ -52493,7 +52592,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
                 IrType* cast = ir_type_from_id(&program->types, label_cast_type);
                 cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
             }
-            CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
+            CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
             if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
                                                                (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label)
             {
