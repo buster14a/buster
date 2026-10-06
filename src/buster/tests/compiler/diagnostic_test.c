@@ -28,7 +28,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     OsFileTestStep failures[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345},
-                                 {OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345},
                                  {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456},
                                  {OS_FILE_TEST_REPLACE, OS_FILE_TEST_ERROR, 12345}};
     String8 sentinel = S8("previous valid artifact\0with suffix");
@@ -145,15 +144,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_diagnostic_test_output_directory(Arena* arena,
 }
 #endif
 
-// A synthetic flush refusal after a real complete staging write. Zero-valued
-// CLOSE/DELETE steps witness the native unwind without replacing its outcome.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_flush_cleanup(UnitTestArguments* arguments)
+// A synthetic close refusal after a real complete staging write and native
+// close. The zero-valued DELETE step witnesses the native unwind without
+// replacing its outcome.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_close_cleanup(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
 #if !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_WINDOWS || BUSTER_LINUX || BUSTER_MACOS)
     Arena* arena = arguments->arena;
-    String8 input = buster_test_temporary_path(arena, S8("diagnostic-flush-cleanup-input"), S8(".c"));
-    String8 directory = buster_test_temporary_path(arena, S8("diagnostic-flush-cleanup-output"), S8(""));
+    String8 input = buster_test_temporary_path(arena, S8("diagnostic-close-cleanup-input"), S8(".c"));
+    String8 directory = buster_test_temporary_path(arena, S8("diagnostic-close-cleanup-output"), S8(""));
     OsDirectoryCreateResult created = os_make_directory_exclusive(directory);
     if (BUSTER_REQUIRE(arguments, created.created && !created.error.v))
     {
@@ -166,8 +166,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_flush_cleanup(UnitTe
         {
             String8 command[] = {S8("-E"), S8("-nostdinc"), input, S8("-o"), output};
             OsFileTestStep steps[] = {
-                {OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345},
-                {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 0},
+                {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 12345},
                 {OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, 0},
             };
             for (u32 existing = 0; existing < 2; existing += 1)
@@ -190,7 +189,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_flush_cleanup(UnitTe
                 u32 consumed = os_file_test_end();
                 u64 handles_after = os_process_spawn_test_resource_count();
                 FileMapTestCounters maps_after = file_map_test_counters();
-                arguments->show(arguments, S8("DRIVER_FLUSH_CLEANUP_FAILURE existing={u32} consumed={u32} status={u32} maps={u64} unmaps={u64} handles_before={u64} handles_after={u64}\n"),
+                arguments->show(arguments, S8("DRIVER_CLOSE_CLEANUP_FAILURE existing={u32} consumed={u32} status={u32} maps={u64} unmaps={u64} handles_before={u64} handles_after={u64}\n"),
                                 existing, consumed, (u32)failed.error, maps_after.mapped - maps_before.mapped,
                                 maps_after.unmapped - maps_before.unmapped, handles_before, handles_after);
                 BUSTER_TEST_RAW(arguments, failed.error == COMPILER_DRIVER_ERROR_FILE_WRITE, failed.diagnostic);
@@ -225,7 +224,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_flush_cleanup(UnitTe
                 ByteSlice published = file_read(scratch.arena, output, (FileReadOptions){0});
                 BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, published), expected);
                 BUSTER_TEST(arguments, compiler_diagnostic_test_output_directory(scratch.arena, directory, true));
-                arguments->show(arguments, S8("DRIVER_FLUSH_CLEANUP_RECOVERY existing={u32} status={u32} maps={u64} unmaps={u64} handles_before={u64} handles_after={u64}\n"),
+                arguments->show(arguments, S8("DRIVER_CLOSE_CLEANUP_RECOVERY existing={u32} status={u32} maps={u64} unmaps={u64} handles_before={u64} handles_after={u64}\n"),
                                 existing, (u32)recovered.error,
                                 maps_after.mapped - maps_before.mapped, maps_after.unmapped - maps_before.unmapped, handles_before, handles_after);
                 scratch_end(scratch);
@@ -236,7 +235,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_flush_cleanup(UnitTe
         BUSTER_TEST(arguments, os_directory_delete(directory));
     }
 #else
-    arguments->show(arguments, S8("DRIVER_FLUSH_CLEANUP skipped: desktop native mapping, handle census and directory observation required\n"));
+    arguments->show(arguments, S8("DRIVER_CLOSE_CLEANUP skipped: desktop native mapping, handle census and directory observation required\n"));
 #endif
     return result;
 }
@@ -358,7 +357,7 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, comma.diagnostic_count == 0);
     BUSTER_TEST(arguments, os_file_delete(comma_path));
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_write_failures);
-    BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_flush_cleanup);
+    BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_close_cleanup);
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_read_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_null_device_output);
     CompilerDiagnostic copy;

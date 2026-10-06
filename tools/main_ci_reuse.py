@@ -313,7 +313,7 @@ def successful_source_jobs(api, source, sha, *, diagnostics=None):
             jobs, run_id, 1, sha, checks)
     except ValueError as error:
         raise AdmissionError(str(error)) from error
-    jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha)
+    jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, event='merge_group')
     require(not extras, "; ".join(extras))
     errors = github_ci_time.validate_required_jobs(jobs, run_id, 1, sha,
                                                    expected_names=github_ci_time.combination_jobs(),
@@ -457,7 +457,7 @@ def verify_current_jobs(api, sha, run_id, *, diagnostics=None):
         raise AdmissionError(str(error)) from error
     rows = separate_skipped_jobs(rows, sha, run_id, diagnostics)
     jobs = github_ci_time.latest_run_jobs(rows, run_id, 1, sha)
-    jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, required=True)
+    jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, required=True, event='push')
     require(not extras, "; ".join(extras))
     desktop = [job for job in jobs if job.get("name") in DESKTOP_NAMES]
     require({job["name"] for job in desktop} == DESKTOP_NAMES and len(desktop) == len(DESKTOP),

@@ -1115,11 +1115,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* select
     {
         selected = machine_a64_select_float_to_i128(selector, instruction, source_type, cast_target_type);
     }
-    else if (source_type && cast_target_type && source_type->kind == IR_TYPE_INTEGER && cast_target_type->kind == IR_TYPE_INTEGER)
+    else if (source_type && cast_target_type && (source_type->kind == IR_TYPE_INTEGER ||
+              (source_type->kind == IR_TYPE_BOOLEAN && instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND)) &&
+             cast_target_type->kind == IR_TYPE_INTEGER)
     {
         bool source_integer128 = source_type->bit_width == 128;
         bool target_integer128 = cast_target_type->bit_width == 128;
-        u32 source_bits = source_type->bit_width;
+        u32 source_bits = machine_a64_scalar_bit_width(source_type);
         u32 source_slot = instruction->operands[0].value < function->value_count ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
         u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
         bool reinterpret_i128 = source_integer128 && target_integer128 &&
@@ -9452,7 +9454,10 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                 // unordered-false C semantics.
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[2], 0, 0, 1);
-                machine_a64_emit(&encoder, (instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u);
+                // == and != are quiet (fcmp); the relational conditions are
+                // signaling (fcmpe, opcode2 bit 4), as in GCC and Clang.
+                machine_a64_emit(&encoder, ((instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u) |
+                                           (((instruction->payload & 0xfu) > 1u) ? 0x10u : 0u));
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_CSET, operand_registers[0], 0, 0, instruction->payload & 0xfu);
                 break;
             case MACHINE_A64_CVT_F32_TO_F64:

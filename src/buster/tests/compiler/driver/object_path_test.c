@@ -34,21 +34,48 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_file_exists(String8 pa
     return result;
 }
 
+// A failed compile names its command, every stage error and each published
+// diagnostic record: hosted shards show only the log, and a failure whose
+// flattened diagnostic is empty must still identify itself (#2789).
+BUSTER_GLOBAL_LOCAL void compiler_driver_object_path_test_report(UnitTestArguments* arguments, Arena* arena, SliceString8 command_line,
+                                                                  CompilerDriverResult compiled)
+{
+    String8 command = {0};
+    for (u64 index = 0; index < command_line.length; index += 1)
+    {
+        command = string_format(arena, index ? S8("{S8} {S8}") : S8("{S8}{S8}"), command, command_line.pointer[index]);
+    }
+    arguments->show(arguments,
+        S8("default object path compiler error: driver_error={u32} codegen_error={u32} object_error={u32} link_error={S8} link_symbol='{S8}' "
+           "diagnostics={u32} fallbacks={u32} command='{S8}' diagnostic='{S8}'\n"),
+        (u32)compiled.error, (u32)compiled.codegen_error, (u32)compiled.object_error, link_error_name(compiled.native_link.error),
+        compiled.native_link.symbol, compiled.diagnostic_count, compiled.fallback_record_count, command, compiled.diagnostic);
+    for (u32 index = 0; index < compiled.diagnostic_count; index += 1)
+    {
+        arguments->show(arguments, S8("default object path compiler diagnostic {u32}: {S8}\n"), index,
+                        compiler_diagnostic_render(arena, compiled.diagnostics[index]));
+    }
+}
+
 BUSTER_GLOBAL_LOCAL CompilerDriverError compiler_driver_object_path_test_compile(UnitTestArguments* arguments, SliceString8 command_line)
 {
+    CompilerDriverError result = COMPILER_DRIVER_ERROR_INVALID_INPUT;
     Arena* arena = arena_create((ArenaCreation){0});
-    if (!arena)
+    if (arena)
     {
-        return COMPILER_DRIVER_ERROR_INVALID_INPUT;
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, command_line);
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+        if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            compiler_driver_object_path_test_report(arguments, arena, command_line, compiled);
+        }
+        result = compiled.error;
+        BUSTER_CHECK(arena_destroy(arena, 1));
     }
-    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, command_line);
-    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
-    if (compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length)
+    else
     {
-        arguments->show(arguments, S8("default object path compiler error: {S8}\n"), compiled.diagnostic);
+        arguments->show(arguments, S8("default object path compiler error: cannot create the compile arena\n"));
     }
-    CompilerDriverError result = compiled.error;
-    BUSTER_CHECK(arena_destroy(arena, 1));
     return result;
 }
 

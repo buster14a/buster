@@ -48,6 +48,15 @@ group is unavailable. Report either instead of working around it.
 - File name: `[a-z0-9][a-z0-9_-]{0,47}.c`, at most 256 KiB, at most four
   changed workloads per pull request. Subdirectories, headers and build
   scripts are ignored.
+- Optional input data (#2769): `<name>.data` beside `<name>.c`, a regular
+  file of at most 8 MiB. Before the first run it is copied read-only into the
+  run directory as `input.data`, which the program opens by that relative
+  name. Its sha256 is reported. Changing only the data file reruns its
+  workload. Use it to replay a recorded trace exactly instead of embedding a
+  generator.
+- Workloads, their data and this directory's request file are classified as
+  `tests` by `./build.sh source_size` (#2770). A workload between 32 and
+  256 KiB therefore needs no source-size baseline acknowledgement.
 - Built once with `clang -std=c11 -O2 -static -fwrapv -fno-strict-aliasing
   -funsigned-char -Wall -Wextra -Werror`.
 - Run as two warmups and nine measured fresh processes pinned to CPU 2, with
@@ -55,6 +64,64 @@ group is unavailable. Report either instead of working around it.
   ten-second limit per run.
 - A nonzero exit, a signal, a timeout or a compile error fails the run. Print
   a self-check line and exit nonzero when it does not hold.
+- The report's `Observed host:` line is the CPU model the kernel reports
+  (#2761). On any CPU other than the AMD Ryzen 7 9700X nothing is compiled
+  or run and the run fails, whatever runner label selected the job.
+
+## Compiler comparison of a pull request
+
+To measure a compiler change before merging (#2769), add or change any line
+of [`compiler-compare.request`](compiler-compare.request) in an owner pull
+request; a draft is enough. Combine it with workloads if you like. The same
+gate applies, and these jobs follow `authorize`:
+
+- `compare-pull` (the 9700X) builds tests-off Clang Release `ide` binaries of
+  the pull request's merge base and of its head. It times both with
+  `tools/uarch_lab.py compare` on the same frozen merge-base source, using the
+  `compiler-compare-v1` profile. It then runs the native throughput corpus
+  (`./build.sh bench_throughput run` from the merge base, profile
+  `throughput-corpus-v1`: the default CI corpus under every allocator mode,
+  20 pairs in each of two rounds) on the same two binaries (#2761). A head
+  that moved before measurement is recorded as superseded.
+- `start-pull` (hosted) shows the check
+  `9700X compiler benchmark (pull request)` on the head commit as soon as the
+  request is authorized: queued while the 9700X is busy, then in progress
+  with a link to the live job once `compare-pull` starts. It also closes the
+  open check of an earlier head of the same pull request as superseded.
+- `publish-pull` (hosted) validates the evidence, including that the observed
+  CPU is the Ryzen 7 9700X, and completes that same check. Its summary
+  states the identities, the pair count, the verdict with its 95% CI, the
+  corpus case count with its confirmed regressions and inconclusive cases, the
+  host time spent, and links to the workflow attempt and the evidence. The run's artifact `buster-9700x-compiler-<head>-<attempt>`
+  holds `receipt.json`, the lab's `summary.json` and raw pairs, and the
+  corpus's `throughput/summary.json`, `metadata.json` and raw samples. A
+  missing, partial or invalid corpus run, or one whose compiler hashes are
+  not the measured binaries, fails the check like a failed self-host run.
+
+### Multi-TU scaling of a pull request
+
+To measure how the pull request's compiler scales across cores (#424), add
+or change any line of [`scaling.request`](scaling.request) in an owner pull
+request. This also requests the comparison above, and `compare-pull` then
+adds the `scaling-v1` profile after the corpus:
+- `./build.sh bench_throughput scale` from the merge base, on the head's
+  compiler only;
+- two series, `cores` (CPU 0's physical core excluded, 1/2/4/7 whole cores,
+  then 7C/14T) and `machine` (8 cores, then 8C/16T);
+- generated multi-TU compile-and-link, with each worker count checked against
+  the compiler's own `compilation_workers` report.
+
+The artifact's `scaling/<series>/` directories hold each bundle's
+`scaling.json`, `scaling.md`, raw `scaling.csv` and logs. `publish-pull`
+re-checks that each bundle is valid and was produced by the measured
+candidate, and the check's report shows every point's speedup, bounds,
+efficiency, CPU-work and RSS inflation. The leg adds about ten minutes and is
+report-only. See the [harness contract](../../tools/throughput/README.md#multi-tu-scaling-scale).
+
+The verdict is report-only and blocks nothing; the comparison of each commit
+after it lands on main publishes under a different name. A comparison takes a pilot
+plus about ten minutes of pairs after three builds, so request it once per
+head you intend to report.
 
 ## What the numbers mean
 

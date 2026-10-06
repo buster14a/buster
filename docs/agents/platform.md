@@ -126,6 +126,24 @@ failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
 
+## Linux process-group census reads
+
+A procfs task can disappear after its stat/status descriptor opens. Both the
+ordinary read and the capacity probe classify native ESRCH as disappearance;
+the caller retries its unchanged bounded, complete two-snapshot census.
+Open-time ENOENT/ESRCH retain the same meaning. Empty files, oversized content,
+malformed records, other read errors and close failures remain failures, and a
+failed read never publishes a length. This does not relax leader reservation,
+namespace identity, member-state or final ownership checks.
+
+Registered `os_tests` retain an unread stat descriptor for an exited child,
+reap that exact child, then exercise the production descriptor reader. Both
+normal and capacity-probe reads must observe ESRCH without publishing a length.
+Live, empty, oversized and invalid-descriptor controls distinguish disappearance
+from other outcomes. The existing synthetic census-churn fixture remains a
+separate check. This regression proves the read-after-open defect; the original
+#2380 CI failure had no stage detail and is not attributed conclusively to it.
+
 Linux process-group cleanup reads `self/status` from its retained procfs
 descriptor. `NSpid` lists the procfs mount's namespace followed by successively
 nested namespaces; the final coordinate is the caller's active namespace and
@@ -363,7 +381,10 @@ Writes are synchronous descriptor transfers, without a userspace output buffer.
 Flush (`fsync`/`FlushFileBuffers`) is explicit and reports errors; ordinary
 artifact writes do not add a durability flush. A failed write can leave an
 empty, partial, or complete destination, and a close failure still fails the
-operation. Atomic old-or-new replacement remains the separate #83 contract.
+operation. Atomic old-or-new replacement remains the separate #83 contract:
+`file_publish_*` and `file_copy_checked` close a staging file and rename it
+without flushing either, so publication is atomic but not crash-durable (#2621;
+see [artifact publication](driver.md#compiler-output-streams)).
 Console printing retains its always-on failure wrapper.
 
 Registered file/diagnostic tests use `os_internal.h` scripts scoped to one
@@ -422,3 +443,36 @@ library dependency. Its own loader uses existing OS threads, one-lane dispatch
 and Linux libc synchronization/filesystem calls where no current generic API
 fits. It adds no UI/font/Vulkan module to the compiler. Native Xvfb pixel
 readback is software-XCB evidence, not GPU or other-platform product support.
+
+## Native XCB fixture lifecycle
+
+The actual raster fixture owns an independent admitted XCB connection through
+allocation refusal, repeated WM initialization and both real XIM provider modes.
+Default X servers reset when their last admitted client disconnects; an accepted
+next client can be closed before its setup completes. The independent owner
+keeps that server lifetime explicit. A server-generation atom must survive every
+tested cycle. Production initialization still reports unavailable/lost native
+connections without reconnect retries.
+
+The window-arena fault fixture must prove its reserve fault was consumed.
+`arena_test_cancel_reserve_failure` in the private tests-only arena header
+cancels any unused calling-thread injection before another consumer can
+allocate. The unavailable-display control distinguishes native admission
+refusal from allocation refusal and requires subsequent unpooled allocations
+to succeed.
+
+XIM forward and synchronous masks keep their protocol meanings. Native
+subscriptions add only valid core forward bits; synchronous masks determine
+protocol event flags, not additional X server subscriptions. Both live provider
+modes independently check committed text, refusal/recovery, error-free native
+requests, input-context teardown, advertisement/selection removal and restored
+environment. A separate real client-loss control preserves the fixture owner.
+
+The native workflow runs 64 complete repetitions per profile, requiring
+192 lifecycle cases and 128 real encoding cases, and retains native logs plus
+Xvfb stderr even on failure. Local fixture invocations default to one complete
+repetition; `BUSTER_NATIVE_CAMPAIGN_REPETITIONS` admits only 1..64. A smaller
+executed case count fails independently of the assertion total. Existing
+five-second phase deadlines, pass bounds, pixel readback and downstream browser
+checks remain required. See [#2499](https://github.com/buster14a/buster/issues/2499)
+for the before/after experiments and attribution.

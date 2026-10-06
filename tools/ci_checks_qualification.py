@@ -92,9 +92,10 @@ import posixpath
 import re
 import statistics
 import sys
+from types import SimpleNamespace
 
 import ci_matrix_phases as phases
-import ci_summary_core as coverage_tools
+import ci_summary_core as _coverage_core
 import ci_unit_tests_measure as units
 import ci_unit_tests_campaign as unit_campaign
 import github_ci_time as github
@@ -118,6 +119,26 @@ SELECTED_TOOL_ROLES = {
     "Android x86-64": ("mobile", "adb", "adb_version"),
 }
 
+# The #2120 cohorts froze policy v1/partition v2 evidence, including the old
+# full-runtime sanitized-debug owner. Read them only through that frozen view;
+# #2657's current policy v2/partition v3 never redefines archived samples.
+# The #2120 split cohorts froze three check owners per split platform. This
+# is a property of archived evidence, not of the current github_ci_time
+# layout, so it never follows the current (#2657) split shards.
+COHORT_SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
+coverage_tools = SimpleNamespace(
+    COVERAGE_POLICY_VERSION=_coverage_core.HISTORICAL_COVERAGE_POLICY_VERSION,
+    COVERAGE_PARTITION_VERSION=_coverage_core.HISTORICAL_COVERAGE_PARTITION_VERSION,
+    _COVERAGE_POLICY_ANCHORS=_coverage_core._HISTORICAL_COVERAGE_POLICY_ANCHORS,
+    _coverage_row_id=_coverage_core._coverage_row_id,
+    _coverage_row_owner=_coverage_core._historical_coverage_row_owner,
+    _coverage_selected_ids=lambda rows, shard: _coverage_core._coverage_selected_ids(
+        rows, shard, _coverage_core._historical_coverage_row_owner),
+    _coverage_policy_fingerprint=lambda identity, rows: _coverage_core._coverage_policy_fingerprint(
+        identity, rows, _coverage_core.HISTORICAL_COVERAGE_POLICY_VERSION),
+    _coverage_expected_obligations=_coverage_core._coverage_expected_obligations,
+)
+
 
 def require(condition, message):
     if not condition:
@@ -138,7 +159,7 @@ def record(root, reference):
 
 def role(name):
     result = name
-    for shard in github.SPLIT_CHECK_SHARDS:
+    for shard in COHORT_SPLIT_CHECK_SHARDS:
         if name.endswith(" " + shard):
             result = name.rsplit(" ", 1)[0] + " checks"
     return result
@@ -178,7 +199,7 @@ def cohort(campaign):
 def _cohort_desktop(variant):
     split_platforms = ("Linux x86-64", "Linux AArch64", "Windows x86-64") if variant == "split-overlap" else ()
     return tuple(f"{platform} {shard}" for platform in github.PLATFORMS
-                 for shard in (("release",) + github.SPLIT_CHECK_SHARDS
+                 for shard in (("release",) + COHORT_SPLIT_CHECK_SHARDS
                                if platform in split_platforms else github.COMBINATION_SHARDS))
 
 
@@ -449,8 +470,12 @@ def observation(root, item, test, unit, manifest_path, event, identity):
     log_path = retained(path.parent, {"path": "test.log", "sha256": value.get("log_sha256")})
     manifest = phases.read(manifest_path)
     require((manifest_path.parent / manifest["log"]).resolve() == log_path.resolve() and test["log_sha256"] == value["log_sha256"], "manifest did not consume the native test log")
-    require(unit["inventory"] == unit_campaign.inventory(inventory_path), "native independent inventory differs from test manifest")
-    profile = unit_campaign.host_profile(inventory_path, required=True)
+    inventory_rows, profile, inventory_primary = unit_campaign.inventory_proof(inventory_path)
+    require(profile is not None, "Missing measured native host profile")
+    require(unit["inventory"] == inventory_rows, "native independent inventory differs from test manifest")
+    if unit["mode"] == "groups":
+        require(manifest.get("primary_module") == inventory_primary,
+                "native independent inventory primary differs from grouped manifest")
     declared_profile = unit["identity"].get("native_host_profile")
     require(profile["architecture"] == identity["architecture"] and
             declared_profile == profile and json.dumps(declared_profile, sort_keys=True) == json.dumps(profile, sort_keys=True),
