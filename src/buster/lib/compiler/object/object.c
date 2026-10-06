@@ -7764,6 +7764,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                                         : string_starts_with_sequence(name, S8("__data")) ? OBJECT_SECTION_DATA
                                                                                                              : OBJECT_SECTION_READ_ONLY_DATA;
                     }
+                    // A zero-fill kind with no zero-fill type flag (a `__bss`-named
+                    // S_REGULAR section) has no buffer yet claims file bytes: malformed.
+                    if (read_ok && !zero_fill && section_size && object_section_kind_is_zero_fill(output_kind))
+                    {
+                        read_ok = false;
+                    }
                     u32 alignment = 0;
                     if (read_ok)
                     {
@@ -7886,9 +7892,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             object_read_u32(bytes, section + 48, &offset);
             object_read_u32(bytes, section + 64, &flags);
             u32 section_type = flags & 0xff;
-            if (section_type != 1 && section_type != 0x12 && size && !compact_sections[section_index] && !(has_compact && eh_frame_sections[section_index]))
+            ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
+            // Gate on the resolved kind (the allocation decision), not the raw type
+            // flag: a `__bss`-named section is OBJECT_SECTION_ZERO and has no buffer.
+            if (section_type != 1 && section_type != 0x12 && !object_section_kind_is_zero_fill(kind) && size && !compact_sections[section_index] &&
+                !(has_compact && eh_frame_sections[section_index]))
             {
-                ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
                 memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
             }
         }
@@ -8723,38 +8732,50 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             u64 stored = 0;
                             object_read_u64(bytes, entry, &stored);
                             u64 function_offset = 0;
-                            if (external)
+                            // A rejected reference must never be used as an index:
+                            // r_symbolnum is attacker-controlled (zero underflows the
+                            // section lookup; an oversized value walks past symbol_map).
+                            if (read_ok && external)
                             {
                                 if (source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX)
                                 {
                                     read_ok = false;
                                 }
-                                ObjectSymbol* symbol = &result.symbols[symbol_map[source_symbol]];
-                                if (symbol->section != OBJECT_SECTION_TEXT || stored > UINT64_MAX - symbol->value)
+                                else
                                 {
-                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                                    read_ok = false;
+                                    ObjectSymbol* symbol = &result.symbols[symbol_map[source_symbol]];
+                                    if (symbol->section != OBJECT_SECTION_TEXT || stored > UINT64_MAX - symbol->value)
+                                    {
+                                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                        read_ok = false;
+                                    }
+                                    function_offset = symbol->value + stored;
                                 }
-                                function_offset = symbol->value + stored;
                             }
-                            else
+                            else if (read_ok)
                             {
                                 if (!source_symbol || source_symbol > mach_section_count)
                                 {
                                     read_ok = false;
                                 }
-                                u32 referenced_section = source_symbol - 1;
-                                if (section_kinds[referenced_section] != OBJECT_SECTION_TEXT || stored < section_addresses[referenced_section])
+                                else
                                 {
-                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                                    read_ok = false;
+                                    u32 referenced_section = source_symbol - 1;
+                                    if (section_kinds[referenced_section] != OBJECT_SECTION_TEXT || stored < section_addresses[referenced_section])
+                                    {
+                                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                        read_ok = false;
+                                    }
+                                    else
+                                    {
+                                        u64 local_offset = stored - section_addresses[referenced_section];
+                                        if (local_offset > UINT64_MAX - section_bases[referenced_section])
+                                        {
+                                            read_ok = false;
+                                        }
+                                        function_offset = section_bases[referenced_section] + local_offset;
+                                    }
                                 }
-                                u64 local_offset = stored - section_addresses[referenced_section];
-                                if (local_offset > UINT64_MAX - section_bases[referenced_section])
-                                {
-                                    read_ok = false;
-                                }
-                                function_offset = section_bases[referenced_section] + local_offset;
                             }
                             if (function_offset > UINT32_MAX || function_offset > result.sections[OBJECT_SECTION_TEXT].data.length ||
                                 function_size > result.sections[OBJECT_SECTION_TEXT].data.length - function_offset ||
@@ -10700,6 +10721,7 @@ BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResu
             .offset = relocation.offset,
             .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
             .symbol = symbol_index,
+            .addend = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? (s64)relocation.addend : 0,
             .kind = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? OBJECT_RELOCATION_COFF_SECREL32 : OBJECT_RELOCATION_COFF_SECTION16,
         };
     }
