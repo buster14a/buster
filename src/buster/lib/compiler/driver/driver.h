@@ -99,6 +99,20 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
+typedef enum CompilerDriverLinkOperationKind
+{
+    COMPILER_DRIVER_LINK_OPERATION_FILE,
+    COMPILER_DRIVER_LINK_OPERATION_LIBRARY,
+    COMPILER_DRIVER_LINK_OPERATION_COUNT,
+} CompilerDriverLinkOperationKind;
+
+typedef struct CompilerDriverLinkOperation CompilerDriverLinkOperation;
+struct CompilerDriverLinkOperation
+{
+    u32 index;
+    CompilerDriverLinkOperationKind kind;
+};
+
 typedef struct CompilerDriverInvocation CompilerDriverInvocation;
 struct CompilerDriverInvocation
 {
@@ -108,6 +122,10 @@ struct CompilerDriverInvocation
     // and contains exactly input_count entries. API-built legacy
     // invocations leave it null and continue to use language globally.
     CompilerDriverLanguage* input_languages;
+    // Parsed native links apply files and libraries in this CLI order. Each
+    // index selects the next entry of input_paths or libraries. A zero count
+    // retains the API's legacy file-then-library order.
+    CompilerDriverLinkOperation* link_operations;
     String8* include_paths;
     String8* system_include_paths;
     // Parsed command lines populate only this ordered stream. The separate
@@ -154,6 +172,8 @@ struct CompilerDriverInvocation
     u32 input_count;
     // Zero when input_languages is null; otherwise exactly input_count.
     u32 input_language_count;
+    // A nonzero stream covers every input and library occurrence exactly once.
+    u32 link_operation_count;
     // -fcompile-jobs=N: opt-in lanes for consecutive native C link inputs.
     // Zero/default is one. The caller owns its total process/thread budget;
     // this does not infer available RAM from the TU's virtual reservation.
@@ -197,6 +217,10 @@ struct CompilerDriverInvocation
     // -shared` will place. A PIE takes the same model; the image writer
     // relaxes the GOT loads of the definitions it binds.
     bool position_independent;
+    // 0: none, 1: lowercase PIC spelling, 2: uppercase PIC spelling.
+    u8 position_independent_level;
+    // The selected position-independent spelling was a PIE flag.
+    bool position_independent_executable;
     // -shared or -pie: the NativeImageKind a link produces. Accepted for a
     // link only on x86-64 Linux, the one target with a writer for it.
     NativeImageKind image_kind;

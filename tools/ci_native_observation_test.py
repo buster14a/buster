@@ -767,7 +767,7 @@ class NativeObservationTest(unittest.TestCase):
             "refs/heads/codex/2120-evidence-v2-combined-all-builds",
         )
         combined_shards = ["release", "checks"]
-        split_shards = combined_shards + ["sanitized-debug", "sanitized-release", "portability"]
+        split_shards = combined_shards + ["sanitized-release", "portability"]
         dispatch_guard = "github.event_name == 'workflow_dispatch' && (" + " || ".join(
             "github.ref == '" + ref + "'" for ref in combined_refs) + ")"
         self.assertEqual(shards.group(1), dispatch_guard + " && '" + json.dumps(combined_shards) +

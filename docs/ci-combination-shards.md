@@ -3,40 +3,43 @@
 This is the internal compiler/configuration partition, after the independent
 native/mobile suite split. `build.c` remains the scheduling and coverage
 policy authority. Compiler implementation, test selection, optimization,
-sanitizer/fuzzer policy, deadlines and production backend dispatch do not change.
+deadlines and production backend dispatch do not change. Policy v2 (#2657)
+deliberately changed sanitizer/fuzz execution ownership; see
+[Sanitizer execution policy](#sanitizer-execution-policy-2657).
 
 ## Ownership
 
-The five retained runner labels form sixteen desktop jobs. Linux x86-64,
-Linux AArch64 and Windows x86-64 each have `release`, `sanitized-debug`,
-`sanitized-release` and `portability` owners. macOS AArch64 and Windows AArch64
-retain `release` and grouped `checks`. Include entries add metadata by lane.
-The historical combined layout remains an explicit qualification cohort.
+The five retained runner labels form fourteen desktop jobs. Linux x86-64,
+Linux AArch64, macOS AArch64 and Windows x86-64 each have `release`,
+`sanitized-release` and `portability` owners. Windows AArch64 retains
+`release` and grouped `checks`. Include entries add metadata by lane. The
+historical combined layout remains an explicit qualification cohort.
 
 | Shard | Work |
 | --- | --- |
 | `release` | The one unsanitized Clang Release/unity tree, its runtime tests, canonical unity analysis/table audits, and supported artifact-fanout self-host/fixed-point/census consumers. Shared native diagnostics, throughput/service self-tests, workflow-tool and wrapper regressions also run here once per platform. |
-| `checks` | Sanitized Clang Debug/Release and the existing non-Clang portability Debug trees. Windows ARM64 still has its nonempty MSVC Debug shard and explicit unsupported GCC/Zig/sanitizer/fuzzer exclusions. |
-| `sanitized-debug` | Original sanitized Clang Debug/fuzz configurations, with the full runner worker budget. |
-| `sanitized-release` | Original sanitized Clang Release configurations, with the full runner worker budget. |
-| `portability` | Original noncanonical compiler/configuration rows; compilation-only policy is unchanged. |
+| `checks` | Sanitized Clang Release and every portability tree: the exact union of the two owners below. Scheduled only on Windows ARM64, whose nonempty MSVC Debug shard keeps explicit unsupported GCC/Zig/sanitizer/fuzzer exclusions; elsewhere it remains a grouped diagnostic selection. |
+| `sanitized-release` | The checks-enabled (#2656) optimized sanitized Clang Release tree: the sanitizer runtime suite, the `sanitizer_tests` controls and, where libFuzzer exists, the fuzz-enabled sanitized binary. Full runner worker budget. |
+| `portability` | Compile-and-link coverage: the sanitized Clang Debug tree (build-only since #2657) and the noncanonical GCC/Zig/MSVC Debug rows. No row here runs tests. |
 
-| Platform | Release configurations | Checks configurations | Total required |
-| --- | ---: | ---: | ---: |
-| Linux, either architecture | 1 | 4 | 5 |
-| macOS AArch64 | 1 | 4 | 5 |
-| Windows x86-64 | 1 | 5 | 6 |
-| Windows AArch64 | 1 | 1 | 2 |
+| Platform | Release configurations | Checks configurations | Runtime / compile-link | Total required |
+| --- | ---: | ---: | ---: | ---: |
+| Linux, either architecture | 1 | 4 | 2 / 3 | 5 |
+| macOS AArch64 | 1 | 4 | 2 / 3 | 5 |
+| Windows x86-64 | 1 | 5 | 2 / 4 | 6 |
+| Windows AArch64 | 1 | 1 | 1 / 1 | 2 |
 
 Selection is semantic: Clang + unsanitized + optimized belongs to `release`;
 the other rows belong to `checks`. It is not an ordinal/modulo partition or
 a test-name prefix. Excluded rows have explicit owners too, but never count
 as execution. The native partition validator requires exactly one canonical
-Release configuration, a nonempty checks selection, and intact shared trees.
-In particular, the macOS sanitized Debug/Release configurations stay in the
-same CMake multi-config tree. The scheduled owners together execute each
-original required configuration exactly once. Grouped `checks` remains the
-exact union of the three check owners.
+Release configuration, a nonempty checks selection, and exactly one owner per
+CMake tree. Every sanitized Clang configuration therefore has its own
+single-configuration tree on every host, including macOS where no fuzz split
+existed before #2659; no two owners configure, build or test one directory.
+The scheduled owners together execute each original required configuration
+exactly once. Grouped `checks` remains the exact union of the three check
+owners, now as separate trees in one job.
 
 The canonical producer and all its consumers remain in one job: there is no
 cross-job compiler artifact handoff or second canonical compiler build.
@@ -62,19 +65,76 @@ job. Only verified download archives are cached; build trees, compiler outputs
 and test verdicts are not. The extra setup and queue cost must be included in
 qualification, not assumed free.
 
+## Sanitizer execution policy (#2657)
+
+Sanitized Release is checks-enabled: since #2656, `BUSTER_CHECK`,
+`BUSTER_ASSERT` and `BUSTER_UNREACHABLE` are diagnostics whenever
+`BUSTER_SANITIZE` is set, at every optimization level. Policy v2 therefore runs
+the sanitizer suite once, in the optimized tree, and keeps sanitized Debug as
+compile-and-link portability coverage. `matrix_coverage_row_execution` in
+`build.c` is the single rule: only optimized Clang rows are `runtime`; every
+Debug and non-Clang row is `compile-link`, builds `ide` and never runs tests.
+
+| Supported configuration | Before (policy v1) | After (policy v2) |
+| --- | --- | --- |
+| Unsanitized Clang Release (unity, canonical) | `release`, runtime, fuzz-enabled on Linux/Windows x86-64 and Linux AArch64 | Unchanged |
+| Sanitized Clang Release | `sanitized-release`, runtime, fuzz off | `sanitized-release`, runtime, **fuzz-enabled** where libFuzzer exists |
+| Sanitized Clang Debug | `sanitized-debug` job, full runtime suite, fuzz-enabled where libFuzzer exists | `portability`, **compile-link only**, fuzz off |
+| GCC/Zig Debug, MSVC Debug | `portability`, compile-link | Unchanged |
+| Unsupported rows (Windows AArch64 sanitizers/GCC/Zig, Apple fuzz, ...) | Explicit exclusions | Unchanged |
+
+The runtime build and test flags are those of the ordinary sanitized tree:
+`-DBUSTER_SANITIZE=ON` with `CMAKE_BUILD_TYPE`/configuration `Release`, so
+`BUSTER_OPTIMIZE=1` and `BUSTER_SANITIZE=1`. The existing fatal
+`ASAN_OPTIONS`/`UBSAN_OPTIONS` launch, leak checking where supported and the
+registered `sanitizer_tests` positive/negative controls run in that tree.
+`sanitizer_tests` records `CONTRACT_CONFIGURATION optimize=1 sanitize=1
+checked=1` there and checks the compiler's own optimization/sanitizer
+predefinitions, so a directory name cannot stand in for the effective flags.
+
+**Fuzz.** `BUSTER_FUZZ_AVAILABLE` builds a fuzz-enabled `ide` and compiles the
+fuzz-only unit controls (`object_fuzz_test_input` boundary inputs). No matrix
+row runs a libFuzzer campaign. The fuzz-enabled sanitized binary and those
+controls moved with the runtime obligation to the sanitized Release tree; the
+build-only sanitized Debug tree does not build them. The unsanitized canonical
+Release tree keeps its existing fuzz-enabled build.
+
+**Debug-only behavior.** The inventory of `!BUSTER_OPTIMIZE` code at the #2657
+revision:
+
+* Reference-equivalence and invariant checks in the C frontend (`c_gen.c`,
+  `c_parse.c`, `c_source.c`) and object writer (`object.c`) now use
+  `BUSTER_REFERENCE_CHECKS` (`!BUSTER_OPTIMIZE || BUSTER_SANITIZE`), so
+  sanitized Release executes them and ordinary Release still pays nothing.
+  `sanitizer_tests` asserts that gate equals the checked-contract
+  configuration. `BUSTER_IR_TRANSFORM_CHECKS` and GPU validation already
+  included `BUSTER_SANITIZE`.
+* Remaining Debug-only behavior no longer executed by routine CI:
+  `BUSTER_INLINE` is not forced inline, `string_equal` uses its byte loop
+  instead of `memory_compare`, unsanitized-Debug benchmarks use fewer
+  iterations, and code generated at `-O0` (no optimizer transformations,
+  frame layout and inlining as written) is only compiled and linked. Compile
+  and link success is not runtime evidence for those paths. Developers can
+  still run sanitized Debug locally with `./build.sh generate --sanitize` and
+  `./build.sh build -t test_all`, and `test_all_combinations` builds it.
+
 ## Coverage and completion proof
 
-`BUSTER_MATRIX_SHARD=release|checks|sanitized-debug|sanitized-release|portability`
+`BUSTER_MATRIX_SHARD=release|checks|sanitized-release|portability`
 selects an owner. An absent value or `all`
 runs the original unsharded matrix (`combinations` in the manifest). Invalid
-values fail before compiler discovery, preflight or build-tree mutation.
+values, including the retired `sanitized-debug`, fail before compiler
+discovery, preflight or build-tree mutation.
 Default tree prefixes include `build/build-release-`, `build/build-checks-`,
-`build/build-sanitized-debug-`, `build/build-sanitized-release-` and
-`build/build-portability-`; an explicit build-directory prefix remains supported.
+`build/build-sanitized-release-` and `build/build-portability-`; an explicit
+build-directory prefix remains supported.
 
 Every manifest retains the **entire** expected/detected policy. Row IDs stay
-in the original `desktop/combinations/...` namespace, so all six independently
-reviewed policy counts and fingerprints from #612 remain unchanged. A new
+in the original `desktop/combinations/...` namespace. Policy v2 changed the
+`execution` and `fuzz` fields of the sanitized Clang rows, so all six
+independently reviewed fingerprints were re-derived (the row counts are
+unchanged) and both the policy version (1 → 2) and partition version (2 → 3)
+were bumped: v1 runtime evidence cannot satisfy the current consumer. A
 `owner_shard` is independently checked by the consumer; it cannot redefine
 ownership. A completion record must contain exactly the selected required
 IDs, with no missing, duplicate or foreign-shard rows. Source, driver,
@@ -86,8 +146,8 @@ validated on the executing runner. A checks completion explicitly says
 
 * All six job groups (`lint`, `test`, `native`, `mobile`, `uefi`, `analyzer`)
   must succeed, with the existing real-shell negative controls retained.
-* The read-only Actions job inventory must contain the exact 27 expected job
-  identities: all sixteen desktop shard names, all five native names, two
+* The read-only Actions job inventory must contain the exact 25 expected job
+  identities: all fourteen desktop shard names, all five native names, two
   mobile names, UEFI, analyzer, lint and the active aggregate. Every completed
   job must succeed. Each desktop job must complete its applicable matrix,
   coverage summary, tool setup, shared regressions and log upload; each native
@@ -105,7 +165,7 @@ The job inventory is retained as `desktop-partitions-<run>-<attempt>`.
 For a main push with [admitted exact queue evidence](ci-main-reuse.md), the
 native, mobile and UEFI groups are skipped on main and the aggregate verifies
 their eight actual queue job executions, artifacts and retained current-run
-inventory. The full 27-job inventory remains mandatory on ordinary non-reuse
+inventory. The full 25-job inventory remains mandatory on ordinary non-reuse
 events and on main whenever admission falls back. Exact combined qualification
 dispatch refs retain their explicit 21-job inventory. The aggregate rechecks
 every source desktop partition and the main cache-only effects; it does not
@@ -184,7 +244,7 @@ Focused controls, without compiling the full compiler matrix:
 ```sh
 python3 tools/matrix_shard_test.py -v
 python3 tools/coverage_manifest_test.py -v
-python3 tests/ci_tools_test.py -v
+python3 tools/ci_workflow_policy_test.py -v
 python3 tools/check_action_pins.py
 ```
 
@@ -215,15 +275,17 @@ python3 tools/github_ci_time.py summarize baseline-runs.json --output baseline-s
 python3 tools/github_ci_time.py summarize candidate-runs.json --output candidate-summary.json
 ```
 
-The collector understands the historical 6/11/15/17/23-job layouts and the
-current 27-job layout. All 27 execution intervals count toward candidate runner
+The collector understands the historical 6/11/15/17/23-job layouts, the
+pre-#2659 27-job split layout, the pre-#2657 29-job layout and the current
+25-job layout. All 25 execution intervals count toward candidate runner
 seconds, including both Windows mode lanes and the aggregate inventory check.
 It reports whole-workflow elapsed time, execution span, initial queue delay,
 individual job durations and job queue delays when API creation timestamps
 exist (otherwise `null`, never imputed zero). Missing successful steps or shard
 identities reject a sample, so draft runs with deferred macOS lanes are never
-timing samples. Historical 21-/23-/25-job and current 27-job workflow blobs
-remain separate cohorts.
+timing samples. Historical 21-/23-/25-/27-/29-job and current 25-job workflow
+blobs remain separate cohorts (the historical and current 25-job inventories
+have different job names).
 
 Compare medians and retain individual shard distributions. Inspect
 `result.json` cache/image fields and `BUSTER_MATRIX_PARTITION`/step logs for
@@ -242,12 +304,14 @@ row ownership remain unchanged; alternative-order predictions are diagnostic.
 ## Isolated module process experiment
 
 The `BUSTER_TEST_PROCESS_PARTITIONS` CMake option defaults to `OFF`; the CI
-matrix enables it for its sanitized Clang test trees, whose serialized test phases receive
+matrix enables it for sanitized Clang trees and native Windows AArch64 Clang
+trees. Their serialized test phases receive
 the whole low-core budget (see [build guidance](agents/build.md)).
 CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
 native `build.c test_units_partitioned <ide-path>` diagnostic. The partition
-driver runs `compiler_driver_tests` and the remaining enabled modules in
-separate processes, shares one built executable, divides its supplied test
+driver runs the `primary` module (`c_frontend_tests` on Windows x86-64,
+`compiler_driver_tests` elsewhere) and the remaining enabled modules in
+separate processes. It shares one built executable, divides its supplied test
 budget between the children, and replays their captured output in stable order.
 It rejects missing/duplicate module evidence, failed assertions/processes,
 timeouts, capture failures and incomplete cleanup. Whole-table audit exclusions
@@ -295,25 +359,33 @@ requires a frozen declaration, exhaustive dispatch history and population/
 operational disposition; it does not reinterpret historical samples or
 establish performance acceptance by itself.
 
-Partition version 2 assigns every original policy row to one of four owners:
+Historical partition version 2 (superseded by version 3 in #2657) assigned
+every original policy row to one of four owners:
 `release` (unsanitized optimized Clang), `sanitized-debug`, `sanitized-release`,
 and `portability`. `checks` selects the union of the three non-Release owners;
 `all` still selects the entire original policy. Excluded rows remain explicit.
-The original row IDs, policy version, counts and fingerprints are unchanged.
-The consumer independently derives owners and rejects missing, foreign,
-duplicated and empty completions.
+That version kept the #612 row IDs, policy version, counts and fingerprints.
+`tools/ci_checks_qualification.py` reads the frozen #2120 evidence only
+through that historical policy-v1/partition-v2 view. The consumer
+independently derives owners and rejects missing, foreign, duplicated and
+empty completions.
 
-The default workflow replaces grouped checks on Linux x86-64, Linux AArch64
-and Windows x86-64 with three independent jobs, giving sixteen desktop jobs
-and an exact 27-job required
-inventory (plus the main-reuse decision job). macOS retains its shared sanitizer
-tree and Windows AArch64 retains grouped MSVC portability checks. Individual
-Apple sanitizer selections and empty Windows AArch64 sanitizer selections fail
-before native build-tree mutation. Only Release owns preflight and canonical
-producer obligations. Each isolated sanitizer job receives its full host budget.
+The #2120 rollout replaced grouped checks on Linux x86-64, Linux AArch64 and
+Windows x86-64 with three independent jobs, giving sixteen desktop jobs and an
+exact 27-job required inventory (plus the main-reuse decision job); macOS then
+kept a shared sanitizer tree. #2659 later split macOS AArch64 the same way
+(eighteen desktop jobs, 29 required jobs), and #2657 then removed the four
+full-runtime `sanitized-debug` jobs (fourteen desktop jobs, 25 required jobs;
+see Ownership). The #2120 cohorts and
+their readers (`ci_checks_qualification.cohort_jobs`) keep that historical
+27-job split inventory. Windows AArch64 retains grouped MSVC portability
+checks, and its empty sanitizer selections fail before native build-tree
+mutation. Only Release owns preflight and canonical producer obligations. Each
+isolated sanitizer job receives its full host budget.
 
 The configure-evidence collector recognizes the native default compiler-tree
-prefixes for `sanitized-debug`, `sanitized-release`, and `portability` alongside
+prefixes for `sanitized-release` and `portability` (and the retired
+`sanitized-debug` prefix of historical trees) alongside
 the unsharded, Release and grouped-checks trees. It retains the same bounded
 CMake diagnostics for each split owner, excludes superbuild trees, and fails
 when no matrix configure trees are present.
@@ -408,9 +480,14 @@ oracle derives features from the detected model and is labeled `target-native`,
 not CPUID. Unsupported or unavailable oracles cannot qualify a campaign.
 The existing inventory SHA-256 and binary receipt bind this record to the
 invocation. `ci_unit_tests_campaign.host_profile()` validates it without
-running a binary. Legacy inventories remain readable as diagnostic evidence;
-qualification requires an observed `identity.native_host_profile` equal to
-the independent query and includes that profile in each exact row census.
+running a binary. Inventories without a measured host profile remain
+diagnostic evidence when interpreted by the reader bound to their group
+schema. Archived `driver`/`rest` inventories remain interpretable only with
+their exact pinned historical reader; the current reader requires one
+`primary` owner and uses `primary`/`rest` records. Backward compatibility
+for old group names is not claimed. Qualification requires an observed
+`identity.native_host_profile` equal to the independent query and includes
+that profile in each exact row census.
 Duplicate, malformed or forged profiles fail closed. The ordinary test
 invocations, registered modules and assertion accounting are unchanged.
 

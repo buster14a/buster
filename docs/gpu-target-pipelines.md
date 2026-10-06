@@ -199,13 +199,39 @@ binary artifacts are checked for their expected container signature:
 - `DXBC` container signature for DXIL;
 - a textual PTX header for PTX.
 
-Every execution exclusively creates an owner-only sibling directory named
-`.buster-gpu-<pid>-<counter>.temps/` beside the explicit output, or beside the
-first input when no output was named. Every compiler-generated intermediate,
-including the final artifact before validation, is placed inside that
-directory. Concurrent identical invocations therefore have disjoint
-namespaces, and cleanup removes only the directory whose creation this
-invocation successfully claimed.
+Every execution selects a parent scratch root independently of its source and
+named output. A nonempty API `GpuPipelineOptions.temporary_directory` selects
+that parent; direct `gpu_pipeline_plan` callers continue to pass a directory
+whose ownership they already established. With no execution override, use the
+captured process environment and platform defaults:
+
+| Platform | Scratch-root selection |
+|---|---|
+| Windows | Nonempty `TEMP`, then nonempty `TMP`; missing both is a structured error |
+| Linux/macOS desktop | Nonempty `TMPDIR`, otherwise `/tmp` |
+| Android | Nonempty `TMPDIR`, otherwise the native activity's existing `internalDataPath` |
+| iOS | Nonempty `TMPDIR`, otherwise `tmp` beneath captured `HOME`; missing both is a structured error |
+
+The selected root must already exist and be writable. A creation failure does
+not silently select another root. Source/output directories are never implicit
+scratch defaults. Execution first builds the existing pure plan against a
+proposed `.buster-gpu-<pid>-<counter>.temps/` child, then exclusively creates
+that owned child only if planning succeeds. A name collision chooses
+another child and rebuilds its plan; it never adopts an existing entry. Every
+compiler-generated intermediate, including the final artifact before
+validation, stays inside the claimed child. Cleanup removes only that child
+and preserves the selected parent and unrelated entries.
+
+Syntax-only and captured preprocessing/assembly can therefore read sources
+in a non-writable directory when scratch storage is available. Named outputs
+retain their existing destinations and source-derived default names: a default
+named output beside a read-only input can still fail publication. The existing
+same-directory final staging remains independent of private scratch placement.
+The registered desktop POSIX permission fixture requires a nonzero effective
+UID, verifies denied creation in the source directory, and runs a first-party
+external-tool script that reads the source and records each invocation.
+Portable execution controls cover explicit root ownership and the actual
+platform default; mobile does not substitute an explicit root for that default.
 
 The concurrent ownership regression shares its input and parent directory while
 assigning one final output to each invocation. Both outputs must be valid and
@@ -220,6 +246,21 @@ temporary files: <path>`, and the API returns the same path in
 `GpuPipelineResult.temporary_directory`. A process killed outside the executor
 can leave a recognizable `.buster-gpu-*.temps` directory, but a later run
 never adopts or deletes it.
+
+Tool output is retained under a whole-invocation budget,
+`GPU_PIPELINE_LOG_LIMIT_DEFAULT_BYTES` (32 MiB; `GpuPipelineOptions.log_limit_bytes`
+overrides it). Each process step captures stdout and stderr into scratch under
+per-child limits of at most the process-capture defaults (16 MiB per stream,
+32 MiB total) and never above the budget, and only the admitted bytes are copied
+into one chunk per nonempty stream. The chunks are concatenated once, in step
+order, into `GpuPipelineResult.log`, so the work is linear in the retained
+output however many steps run. Pipes are always drained. Output past the budget
+is dropped; a failing tool's own output is kept by evicting the oldest earlier
+output, so the failure diagnostic still carries its error text. Truncation is
+observable: `log_truncated`, `log_dropped_bytes` (child capture drops, budget
+drops and evictions), and the per-child process facts `tool_output_truncated`
+and `tool_capture_limit_exceeded`. The driver reports truncation as a warning
+on success and appends it to the failure diagnostic.
 
 `GpuPipelineResult.published` records that named output replacement committed.
 `cleanup_failed` separately records failure to remove the owned workspace;

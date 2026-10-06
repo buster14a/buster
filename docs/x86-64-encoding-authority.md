@@ -189,6 +189,10 @@ Scalar/control syntax policy also retains full-width byte immediates, typed
 conditional-move aliases, the metadata-owned EMMS form, and the existing limits
 on symbolic arithmetic immediates and reserved control/debug register spellings.
 These projections do not create another encoding or relocation authority.
+Ordinary Jcc/SETcc/CMOVcc now share their condition identities and spelling
+projection in `x86_64_conditions.inc`; see the
+[closed condition-family contract](x86-64-condition-projection.md) for its
+consumers, retained exact-binding checks, independent witnesses and exceptions.
 
 Legacy XMM, MMX and x87 source memory qualifiers are checked against the generated
 operand schema. Candidate-local normalization keeps public vector source widths

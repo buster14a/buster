@@ -71,6 +71,22 @@ bounded Node runner requires a normal zero exit, empty stderr and the exact
 terminal summary. SHA-256 and before/after file comparisons bind execution to
 the compiler's original bytes. Missing Node reports an execution skip.
 
+## Unary value categories
+
+Every `UNARY` operand and result is a `VALUE` at the operation's canonical
+type. A storage `PLACE` requires an explicit `LOAD` before integer, floating,
+Boolean or vector unary arithmetic; matching type IDs do not authorize an
+implicit load or an addressable unary result. Invalid categories are refused
+with `IR_VALIDATION_OPERATION` at the unary row.
+
+`ir_test_canonical_unary_categories` uses an original complete raw
+`LOCAL` -> `LOAD` -> `UNARY` -> void `RETURN` fixture for all ten operations.
+It preserves each valid family while independently replacing the operand,
+result or both with places, and includes invalid operand/result categories.
+Uncertified preparation must reject these controls at `CANONICAL_INPUT`,
+before CFG or completion publication and without mutating the source rows.
+Valid neighboring modules prepare, publish zero edges and revalidate.
+
 ## Scalar binary operation families
 
 Scalar arithmetic and numeric comparisons require the operation's family to
@@ -84,6 +100,23 @@ vector operations retain their separate rules.
 all 33 scalar arithmetic/comparison operations with matching and wrong-family
 operands. It pins `IR_VALIDATION_OPERATION` at the binary row for every
 wrong-family case and preserves Boolean, pointer and vector controls.
+
+## Binary value categories
+
+Every BINARY operand and result is `IR_VALUE_VALUE`. A place denotes object
+storage, even when its canonical type matches the desired arithmetic type;
+an explicit LOAD supplies that stored value. Scalar arithmetic/comparison,
+Boolean, pointer-comparison and vector families use this same category
+contract. Consumers must not infer an implicit load from a matching type.
+
+`ir_test_canonical_binary_categories` supplies raw complete-module LOCAL/LOAD
+rows independently of the frontend and builder. Across 33 scalar operations
+and eight Boolean/pointer/vector controls, it preserves value-only neighbors
+and rejects independent or combined place operands/results and an invalid
+result category at the BINARY row. Its unused result and void return keep
+return validation from masking the fault. Uncertified preparation must reject
+each malformed input before promotion/publication, retain exact row context,
+and leave completion markers unset.
 
 ## Label provenance validation work
 
@@ -221,6 +254,24 @@ machine scheduling must rebuild or remap their derived use/liveness/placement
 facts; the ownership inventory records their producer, lifetime and invalidation.
 This inventory is source-level reconciliation, not a claim that all remaining
 CFG, dominance, width and relocation hypotheses were reproduced or repaired.
+
+## Switch case keys
+
+SWITCH case keys must be distinct after reduction to the selector's integer
+width. Signed raw encodings keep their low-width bit pattern. Wider-than-64-bit
+selectors use the existing zero-extended 64-bit case payload. Repeated
+destinations are permitted; case order and the default-last target contract
+are preserved. This prevents duplicate constants in the LLVM switch consumer.
+It does not assert identical narrow-selector execution across native consumers,
+whose existing comparisons use 32/64-bit widths.
+
+Validation scans strictly ascending/descending normalized keys without scratch
+allocation. Unordered keys use a scratch copy and at most eight radix passes;
+validation never sorts caller-owned immediates or targets. The registered
+`ir_test_canonical_switch_keys` uses raw original ARGUMENT/SWITCH/RETURN rows,
+explicit valid/invalid keys and 4096-case permutations. It checks width aliases,
+signed/full-width endpoints, shared destinations, exact error context and
+uncertified preparation refusal before publication, with unchanged input arrays.
 
 ## Regression and measurement contract
 

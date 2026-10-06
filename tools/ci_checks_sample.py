@@ -89,10 +89,12 @@ def desktop(root, item, condition, output, number):
             inventory_path = qualification.retained(sidecar, {"path": "inventory.log", "sha256": observation.get("inventory_sha256")})
             log_path = qualification.retained(sidecar, {"path": "test.log", "sha256": observation.get("log_sha256")})
             mode = invocation_mode(event)
+            inventory_rows, inventory_profile, inventory_primary = qualification.unit_campaign.inventory_proof(inventory_path)
+            qualification.require(inventory_profile is not None, "Missing measured native host profile")
             manifest = {"schema": "buster-ci-unit-tests-measure-v1", "arm": "candidate" if mode == "groups" else "baseline",
                         "mode": mode, "exit_code": observation.get("test_result"),
                         "test_workers": int(event["test_jobs"]), "elapsed_us": event["end_us"] - event["child_start_us"],
-                        "inventory": qualification.unit_campaign.inventory(inventory_path),
+                        "inventory": inventory_rows,
                         "log": Path(os.path.relpath(log_path, output)).as_posix(),
                         "identity": {"source_revision": identity["source_revision"], "binary_sha256": observation.get("binary_sha256"),
                             "runner_image": {key: condition[key] for key in ("image_os", "image_version", "runner")},
@@ -101,7 +103,9 @@ def desktop(root, item, condition, output, number):
                             "table_audits": row["unity"] if report["scheduler"] == "pooled" else True,
                             "toolchain": {key: capabilities[row_id][key] for key in qualification.CAP_KEYS},
                             "cpu_budget": report["cpu_budget"],
-                            "native_host_profile": qualification.unit_campaign.host_profile(inventory_path, required=True)}}
+                            "native_host_profile": inventory_profile}}
+            if mode == "groups":
+                manifest["primary_module"] = inventory_primary
             path = output / (str(number) + "-" + str(len(tests)) + ".json")
             write_json(path, manifest)
             tests.append({"row_id": row_id, "manifest": reference(root, path),
@@ -124,7 +128,7 @@ def assemble(path, output_name):
     qualification.timing(run, specification["variant"], declaration["name"])
     conditions, _ = qualification.conditions(root, specification["conditions"], run)
     inputs = specification["desktops"]
-    names = qualification.github.SPLIT_COMBINATION_PLATFORMS if specification["variant"] == "split-overlap" else qualification.github.COMBINATION_PLATFORMS
+    names = qualification.cohort_desktop_jobs(specification["variant"])
     qualification.require(isinstance(inputs, list) and Counter(item["job"] for item in inputs) == Counter(names),
                           "missing or duplicate exact desktop artifact")
     qualification.require(isinstance(output_name, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]*\.json", output_name),

@@ -24,6 +24,19 @@ destinations are explicitly refused. Write failures name the path and the OS
 error when supplied; native link failures identify the executable or PDB that
 failed. External GPU tools retain their own file-publication behavior.
 
+Publication (`file_publish_checked`, `file_publish_slices_checked` and
+`file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside
+the destination, closes it and renames it over the destination. It promises
+completion and atomic replacement, not crash durability: nothing calls
+`fsync(2)` or `FlushFileBuffers`, so after a power loss or kernel crash a
+just-published artifact may be missing, stale or empty, as with Clang and GCC
+objects. A process that observes a successful publication, including the
+build driver's self-host verification, sees the complete bytes; build systems
+recover from a crash by rebuilding from timestamps. Removing the per-artifact
+flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
+needs durability today; one that does should flush explicitly with
+`os_file_flush` rather than make every artifact pay for it.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
@@ -38,10 +51,10 @@ Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
 `-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
 nothing per unit and leave `CompilerDriverResult.object` unset.
 
-The registered `compiler_diagnostic_tests` include a desktop flush-failure
-cleanup regression. It injects one refusal after the real staging write, checks
-source mapping and native handle balance, old-or-absent destination bytes and
-a private directory inventory, then reuses the same invocation successfully
+The registered `compiler_diagnostic_tests` include a desktop close-failure
+cleanup regression. It injects one refusal after the real staging write and
+close, checks source mapping and native handle balance, old-or-absent
+destination bytes and a private directory inventory, then reuses the same invocation successfully
 against an independent literal preprocessing result. Close and staging deletion
 remain native operations. Android and iOS skip this desktop observation path
 explicitly; the existing portable write-failure tests still run. This is
@@ -54,8 +67,9 @@ claim. Run `ide test --module=compiler_diagnostic_tests --verbose=1 --ci=1`.
 zero in the invocation API) means one worker. Only consecutive native C
 inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
 `-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
-existing execution. Objects, archives and assembly are serial boundaries,
-even when `-x c` is present. Worker count is clamped to logical CPUs, input
+existing execution. Objects, archives, assembly and each `-l` occurrence are
+serial boundaries, even when `-x c` is present. A library between C sources
+ends the cohort before later translation units can publish definitions. Worker count is clamped to logical CPUs, input
 count and one inside an embedding caller's multi-lane gang.
 
 Each cohort contains at most one full TU per worker. `lane_range` gives
@@ -252,6 +266,13 @@ and maximum native vector width. `-target`/`--target` strings are
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+Windows targets implement the MSVC ABI only, so the MinGW spellings
+(`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
+`unsupported target environment` instead of being aliased to MSVC (#1492);
+MinGW's GCC `ms_struct` layout is not modelled.
+The GNU environment refusal applies after a recognized Windows OS component;
+`x86_64-gnu-windows-msvc` and `x86_64-gnullvm-windows-msvc` retain their free-form
+vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`. Callers may select
 `fast` or `quality`; both run canonical IR -> MIR -> placement ->
@@ -299,6 +320,18 @@ elements. AT&T's unqualified memory spelling uses the same candidate contract.
 When the same visible operands admit different unsized source widths, selection
 rejects the source as ambiguous; encoding length and candidate order never
 choose the number of input lanes.
+
+For explicit two-operand AT&T port I/O, `inb`/`inw`/`inl` and
+`outb`/`outw`/`outl` apply the suffix to the accumulator's data width.
+The port operand retains its separate architectural DX16 or imm8 role;
+metadata validates the exact accumulator, port register and immediate range.
+Source selection consumes both operands even though the imported XED rows mark
+the accumulator and DX as implicit. The hidden `OeAX()` accumulator selects
+AX or EAX and has no ModRM field; its width determines the word prefix rather
+than DX's fixed 16-bit width.
+`assembly_test_att_port_suffixes` checks exact bytes against matching Intel
+spellings, including immediate boundaries, word prefixes and invalid register,
+memory, suffix-width and 64-bit neighbours. It never executes port I/O.
 
 The default `-fcanonical-fast` shared pipeline and independent
 `-fcanonical-fast-{fold,address,dce,parameters}` controls are described in
@@ -431,11 +464,65 @@ relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
-`.att_syntax prefix`; and the `.cfi_*` family, accepted and dropped because it
-describes unwinding rather than bytes. Anything else -- a directive the table
+`.att_syntax prefix`; `.local` with `.comm name, size[, alignment]`, and
+`.lcomm`, which reserve a private zero-filled object in `.bss`; `.set`/`.equ`
+of `symbol` or `symbol±constant` (or a `.`-relative value), resolved once every
+label is known, so GCC may write it ahead of the label it names; and, accepted
+and dropped because they carry no bytes the linked program uses, the `.cfi_*`
+family, `.file`, `.ident`, and Clang's `.addrsig`/`.addrsig_sym`. In an instruction operand `.` is the address of its
+own statement, so `b .`, `bl .`, `b.cond .`, `cbz x0, .`,
+`ldr x0, .`, `jmp .+5` and the like resolve locally without a relocation or a symbol-table entry. AArch64 `b`/`bl` and the
+other PC-relative control forms also take `#imm` (a byte displacement) as well
+as a bare `imm`, matching llvm-mc (#2687). The constant is a byte
+displacement from the instruction and may be negative (`cbz x0, #-4`); the
+range is the form's own (`b.cond`, `cbz`, `cbnz` and `adr` 1 MiB, `tbz` and
+`tbnz` 32 KiB, `b`/`bl` 128 MiB; all but `adr` a multiple of 4) and a value
+outside it or misaligned is refused (#2706). `adr Xd, label` folds a target
+defined in its own section like a branch does. Any other target (another
+section, an undefined name, a `.globl` or `.weak` label) stays an
+`R_AARCH64_ADR_PREL_LO21` relocation with its symbol and addend on ELF, which
+the object reader, in-memory/ELF linkers and `object_aarch64_elf_page_relocate`
+resolve as S + A - P; Mach-O and COFF have no such relocation, so there a
+target the unit cannot fold is refused. `adrp` with a symbol is still refused. A global
+`.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
+absolute value are refused by name. Widths and alignment follow the target
+as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on
+AArch64 `.align N` is 2^N bytes like `.p2align`, `.word` is 32 bits, and
+`.xword`/`.dword` add 64-bit data. A constant that fits neither the signed nor
+the unsigned reading of its directive's width is refused, as llvm-mc does,
+rather than truncated. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
+listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
+register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
+`endbr64` on every target, since they are hint NOPs without IBT (other CET rows
+still require `shstk`); a one-operand shift or rotate (count 1); two-operand
+`shld`/`shrd` (count `%cl`); `xchg` with its memory operand in either position;
+`rep bsf`/`rep bsr`, GCC's spelling of the TZCNT/LZCNT bytes, on every target;
+AT&T `movq` between a general register or memory and an XMM/MMX register; and
+a constant before the symbol in a displacement (`8+w(%rip)`). An unsigned
+immediate field as wide as its operand takes either interpretation, so
+`movb $0xff`, `andb $0xf0`, `xorb $-1` and `mov rax, -2147483649` assemble, and
+an all-ones 64-bit literal is the sign-extended -1. Deliberate differences from
+GNU as: values outside -2^(w-1)..2^w-1 and negative shift counts are diagnosed
+rather than wrapped, and a `movabs` value that fits a sign-extended imm32
+takes the shorter `mov` row. `ret`/`retq` with an immediate (`c2 imm16`), a
+multi-byte `nop` with a register or memory operand (`nopw 0(%rax,%rax,1)`,
+`nopl 0x0(%rax)`, `nop %eax`, Intel `nop word ptr [rax + rax]`; always the
+`0F 1F /0` encoding) and the `movabs` moffs forms (`movabsq 0x1122334455667788, %rax`
+and the store, `a0`..`a3` in every width, Intel `movabs rax, ds:addr`) assemble
+to GNU's bytes; a moffs `movabs` forces the moffs row even when the address
+would fit a ModRM disp32, and a symbolic address is not accepted. A bare `cs`
+or `ds` instruction prefix before an AT&T mnemonic and unsized AT&T `nop mem`
+are not accepted (write `%cs:` in the operand and `nopl`). Known remaining
+deviations in encoding choice ([#2680](https://github.com/buster14a/buster/issues/2680)):
+the short accumulator ALU forms (`and al, imm8` encodes as `80 /4 ib`, a byte
+longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
+choice; both are equal-value encodings left alone because changing them would
+change shared encoder selection.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
 and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
@@ -471,6 +558,94 @@ operand diagnostics. No pair instruction words or generated identities are
 duplicated in the source adapter.
 Unsupported post-index memory operands are refused with their full spelling,
 so their writeback cannot silently disappear during comment handling.
+`ldr`-family statements whose address is a label rather than `[...]` select the
+control owner's PC-relative LDR (literal) rows.
+
+### AArch64 base instruction vocabulary
+
+AArch64 statements the table-driven owners refuse are retried by the base A64
+encoder (`aarch64_base_assembly.c`, entry `a64_base_assemble`), which encodes
+constant-operand GNU/LLVM spellings straight to one word. Statements an owner
+already accepts never reach it. Its vocabulary is:
+
+- Arithmetic: ADD/ADDS/SUB/SUBS with immediates, shifted registers and extended
+  registers, plus CMP/CMN/NEG/NEGS. A negative immediate selects the opposite
+  operation, a larger immediate with its low 12 bits clear uses `lsl #12`, and
+  an SP operand selects the extended form, all as llvm-mc does. Also
+  ADC/ADCS/SBC/SBCS and NGC/NGCS.
+- Logical and moves: AND/ORR/EOR/ANDS/BIC/ORN/EON/BICS with bitmask immediates
+  or shifted registers, plus TST and MVN. MOV covers register to register,
+  to and from SP, immediates (MOVZ, then MOVN, then an ORR bitmask), and
+  element/vector moves. Explicit MOVZ/MOVN/MOVK are accepted.
+- Bitfield: SBFM/BFM/UBFM; LSL/LSR/ASR/ROR with an immediate or a register;
+  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI; EXTR.
+- Conditional and other data processing: CSEL/CSINC/CSINV/CSNEG, the
+  CSET/CSETM/CINC/CINV/CNEG aliases (AL/NV refused), CCMP/CCMN with a register
+  or immediate, UDIV/SDIV/LSLV/LSRV/ASRV/RORV, RBIT/REV16/REV/REV32/REV64/CLZ/CLS.
+- Multiply: MADD/MSUB/SMADDL/SMSUBL/UMADDL/UMSUBL/SMULH/UMULH, with the
+  MUL/MNEG/SMULL/UMULL/SMNEGL/UMNEGL aliases.
+- Single loads and stores: LDR/STR (W/X and B/H/S/D/Q),
+  LDRB/STRB/LDRH/STRH/LDRSB/LDRSH/LDRSW and PRFM (named or `#imm` operation).
+  Addressing covers scaled unsigned offsets, pre- and post-index, and register
+  offsets with LSL/UXTW/SXTW/SXTX. An offset the scaled form cannot hold uses
+  the unscaled encoding, as llvm-mc does. The LDUR/STUR family and PRFUM take
+  unscaled offsets only.
+- Pairs and exclusives: LDP/STP/LDPSW (offset, pre- and post-index) and
+  LDNP/STNP. LDXR/LDAXR/STXR/STLXR/LDAR/STLR, each with B/H forms.
+- Floating point (`fp-armv8`): FMOV (register, general register including
+  `Vn.D[1]`, imm8, and `#0.0` as ZR); FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FNMUL;
+  FABS/FNEG/FSQRT/FRINT{N,P,M,Z,A,X,I}; FCVT; FMADD/FMSUB/FNMADD/FNMSUB;
+  FCMP/FCMPE (including `#0.0`); FCCMP/FCCMPE; FCSEL. FCVT{N,A,P,M,Z}{S,U} and
+  SCVTF/UCVTF take general registers (with fixed-point `#fbits` where the
+  architecture has it) or the AdvSIMD scalar same-size form.
+- NEON element moves: UMOV/SMOV/INS/DUP and their MOV aliases.
+- AdvSIMD forms compilers emit:
+  - MOVI/MVNI and ORR/BIC immediates, including `lsl`/`msl` and the 64-bit
+    byte-mask form (`movi d0, #0000000000000000`), and FMOV vector immediates;
+  - MVN/NOT and EXT;
+  - XTN{2}; SHL, SSHR, USHR, SSRA and USRA (vector, or scalar D);
+  - SSHLL/USHLL{2} and their SXTL/UXTL{2} aliases;
+  - SADDL/UADDL/SSUBL/USUBL/SMULL/UMULL/SMLAL/UMLAL/SMLSL/UMLSL{2};
+  - CMEQ/CMGE/CMGT/CMLE/CMLT against `#0`;
+  - single-lane LD1/ST1 (`{ v0.s }[1], [x0]`, optionally post-indexed).
+- System: DMB/DSB (named or `#imm` option), ISB, CLREX, BRK/HLT/SVC/HVC/SMC/UDF.
+  MRS/MSR accept NZCV, DAIF, FPCR, FPSR, TPIDR_EL0, TPIDRRO_EL0, CTR_EL0,
+  DCZID_EL0, CNTFRQ_EL0, CNTPCT_EL0, CNTVCT_EL0, MIDR_EL1, MPIDR_EL1 and
+  CurrentEL; MSR refuses the read-only names. Barrier immediates are limited
+  to the twelve named options. The generic `s<op0>_<op1>_c<n>_c<m>_<op2>`
+  spelling stays with the system-register owner. The system owners' own rows remain gated to the Apple M1
+  profile, so on other targets these spellings reach this encoder.
+- Feature-gated: half-precision operands need `fullfp16`; LSE
+  LD{ADD,CLR,EOR,SET,SMAX,SMIN,UMAX,UMIN}, ST<op>, SWP and CAS (each with
+  `A`/`AL`/`L` and `B`/`H` suffixes) need `lse`. Apple M1 has both. Without the
+  feature the diagnostic names it.
+
+Writeback whose base register is also a transfer register, and an LDP whose two
+destinations are the same register, are operand diagnostics, as in llvm-mc.
+
+Not in this vocabulary, and still refused unless another owner accepts them:
+
+- symbolic or relocated operands such as `:lo12:` and labels (the control owner
+  handles label LDR);
+- CASP, LDAPR (RCPC), LDTR/STTR, BFC, CRC32 and pointer authentication;
+- AdvSIMD forms beyond the list above that the direct SIMD owner does not
+  cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
+  multi-register or replicating structure loads and stores.
+
+`aarch64_base_assembly_tests` checks the encoder against llvm-mc-derived words
+for each family, plus refusal and feature-gating controls. The driver round
+trip `compiler_driver_test_aarch64_assembly_round_trip` reassembles `-S` output
+with frames, calls, arrays, floating point, division and narrowing under every
+allocator, and compares its text with direct `-c`. Instructions the printer
+still writes as `.word` (#1280) reassemble through the 32-bit AArch64 `.word`.
+A corpus-wide differential census against llvm-mc
+(26,350 of 26,351 constant lines identical, 0 different, one documented
+refusal) was recorded on #2688. Its native, #2467-compliant reimplementation
+is tracked in [#2695](https://github.com/buster14a/buster/issues/2695).
+
+Arrangement suffixes and lane indices accept only unsigned decimal
+architectural spellings: `v1.-16b`, `v1.0x10b` and `v1.s[0x1]` are operand
+diagnostics.
 
 Integer data expressions retain `.` as the current field's section-relative
 address, including each separate operand in a comma-separated directive.
@@ -492,7 +667,28 @@ Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
 following or preceding definition in source order, and those names leave the
 symbol table again once every reference to one is folded, the way GNU as drops
-its own `.L` locals. A repeat or lock prefix alone on a line joins the
+its own `.L` locals. User-written private names follow the same rule per object
+format: on ELF targets a local `.L` label, and on Mach-O a local `L` label, is
+dropped from the symbol table unless a relocation still names it (a literal
+pool or rodata address reached from another section keeps its symbol, where GNU
+as would reference the section symbol plus an addend; the object model cannot
+express that, so the symbol stays, typed `NOTYPE`). `.globl`, weak and
+undefined names are never dropped. COFF has no verified private prefix, so only
+the generated numeric names leave a COFF object and a spelled `.L` label stays.
+A plain local label in an executable section is `STT_NOTYPE` on ELF, as GNU as
+writes it, so disassemblers do not split a function at it; `.type name,@function`
+(or `%function`) gives `STT_FUNC`. An exported (`.globl` or weak) label in an
+executable section stays `STT_FUNC` without `.type`: the linker's entry-point
+and call checks key on the function kind, and the object reader only infers a
+function from an untyped exported label on AArch64. Buster's own `-S` output
+spells `.type` for every function symbol, so it is unaffected. A bare section
+name used as an expression term (`.long .text - .` in the `.eh_frame` the AArch64
+`-S` printer writes) means that section's start, as in GNU as: a name no label,
+`.set` or `.globl` defined, equal to a section opened in the unit, becomes a
+local `STT_NOTYPE` symbol at offset 0 of it. Same-section differences fold, an
+unreferenced one is dropped, and a surviving relocation names this local symbol
+(the object model has no section symbol plus addend). A label the file defines
+itself, such as the x86-64 printer's `.text:`, is used as written. A repeat or lock prefix alone on a line joins the
 instruction on the next one. A same-section PC-relative reference is written
 into the bytes only when its symbol's identity cannot change at link time.
 Weak symbols, including hidden weak definitions, retain references for strong
@@ -510,10 +706,11 @@ contribute one and two bytes to `.init` and any padding between them would
 run as code.
 
 AArch64 units fold same-section, binding-invariant `b`, `bl`, `b.cond`,
-`cbz`/`cbnz`, and `tbz`/`tbnz` references using the shared control semantic
-fixup, including signed addends and numeric labels. Out-of-range or unaligned
-references are diagnosed at their physical source position. Undefined,
-cross-section, weak, and default-visible ELF global short branches are refused
+`cbz`/`cbnz`, `tbz`/`tbnz` and LDR (literal, W/X/SW and S/D/Q destinations)
+references using the shared control semantic fixup, including signed addends
+and numeric labels. Out-of-range or unaligned references are diagnosed at
+their physical source position. Undefined, cross-section, weak, and
+default-visible ELF global short branches and literal loads are refused
 because the object model cannot retain their relocation families; `b`/`bl`
 retain the existing object relocations. This unit-local capability does not
 enable machine inline-asm private-label expansion. The registered driver
@@ -559,7 +756,10 @@ Direct WebAssembly output accepts one C source for `wasm64-unknown-freestanding`
 or `wasm32-wasip1` (also spelled `wasm32-wasi`). The latter emits a WASI Preview 1
 command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
-output rejects `-emit-llvm`, native link inputs, and `-S`.
+output rejects `-emit-llvm`, native link inputs, and `-S`. It also rejects
+`__attribute__((constructor/destructor))`, naming `wasm32` or `wasm64`; the
+direct writer emits no `linking` section to hold `InitFunctions`
+(see [Linkage](frontend/linkage.md)).
 
 Wasm32 also refuses runtime function addresses, including stored/returned
 references and aliases; direct calls remain supported. The existing instruction
@@ -583,9 +783,27 @@ newly selected object. Each archive occurrence builds symbol-to-member provider
 lists and a heap ordered by `(scan pass, member index)`. A dependency discovered
 behind the cursor belongs to the next pass, preserving the former forward
 fixed-point selection sequence and first-definition behavior. Earlier archives
-are revisited only when explicitly present again; `-l` archives retain their
-existing driver placement after ordinary inputs. Definition binding strength
-does not alter eligibility once a selected definition exists.
+are revisited only when explicitly present again. Parsed native links apply
+static `-lfoo`, `-l foo` and `-l:filename` archives at their original CLI
+positions among source, object and directly named archive inputs. A found
+library has the same extraction eligibility as that archive named directly
+at the same position. Repeated occurrences remain separate requests; a later
+object can introduce demand for an explicit repeat, but cannot implicitly
+revisit an earlier occurrence. Global `-L` roots remain shared search state.
+Definition binding strength does not alter eligibility once a selected
+definition exists.
+
+The parser stores this order in `CompilerDriverInvocation.link_operations`,
+with indices into the existing input and library arrays; per-file `-x`
+selections remain attached to the input array. A nonzero stream must cover
+all files and library occurrences exactly once, retaining each array's
+order, or execution diagnoses an invalid invocation before reading inputs.
+The parser reserves one operation record per expanded argument; the native
+consumer walks it without another allocation. API-built invocations with a
+zero `link_operation_count` retain the explicit legacy order of all inputs
+followed by all libraries. Non-link output actions retain their prior order.
+Group/whole-archive and dynamic-library as-needed/interposition policy are
+unchanged.
 
 Provider state changes are monotonic: an edge is revisited at most three times.
 Selection work is expected O(S + A + D log(M + 1)), with S visited selected
@@ -654,15 +872,21 @@ then the same target roots used by ELF export discovery: `lib/<triple>`,
 sysroot. Without a sysroot, the absolute host roots also include
 `/usr/<triple>/lib` after the two multiarch roots. The sysroot replaces these
 default host paths; explicit `-L` directories retain their literal meaning.
-Each directory prefers `libNAME.so` to `libNAME.a`, so an earlier explicit
+Each directory prefers a target-compatible `libNAME.so` to `libNAME.a`, so an earlier explicit
 archive wins over a later default shared library. `-l:FILE.a` searches the
 exact archive name without that shared-library probe and retains its existing
-bare-path fallback. Other target search policies are unchanged.
+bare-path fallback. A little-endian ELF64 shared candidate naming a different
+CPU is skipped before archive selection, allowing an archive in the same or
+a later directory to satisfy the request. Files without that recognized
+foreign shared header retain the existing export-discovery refusal. The probe
+does not validate the complete foreign object. Other target search policies
+are unchanged.
 
 `compiler_driver_archive_test_default_roots`, invoked by the registered lazy
 archive fixture, checks both ELF CPUs and all six literal sysroot roots,
 named/exact/direct image parity, distinct provider precedence, explicit `-L`,
-shared preference, exact archive bypass and output preservation on refusal.
+shared preference, incompatible shared headers beside and before usable
+archives, exact archive bypass and output preservation on refusal.
 Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
@@ -788,11 +1012,20 @@ On x86-64 Linux, `-shared` links a shared object and `-pie` a
 position-independent executable (`NativeImageKind`, carried to the linker in
 `NativeExecutableLinkOptions.image_kind`). `-shared` outranks `-pie` in either
 order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
-inputs of that invocation with the position-independent code model, and
-`-fPIE`/`-fpie` select that same model on every target (the last of the four
-positive spellings wins; `-fno-pie` cancels only a PIE spelling). On any other
-target a link that asks for either image is refused as an unsupported option,
-while a compile-only invocation ignores the link option, as GCC does.
+inputs of that invocation with the position-independent code model.
+The last of `-fPIC`, `-fpic`, `-fPIE` and `-fpie` selects the requested
+model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
+On x86-64 ELF the positive spellings select the implemented PIC reference
+model. Native AArch64 ELF C generation rejects a surviving positive request
+by its spelling before source mapping or output publication; direct invocation
+API requests name the unavailable model. Cancellation, preprocessing,
+syntax-only and assembly/prebuilt-only input routes retain their behavior.
+Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
+behavior is unchanged. LLVM-bitcode and direct backend model requests remain
+an audit residual, so this bounded refusal is only partial issue #1289 support.
+On any other target a link that asks for either image is refused as an
+unsupported option, while a compile-only invocation ignores the link option,
+as GCC does.
 
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
@@ -888,6 +1121,27 @@ preprocessor macro/include operations and dependency requests. Direct `-D`,
 `-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
 preserves any existing artifact instead of reporting a successful stale build.
 
+## Source debug information
+
+`ide cc` omits source debug information by default. Pass `-g` to emit it or
+`-g0` to disable it explicitly; when both occur, the last option wins.
+Other debug levels and formats such as `-g1` remain unsupported. This keeps
+ordinary compilation focused on time to an artifact: it avoids constructing
+source debug models and their larger object payloads unless requested.
+`-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
+objects. Unwind information remains independent of source debug information.
+
+This default also applies when compiler-driver arguments are parsed for an
+embedding caller. The typed invocation API uses its `debug_info` field
+explicitly; a zero-initialized field disables debug output. Release/Debug
+configuration of the Buster compiler executable does not change these source
+compilation options. The self-host recipes pass `-g` explicitly.
+
+The registered driver regression checks the default, both individual switches
+and both orders across x86-64/AArch64 ELF, COFF and Mach-O objects. It reads the
+serialized artifacts, requires debug payloads only in the enabled modes, and
+checks that code/data bytes are unchanged and the default matches `-g0` exactly.
+
 ## Object output (`-c`)
 
 `-c` writes the object through `object_write_borrowing`. The ELF64 writer
@@ -902,6 +1156,10 @@ diagnostic `native elf64 object exceeds the object writer's limits (...)`,
 and leaves an existing output file untouched. `-v` prints the writer's exact
 work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 `-c`. See [object emission](../object-emission.md).
+
+COFF object reads merge same-kind contributions into initialized file-backed
+storage. Alignment gaps and tails introduced by empty aligned sections contain
+zero bytes even when reader arenas are reused; BSS remains virtual-only.
 
 ## ELF TLS companion lookup
 

@@ -1069,6 +1069,7 @@ buster_register_module(compiler_aarch64_direct_simd "${BUSTER_SOURCE_DIR}/compil
 buster_register_module(compiler_aarch64_complex_simd "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_complex_simd_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_memory_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_memory_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_alias_projection "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_alias_projection${COMMON_EXTENSION}")
+buster_register_module(compiler_aarch64_base_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_base_assembly${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_unit "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly_unit${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_metadata "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_metadata${COMMON_EXTENSION}")
@@ -1129,6 +1130,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/frontend/c/record_layout_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
+    src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c
     src/buster/tests/compiler/assembly/aarch64_system_registers_test.c
     src/buster/tests/compiler/assembly/aarch64_semantics_test.c
@@ -1148,6 +1150,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
     src/buster/tests/compiler/diagnostic_test.c
     src/buster/tests/compiler/ir/ir_test.c
+    src/buster/tests/compiler/ir/ir_oracle_test.c
     src/buster/tests/compiler/ir/vector_contract_test.c
     src/buster/tests/compiler/llvm/bitcode_test.c
     src/buster/tests/compiler/codegen/machine_select_test.c
@@ -1194,6 +1197,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/frontend/c/record_layout_corpus.generated.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
+    src/buster/tests/compiler/assembly/aarch64_base_assembly_test.h
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.h
     src/buster/tests/compiler/assembly/aarch64_system_registers_test.h
     src/buster/tests/compiler/assembly/aarch64_semantics_test.h
@@ -1213,6 +1217,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.h
     src/buster/tests/compiler/diagnostic_test.h
     src/buster/tests/compiler/ir/ir_test.h
+    src/buster/tests/compiler/ir/ir_oracle_test.h
     src/buster/tests/compiler/ir/vector_contract_test.h
     src/buster/tests/compiler/llvm/bitcode_test.h
     src/buster/tests/compiler/codegen/machine_select_test.h
@@ -2128,6 +2133,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_complex_simd
     compiler_aarch64_memory_semantics
     compiler_aarch64_alias_projection
+    compiler_aarch64_base_assembly
     compiler_assembly
     compiler_assembly_unit
     compiler_assembly_metadata
@@ -2321,6 +2327,23 @@ else()
             COMMENT "Run headless UI UTF-8 consumer regressions"
             VERBATIM)
     endif()
+    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
+        # Counter-based scalability regressions for keyed-box lookup and focus
+        # navigation, against the production ui_core and an inert renderer.
+        executable_add(ui_scale_component_tests OFF src/buster/tests/ui_scale_component_test.c
+            MODULES os arena integer string file hash time float ui_core)
+        if (UNIX)
+            target_link_libraries(ui_scale_component_tests PRIVATE m)
+        elseif (WIN32)
+            target_link_libraries(ui_scale_component_tests PRIVATE ws2_32)
+        endif()
+        add_custom_target(test_ui_scale
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_scale_component_tests>"
+            DEPENDS ui_scale_component_tests
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run headless UI scalability regressions"
+            VERBATIM)
+    endif()
     add_custom_target(test_units
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
@@ -2394,6 +2417,11 @@ else()
     if (TARGET test_ui_utf8)
         add_dependencies(test_all test_ui_utf8)
         add_dependencies(test_units test_ui_utf8)
+    endif()
+
+    if (TARGET test_ui_scale)
+        add_dependencies(test_all test_ui_scale)
+        add_dependencies(test_units test_ui_scale)
     endif()
 
     # Desktop-only performance benchmark. Not wired up for Android/iOS:

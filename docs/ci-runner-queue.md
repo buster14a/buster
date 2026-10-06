@@ -109,7 +109,8 @@ commands above; lower queue depth alone is not a throughput improvement.
    entry fails. The maintainer asked for 2 as a conservative start; the source
    policy then required 4 (32 of 50 macOS runners at eight jobs per run). After
    #1986 cut `ci.yml` to four macOS jobs, the maintainer raised it to 6 (24 of
-   50 macOS runners, leaving room for pull requests and `main`). This raise is
+   50 macOS runners, leaving room for pull requests and `main`). #2659 split
+   macOS checks into three owners, so six groups now hold up to 36 of 50. This raise is
    not measured; the live ruleset changes only after the policy lands (see
    [merge-queue-admission.md](merge-queue-admission.md)). Compare completed
    merges per hour, end-to-end latency, macOS wait, cancelled merge-group

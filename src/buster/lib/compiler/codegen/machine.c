@@ -4,7 +4,8 @@
 // MachineOpcodeInfo metadata accessors, the chunked instruction stream and
 // function builder, parameter-edge normalization
 // (machine_function_split_parameter_edges), frequency-class stamping, the
-// verifier and replay serialization — and then includes the
+// verifier, checked frame arithmetic (machine_stack_frame_reserve/finish),
+// and replay serialization — and then includes the
 // implementation files at the bottom in the backend-implementation-file
 // pattern (selection facts, the x86-64 and AArch64 selectors/encoders,
 // scheduling, FAST/QUALITY, and the separate predicate-bank allocator), so none of those
@@ -12,6 +13,8 @@
 // the end is the entry point codegen.c calls.
 
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/codegen_internal.h>
+#include <buster/lib/compiler/codegen/machine_frame_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
@@ -4955,6 +4958,55 @@ BUSTER_GLOBAL_LOCAL u64 machine_function_edge_copy_temporary_size(MachineFunctio
         }
     }
     return result;
+}
+
+// Reserve an end-offset frame range without narrowing a wrapped addition or
+// alignment. The FAST/QUALITY layout consumes this authority.
+bool machine_stack_frame_reserve(u64* running, u64 size, u32 alignment)
+{
+    bool valid = alignment && !(alignment & (alignment - 1u)) && *running <= UINT32_MAX &&
+                 size <= UINT32_MAX - *running;
+    if (valid)
+    {
+        u64 end = (*running + size + alignment - 1u) & ~(u64)(alignment - 1u);
+        valid = end <= UINT32_MAX;
+        if (valid)
+        {
+            *running = end;
+        }
+    }
+    return valid;
+}
+
+// The final allocation includes outgoing storage and push parity; encoder
+// limits apply before publishing any narrowed frame size. AArch64 retains its
+// unsigned-offset range, while x86-64 frame references require signed disp32.
+bool machine_stack_frame_finish(MachineFunction const* function, u64 running, u32 push_area, u32 push_count,
+                                                     u32* frame_size)
+{
+    u32 push_parity = (push_count & 1u) ? 8u : 0u;
+    u64 size = ((running - push_area + push_parity + 15u) & ~(u64)15u) - push_parity + function->outgoing_bytes;
+    bool valid = size <= UINT32_MAX && running <= size + push_area;
+    if (function->target == machine_target_aarch64())
+    {
+        u64 area = size + 8u * push_count;
+        valid &= area <= UINT32_MAX - 16u;
+        if (function->windows_aarch64_frame)
+        {
+            u32 saves = codegen_a64_windows_save_area_size(push_count) +
+                        (function->windows_aarch64_variadic ? MACHINE_A64_VA_GP_SAVE_BYTES : 0u);
+            valid &= area <= UINT32_MAX - saves;
+        }
+    }
+    else
+    {
+        valid &= running <= INT32_MAX && size <= INT32_MAX;
+    }
+    if (valid)
+    {
+        *frame_size = (u32)size;
+    }
+    return valid;
 }
 
 typedef struct MachineReplayHeader MachineReplayHeader;

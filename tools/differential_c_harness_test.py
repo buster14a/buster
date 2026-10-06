@@ -29,8 +29,8 @@ class DifferentialNativeModeTests(unittest.TestCase):
     def test_harness_commands_cover_both_explicit_native_allocators(self):
         arguments = argparse.Namespace(ide="/subject/ide", cc="clang")
         self.assertEqual(harness.modes(arguments), [
-            ("clang-O0", ["clang", "-O0", "-w"]),
-            ("clang-O2", ["clang", "-O2", "-w"]),
+            ("clang-O0", ["clang", "-O0", "-w", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char"]),
+            ("clang-O2", ["clang", "-O2", "-w", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char"]),
             ("ide-fast", ["/subject/ide", "cc", "-fregister-allocator=fast"]),
             ("ide-quality", ["/subject/ide", "cc", "-fregister-allocator=quality"]),
         ])
@@ -49,7 +49,7 @@ class DifferentialNativeModeTests(unittest.TestCase):
             checker = RecordingChecker(directory)
             self.assertEqual(checker.observe("int main(void) { return 0; }\n"), ("ok", ""))
             self.assertEqual(checker.commands, [
-                ("clang-O0", ["clang", "-O0", "-w"]),
+                ("clang-O0", ["clang", "-O0", "-w", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char"]),
                 ("ide-fast", ["/subject/ide", "cc", "-fregister-allocator=fast"]),
                 ("ide-quality", ["/subject/ide", "cc", "-fregister-allocator=quality"]),
             ])
@@ -64,7 +64,7 @@ class DifferentialNativeModeTests(unittest.TestCase):
             self.assertEqual([label for label, _command in checker.commands], ["clang-O0", "ide-quality", "clang-O2"])
             checker.behaviors["clang-O2"] = (0, b"invalid generator\n")
             self.assertEqual(checker.observe("int main(void) { return 0; }\n", ide_modes=("ide-quality",)),
-                             ("invalid", "clang modes disagree"))
+                             ("invalid", "clang modes disagree or did not complete"))
 
 
 if __name__ == "__main__":

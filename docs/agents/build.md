@@ -16,6 +16,26 @@ shared checkout still reads source that another session can edit. Follow the
 workload includes `build/generated`. No live-use lock protects `generate`:
 coordination and isolation are required before removing or regenerating a tree.
 
+`generate` only deletes a directory it can prove is disposable
+(`generate_build_directory_verdict` in `build.c`), so a mistyped
+`--build-directory` cannot erase a checkout. The target must be missing, an
+empty directory, a tree carrying the `.buster-build-tree` marker that every
+generation writes, a CMake tree whose `CMakeCache.txt` has
+`CMAKE_HOME_DIRECTORY` equal to this repository (compared by real path), or
+anything inside the repository's ignored `build/` directory. Whatever the
+contents, it refuses the repository root, any ancestor of it (including `/`),
+the home directory, `.git`, `.github`, `cmake`, `docs`, `src`, `tests` and
+`tools` and anything inside them, and a path that is not a directory. Links and
+`.`/`..` are resolved first. A refusal prints the reason, deletes nothing and
+exits nonzero, as does a removal that cannot finish, so `generate` never
+configures on top of a half-deleted tree. Every internal caller (the
+combination matrix, `test_mode_matrix`, self-host, the x86-64 completion census)
+goes through the same check. To reuse a directory that is none of these, empty
+or remove it yourself. `remove_path_recursive` removes through the library's
+iterative, link-safe `os_directory_delete` and reports failure.
+`generate_guard_self_test` covers the guard with sentinel trees and runs in the
+combination-matrix preflight.
+
 ## Self-hosting — reproduce first
 
 All contributors—humans and coding agents—should reproduce the current
@@ -69,6 +89,11 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+A cached driver whose recorded dependency was deleted is a normal cache miss:
+the wrapper quietly rejects it and selects another valid entry or rebuilds.
+A missing dependency in a fresh TCC closure still fails with a diagnostic.
+The canonical hosted TCC workflow covers deletion, rebuild and warm reuse.
+
 Absolute dependency paths may contain lexical `..` components, as TinyCC
 resource paths can when its installation prefix contains them. Cold publication
 and warm validation hash the files at those paths and retain their spelling in
@@ -86,13 +111,6 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
-The separately installed Benchpress recipe driver is compiled from the
-reviewed `build.c` with Clang and checked for a nonexecutable `GNU_STACK`
-header. Its transient unit keeps `MemoryDenyWriteExecute=yes`; the TCC
-bootstrap executable lacks that header and cannot spawn stages there. This
-installed artifact is reviewed by digest and is never a local-bootstrap
-substitute. See the [broker installation contract](../../tools/bench_service/deploy/SYSTEMD_BROKER.md).
-
 Because every hosted driver is Clang-built, the `Workflow lint` job in
 `.github/workflows/ci.yml` also runs the Ubuntu image's GCC over `build.c` with
 `-Wall -Werror -fsyntax-only` and the driver's usual flags. It covers only the
@@ -109,13 +127,8 @@ commit below, records `tcc -v`, removes
 the local bootstrap cache, and runs `./build.sh time_trace_summary_self_test`
 twice to prove both cold publication and warm reuse. This check does not select
 the dedicated benchmark runner or require privileged installation.
-The same hosted check runs native service tests, their ASan/UBSan variant, and
-the fixed smoke recipe self-test through this TCC-built driver. It also builds
-the broker and both static gates and runs their component regressions with
-`bench_service_broker self-test`. These use
-temporary fixtures and do not provision or qualify the benchmark host. It also
-runs the [source-size report and change ratchet](../source-size.md) on the
-validated merge revision against its first parent.
+It also runs the [source-size report and change ratchet](../source-size.md) on
+the validated merge revision against its first parent.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
@@ -173,26 +186,6 @@ ID|version|path, and a changed signature re-probes every candidate (each
 does not need `./build.sh generate`; `tools/native_target_compatibility_test.py`
 covers this behavior.
 
-The Linux fixed `bench_service_recipe` publishes private frozen-tree receipts
-after each successful base-build and candidate-build cleanup. The files
-`validate-buster-v1.base-build.inventory` and
-`validate-buster-v1.candidate-build.inventory` contain complete bounded node
-identities, modes and owners, executable SHA-256 digests, exact recipe
-job/token/revisions, boot ID and scan-completion monotonic time. The source
-publishes each receipt without replacement and syncs its file and result
-directory before reporting that stage successful; a scan, identity, capacity
-or publication failure prevents the next stage from launching. These private
-result files are conserved by the existing BQ bundle index. A separate 64 MiB
-serialized-file limit applies in addition to node, depth, path and hashing
-limits; overflow fails the recipe. These are source-owned statements, while
-the external stage observer records its own inventory and timing independently.
-The build and result descriptors are pinned at preparation, before the stages
-create anything, so every tree walk (locking, receipts, temporary sweeps and
-syncs) reads a fresh open file of the same inode rather than a dup: btrfs
-(Linux 6.5+) never lists entries created after a directory's open file, and a
-consumed offset hides them everywhere (`BENCH_SERVICE_RECIPE_PINNED_WALK_TEST`).
-A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
-
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)
 ./build.sh                          # build the configured tree (Debug by default)
@@ -225,7 +218,7 @@ header that defines functions must be included before the test region, as
 Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
-`test_timing_summary_self_test`, `musl_directory_self_test`,
+`test_timing_summary_self_test`, `musl_directory_self_test`, `generate_guard_self_test`,
 `compiler_discovery_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
@@ -303,14 +296,17 @@ runner because that box is the CI wall-time gate and its PE rows already run
 under wine on Linux. GitHub CI runs it on all four of its Unix runners, which
 is what makes the ELF and Mach-O rows execute natively at both x86-64 and
 AArch64; those images carry no wine, so their PE rows stay on the oracle.
-The combination matrix shares one multi-config build tree across configurations
-when their configure-time policy matches. Clang omits unsanitized Debug because
-sanitized Debug provides the stronger coverage; it builds and runs unsanitized
-Release plus sanitized Debug and Release. Non-Apple Clang configurations use
-dedicated trees because their fuzz-runtime policy differs, while AppleClang's
-two sanitized configurations share one cross-config Ninja graph. GCC and Zig
-compile unsanitized Debug only and do not execute it; MSVC does the same on
-Windows. Only optimized, unsanitized Clang/AppleClang builds use the requested
+The combination matrix gives every configuration its own single-configuration
+tree. Clang omits unsanitized Debug because sanitized Debug provides the
+stronger build coverage; it builds and runs unsanitized Release and the
+checks-enabled sanitized Release, and compiles and links sanitized Debug
+without running it (#2657, see the
+[sanitizer execution policy](../ci-combination-shards.md#sanitizer-execution-policy-2657)).
+Where libFuzzer exists, the unsanitized and sanitized Release trees are the
+fuzz-enabled builds. GCC and Zig compile unsanitized Debug only and do not
+execute it; MSVC does the same on Windows. For a local sanitized Debug test
+run use `./build.sh generate --sanitize` and `./build.sh build -t test_all`.
+Only optimized, unsanitized Clang/AppleClang builds use the requested
 unity build; every other build uses split translation units. TCC is retained
 only as the bootstrap compiler for `build.c` and is omitted from all
 application/compiler combinations.
@@ -336,18 +332,25 @@ work, use every CPU instead of one each (#892 measured macOS arm64 checks at
 compile-only trees). A matrix without test trees, or one whose concurrent
 self-host worker would then exceed the CPU budget, keeps the one-job-per-tree
 allocation (`matrix_superbuild_allocate_jobs`). With two or more test trees and
-no self-host worker (the hosted checks shards), test phases are serialized:
-each test tree keeps its share as the inner Ninja quota but runs its tests with
-the whole CPU budget, one tree at a time in declaration order (sanitized Debug
-first). The superbuild makes each tree's test target wait for the previous test
-tree's, and the phase plan records that edge as `after`. Builds are not
-serialized, so a test phase can still overlap the remaining compiles; that
-deliberately extends the bounded overlap above to the sanitized Release build
-(up to about twice the CPU count in nominal workers for its duration) in
-exchange for no idle CPUs during the long sanitized Debug test tail. Sanitized
-Clang CI trees run `test_all` through the isolated-process runner
-(`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a four-worker quota into two
-two-worker processes and runs the ordinary invocation below four. Larger hosts retain the weighted
+no self-host worker, test phases are serialized: each test tree keeps its
+share as the inner Ninja quota but runs its tests with the whole CPU budget,
+one tree at a time in declaration order. The superbuild makes each tree's test
+target wait for the previous test tree's, and the phase plan records that edge
+as `after`. Builds are not serialized, so a test phase can still overlap the
+remaining compiles (up to about twice the CPU count in nominal workers) in
+exchange for no idle CPUs during a long sanitized test tail. Before #2657 this
+applied to the grouped hosted checks shards (sanitized Debug and Release
+tests); since #2657 every hosted desktop shard has at most one test tree, so
+serialization remains only for multi-test-tree local selections. Sanitized
+Clang CI trees and Windows AArch64 Release run `test_all` through the existing
+isolated-process runner (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a
+four-worker quota into two two-worker processes and runs the ordinary invocation
+below four. The `primary` group owns `c_frontend_tests` on Windows x86-64 and
+`compiler_driver_tests` elsewhere; `rest` owns every other enabled module.
+The parent independently checks both complete inventories and their exact
+disjoint union. Windows AArch64 has no artifact-fanout consumer; supported
+canonical producers retain their standard configure arguments.
+See [Windows critical-path attribution](../windows-ci-critical-path.md). Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Clang tests then run concurrently in the same bounded
 pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work

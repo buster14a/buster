@@ -55,6 +55,10 @@ struct X86_64EncodedInstruction
 };
 
 BUSTER_F_DECL CpuModel cpu_detect_model_x86_64(void);
+// Pure model lookup from CPUID leaf 0 vendor string, leaf 1 registers and the
+// leaf 7 AVX-512 VNNI/BF16 bits. Returns CPU_MODEL_ERROR, silently, for an
+// unrecognized vendor or family/model.
+BUSTER_F_DECL CpuModel cpu_model_x86_64_from_identity(String8 vendor_string, CpuId family_model_cpuid, bool has_avx512vnni, bool has_avx512bf16);
 BUSTER_F_DECL String8 x86_64_cpu_brand_string(char8* buffer, u64 capacity);
 BUSTER_F_DECL TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input);
 BUSTER_F_DECL TargetCpuFeatures cpu_detect_features_x86_64(void);

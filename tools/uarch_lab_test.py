@@ -14,7 +14,9 @@ import os
 import shutil
 import stat
 import struct
+import subprocess
 import sys
+import sysconfig
 import tempfile
 import unittest
 from unittest import mock
@@ -344,6 +346,15 @@ if args[:1] == ["bench"]:
     print("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=21042 min_ns=3359552 median_ns=3983033")
     sys.exit(0)
 out = args[args.index("-o") + 1]
+if globals().get("FAIL_AFTER") is not None:
+    # Succeed for the first FAIL_AFTER compiles (probes, warm-up), then fail.
+    import os
+    counter = out + ".count"
+    count = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
+    open(counter, "w").write(str(count))
+    if count > FAIL_AFTER:
+        sys.stderr.write("cc: error: requested failure\n")
+        sys.exit(1)
 if globals().get("FAIL_PLAIN") and not any(arg.startswith(("-fsource-metrics=", "-fmetrics-out=")) for arg in args):
     sys.stderr.write("cc: error: requested plain compile failure\n")
     sys.exit(1)
@@ -355,11 +366,18 @@ for arg in args:
             sys.stderr.write("cc: error: unknown argument\n")
             sys.exit(1)
         open(arg.split("=", 1)[1], "w").write(METRICS)
-output = globals().get("OUTPUT", b"\x7fELF same bytes")
-if globals().get("OUTPUT_FILE"):
-    # The stage-1 "executable": a real ELF (the Python interpreter) plus a pad.
-    output = open(OUTPUT_FILE, "rb").read() + OUTPUT_PAD
-open(out, "wb").write(output)
+with open(out, "wb") as target:
+    if globals().get("OUTPUT_FILE"):
+        # The stage-1 "executable": a real ELF (the Python interpreter) plus a
+        # pad.  Streamed in small blocks, so a fake without ALLOC stays near
+        # the interpreter's own RSS however large the interpreter is (a
+        # standalone build is several times a system one).
+        import shutil
+        with open(OUTPUT_FILE, "rb") as source:
+            shutil.copyfileobj(source, target, 1 << 16)
+        target.write(OUTPUT_PAD)
+    else:
+        target.write(globals().get("OUTPUT", b"\x7fELF same bytes"))
 '''
 
 FAKE_PERF = r'''#!/usr/bin/env python3
@@ -409,6 +427,11 @@ elif command == "stat":
     sys.exit(status)
 elif command == "record":
     event = option("-e")
+    # REFUSE: events a strict host forbids (perf_event_paranoid, no PMU).
+    refused = [args[index + 1] for index, arg in enumerate(args) if arg == "-e" and args[index + 1] in globals().get("REFUSE", ())]
+    if refused:
+        sys.stderr.write("Access to performance monitoring and observability operations is limited: %s\n" % refused[0])
+        sys.exit(255)
     if event == "dTLB-load-misses:u":
         sys.stderr.write("The dTLB-load-misses event is not supported.\n")
         sys.exit(255)
@@ -456,11 +479,26 @@ os.execvp(args[0], args)
 '''
 
 
+# Fixture interpreter contract: every fake script runs under the interpreter
+# that runs this file.  `#!/usr/bin/env python3` would pick whatever PATH
+# selects, so a standalone test interpreter would mix with the system one.
+# Linux reads at most 255 shebang bytes and splits the line at whitespace.
+SHEBANG_LIMIT = 255
+
+
+def fixture_shebang():
+    shebang = "#!" + sys.executable
+    if not sys.executable or any(character.isspace() for character in sys.executable) or len(shebang.encode()) > SHEBANG_LIMIT:
+        raise unittest.SkipTest("unsupported fixture: the test interpreter path %r cannot be a shebang (empty, whitespace, or over %d bytes)"
+                                % (sys.executable, SHEBANG_LIMIT))
+    return shebang
+
+
 def write_script(path, body, constants):
     header = "".join("%s = %r\n" % item for item in constants.items())
     lines = body.split("\n", 1)
     with open(path, "w") as handle:
-        handle.write(lines[0] + "\n" + header + lines[1])
+        handle.write(fixture_shebang() + "\n" + header + lines[1])
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
 
 
@@ -476,8 +514,12 @@ class Fakes:
         write_script(os.path.join(root, "sudo"), FAKE_SUDO, {})
         return root, ide, perf
 
-    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3"), compiler=None):
+    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3"), compiler=None, refuse=()):
         root, ide, perf = self.fakes(mode, stat)
+        if refuse:
+            with open(perf) as handle:
+                script = handle.read()
+            write_script(perf, script, {"REFUSE": list(refuse)})
         write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": mode,
                                         "COMPILE_LOG": os.path.join(root, "compile.jsonl")}, **(compiler or {})))
         output = os.path.join(root, "out")
@@ -493,6 +535,42 @@ class Fakes:
         with open(os.path.join(output, "report.md")) as handle:
             return meta, handle.read(), output
 
+
+
+@unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+class ThreadsTests(Fakes, unittest.TestCase):
+    """The opt-in Superluminal-style capture (step_threads)."""
+
+    SKIP = ("--skip", "topdown", "timeline", "sampling", "micro")
+
+    def test_threads_are_opt_in(self):
+        meta, report, _ = self.run_lab("new", runs=("--runs", "2") + self.SKIP[:1] + self.SKIP[1:])
+        self.assertEqual((meta["steps"]["threads"]["status"], meta["steps"]["threads"]["note"]), ("skipped", "opt-in: --threads"))
+
+    def test_full_capture_with_scheduler_events(self):
+        meta, report, output = self.run_lab("new", runs=("--runs", "2", "--threads") + self.SKIP)
+        self.assertEqual(meta["steps"]["threads"]["status"], "ok", meta["steps"]["threads"])
+        record = json.loads(lab.read_text(os.path.join(output, "threads", "threads.json")))
+        self.assertEqual((record["mode"], record["hz"], record["refused"]), ("full", lab.THREAD_SAMPLE_HZ, []))
+        self.assertEqual(record["events"], ["cycles", "sched:sched_switch", "sched:sched_wakeup"])
+        self.assertTrue(os.path.isfile(os.path.join(output, "threads", "threads.data")))
+        self.assertIn("## 6b. Thread timeline (Hotspot, opt-in)", report)
+        self.assertIn("hotspot " + record["data"], report)
+        log = lab.read_text(os.path.join(output, "threads", "full.record.log"))
+        for flag in ("--switch-events", "--call-graph fp", "-F %d" % lab.THREAD_SAMPLE_HZ):
+            self.assertIn(flag, log)
+
+    def test_strict_hosts_fall_back_and_say_why(self):
+        meta, report, output = self.run_lab("new", runs=("--runs", "2", "--threads") + self.SKIP, refuse=("cycles",))
+        record = json.loads(lab.read_text(os.path.join(output, "threads", "threads.json")))
+        self.assertEqual(record["mode"], "user")
+        self.assertEqual([item["mode"] for item in record["refused"]], ["full"])
+        self.assertIn("Access to performance monitoring", record["refused"][0]["reason"])
+        self.assertIn("`full` refused (exit 255)", report)
+        meta, report, output = self.run_lab("new", runs=("--runs", "2", "--threads") + self.SKIP,
+                                            refuse=("cycles", "cycles:u", "cpu-clock:u"))
+        self.assertEqual(meta["steps"]["threads"]["status"], "failed")
+        self.assertIn("no thread capture could be recorded", meta["steps"]["threads"]["note"])
 
 
 @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
@@ -883,7 +961,7 @@ class Lab2ReviewTests(unittest.TestCase):
 RUN_SUMMARY_KEYS = {"schema", "directory", "command", "cpu", "ide", "host", "capabilities", "steps", "timed", "phases", "work",
                     "topdown", "dominant_topdown_category", "hot_symbols", "findings"}
 COMPARE_SUMMARY_KEYS = {"schema", "directory", "command", "repo_root", "cpu", "host", "baseline", "candidate", "outputs_identical",
-                        "phase_metrics", "code_bytes", "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
+                        "phase_metrics", "counters", "code_bytes", "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
 CODE_BYTES_KEYS = {"a_value", "b_value", "ratio", "a_format", "b_format", "a_file_bytes", "b_file_bytes", "a_sections", "b_sections", "note"}
 RETIREMENT_SUMMARY_KEYS = {"schema", "directory", "decision", "contract", "verdict", "baseline", "candidate", "stage1", "repo_root", "cpu",
                            "host", "plan", "limits", "cells", "aggregates", "external_checks", "warnings"}
@@ -1029,8 +1107,9 @@ class CompareStatisticsTests(unittest.TestCase):
 
 @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
 class CompareFlowTests(Fakes, unittest.TestCase):
-    def compare(self, arguments, candidate=None, baseline=None):
-        root, ide, perf = self.fakes("new")
+    def compare(self, arguments, candidate=None, baseline=None, perf=None):
+        root, ide, fake_perf = self.fakes("new")
+        perf = perf(root) if perf else fake_perf
         write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
                                         "COMPILE_LOG": os.path.join(root, "compile-a.jsonl")}, **(baseline or {})))
         other = os.path.join(root, "ide-b")
@@ -1049,6 +1128,42 @@ class CompareFlowTests(Fakes, unittest.TestCase):
             summary = json.load(handle)
         with open(os.path.join(output, "report.md")) as handle:
             return summary, handle.read(), output
+
+    def test_compare_without_perf_measures_wall_cpu_and_rss_with_counters_na(self):
+        # #2768: a host without perf still yields a wall-time verdict.
+        summary, report, output = self.compare(["--pairs", "6"], {"DELAY": 0.25},
+                                               perf=lambda root: os.path.join(root, "no-such-perf"))
+        self.assertEqual(set(summary), COMPARE_SUMMARY_KEYS)
+        self.assertEqual(summary["counters"]["perf_stat"], False)
+        self.assertIn("exit 127", summary["counters"]["reason"])
+        self.assertEqual(summary["plan"]["complete_pairs"], 6)
+        self.assertEqual(summary["verdict"]["outcome"], "slower", summary["verdict"])
+        self.assertEqual(summary["metrics"]["task_clock"]["n"], 6)
+        for name in ("instructions", "cycles", "branch_misses", "page_faults"):
+            self.assertEqual((summary["metrics"][name]["n"], summary["metrics"][name]["outcome"]), (0, "no data"), name)
+        warnings = [warning for warning in summary["warnings"] if warning.startswith("perf stat unusable")]
+        self.assertEqual(len(warnings), 1, summary["warnings"])
+        self.assertNotIn("unusable (perf stat unusable", warnings[0])
+        with open(os.path.join(output, "pairs.json")) as handle:
+            records = json.load(handle)
+        self.assertTrue(all(record["counters"] is False and record["cpu_s"] is not None for record in records))
+
+    def test_compare_thread_captures_for_both_variants(self):
+        summary, report, output = self.compare(["--pairs", "6", "--profile-steps", "threads"])
+        captures = summary["profile"]["threads"]["captures"]
+        self.assertEqual((captures["baseline"]["mode"], captures["candidate"]["mode"]), ("full", "full"))
+        for key in ("a", "b"):
+            self.assertTrue(os.path.isfile(os.path.join(output, key, "threads", "threads.data")))
+
+    def test_compare_profile_steps_without_perf_stop_before_any_pair(self):
+        with self.assertRaises(SystemExit) as stop:
+            self.compare(["--pairs", "6", "--profile-steps", "topdown"], perf=lambda root: os.path.join(root, "no-such-perf"))
+        self.assertIn("need a working perf", str(stop.exception.code))
+
+    def test_compare_with_no_complete_pair_exits_nonzero(self):
+        with self.assertRaises(SystemExit) as stop:
+            self.compare(["--pairs", "2"], {"FAIL_AFTER": 3})
+        self.assertIn("no complete pair", str(stop.exception.code))
 
     def test_slower_candidate_end_to_end(self):
         summary, report, output = self.compare(
@@ -1815,6 +1930,40 @@ class RetirementCompilerTests(unittest.TestCase):
                          ["-fregister-allocator=none", "-fregister-allocator=mir-stack"] * 2)
 
 
+def copied_interpreter_environment(directory):
+    """Return the environment additions under which a copy of the test
+    interpreter, moved away from its installation, still starts; raise
+    SkipTest naming each attempt's failure when none works.  A standalone
+    distribution finds its standard library (and a shared libpython) relative
+    to its original executable, so a lone copy needs PYTHONHOME and, for a
+    shared build, the library directory."""
+    copy = os.path.join(directory, "copied-interpreter")
+    shutil.copy2(sys.executable, copy)
+    home = sys.base_prefix if sys.base_prefix == sys.base_exec_prefix else sys.base_prefix + os.pathsep + sys.base_exec_prefix
+    attempts = [{}, {"PYTHONHOME": home}]
+    library = sysconfig.get_config_var("LIBDIR")
+    if sysconfig.get_config_var("Py_ENABLE_SHARED") and library:
+        search = os.environ.get("LD_LIBRARY_PATH")
+        attempts.append({"PYTHONHOME": home, "LD_LIBRARY_PATH": library + (os.pathsep + search if search else "")})
+    failures = []
+    found = None
+    for extra in attempts:
+        if found is None:
+            probe = subprocess.run([copy, "-c", "print('ready')"], env=dict(os.environ, **extra), capture_output=True, text=True)
+            if probe.returncode == 0 and probe.stdout == "ready\n":
+                found = extra
+            else:
+                lines = [line.strip() for line in probe.stderr.splitlines() if line.strip()]
+                errors = [line for line in lines if "Error" in line or "error" in line]
+                failures.append("%s: exit %d, %s" % (sorted(extra) or "no additions", probe.returncode,
+                                                    (errors or lines or ["no stderr"])[-1]))
+    os.unlink(copy)
+    if found is None:
+        raise unittest.SkipTest("unsupported fixture: a lone copy of %s (%s) does not start; %s"
+                                % (sys.executable, sys.version.split()[0], "; ".join(failures)))
+    return found
+
+
 @unittest.skipIf(not sys.platform.startswith("linux"), "the fake stage-1 compiler is a copied Linux ELF interpreter")
 class RetirementFlowTests(Fakes, unittest.TestCase):
     # The fakes: A and B write the Python interpreter (a real ELF64, so code
@@ -1822,9 +1971,14 @@ class RetirementFlowTests(Fakes, unittest.TestCase):
     # generated-runtime cell that output runs as a compiler: the copied
     # interpreter executes the repository root's `cc` script (the default
     # command's first argument), whose speed is the pad byte.  A is slower
-    # and larger than B, so every interval check passes clearly.
+    # and larger than B, so every interval check passes clearly.  A copied
+    # standalone interpreter needs its home in the environment the lab hands
+    # to every child (captured from os.environ when it starts).
     def setUp(self):
         self.root, self.ide, self.perf = self.fakes("new")
+        environment = mock.patch.dict(os.environ, copied_interpreter_environment(self.root))
+        environment.start()
+        self.addCleanup(environment.stop)
         common = {"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new", "OUTPUT_FILE": sys.executable}
         write_script(self.ide, FAKE_IDE, dict(common, DELAY=0.25, ALLOC=192 << 20, OUTPUT_PAD=b"S"))
         self.candidate = os.path.join(self.root, "ide-b")

@@ -281,6 +281,9 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
     C_DIAGNOSTIC_SOURCE_TOO_LARGE,
     C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS,
+    // A reachable direct call to a function declared with GNU
+    // `__attribute__((error("message")))`.
+    C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -564,8 +567,12 @@ struct CPreprocessOptions
     // No report will read preprocessed.bytes (the driver passes its
     // invocation's omit_spelled_bytes), so the pass over the output stream
     // that sums spelling lengths is skipped and the field stays zero. Every
-    // other metric is still gathered. It takes the last reserved byte.
+    // other metric is still gathered.
     bool omit_spelled_bytes;
+    // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
+    u8 position_independent_level;
+    // The selected position-independent spelling was a PIE flag.
+    bool position_independent_executable;
     // Optional caller-owned arena for state whose last reader is inside the
     // phase: per-file lexed rows, macro records, include tables and line
     // staging. The phase allocates above the arena's position at entry and
@@ -1022,6 +1029,8 @@ struct CEnumMember
     // finalized once, at the closing brace, according to the selected dialect.
     CTypeId declaration_type;
     CTypeId type;
+    // The declaration-point ICE survives completion. On Microsoft targets an
+    // implicit successor's published signed-int value can differ from it.
     CIntegerConstant integer_constant;
     u64 value;
     bool is_negative;
@@ -1694,6 +1703,16 @@ BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPrep
 // the mapping for the next unit on this thread. The caller must be the thread
 // that created it (docs/agents/parallelism.md).
 BUSTER_F_DECL void c_phase_arena_retire(Arena* arena);
+// Ends the use of the private arenas c_preprocess reserved for one unit (the
+// spelling space, the token rows and the token shapes). Each returns every
+// committed page beyond C_PHASE_ARENA_RETAINED_SIZE to the OS and parks its
+// reservation in the creating thread's reuse pool, so a process that compiles
+// many units in turn holds a bounded address space. Call once the unit's
+// compilation is complete: afterwards `tokens`, `spelling_base` and every
+// token spelling of the result are gone; the source map, symbols, files and
+// diagnostics live in the caller's arena and stay valid. Idempotent, and a
+// no-op for a hand-built result.
+BUSTER_F_DECL void c_preprocess_release(CPreprocessResult* result);
 BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics const* part);
 // translated_bytes minus comments and whitespace: the bytes that became
 // tokens, literal spellings included.

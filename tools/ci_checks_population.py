@@ -238,7 +238,7 @@ def dispatch_inventory(root, reference, published, attempts):
 def job_timing(run, variant):
     """Preserve authentic timestamps; metadata is outside required-job end."""
     measured = qualification.timing(run, variant, qualification.PROSPECTIVE_COHORT)
-    required = set(github.combination_jobs("split" if variant == "split-overlap" else "combined"))
+    required = set(qualification.cohort_jobs(variant))
     created = github.timestamp(run["created_at"])
     end = max(github.timestamp(job["completed_at"]) for job in run["jobs"] if job["name"] in required)
     measured["elapsed_seconds"] = (end - created).total_seconds()

@@ -43,6 +43,22 @@ the compiler has no added UI, window, or rendering dependency. The retained
 `ui_test.c` suite is not registered by this target, and these headless checks do
 not establish device rendering or a supported graphical application.
 
+`./build.sh build --config Release -t test_ui_scale` runs a headless component
+that counts `ui_core` work instead of timing it. Keyed-box lookup goes through a
+power-of-two index that doubles whenever the keyed population exceeds its size,
+so chains stay short at any scale (`UI_State.box_key_probes` per
+`box_key_lookups`). The fixed 4096-slot box table remains only as the ordering
+structure behind the dense active list, so that list's order does not change
+when the index grows. The target also checks box identity, duplicate and zero
+keys, pruning and free-list reuse, and the active-list order across growth.
+Keyboard focus navigation stamps the chosen scope's subtree once per request
+(one iterative pre-order pass) so scope membership is a single compare per
+candidate rather than a parent-chain walk; `UI_State.focus_scope_steps` counts
+the parent hops and subtree visits. The target compares selected keys with an
+independent copy of the ancestor-walk algorithm on chain, nested-scope, comb and
+broad trees with ineligible nodes, and bounds steps per box on 500 to 4000 deep
+spines. Desktop `test_all` and `test_units` include it when tests and libc are enabled.
+
 Create a feature issue for a concrete application workflow or component behavior,
 not a speculative checklist claiming that a future editor/viewer already exists.
 
@@ -128,18 +144,38 @@ mutating the arena; a refusal emits no partial event. Conversion-library
 allocations remain native-library owned and outside the event arena. These
 limits do not establish a general bound on all XIM protocol-library activity.
 
+CREATE_IC publication marks a window pending before `xcb_xim_create_ic`,
+because the library processes its request queue synchronously and a send
+failure or immediate reply can run the completion callback before the call
+returns; that callback's transition is never overwritten. Only a direct refusal
+(nothing queued) clears pending and advances the input-style attempt, once, and
+the per-window loop never issues a second request while one is pending or a
+context exists. Provider disconnect is handled by the `disconnected` callback:
+xcb-imdkit frees queued requests without completion callbacks, so Buster clears
+every window's IC, pending CREATE_IC, style attempt, negotiated styles,
+style-query state, open state and provider event masks while retaining windows,
+focus and arena ownership. Automatic reconnect then rebuilds contexts.
+
 `test_rendering_raster_native` exercises actual X-server XDND negotiation,
 direct/INCR transfer, decoded-path ownership, cancellation and shutdown, plus
 synthetic XIM reducer boundaries and actual poll scope teardown. Its ordinary
 native invocation also requires a real XIM provider on a second XCB connection,
-using the server API in the already linked `libxcb-imdkit`. Two independently
+using the server API in the already linked `libxcb-imdkit`. Independently
 negotiated provider cycles exercise UTF-8 and Compound Text commits through
 normal bounded polling with nonzero input contexts. Independent Unicode golden
 bytes, producer-payload mutation/release, scratch clobbering and text reads after
 complete client/provider shutdown check caller-arena ownership. UTF-8 controls
 also admit 4096 raw bytes, refuse 4097 bytes and malformed input, and recover with
 a subsequent valid commit. Asynchronous commits followed by ordered XIM SYNC
-replies distinguish consumed refusals from missing provider traffic.
+replies distinguish consumed refusals from missing provider traffic. A third
+UTF-8 cycle closes the provider after a commit, requires the client to
+invalidate its session and contexts, keeps polling with the provider missing
+without a fabricated context, then restarts a provider under the same
+advertisement name and requires a rebuilt nonzero context, a correct commit and
+teardown of both provider sessions. Synthetic controls drive the CREATE_IC
+publication helpers for immediate failure, accepted asynchronous, immediate
+success and refused requests, and the registered disconnect callback against a
+window with a pending CREATE_IC.
 
 Provider handshake, commit and teardown phases each have a 5-second deadline,
 a 2048-pass cap, and bounded work per pass (64 provider events, 32 client events).

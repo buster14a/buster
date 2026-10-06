@@ -249,7 +249,7 @@ BUSTER_COLD bool is_debugger_present(void)
         // PTRACE_TRACEME probe left the process permanently traced by its
         // parent and blocked a real debugger from attaching later.
         bool traced = false;
-        int status_fd = open("/proc/self/status", O_RDONLY);
+        int status_fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
         if (status_fd >= 0)
         {
             char8 status_buffer[4096];
@@ -2111,6 +2111,11 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             o |= (flags.truncate) * O_TRUNC;
             o |= (flags.create) * O_CREAT;
             o |= (flags.directory) * O_DIRECTORY;
+            // Every descriptor is close-on-exec from creation: a concurrent
+            // spawn on another thread must never inherit it, and a separate
+            // F_SETFD would leave a window. Children only receive the standard
+            // streams, which the spawn file actions dup2 over 0, 1 and 2.
+            o |= O_CLOEXEC;
 
             mode_t mode = permissions.execute ? 0755 : 0644;
             int fd;
@@ -2568,7 +2573,7 @@ FileStats os_file_replacement_target_stats(String8 path)
             int fd;
             do
             {
-                fd = open((char*)path_z.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+                fd = open((char*)path_z.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
             } while (fd < 0 && errno == EINTR);
             if (fd >= 0)
             {
@@ -2707,7 +2712,7 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
         {
             do
             {
-                fd = open((char*)path_z.pointer, O_WRONLY | O_CREAT | O_EXCL, mode);
+                fd = open((char*)path_z.pointer, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode);
             } while (fd < 0 && errno == EINTR);
             error = fd >= 0 ? (OsError){0} : os_get_last_error();
         }
@@ -3266,7 +3271,10 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_add_open_descriptor_closes(posix_spawn_
     {
         int directory_descriptor = dirfd(directory);
         struct dirent* entry;
-        while (!result && (entry = readdir(directory)) != 0)
+        // readdir returns null for both the end of the directory and a failure.
+        // Clear errno first so an error is reported instead of being taken as a
+        // complete set of closes.
+        while (!result && (errno = 0, entry = readdir(directory)) != 0)
         {
             u64 descriptor = 0;
             bool numeric = entry->d_name[0] != 0;
@@ -3290,6 +3298,10 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_add_open_descriptor_closes(posix_spawn_
                     result = posix_spawn_file_actions_addclose(file_actions, (int)descriptor);
                 }
             }
+        }
+        if (!result && errno != 0)
+        {
+            result = errno;
         }
         closedir(directory);
     }
@@ -6360,7 +6372,7 @@ BUSTER_GLOBAL_LOCAL u64 os_resident_memory(bool peak)
     }
     // /proc/self/statm is "size resident shared ..." in pages. The second
     // field is what /proc/self/status calls VmRSS, without the string parse.
-    int statm_fd = peak ? -1 : open("/proc/self/statm", O_RDONLY);
+    int statm_fd = peak ? -1 : open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
     if (statm_fd >= 0)
     {
         char statm_buffer[128];

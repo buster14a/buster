@@ -1,6 +1,6 @@
 # Exact queue-to-main CI reuse (#1808)
 
-`Buster CI` may reuse validation from twenty-five jobs from a successful `merge_group` execution when
+`Buster CI` may reuse validation from twenty-three jobs from a successful `merge_group` execution when
 GitHub merges **that same commit SHA** to `main`. The source run remains the
 authoritative execution. The main `CI complete` job links it and says that the
 native/mobile/UEFI main jobs were skipped and desktop jobs ran only their cache lifecycle. It does not claim that their validation ran twice. Required
@@ -10,7 +10,7 @@ check names and the merge-queue ruleset are unchanged.
 
 | Main-push obligation | Policy | Reason |
 | --- | --- | --- |
-| Sixteen desktop owners: `release` plus isolated check owners on Linux/x86 Windows; grouped `checks` on macOS/Windows ARM | Reuse validation; run cache lifecycle on main | Same queue-proven compiler/configuration/fixture coverage. Main retains exact-key Zig restore, digest verification, publication and evidence, logs and existing job names. |
+| Fourteen desktop owners: `release` plus isolated `sanitized-release` and `portability` owners on Linux, macOS and x86 Windows; grouped `checks` on Windows ARM | Reuse validation; run cache lifecycle on main | Same queue-proven compiler/configuration/fixture coverage. Main retains exact-key Zig restore, digest verification, publication and evidence, logs and existing job names. |
 | Workflow lint | Run on main | The merge-parent guard evaluates the main push's `before` SHA and event. |
 | Clang analyzer shards | Reuse exact queue analysis; retain main receipt job | Both events use the exact SHA as candidate and baseline. Queue performs the full candidate analysis and failure/coverage controls, possibly with an additional comparison; main ordinarily requests candidate-only analysis. All four source execution steps and its artifact must succeed. |
 | Five desktop-native mode lanes and three Unix differentials | Reuse exact queue jobs if admitted | Same commit, job definitions and input-free test commands; source job and required step results remain authoritative. |
@@ -19,7 +19,7 @@ check names and the merge-queue ruleset are unchanged.
 | UEFI boot | Reuse exact queue job if admitted | Same commit, pinned firmware packages and boot commands; source boot result and retained artifact are required. |
 | Independent required workflows | Unchanged | This policy affects only `Buster CI`; their checks still run under their own contracts. |
 
-The twenty-five exact names and artifact prefixes are declared in
+The twenty-three exact names and artifact prefixes are declared in
 `tools/main_ci_reuse.py`; tests compare those names with the workflow matrix
 inventory. The source artifact record retains its digest, run/attempt binding,
 runner and resolved toolchain logs. Native LLVM is resolved at execution time
@@ -36,8 +36,8 @@ contents and Actions permissions. It checks the current run's repository ID,
 workflow ID/path, exact commit, main ref, push event and first attempt. It
 requires one successful, completed first-attempt merge-queue run with the same
 SHA, the expected queue ref, and completion within two hours before the main
-run. It checks the exact workflow blob against the local checkout, all 27
-successful source job identities and mandatory coverage steps, and twenty-five
+run. It checks the exact workflow blob against the local checkout, all 23
+successful source job identities and mandatory coverage steps, and twenty-three
 nonempty, unexpired, source-bound artifacts with SHA-256 digests. Paged API
 results must be complete. It rereads the source and current runs after
 collection to catch attempt movement.
@@ -61,7 +61,7 @@ authority, no cross-event cancellation key is shared, and no check is forged.
 
 This is policy `buster-main-ci-reuse-v2`. Existing required checks, matrix
 names, cache keys, cache write policy and artifact names remain unchanged.
-Desktop cache jobs still allocate all sixteen desktop runners and the analyzer receipt still allocates its Linux runner; this change saves
+Desktop cache jobs still allocate all fourteen desktop runners and the analyzer receipt still allocates its Linux runner; this change saves
 build/test and compiler-install work, not those allocations. Reducing them to
 five cache publishers is a separate cache/check-contract transition. Independent
 workflows require their own event/coverage review before reuse can be enabled.
@@ -112,7 +112,7 @@ and retained main execution checks remain required.
 
 Run `python3 -B tools/main_ci_reuse_test.py -v` and the existing workflow
 policy/inventory tests. On a bounded queue-to-main transition, retain the
-source and main run/attempt IDs, the twenty-five source job IDs, the receipt and the
+source and main run/attempt IDs, the twenty-three source job IDs, the receipt and the
 current job inventory. Compare the source and main jobs' `created_at`,
 `started_at` and `completed_at` values: sum actual runner busy seconds, report
 queue delay separately, and report run creation to aggregate completion for
@@ -153,7 +153,7 @@ expired/missing artifacts in this change.
 
 The network-free state replay compares the former one-read decision with
 absent-then-complete evidence: the old policy falls back; the new policy reuses
-only after all twenty-five jobs and artifacts are independently verified. The
+only after all twenty-three jobs and artifacts are independently verified. The
 production wrapper regression exercises actual `GitHub.pages/get` and the
 shared GET reader with a mocked HTTP transport in both phases. Hosted CI runs
 these controls through the existing workflow-tools suite. This is a prospective

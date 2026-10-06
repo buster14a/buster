@@ -7,8 +7,12 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - Type-embedded constant producers use the protected TYPE query contract
   described in [foundations](foundations.md). It reads a declaration-point
   model and returns stable integer facts without entering the live declaration
-  machine. Enum consumers retain the explicit ENUM compatibility mode until
-  their declaration preparation is migrated (#1247).
+  machine. Enum consumers retain explicit ENUM compatibility arithmetic and
+  successful machineless answers. Only failed `sizeof` expression leaves use
+  that private reader at their live declaration point, exporting the size
+  magnitude without a private type ID. Type-name/function-valued operands,
+  nested layout operators and attributes remain outside this partial fallback;
+  stored-layout and broader declaration preparation remain open (#1258/#1247).
 - Record definitions in expression type names are registered in the containing
   C scope as their keyword is reached. Their braces hold member declarations;
   the block binder skips those bodies instead of opening a local scope or
@@ -152,7 +156,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
   one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
   refuse `int b : 0;`, where accepting it laid out a member that occupies no
-  bits and can still be assigned and read back (issue #710). **A bit-field has an integer type, and no member has an incomplete type** (C17 6.7.2.1p3, p5): `c_parse_validate_members` refuses `float f : 3`, `int *p : 4`, a member whose struct or union was still incomplete at its declarator (its own tag, or a tag defined only later -- `CMember.has_incomplete_type` records that, since both read complete once the unit is parsed) and a member name repeated in one aggregate; each of these used to lay out with a fabricated size (issue #2517). **A width is
+  bits and can still be assigned and read back (issue #710). **A bit-field has an integer type, and no member has an incomplete type** (C17 6.7.2.1p3, p5): `c_parse_validate_members` refuses `float f : 3`, `int *p : 4`, a member whose struct or union was still incomplete at its declarator (its own tag, or a tag defined only later -- `CMember.has_incomplete_type` records that, since both read complete once the unit is parsed) and a member name repeated in one aggregate, counting the members of anonymous structs and unions at any depth (C17 6.7.2.1p13; issue #2675: `c_parse_validate_member_names` walks each record once with an explicit stack and an interned-symbol epoch stamp table, linear in the member count); each of these used to lay out with a fabricated size (issue #2517). **A width is
   evaluated once, where the member is declared**: `c_parse.c` folds a
   single-token literal (decimal, hex, octal or suffixed) with
   `c_integer_expression_evaluate` and anything else through

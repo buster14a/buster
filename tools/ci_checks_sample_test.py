@@ -102,11 +102,17 @@ class SampleTests(unittest.TestCase):
         item, _, condition = self.fixture.complete_desktop()
         event, observation_path = self.partitioned(item, 4)
         observation = qualification.phases.read(observation_path)
-        inventory = qualification.unit_campaign.inventory(observation_path.parent / "inventory.log")
-        lines = [f"CI_UNIT_PLAN_V1 binary_sha256={'e' * 64} source_revision={'a' * 40} workers=4 groups=2 group_workers=2"]
-        for group, index, count in (("driver", 0, 1), ("rest", 1, 2)):
+        inventory_path = observation_path.parent / "inventory.log"
+        inventory_bytes = inventory_path.read_bytes().replace(b"compiler_driver_tests", b"c_frontend_tests").replace(
+            b"module=fixture ", b"module=compiler_driver_tests ")
+        inventory_path.write_bytes(inventory_bytes)
+        observation["inventory_sha256"] = hashlib.sha256(inventory_bytes).hexdigest()
+        observation_path.write_text(json.dumps(observation) + "\n")
+        inventory = qualification.unit_campaign.inventory(inventory_path)
+        lines = [f"CI_UNIT_PLAN_V1 binary_sha256={'e' * 64} source_revision={'a' * 40} workers=4 groups=2 group_workers=2 primary_module=c_frontend_tests"]
+        for group, index, count in (("primary", 0, 1), ("rest", 1, 2)):
             for row in inventory:
-                owner = "driver" if row["name"] == "compiler_driver_tests" else "rest"
+                owner = "primary" if row["name"] == "c_frontend_tests" else "rest"
                 lines.append(f"CI_UNIT_MODULE_V1 index={row['index']} module={row['name']} table_audit={int(row['table_audit'])} enabled={int(not row['table_audit'])} selected={int(not row['table_audit'] and owner == group)} group={owner}")
             lines += [f"TEST_MODULE_TIMING index={index} module={inventory[index]['name']} duration_ns=1 passed={count} failed=0 assertions={count} status=pass",
                       f"CI_UNIT_BATCH_V1 group={group} modules=1 modules_passed=1 assertions={count} passed={count} failed=0 external=0 external_passed=0 status=pass",
@@ -124,6 +130,23 @@ class SampleTests(unittest.TestCase):
         self.assertEqual(manifest["mode"], "groups")
         self.assertEqual(manifest["test_workers"], 4)
         self.assertEqual(len(result["census"]), 2)
+        original_inventory = inventory_path.read_bytes()
+        mismatched_inventory = original_inventory.replace(
+            b"module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=primary",
+            b"module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=rest").replace(
+            b"module=compiler_driver_tests table_audit=0 enabled=1 selected=0 group=rest",
+            b"module=compiler_driver_tests table_audit=0 enabled=1 selected=0 group=primary")
+        inventory_path.write_bytes(mismatched_inventory)
+        observation["inventory_sha256"] = hashlib.sha256(mismatched_inventory).hexdigest()
+        observation_path.write_text(json.dumps(observation) + "\n")
+        observation_reference = observation_path.relative_to(self.root).as_posix()
+        for evidence in generated["tests"]:
+            if evidence["observation"]["path"] == observation_reference:
+                evidence["observation"] = fixtures.reference(self.root, observation_reference, observation)
+        with self.assertRaisesRegex(ValueError, "independent inventory primary"):
+            self.validate(generated, condition)
+        inventory_path.write_bytes(original_inventory)
+        observation["inventory_sha256"] = hashlib.sha256(original_inventory).hexdigest()
         log_path.write_text("\n".join(lines[1:]) + "\n")
         observation["log_sha256"] = hashlib.sha256(log_path.read_bytes()).hexdigest()
         observation_path.write_text(json.dumps(observation) + "\n")
@@ -221,7 +244,7 @@ class SampleTests(unittest.TestCase):
         # one complete synthetic platform. Reuse that validated condition tuple;
         # strict sample/desktop/journal readers remain real. This is no CI proof.
         names = ("Windows x86-64 release", "Windows x86-64 checks")
-        with mock.patch.object(qualification.github, "COMBINATION_PLATFORMS", names), mock.patch.object(qualification, "conditions", return_value=validated_conditions):
+        with mock.patch.object(qualification, "cohort_desktop_jobs", return_value=names), mock.patch.object(qualification, "conditions", return_value=validated_conditions):
             result = sample.assemble(path, "sample-123.json")
             item = qualification.record(self.root, result["sample"])
             observed = qualification.sample(self.root, item, qualification.PROSPECTIVE_COHORT)
@@ -250,7 +273,7 @@ class SampleTests(unittest.TestCase):
         path, value = self.input()
         validated_conditions = qualification.conditions(self.root, value["conditions"], qualification.record(self.root, value["run"]))
         before = {file: file.read_bytes() for file in self.root.rglob("*") if file.is_file()}
-        with mock.patch.object(qualification.github, "COMBINATION_PLATFORMS", ("Windows x86-64 release", "Windows x86-64 checks")), mock.patch.object(qualification, "conditions", return_value=validated_conditions), mock.patch.object(qualification, "sample", side_effect=ValueError("strict rejection")):
+        with mock.patch.object(qualification, "cohort_desktop_jobs", return_value=("Windows x86-64 release", "Windows x86-64 checks")), mock.patch.object(qualification, "conditions", return_value=validated_conditions), mock.patch.object(qualification, "sample", side_effect=ValueError("strict rejection")):
             with self.assertRaisesRegex(ValueError, "strict rejection"):
                 sample.assemble(path, "sample.json")
         self.assertFalse((self.root / "sample.json").exists())

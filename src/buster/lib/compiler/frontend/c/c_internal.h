@@ -11,6 +11,7 @@
  */
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
@@ -506,7 +507,7 @@ BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
 // AAPCS64    The same placement, but every bit-field's container -- named,
 //            unnamed or zero-width -- raises the record's alignment (AAPCS64
 //            10.1.8). AArch64 Linux, Android, UEFI and bare metal; not Darwin.
-// MICROSOFT  The Windows rule, for the MSVC and MinGW environments alike: a
+// MICROSOFT  The Windows (MSVC) rule; MinGW triples are rejected (#1492): a
 //            bit-field occupies a storage unit of its declared type's size,
 //            and the next one shares it only while its declared type has the
 //            same size and its bits still fit. A zero-width bit-field matters
@@ -778,6 +779,7 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONSTEXPR,
     C_SYMBOL_WELL_KNOWN_CONST,
     C_SYMBOL_WELL_KNOWN_ATOMIC,
+    C_SYMBOL_WELL_KNOWN_VA_OPT,
     C_SYMBOL_WELL_KNOWN_COUNT,
 } CSymbolWellKnown;
 
@@ -1141,6 +1143,9 @@ struct CTypeParseFrame
     u32 shared_specifier_end;
     u32 mutation_mark;
     u32 definition_type_start;
+    // PARAMETER frames: the diagnostic count at entry, so a failed type
+    // specifier that said nothing can be named.
+    u32 diagnostic_start;
     u32 pending_index;
     u64 arena_mark;
     CTypeParseFrameKind kind;
@@ -1197,14 +1202,20 @@ struct CTypeLayoutCache
 #define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
 #define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
 #define C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION 16u
+#define C_PARSE_EXPRESSION_QUERY_FLAG_MASK (C_PARSE_EXPRESSION_QUERY_VALID | C_PARSE_EXPRESSION_QUERY_CHECKED | \
+    C_PARSE_EXPRESSION_QUERY_RUNTIME | C_PARSE_EXPRESSION_QUERY_CONSTANT | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)
+// The flags live in their own zeroed byte column so a body clears one byte per
+// token and an empty or mode-incompatible probe never touches the payload.
+BUSTER_CT_CHECK(C_PARSE_EXPRESSION_QUERY_FLAG_MASK <= UINT8_MAX);
 
+// Payload of one memo slot; meaningful only while the slot's flag byte is
+// nonzero, so it is never cleared. Publication writes it before the flags.
 typedef struct CParseExpressionQuery CParseExpressionQuery;
 struct CParseExpressionQuery
 {
     u32 end;
     CScopeId scope;
     CTypeId type;
-    u32 flags;
 };
 
 typedef enum CConstantEvaluationMode
@@ -1221,6 +1232,7 @@ typedef enum CConstantEvaluationMode
 struct CTypeParseMachine
 {
     CParseExpressionQuery* expression_queries;
+    u8* expression_query_flags;
     CParseResult* expression_query_result;
     CToken const* expression_query_tokens;
     u32 expression_query_start;
@@ -1256,6 +1268,11 @@ struct CTypeParseMachine
     u32 mutation_count;
     u32 mutation_capacity;
     u32 mutation_type_limit;
+    // Parenthesized declarators being parsed for an aggregate member or a
+    // declaration that creates storage. A parameter whose type specifier fails
+    // inside one is reported there, because neither path has a later fallback
+    // that names it.
+    u32 member_declarator_depth;
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
@@ -1269,6 +1286,8 @@ struct CTypeParseMachine
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool type_identity_queries_active;
+    // Only the private fallback for failed ENUM sizeof expression leaves.
+    bool enum_sizeof_expression_query;
     // How many GNU `_Alignof(object)` evaluations of an object's alignment
     // records enclose this one, and whether one of them hit
     // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_parse_alignof_object_alignment.
@@ -1286,6 +1305,7 @@ struct CParsePromotedMemberWork
 };
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
+BUSTER_C_EXTERN String8 c_semantic_asm_clobber_name(Target target, String8 clobber);
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint);
 
 BUSTER_C_EXTERN void c_parse_index_declarations(CParseResult* result, Arena* arena);
@@ -1312,6 +1332,10 @@ struct CIrConstantValue
     u64 integer_high;
     f64 floating;
     CIrConstantValueKind kind;
+    // Set only on the value a function identifier folds to, which is already
+    // its decayed pointer. Unary `&` accepts exactly that value, so `&f` is
+    // `f`; every operator result clears it, keeping `&(rvalue)` refused.
+    bool function_designator;
 };
 
 BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
@@ -1376,6 +1400,8 @@ BUSTER_C_EXTERN bool c_semantic_asm_vector_operand(IrType* type);
 BUSTER_C_EXTERN bool c_semantic_asm_x87_operand(IrType* type);
 
 BUSTER_C_EXTERN bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_out);
+
+BUSTER_C_EXTERN u64 c_semantic_asm_register_alternative(String8 text, bool output);
 
 BUSTER_C_EXTERN u64 c_semantic_asm_bound_register(Target target, String8 label);
 

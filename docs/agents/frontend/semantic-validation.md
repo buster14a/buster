@@ -25,6 +25,18 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+`c_parse_parameter_list_names_validate` checks a completed parameter list before
+its names can overwrite function parameter bindings. A scratch hash table belongs
+to one published list and reports its first repeated name at the later parameter,
+including the earlier declaration's line and column. Unnamed parameters are
+skipped, and separate prototype scopes, nested function-pointer lists and C23
+unnamed definitions retain their existing rules. Direct, parenthesized and block
+local declarators use the same check. The local suffix reader reserves its outer
+parameter range before parsing nested declarators, keeping child names outside
+that list. `c_test_duplicate_parameter_names` checks syntax-only/lowering
+parity, both frontend forms and symbol/spelling lookup, and inspects the outer
+parameter names of nested block-local prototypes.
+
 Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
 to the function specifier `inline`, without injecting a storage class. UCRT-style
 `static __inline` and `extern __inline` declarations retain their source storage;
@@ -60,6 +72,20 @@ source locations and matching semantic-only/full-compilation refusal. Both
 frontend forms validate positive neighbors in those dialects, including
 enum/typedef shadowing, and GNU-zero neighbors independently.
 
+Structure and union member validation walks array, pointer and function-return derivations,
+including those inherited through typedefs, and rejects variably modified
+types at the member's original source site. Each bound is queried in its
+declaring scope using the existing typed constant predicate. The check runs
+after expression/type-name validation and also visits members appended by its
+own bound queries. Completed aggregate definitions retain their source identity,
+so deeply nested `sizeof` type names are covered without declaring an object.
+Flexible arrays, constant expression bounds and function-pointer prototype
+parameters keep their existing rules. `c_test_variable_member_types` checks
+rejected file/block/type-name/nested/typedef forms, exact member locations and
+valid neighbors through semantic-only analysis and both canonical frontend
+forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
+[WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
 pointers to arrays and functions retain their pointer size. Its explicit task
@@ -93,6 +119,7 @@ checks remain defensive checks for direct lowering callers.
 | Lowering responsibility | Semantic owner / shared policy |
 | --- | --- |
 | Invalid type/specifier combinations, incomplete and void objects, parameter/return layouts | Existing declarator analysis, `c_parse_validate_signature`, `c_parse_validate_vla_declarations` |
+| Repeated names within one parameter list | `c_parse_parameter_list_names_validate`; completed direct, parenthesized and local declarator ranges |
 | Integer literals, typed constant expressions, static assertions, `sizeof`/alignment, enum and designator values | `c_parse_typed_constant`, `c_parse_validate_deferred_assertions`, `c_parse_validate_sizeof_operands`; shared literal selection and floating-point bit helpers |
 | Zero-width named bit-fields, explicit alignment, array element stride, alignment redeclarations | `c_parse_validate_bit_field_widths`, `c_parse_validate_alignment_range`, `c_parse_validate_array_strides`, `c_parse_validate_alignment_redeclarations` |
 | Initializer shape, promoted members, separators, string width/bounds, automatic range designators, VLA initialization/storage | `c_parse_validate_initializer_shape`, `c_parse_infer_initializer_array_count_core`, `c_parse_validate_vla_declarations` |
@@ -164,6 +191,15 @@ slot, and root snapshots and rollbacks are passed by pointer. A rollback that
 does not continue into a successful parse is masked by its root's rollback, so
 `c_test_type_parse_snapshot_rows` checks row independence directly.
 
+GNU `__attribute__((fallthrough));` and its `__fallthrough__` alias
+are null statements, including in C99/GNU11/C17. Leading attribute lists
+are skipped by the lowering body walker; `c_parse_validate_gnu_fallthrough`
+therefore checks the empty statement and zero-argument constraint (allowing
+an empty parenthesized parameter list) before lowering can erase the attribute prefix. Other attributes retain their own
+handling. Embedded driver regressions cover both spellings, dialects, both
+frontend forms and both native allocators, with syntax/object diagnostic
+equivalence for a missing semicolon or attribute arguments.
+
 A modification destination is typed from its whole operand.
 `c_parse_assignment_identifier_is_operand` is the one rule both assignment
 scans in `c_parse_validate_const_assignments` use for when the identifier in
@@ -194,7 +230,49 @@ conjunction operator shares the spelling; a body with a goto label and
 `&&` is that operator's operand, not a cast. `c_test_label_values_gate` pins
 the gate through the private seam beside the unchanged diagnostics.
 
+## Reservation failure contract
+
+Required preprocessing spelling/token/shape/phase and semantic machine/phase
+reservations produce an error row in the caller's result arena, with the phase
+and requested size in its message. Parsing has no private arena reservation;
+it forwards failed preprocessing and diagnoses absent or oversized token input.
+Semantic analysis stays incomplete on a reservation failure. Lowering refuses
+an incomplete semantic model and never publishes its partially constructed
+program after a required arena reservation fails, including scratch growth.
+The driver preserves these diagnostics for syntax-only and object actions and
+has a nonempty fallback for an incomplete producer result.
+
+`c_test_frontend_reservation_failures` and
+`compiler_driver_test_frontend_reservation_failures` select each mandatory
+phase-local creation through a calling-thread private seam, which arms the
+existing `arena_test_fail_next_reserve` immediately at that creation and
+disables pool reuse for that attempt. Both SSA forms cover all four
+preprocessing, two analysis and one ordinary lowering reservations, failed
+result publication and successful next-call recovery. Driver coverage includes
+syntax-only for phases it actually executes. Oversized query/function growth
+uses the same reservation boundary and reports the requested bytes. A private
+tests-only initial function budget forces real growth with a small valid input;
+a synthetic query extent refuses its mapping before any oversized source walk.
+The attribute-role regression also forces its deep semantic spill reservation
+and checks recovery. The frontend reservation fixture releases each complete
+preprocessed unit with `c_preprocess_release` before rewinding scratch, so the
+test-unit registry is unregistered and cannot retain destroyed arena pointers. Existing scratch-limit regressions cover checked plan refusal.
+The lexer diagnostic arena remains an optional optimization with a tested
+result-arena fallback; failure there retains the original lexical diagnostics.
+
 ## Regression contract
+
+The registered `c_test_integer_semantics_agreement` matrix pins #1577's
+nearest-object lookup for `sizeof(x)`, `sizeof x` and `_Alignof(x)` when a
+local character array shadows an outer pointer typedef. Literal operands select
+the immediate assertion route (historically the legacy route); enumerator-dependent bounds and answers use the
+deferred typed route. Both routes require the independent array size 256 and
+alignment 1 across six native target layouts, semantic-only/canonical analysis
+and both frontend SSA forms. False-value neighbors must report a static
+assertion diagnostic and publish no program. GNU17 is explicit because
+expression operands to `_Alignof` are a GNU extension. Both routes now prefer the shared typed constant answer when available.
+The production shadow guard is the previously landed #1529 repair; this matrix supplies the remaining
+explicit route/spelling coverage without changing it.
 
 Lowering checks the query machine's five arrays, missing scope-child indexes,
 per-function builder arrays and body tasks before carving them. Ordinary queries
@@ -264,3 +342,17 @@ large translation units and the compiler unity source. Then run the complete
 suite, sanitized suite and byte-identical self-host fixed point. Record compiler
 identities, input identities, actual results and limits in a new performance
 audit; do not substitute cross-path agreement for a baseline comparison.
+
+The final member check defers failed bound classifications until its live
+member walk has materialized nested aggregate definitions. It retries only failed
+candidates and visits physical members appended by retries, until neither member
+rows nor unique completed source-backed aggregate definitions grow. A lazy scratch
+bitset keyed by definition tokens includes GNU empty records; qualified copies
+and temporary type-only derivations do not count as progress. It then reports
+VM members, so a valid deeply nested sizeof
+bound does not become a runtime bound merely because its first layout query
+could not yet resolve a copied type name. Pending rows are sparse scratch data,
+released after validation; completed definitions reuse their source identity.
+The multidimensional constant/runtime pair pins a later array derivation that
+first materializes a member during retry, including its exact source diagnostic.
+A GNU17-only empty-record dimension pins completion without member-row growth.

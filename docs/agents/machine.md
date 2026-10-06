@@ -32,6 +32,24 @@ fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
 
+- Debug-location seed storage starts with a small arena-backed array and grows
+  with actual emitted ranges in machine emission. Never
+  reserve the product of lexical locals and CFG blocks or machine rows.
+  Growth checks aligned remaining arena capacity before allocating, retains
+  all earlier records, and reports `CODEGEN_ERROR_CAPACITY` without advancing
+  the arena when the actual records cannot fit. Spare doubling capacity may
+  be reduced to fit; an existing seed error must survive final publication.
+  `codegen_test_debug_seed_capacity` checks fixed and growing storage, exact
+  remaining capacity, alignment and count-overflow refusals; the registered
+  block-local source cases compile with debug information in a bounded arena.
+- X86 inline assembly admits `vzeroupper` and `popcnt`/`lzcnt`
+  with unsuffixed and AT&T `w`/`l`/`q` spellings through the shared checked
+  assembler. Template authors retain responsibility for declared clobbers and
+  runtime CPU checks. `machine_test_inline_assembly_counters` pins independent instruction
+  bytes, both frontend forms, all allocators, and Linux/Windows/macOS objects.
+  Rejected neighbours cover byte-width bit counts, mismatched operand widths,
+  and extra operands on `vzeroupper`, with no partial bytes.
+  Matching native hosts execute optional instructions only when supported.
 - Selection retains a canonical-block-to-MIR-entry projection when expansion
   or entry-first layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
@@ -44,7 +62,6 @@ fixture as well as compiling both architectures.
   aggregate-comma regression covers three-byte structs, thirteen-byte unions
   and twenty-four-byte indirect values, preserving tail bytes and expression
   side effects across every native allocator spelling and frontend form.
-
 - System V indirect variadic calls keep the vector-register count in AL
   through the call instruction. FAST and QUALITY reserve caller-saved R10 for
   the indirect callee while staging arguments.
@@ -96,6 +113,17 @@ fixture as well as compiling both architectures.
   `vector_register_mask` describes class membership including
   nonallocatable registers. Target-less synthetic functions still accept
   bounded physical references without imposing a target class map.
+- FAST and QUALITY use the shared private frame arithmetic in
+  `machine_frame_internal.h`. Each home, colored slot group, dedicated slot
+  and edge-copy tile checks wide addition/alignment before publishing a
+  32-bit offset; outgoing storage and push parity are checked before the final
+  frame is published. x86-64 actual offsets and allocation sizes fit signed
+  disp32. AArch64 retains unsigned offsets and checks the encoder's footer and
+  Windows save areas. Capacity refusals remain distinct from malformed MIR,
+  including strict verification, and reach the driver as `codegen.capacity`.
+  Registered `machine_test_frame_capacity` checks representation boundaries,
+  parity, groups, outgoing storage and both frontend forms of a large-local C
+  witness without allocating or executing that native stack (GitHub #1838).
 - Stack alignments and call-target reference forms remain optional, defaulting
   to eight and DIRECT. Line marks permit duplicate rows and a final row equal
   to `instruction_count`; zero-row lowering can produce both. Validate every
@@ -233,6 +261,20 @@ fixture as well as compiling both architectures.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
+- FAST's existing prepass records one advisory byte per virtual register for
+  a nearby fixed-register or forced-scratch consumer. Only immutable values
+  defined in the same block, at most eight rows before the first qualifying
+  use, receive a hint. The two definition free-pick sites consume it only if
+  the lane is already free in the existing candidate mask and the value does
+  not prefer callee-saved registers. Hints never evict or override fixed,
+  tied, pinned, reserved or class constraints; normal preferred/free/dead/LRU
+  selection remains the fallback. The prepass and placement share the same
+  immutable function lifetime. QUALITY inherits the hints through FAST reruns
+  and retains its strict acceptance comparison. `MACHINE_FAST_CONSUMER_HINTS`
+  defaults to 1; the diagnostic `MACHINE_FAST_AVOID_SCRATCH_PICK` variant
+  defaults to 0. Static code-size observations do not establish compiler
+  throughput gains. The registered consumer-hint MIR fixture verifies the
+  constrained lane, absence of unnecessary edits and deterministic placement.
 - QUALITY scheduling remains pressure-first and deterministic. Pressure is
   counted per register class; metadata supplies barriers, memory membership,
   and implicit vector-state chain membership through the published
@@ -372,7 +414,10 @@ fixture as well as compiling both architectures.
   emits closed metadata-backed x87 transactions, with one explicit ST(i)
   operand and architectural ST(0) left implicit in the exact token. Arithmetic,
   negation, comparison and conversion rows carry memory/barrier membership;
-  no x87 register class is allocated. Comparisons repair unordered flags,
+  no x87 register class is allocated. Comparisons repair unordered flags and
+  follow C17 F.3: `==`/`!=` are quiet (`ucomis[sd]`, `fucomip`, A64 `fcmp`) and
+  never raise FE_INVALID for a quiet NaN, while `<`, `<=`, `>`, `>=` are
+  signaling (`comis[sd]`, `fcomip`, A64 `fcmpe`), matching GCC,
   integer casts save/restore the caller's control word, and only call/return
   bridges carry live ST results. Frame sizes and operation payloads are checked
   by the MIR verifier. Scalar loads/stores copy ten payload bytes, while
@@ -679,9 +724,10 @@ fixture as well as compiling both architectures.
   declare RDX/X10 scratch clobbers. Darwin TLS descriptor rows have ordinary
   call effects; a following move captures RAX/X0 into an SSA value. Every
   relocation site distinguishes the index, value offset, or descriptor field.
-  The thread-local model fixture requires zero fallback with all desktop
-  targets, allocators, frontend forms, and PIC settings; native hosts execute
-  its separate definition object and values held across repeated TLS accesses.
+  The thread-local model fixture requires zero fallback for admitted desktop
+  targets, allocators, frontend forms and code models, and named refusal with
+  no artifact for effective AArch64 ELF PIC requests. Native hosts execute
+  the supported models with separate definitions and live repeated accesses.
 - x86-64 i128 bitwise complement reads both frame-backed limbs and emits
   ordinary three-operand XOR64 rows against one all-ones constant. Each limb
   result has one definition; do not use mutable NOT rows for this expansion.
@@ -725,8 +771,9 @@ fixture as well as compiling both architectures.
   both sides of a VLA, packed narrow arguments, split pairs, indirect large
   results, ninth floating arguments and variadics. The registered driver
   matrix retains both original over-aligned stack fixtures, all six AArch64
-  targets, allocator modes, frontend forms and PIC settings. Native AArch64
-  desktop hosts also link the independent host observer in both directions
+  targets, allocator modes and frontend forms, with supported code models
+  and explicit AArch64 ELF PIC refusals. Native AArch64 desktop hosts also
+  link the independent host observer in both directions
   for FAST and QUALITY. The archived matrix additionally covered MIR-stack.
   Its direct NONE path stayed an object control: that reference failed
   independently compiled split-composite and packed Darwin call boundaries.
@@ -895,10 +942,16 @@ fixture as well as compiling both architectures.
   with the function's own offset, because an FDE naming a preemptible function
   is the same PC-relative reference to an interposable symbol that `ld`
   refuses in the body.
-- `-fPIE`/`-fpie` select the same position-independent code model as `-fPIC`
-  on every target. The last positive spelling wins; `-fno-pie` cancels only
-  a PIE spelling, whereas `-fno-pic` clears either model. Target-specific
-  code generation still decides where the selected model changes references.
+- On x86-64 ELF, `-fPIE`/`-fpie` request the same implemented PIC model
+  as `-fPIC`/`-fpic`; the last positive spelling wins. `-fno-pic` clears
+  that request, and `-fno-pie` cancels only a PIE spelling. Native AArch64
+  ELF C generation has no PIC reference model and the driver rejects an
+  effective positive request before mapping sources or publishing artifacts.
+  Default/cancelled generation and non-code actions remain supported.
+  Assembly and prebuilt inputs spell their own references. Mach-O/COFF models
+  and Wasm/eBPF compatibility behavior are unchanged; this partial #1289
+  boundary does not certify their PIC policy or the residual LLVM/direct
+  backend model paths.
 - The built-in linker binds every name in its image: `PLT32` patches the same
   rel32 `PC32` does. The ELF reader preserves `GOTPCREL`, `GOTPCRELX`,
   `REX_GOTPCRELX` and `CODE_4_GOTPCRELX` as distinct relocation kinds.
