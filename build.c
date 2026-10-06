@@ -22842,6 +22842,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out canonical-combination test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
+    // Process partitioning is a test launcher choice, never an admitted
+    // artifact-fanout producer argument. ARM opts in only without fanout.
+    String8 partition_arguments[] = {
+        S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
+        S8("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
+    };
+    Generate partitioned = canonical;
+    partitioned.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(partition_arguments);
+    if (build_artifact_fanout_is_canonical(partitioned, release))
+    {
+        string_print(S8("error: artifact fan-out accepted a partitioned producer\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     if (!build_artifact_fanout_worker_quota_valid(S8("1")) || build_artifact_fanout_worker_quota_valid((String8){0}) ||
         build_artifact_fanout_worker_quota_valid(S8("0")) || build_artifact_fanout_worker_quota_valid(S8("2")) ||
         build_artifact_fanout_worker_quota_valid(S8("jobs")))
@@ -25765,10 +25778,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     BUSTER_GLOBAL_LOCAL String8 ci_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
     };
-    // Sanitized Clang trees own the serialized checks test phases. Their
-    // test_all uses the isolated-process runner, which partitions only at four
-    // or more test workers and otherwise runs the ordinary invocation unchanged
-    // (tools/ci_unit_tests.c). The unsanitized canonical Release producer keeps
+    // Sanitized Clang and Windows AArch64 Release trees use the existing
+    // isolated-process runner at four or more test workers. Smaller quotas
+    // retain the ordinary invocation (tools/ci_unit_tests.c). Windows AArch64
+    // has no artifact-fanout consumer; supported canonical producers retain
     // exactly the standard arguments (build_artifact_fanout_is_canonical).
     BUSTER_GLOBAL_LOCAL String8 ci_test_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
@@ -25819,7 +25832,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cmake_profile_set = cmake_profile,
             .cmake_profile_summary = cmake_profile,
             .cross_configs = !direct_matrix,
-            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && tree_plan.sanitize ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
+            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && (tree_plan.sanitize || (coverage_target.windows && coverage_target.aarch64)) ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
                 : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);

@@ -54,6 +54,8 @@
 #define BUSTER_X11_XDND_TYPE_REPLY_ATOMS ((u32)256)
 #define BUSTER_X11_XDND_MAX_TYPE_ATOMS ((u32)1024)
 #define BUSTER_X11_XDND_MAX_RETAINED_BYTES (BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES + BUSTER_KB(64))
+// Core X11 EventMask defines bits 0..24; high bits are reserved.
+#define BUSTER_X11_CORE_EVENT_MASK ((u32)0x01ffffff)
 #define BUSTER_X11_XIM_MAX_INPUT_BYTES ((u64)4096)
 #define BUSTER_X11_XIM_MAX_OUTPUT_BYTES ((u64)16384)
 #define BUSTER_X11_XIM_MAX_POLL_BYTES BUSTER_KB(64)
@@ -109,6 +111,8 @@ struct WmHandle
     u32 xdnd_type_test_reply_count;
     u32 xdnd_type_test_max_reply_atoms;
     u32 xdnd_type_test_scanned_atoms;
+    u32 native_error_count;
+    u32 native_event_mask_sequence;
 #endif
     Arena* poll_arena;
     WmEventList* poll_event_list;
