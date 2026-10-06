@@ -17,11 +17,11 @@ compiler with tests off as described in `docs/agents/benchmarking.md`. Every
 attempt gets a new output directory, retained until its users finish.
 
     python3 tools/uarch_lab.py run --ide "$session_root/src/build/Release/ide" --repo-root "$session_root/src" \\
-        --cpu 2 --output "$session_root/lab-attempt-1" [--target-minutes 15 | --runs N] [--sudo] \\
+        --cpu 2 --output "$session_root/lab-attempt-1" [--target-minutes 15 | --runs N] [--sudo] [--threads] \\
         [--skip STEP ...] [--no-fresh-copy] [--perf PATH] [-- extra compile args]
     python3 tools/uarch_lab.py compare --baseline A_IDE --candidate B_IDE \\
         --repo-root "$session_root/src" --cpu 2 --output "$session_root/ab-attempt-1" [--target-minutes 15 | --pairs N] \\
-        [--profile-steps topdown,sampling] [--sudo] [--seed N] \\
+        [--profile-steps topdown,sampling,threads] [--sudo] [--seed N] \\
         [--min-effect PCT] [--no-fresh-copy] [--require-identical-output] \\
         [--perf PATH] [-- extra compile args]
     python3 tools/uarch_lab.py retirement --baseline A_IDE --candidate B_IDE \\
@@ -61,6 +61,10 @@ Steps (each writes DIR/<step>/ and one report section; any can be skipped):
               compiler renames its main thread `main_thread`, so its exec name
               alone misses nearly every sample); `report DIR` derives these
               filtered reports from the raw *.data when they are missing
+    threads   (--threads / --profile-steps threads, opt-in) one Superluminal-
+              style capture for Hotspot: `perf record -F 10000 --call-graph
+              fp --switch-events`, with kernel stacks and scheduler wake-ups
+              when perf_event_paranoid is -1, else user-only (step_threads)
     micro     `ide bench` if the binary supports it
 
 A step is `ok` only when its section has real data: the report re-assesses
@@ -157,7 +161,7 @@ import tempfile
 import threading
 import time
 
-STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "micro")
+STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "threads", "micro")
 DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
                    "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm"]
 # No duration_time: perf 7.2.4 reads it as 0 whenever it shares the event
@@ -233,7 +237,18 @@ SHF_EXECINSTR = 0x4
 SHT_NOBITS = 8
 # A/B compare (command_compare): variants, ABBA pair planning, statistics.
 VARIANTS = (("a", "baseline"), ("b", "candidate"))
-PROFILE_STEPS = ("topdown", "sampling", "ibs")
+PROFILE_STEPS = ("topdown", "sampling", "ibs", "threads")
+# The opt-in `threads` step (step_threads): one Superluminal-style capture for
+# Hotspot, at THREAD_SAMPLE_HZ with frame-pointer stacks and context switches.
+# Each mode needs less of the host than the one before; the first that
+# records wins (perf_event_paranoid -1, then 2, then no PMU).
+THREAD_SAMPLE_HZ = 10000
+THREAD_MODES = (
+    ("full", ["-e", "cycles", "-e", "sched:sched_switch", "-e", "sched:sched_wakeup"],
+     "kernel and user stacks, context switches and scheduler wake-ups (off-CPU waits)"),
+    ("user", ["-e", "cycles:u"], "user-space stacks and context switches; no kernel frames or wake-ups"),
+    ("cpu-clock", ["-e", "cpu-clock:u"], "software-clock user stacks and context switches; no PMU"),
+)
 PILOT_PAIRS = 2
 MIN_PAIRS = 10
 MAX_PAIRS = 1000
@@ -909,6 +924,10 @@ class Lab:
         self.last_elapsed = None
         self.last_maxrss = None
         self.last_harness_rss = None
+        self.last_cpu_s = None
+        # Whether timed runs go under `perf stat` (probe_counters): None until
+        # probed, then True, or False when perf is absent or cannot count.
+        self.counters = None
 
     def path(self, *parts):
         full = os.path.join(self.output, *parts)
@@ -971,7 +990,9 @@ class Lab:
             if output and os.path.isfile(output):
                 os.remove(output)
         started = time.monotonic()
-        status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout)
+        usage = {}
+        status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout, usage)
+        self.last_cpu_s = usage.get("cpu_s")
         if status == 0 and output and not os.path.isfile(output):
             status, err = 1, err + b"\ncompiler did not create the requested output\n"
         self.last_elapsed = time.monotonic() - started
@@ -1012,9 +1033,12 @@ def harness_resident_bytes():
     return value
 
 
-def run_measured(argv, cwd, environment, timeout):
+def run_measured(argv, cwd, environment, timeout, usage_out=None):
     """(exit status, stdout bytes, stderr bytes, peak RSS bytes, harness
     resident RSS bytes) of argv; both RSS values None where unsupported.
+    A usage_out dict receives `cpu_s`, the child's user+system seconds from
+    the same wait4 (None where unsupported): the CPU time measured without
+    perf (#2768).
 
     Peak RSS is ru_maxrss from os.wait4 on the direct child.  At reap Linux
     reports the largest of that process's own high-water RSS and the ru_maxrss
@@ -1051,6 +1075,8 @@ def run_measured(argv, cwd, environment, timeout):
                 _, wait_status, usage = os.wait4(process.pid, 0)
                 process.returncode = os.waitstatus_to_exitcode(wait_status)
                 rss = maxrss_bytes(usage.ru_maxrss)
+                if usage_out is not None:
+                    usage_out["cpu_s"] = usage.ru_utime + usage.ru_stime
             else:
                 process.wait()
                 rss = None
@@ -1262,11 +1288,11 @@ def compile_flags(lab, metrics_path):
     return ["-fmetrics-out=" + metrics_path] if metrics_path and enabled else []
 
 
-def estimate_other_compiles(groups, skip, sudo):
+def estimate_other_compiles(groups, skip, sudo, threads=False):
     """Rough cost of the steps after `timed`, in compile-equivalents (one
     compile's wall time), for choose_run_count."""
     cost = {"topdown": TOPDOWN_COMPILES_PER_GROUP * (len(groups) if groups is not None else 8),
-            "timeline": 3, "sampling": SAMPLING_COMPILES, "ibs": IBS_COMPILES if sudo else 0, "micro": 3}
+            "timeline": 3, "sampling": SAMPLING_COMPILES, "ibs": IBS_COMPILES if sudo else 0, "threads": 1 if threads else 0, "micro": 3}
     return sum(value for step, value in cost.items() if step not in skip)
 
 
@@ -1292,9 +1318,34 @@ def task_seconds(rows):
     return None
 
 
+def probe_counters(lab):
+    """Decide once whether timed runs can go under `perf stat` (#2768): a
+    `perf stat -- true` with TIMED_EVENTS must exit 0 and write a task-clock
+    line. Without perf, or when perf cannot open events (containers with a
+    strict perf_event_paranoid), timed runs execute the workload directly:
+    wall time, CPU time (wait4 user+system) and peak RSS are still measured
+    and every counter is NA, never zero. A usable perf that counts zero stays
+    a perf defect that timed_problems degrades, not a reason to fall back."""
+    if lab.counters is None:
+        csv_path = lab.path("perf-probe.csv")
+        status, _, err = lab.run_command([lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--", "true"],
+                                         timeout=60)
+        task = task_seconds(parse_stat(read_text(csv_path) or "")) if status == 0 else None
+        lab.counters = task is not None
+        reason = "perf stat counts task-clock" if lab.counters else "perf stat unusable (%s)" % (
+            "exit %d: %s" % (status, last_reason(err)) if status != 0 else "no task-clock line")
+        lab.meta.setdefault("capabilities", {})["perf_stat"] = {"usable": lab.counters, "reason": reason}
+        lab.save_meta()
+        if not lab.counters:
+            print("uarch_lab: %s; timing without perf, counters NA" % reason, flush=True)
+    return lab.counters
+
+
 def timed_command(lab, csv_path):
-    """The pinned `perf stat` prefix of every timed run (the workload follows `--`)."""
-    return lab.pin() + [lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--"]
+    """The pinned prefix of every timed run (the workload follows): `perf stat
+    ... --` when probe_counters found it usable, else the pin alone."""
+    counters = [lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--"] if probe_counters(lab) else []
+    return lab.pin() + counters
 
 
 def probe_workload(lab, directory, out):
@@ -1355,13 +1406,14 @@ def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_
             with open(os.path.join(directory, "run-%04d.err" % index), "w") as handle:
                 handle.write(out_text[-20000:] + err[-20000:])
         rows = parse_stat(read_text(csv_path) or "")
-        task = task_seconds(rows)
+        task = task_seconds(rows) if lab.counters else lab.last_cpu_s
         wall_ns = parse_cc_metrics(read_text(metrics_path) or "")["header"].get("wall_ns")
         if status == 0:
             best = span if best is None else min(best, span)
         records.append({"run": index, "exit": status, "identical": identical, "span_s": round(span, 6),
                         "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
-                        "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes")})
+                        "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes"),
+                        "cpu_s": lab.last_cpu_s, "counters": lab.counters})
         warning = "" if task is not None and task > 0 else " TASK-CLOCK %s: %s" % (
             "MISSING" if task is None else "NON-POSITIVE", stat_lines(rows).get("task-clock", "no task-clock line in " + csv_path))
         print("[timed] %d/%s span %.4f s, task-clock %s s, compiler wall %s s (min span %s)%s%s" % (
@@ -1574,6 +1626,40 @@ def derive_ibs_reports(lab, directory, basename):
     return notes
 
 
+def step_threads(lab):
+    """Opt-in Superluminal-style capture (run --threads, compare --profile-steps
+    threads): `perf record -F THREAD_SAMPLE_HZ --call-graph fp --switch-events`
+    with the richest THREAD_MODES entry the host permits. The binary runs in
+    place, not as a fresh copy, so threads/threads.data stays resolvable:
+    open it with Hotspot (`hotspot threads/threads.data`). Writes
+    threads.json (mode, events, why richer modes failed), a per-thread sample
+    report and, with scheduler events, `perf sched timehist --summary`."""
+    directory = lab.directory("threads")
+    data = os.path.join(directory, "threads.data")
+    out = os.path.join(directory, "out.exe")
+    record = {"hz": THREAD_SAMPLE_HZ, "data": data, "mode": None, "description": None, "events": [], "refused": []}
+    for mode, events, description in THREAD_MODES:
+        if record["mode"] is None:
+            log = os.path.join(directory, mode + ".record.log")
+            status, _, err = lab.run_command(lab.pin() + [lab.perf, "record", "-q", "-F", str(THREAD_SAMPLE_HZ), "--call-graph", "fp",
+                                                          "--switch-events"] + events + ["-o", data, "--"] + lab.workload(out), log=log)
+            print("[threads] %s exit=%d" % (mode, status), flush=True)
+            if status == 0 and os.path.isfile(data):
+                record.update(mode=mode, description=description, events=events[1::2])
+            else:
+                record["refused"].append({"mode": mode, "exit": status, "reason": last_reason(read_text(log) or err)})
+    write_json(os.path.join(directory, "threads.json"), record)
+    if record["mode"] is None:
+        raise RuntimeError("no thread capture could be recorded: " + "; ".join("%s: %s" % (item["mode"], item["reason"])
+                                                                             for item in record["refused"]))
+    lab.run_command([lab.perf, "report", "-i", data, "--stdio", "--no-children", "--sort", "tid", "-g", "none"],
+                    stdout_path=os.path.join(directory, "threads.tid.txt"), log=os.path.join(directory, "threads.tid.log"))
+    if record["mode"] == "full":
+        lab.run_command([lab.perf, "sched", "timehist", "-i", data, "--summary"],
+                        stdout_path=os.path.join(directory, "threads.sched.txt"), log=os.path.join(directory, "threads.sched.log"))
+    return "mode %s (%s); open %s with Hotspot" % (record["mode"], record["description"], data)
+
+
 def step_ibs(lab):
     if not lab.sudo:
         return None
@@ -1700,10 +1786,12 @@ def load_run(record, csv_path, metrics_path, span, source):
     rows = parse_stat(read_text(csv_path) or "")
     metrics = parse_cc_metrics(read_text(metrics_path) or "")
     wall_ns = metrics["header"].get("wall_ns")
+    # A run timed without perf (counters False) takes its CPU time from wait4.
+    task = record.get("cpu_s") if record.get("counters") is False else task_seconds(rows)
     return {**record, "values": stat_values(rows), "lines": stat_lines(rows), "metrics": metrics,
             "span_s": span, "span_source": source if span is not None else None,
             "cc_wall_s": ratio(wall_ns, 1e9) if isinstance(wall_ns, (int, float)) else None,
-            "task_s": task_seconds(rows)}
+            "task_s": task}
 
 
 def run_metrics(run):
@@ -1743,10 +1831,15 @@ def timed_problems(good):
             problems.append("run %d: no positive wall time (harness span %s, compiler wall_ns %s; perf CSV `%s`)" % (
                 run["run"], fmt(run["span_s"], ".3f"), fmt(run["cc_wall_s"], ".4f"),
                 run["lines"].get("duration_time") or run["lines"].get("task-clock") or "no CSV"))
-        task = run["values"].get("task-clock")
-        if task is None or task <= 0:
-            problems.append("run %d: task-clock %s: `%s`" % (run["run"], "missing" if task is None else "non-positive",
-                                                             run["lines"].get("task-clock", "no task-clock line")))
+        if run.get("counters") is False:
+            # Timed without perf: CPU time is wait4's user+system instead.
+            if positive(run["task_s"]) is None:
+                problems.append("run %d: no positive wait4 CPU time (%s)" % (run["run"], fmt(run["task_s"])))
+        else:
+            task = run["values"].get("task-clock")
+            if task is None or task <= 0:
+                problems.append("run %d: task-clock %s: `%s`" % (run["run"], "missing" if task is None else "non-positive",
+                                                                 run["lines"].get("task-clock", "no task-clock line")))
         for event in ("cycles", "instructions"):
             value = run["values"].get(event)
             if value is not None and value <= 0:
@@ -2338,6 +2431,31 @@ def mem_lines(base, findings, problems):
     return lines
 
 
+def render_threads(directory, findings, problems):
+    record = json.loads(read_text(os.path.join(directory, "threads", "threads.json")) or "{}")
+    lines = []
+    if not record.get("mode"):
+        problems.append("no thread capture recorded")
+        lines.append("NA (no thread capture; %s)." % ("; ".join("%s: %s" % (item.get("mode"), item.get("reason"))
+                                                                for item in record.get("refused", [])) or "not run"))
+    else:
+        lines += ["Mode `%s`: %s, %d Hz, frame-pointer stacks. Open `%s` with Hotspot (`hotspot %s`) for the per-thread "
+                  "timeline, off-CPU time and flame graphs; `perf script -i` exports it for the Firefox Profiler." % (
+                      record["mode"], record["description"], record["hz"], os.path.relpath(record["data"], directory),
+                      record["data"])]
+        for item in record.get("refused", []):
+            lines.append("- `%s` refused (exit %s): %s" % (item.get("mode"), item.get("exit"), item.get("reason")))
+        tid = read_text(os.path.join(directory, "threads", "threads.tid.txt")) or ""
+        rows = [line for line in tid.splitlines() if line.strip() and not line.startswith("#")]
+        if not rows:
+            problems.append("per-thread report has no rows")
+        lines += ["", "Samples per thread:"] + fenced("\n".join(rows[:40]) or "no rows")
+        sched = read_text(os.path.join(directory, "threads", "threads.sched.txt"))
+        if sched:
+            lines += ["", "Scheduler summary (`perf sched timehist --summary`):"] + fenced("\n".join(sched.splitlines()[:60]))
+    return lines
+
+
 def render_micro(directory, findings, problems):
     text = read_text(os.path.join(directory, "micro", "bench.txt"))
     if not text or "BENCH_C_FRONTEND" not in text:
@@ -2351,7 +2469,7 @@ def render_micro(directory, findings, problems):
 RENDERERS = {"env": ("1. Environment", render_env), "timed": ("2. Timed runs", render_timed),
              "topdown": ("3. Top-down metric groups", render_topdown), "timeline": ("4. Timeline (WHEN)", render_timeline),
              "sampling": ("5. Sampling (WHERE)", render_sampling), "ibs": ("6. IBS and perf mem (sudo)", render_ibs),
-             "micro": ("7. Micro-benchmark", render_micro)}
+             "threads": ("6b. Thread timeline (Hotspot, opt-in)", render_threads), "micro": ("7. Micro-benchmark", render_micro)}
 
 
 def render_section(directory, step, findings):
@@ -2798,7 +2916,8 @@ def run_pair_member(lab, directory, pair, key):
     identical = status == 0 and filecmp.cmp(os.path.join(lab.output, "reference.exe"), out, shallow=False)
     return {"pair": pair, "order": abba_order(pair), "variant": key, "exit": status, "identical": identical, "span_s": round(span, 6),
             "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
-            "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes")}
+            "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes"),
+            "cpu_s": lab.last_cpu_s, "counters": lab.counters}
 
 
 def compare_timed(labs, directory, meta, arguments, started, other_compiles):
@@ -2833,7 +2952,7 @@ def compare_timed(labs, directory, meta, arguments, started, other_compiles):
 
 def compare_profile_cost(groups, steps):
     per_variant = {"topdown": TOPDOWN_COMPILES_PER_GROUP * (len(groups) if groups is not None else 8),
-                   "sampling": len(SAMPLE_EVENTS) + 1, "ibs": IBS_COMPILES}
+                   "sampling": len(SAMPLE_EVENTS) + 1, "ibs": IBS_COMPILES, "threads": 1}
     return 2 * sum(per_variant[step] for step in steps)
 
 
@@ -2897,6 +3016,9 @@ def command_compare(arguments):
 
     stage("env", lambda: step_env(labs["a"]))
     groups = json.loads(read_text(os.path.join(labs["a"].output, "env", "env.json")) or "{}").get("metric_groups")
+    if steps and not probe_counters(labs["a"]):
+        sys.exit("uarch_lab: --profile-steps %s need a working perf (%s); rerun without them for a wall, CPU-time and "
+                 "peak-RSS comparison" % (",".join(steps), labs["a"].meta["capabilities"]["perf_stat"]["reason"]))
 
     def prepare():
         for key in ("a", "b"):
@@ -2929,6 +3051,8 @@ def command_compare(arguments):
                         note = step_topdown(lab, groups or [])
                     elif step == "sampling":
                         note = step_sampling(lab, detail=False)
+                    elif step == "threads":
+                        note = step_threads(lab)
                     else:
                         note = step_ibs(lab)
                     lab.meta["steps"][step] = {"status": "ok", "note": note or ""}
@@ -2945,6 +3069,9 @@ def command_compare(arguments):
         os.path.join(directory, "summary.json")))
     if not proceed:
         sys.exit("uarch_lab: compare stopped before the timed series (see report.md)")
+    if not summary.get("plan", {}).get("complete_pairs"):
+        # A series without one complete pair is no measurement; never exit 0.
+        sys.exit("uarch_lab: no complete pair; every timed run failed (see %s)" % os.path.join(directory, "pairs"))
 
 
 # ---------------------------------------------------------------- A/B compare: summary and report
@@ -3101,6 +3228,12 @@ def compare_profile(directory, meta):
             if a_text is not None and b_text is not None:
                 events[name] = symbol_movers(a_text, b_text)
         profile[step] = {"status": steps[step]["status"], "events": events}
+    if "threads" in steps:
+        captures = {}
+        for key, role in VARIANTS:
+            record = json.loads(read_text(os.path.join(roots[key], "threads", "threads.json")) or "{}")
+            captures[role] = {"mode": record.get("mode"), "data": record.get("data"), "refused": record.get("refused", [])}
+        profile["threads"] = {"status": steps["threads"]["status"], "captures": captures}
     return profile
 
 
@@ -3147,17 +3280,34 @@ def compare_summary(directory):
     checks = compare_checks(pairs)
     verdict = compare_verdict(metrics, phases, min_effect)
     code = code_bytes_summary(references)
+    counters = compare_counters(directory)
     return {"schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
             "cpu": config.get("cpu"), "host": host_facts(os.path.join(directory, "a")),
             "baseline": variants["baseline"], "candidate": variants["candidate"], "outputs_identical": outputs_identical,
             "phase_metrics": meta.get("phase_metrics", {"enabled": None, "reason": "collection policy not recorded (older comparison)"}),
+            "counters": counters,
             "code_bytes": code,
             "plan": dict(meta.get("plan") or {}, seed=seed, confidence=CONFIDENCE, bootstrap_resamples=BOOTSTRAP_RESAMPLES,
                          complete_pairs=len(pairs), fresh_copy=bool(config.get("fresh_copy"))),
             "method": COMPARE_METHOD, "verdict": verdict, "metrics": metrics, "phases": phases, "checks": checks,
             "profile": compare_profile(directory, meta),
             "steps": {name: state.get("status") for name, state in meta.get("steps", {}).items()},
-            "warnings": compare_warnings(variants, outputs_identical, metrics, checks, meta) + rss_warnings(runs)}
+            "warnings": compare_warnings(variants, outputs_identical, metrics, checks, meta) + rss_warnings(runs) +
+                        ([] if counters["perf_stat"] is not False else
+                         ["%s: timed without perf; wall time, wait4 CPU time and peak RSS are measured, every "
+                          "counter is NA" % counters["reason"]])}
+
+
+def compare_counters(directory):
+    """Whether both variants were timed under `perf stat` (probe_counters):
+    perf_stat True, False (counters NA) or None (not recorded: older output)."""
+    states = [load_meta(os.path.join(directory, key)).get("capabilities", {}).get("perf_stat") for key, _ in VARIANTS]
+    usable = None
+    reason = "not recorded (older comparison)"
+    if all(isinstance(state, dict) for state in states):
+        usable = all(state.get("usable") is True for state in states)
+        reason = "; ".join(sorted({str(state.get("reason")) for state in states}))
+    return {"perf_stat": usable, "reason": reason}
 
 
 def code_bytes_summary(references):
@@ -3689,8 +3839,9 @@ def command_run(arguments):
                                         "timed-run count chosen after %d pilot runs to land near %g min" % (PILOT_RUNS, arguments.target_minutes)), flush=True)
     started = time.monotonic()
     for step in STEPS:
-        if step in arguments.skip or (step == "ibs" and not arguments.sudo):
-            lab.meta["steps"][step] = {"status": "skipped", "elapsed_s": 0.0, "note": "--skip" if step in arguments.skip else "needs --sudo"}
+        if step in arguments.skip or (step == "ibs" and not arguments.sudo) or (step == "threads" and not arguments.threads):
+            lab.meta["steps"][step] = {"status": "skipped", "elapsed_s": 0.0, "note": "--skip" if step in arguments.skip else
+                                       "needs --sudo" if step == "ibs" else "opt-in: --threads"}
             lab.save_meta()
             continue
         print("uarch_lab: step %s ..." % step, flush=True)
@@ -3701,7 +3852,7 @@ def command_run(arguments):
             elif step == "timed":
                 facts = json.loads(read_text(os.path.join(lab.output, "env", "env.json")) or "{}")
                 note = step_timed(lab, arguments.runs, arguments.warmups, arguments.target_minutes, started,
-                                  estimate_other_compiles(facts.get("metric_groups"), arguments.skip, arguments.sudo))
+                                  estimate_other_compiles(facts.get("metric_groups"), arguments.skip, arguments.sudo, arguments.threads))
             elif step == "topdown":
                 facts = json.loads(read_text(os.path.join(lab.output, "env", "env.json")) or "{}")
                 groups = facts.get("metric_groups")
@@ -3719,6 +3870,8 @@ def command_run(arguments):
                 note = step_sampling(lab)
             elif step == "ibs":
                 note = step_ibs(lab)
+            elif step == "threads":
+                note = step_threads(lab)
             else:
                 note = step_micro(lab)
             state = {"status": "ok", "note": note or ""}
@@ -3753,6 +3906,8 @@ def main(argv=None):
     run.add_argument("--warmups", type=int, default=1)
     run.add_argument("--perf", default="perf")
     run.add_argument("--sudo", action="store_true", help="enable the IBS / perf mem step")
+    run.add_argument("--threads", action="store_true",
+                     help="add the Superluminal-style thread capture for Hotspot (step_threads; richest with perf_event_paranoid -1)")
     run.add_argument("--skip", nargs="*", default=[], choices=STEPS)
     run.add_argument("--no-fresh-copy", dest="fresh_copy", action="store_false",
                      help="run the binary in place instead of a fresh copy per timed run and capture")

@@ -1,7 +1,7 @@
 # GitHub workflow audit — 2026-09-07
 
 > Historical suite-level design/evidence. The subsequent internal desktop
-> partition and current 29-job completion contract are documented in
+> partition and current 25-job completion contract are documented in
 > [Desktop combination shards](ci-combination-shards.md). Historical timings
 > below are not matched before/after evidence for #333.
 
@@ -12,7 +12,7 @@ source-free broker under `.forgejo/github-bridge/`. Broker cache/artifact and
 credential restrictions remain untouched.
 
 > The job inventories and measurements in this audit describe its recorded
-> revisions. Current CI uses the [29-job inventory](ci-combination-shards.md)
+> revisions. Current CI uses the [25-job inventory](ci-combination-shards.md)
 > and [AArch64-only Apple policy](apple-ci-policy.md).
 
 ## Coverage contract and scheduling
@@ -64,6 +64,24 @@ PATH publication. Only successful default-branch push setup writes a cache,
 and it writes immediately after verification, before repository tests run.
 Other branches and manual runs are read-only cache consumers. A corrupt
 archive fails setup rather than executing unverified bytes.
+
+`tools/ci_zig.py` permits one retry after a nonzero extraction or `zig version`
+subprocess exit. It discards the entire staging tree before rechecking the
+same archive's SHA-256 and extracting into a new temporary directory. It
+retains both failed command streams and records the phase/attempt plus each
+successful hash verification. A hash mismatch, successful wrong-version
+response, launch failure or publication failure does not enter this retry;
+verified bytes are never downloaded again to recover a decoder failure.
+
+On Windows only, publication makes at most seven attempts after Access Denied
+(`winerror=5`), with delays of 0.25, 0.5, 1, 2, 4 and 4 seconds (11.75 seconds total).
+Each retry records its attempt and delay. Destination existence is checked
+before every attempt and immediately after a denied rename; Windows uses
+`rename` so a newly appeared destination is never replaced. Other errors
+fail immediately, exhaustion remains fatal, and PATH is written only after
+successful publication. These recovery bounds do not change the manifest,
+cache key, trusted bytes or normal setup path. The network-free controls run
+with `python3 tools/ci_zig_test.py -v` in the existing workflow-tools suite.
 
 Mutable Android SDK packages, AVD state, and Homebrew prefixes are deliberately not cached. Their present installation commands
 do not provide immutable per-package revisions/checksums suitable for portable

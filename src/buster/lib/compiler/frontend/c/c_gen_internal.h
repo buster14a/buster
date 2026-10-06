@@ -53,6 +53,10 @@ typedef enum CTestIrScratchProbeKind
     C_TEST_IR_SCRATCH_EVENTS,
     C_TEST_IR_SCRATCH_READS,
     C_TEST_IR_SCRATCH_BODY_TASKS,
+    C_TEST_IR_SCRATCH_SSA_SLOTS,
+    C_TEST_IR_SCRATCH_SSA_PARAMETERS,
+    C_TEST_IR_SCRATCH_SSA_FINISH_CFG,
+    C_TEST_IR_SCRATCH_SSA_FINISH_PUBLISH,
 } CTestIrScratchProbeKind;
 BUSTER_F_DECL bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclaration declaration, CTestIrScratchProbeKind kind);
 

@@ -260,6 +260,7 @@ WmHandle* wm_initialize(void)
         result->window_arena = arena_create((ArenaCreation){0});
         if (!result->window_arena)
         {
+            string_print_error(S8("WM_INITIALIZE_V1 stage=window-arena-refused\n"));
             wm_deinitialize(result);
             result = 0;
         }

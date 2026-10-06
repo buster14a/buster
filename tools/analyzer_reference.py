@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fail-closed provenance and selection for the CI Clang analyzer reference.
+"""Candidate build-driver provenance and read-only historical selection decoding.
 
-The candidate and historical build drivers are compiled with Clang dependency
-files.  This helper normalizes those compiler-selected repository dependencies,
-verifies their materialized bytes against exact Git blob identities, and binds
-the comparison policy to a versioned manifest.  It never uses a changed-file
-heuristic or reads dependency identities from an uncommitted tree.
+The candidate is compiled once with Clang dependency output. Its complete source,
+executable, compiler, command and environment identities are revalidated before
+one full analysis. No event or dependency change can select another execution.
+
+The original module name and load_selection decoder remain for source-pinned
+historical CI measurement readers. They do not select or launch reference work.
 """
 
 from __future__ import annotations
@@ -49,7 +50,6 @@ COMPILE_PROFILE = {
 }
 HEX_OBJECT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-SAFE_EVENT = re.compile(r"[A-Za-z0-9_.-]+\Z")
 # Only compiler/driver inputs, never credentials or unrelated runner metadata.
 CONTEXT_ENVIRONMENT = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
@@ -353,6 +353,7 @@ def build_manifest(
         entry = tree.get(path)
         if entry is None:
             policy_inputs.append({"path": path, "state": "missing"})
+            issues.append(f"missing-policy-input:{path}")
             continue
         if entry["type"] != "blob" or entry["mode"] not in ("100644", "100755"):
             policy_inputs.append(
@@ -458,139 +459,7 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
     return manifest, raw
 
 
-def parse_bool(value: str) -> bool:
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    raise ProvenanceError(f"expected true or false, got {value!r}")
-
-
-def same_revision_skip(event: str, requested: bool, candidate_commit: str, reference_commit: str) -> bool:
-    """Whether policy skips comparison without consulting any manifest."""
-    return not requested and candidate_commit == reference_commit and event in ("push", "workflow_dispatch")
-
-
-def same_driver_skip(
-    event: str, requested: bool, candidate_commit: str, reference_commit: str,
-    candidate: dict[str, Any], reference: dict[str, Any],
-) -> bool:
-    """Merge groups may omit an A/A arm only for one proven, shared driver.
-
-    Exact manifest equality binds the dependency bytes, policy and execution
-    context. No missing context or cross-revision/cross-root proof is admitted.
-    """
-    context = candidate["execution_context"]
-    command = context["compile_command"] if context is not None else []
-    canonical = False
-    if len(command) == len(COMPILE_PROFILE["arguments"]) + 1:
-        depfile = Path(command[COMPILE_PROFILE["arguments"].index("-MF") + 2])
-        canonical = depfile.is_absolute() and command == driver_command(
-            Path(context["compiler"]), depfile, Path(context["driver"])
-        )
-    known_policy = ([entry.get("path") for entry in candidate["policy_inputs"]] == sorted(POLICY_INPUTS)
-                    and all(entry.get("state") == "blob" for entry in candidate["policy_inputs"]))
-    known_root = any(entry.get("path") == ROOT_SOURCE for entry in candidate["dependencies"])
-    return (event == "merge_group" and not requested and candidate_commit == reference_commit
-            and candidate["complete"] and reference["complete"]
-            and known_policy and known_root and context is not None and canonical and candidate == reference)
-
-
-def validate_request(event: str, requested_text: str) -> bool:
-    if not SAFE_EVENT.fullmatch(event):
-        raise ProvenanceError(f"invalid event name {event!r}")
-    requested = parse_bool(requested_text)
-    if requested and event != "workflow_dispatch":
-        raise ProvenanceError("explicit analyzer comparison is valid only for workflow_dispatch")
-    return requested
-
-
-def reference_materialization(
-    repository: Path,
-    event: str,
-    requested_text: str,
-    candidate_revision: str,
-    reference_revision: str,
-    candidate_path: Path | None = None,
-) -> bool:
-    """Whether CI must build the historical reference driver.
-
-    Push/dispatch skips need no manifest. A same-revision merge group requires
-    the complete candidate manifest and exact driver context. Other selections
-    need the reference tree, to compare or to prove closure equality.
-    """
-    repository = repository.resolve(strict=True)
-    requested = validate_request(event, requested_text)
-    candidate_commit, _ = resolve_revision(repository, candidate_revision)
-    reference_commit, _ = resolve_revision(repository, reference_revision)
-    skip = same_revision_skip(event, requested, candidate_commit, reference_commit)
-    if not skip and candidate_path is not None:
-        candidate, _ = load_manifest(candidate_path)
-        _, candidate_tree = resolve_revision(repository, candidate_commit)
-        if candidate["revision"] != candidate_commit or candidate["tree"] != candidate_tree:
-            raise ProvenanceError("candidate provenance does not match the selected commit")
-        skip = same_driver_skip(event, requested, candidate_commit, reference_commit, candidate, candidate)
-    return not skip
-
-
-def select_campaign(
-    repository: Path,
-    event: str,
-    requested_text: str,
-    candidate_revision: str,
-    reference_revision: str,
-    candidate_path: Path,
-    reference_path: Path,
-) -> bytes:
-    repository = repository.resolve(strict=True)
-    requested = validate_request(event, requested_text)
-    candidate_commit, candidate_tree = resolve_revision(repository, candidate_revision)
-    reference_commit, reference_tree = resolve_revision(repository, reference_revision)
-    candidate, candidate_raw = load_manifest(candidate_path)
-    reference, reference_raw = load_manifest(reference_path)
-    if candidate["revision"] != candidate_commit or candidate["tree"] != candidate_tree:
-        raise ProvenanceError("candidate provenance does not match the selected commit")
-    if reference["revision"] != reference_commit or reference["tree"] != reference_tree:
-        raise ProvenanceError("reference provenance does not match the selected commit")
-
-    if requested:
-        selection, reason = "compare", "requested"
-    elif same_revision_skip(event, requested, candidate_commit, reference_commit):
-        selection, reason = "skip", "same-revision"
-    elif same_driver_skip(event, requested, candidate_commit, reference_commit, candidate, reference):
-        selection, reason = "skip", "same-driver-merge-group"
-    elif candidate_commit == reference_commit:
-        selection, reason = "compare", "event-requires-comparison"
-    elif event == "pull_request":
-        if not candidate["complete"] or not reference["complete"]:
-            selection, reason = "compare", "provenance-uncertain"
-        elif candidate["closure_sha256"] == reference["closure_sha256"]:
-            selection, reason = "skip", "unchanged-driver-closure"
-        else:
-            selection, reason = "compare", "changed-driver-closure"
-    else:
-        selection, reason = "compare", "distinct-revisions"
-
-    fields = [
-        SELECTION_SCHEMA,
-        f"event={event}",
-        f"requested={'true' if requested else 'false'}",
-        f"candidate_revision={candidate_commit}",
-        f"reference_revision={reference_commit}",
-        f"candidate_tree={candidate_tree}",
-        f"reference_tree={reference_tree}",
-        f"candidate_closure_sha256={candidate['closure_sha256']}",
-        f"reference_closure_sha256={reference['closure_sha256']}",
-        f"candidate_complete={'true' if candidate['complete'] else 'false'}",
-        f"reference_complete={'true' if reference['complete'] else 'false'}",
-        f"candidate_manifest_sha256={sha256_bytes(candidate_raw)}",
-        f"reference_manifest_sha256={sha256_bytes(reference_raw)}",
-        f"selection={selection}",
-        f"reason={reason}",
-    ]
-    return ("\n".join(fields) + "\n").encode("ascii")
-
-
+# Historical V3 records are decoded unchanged, never produced by current CI.
 SELECTION_KEYS = (
     "event",
     "requested",
@@ -650,8 +519,10 @@ def command_manifest(arguments: argparse.Namespace) -> None:
         arguments.revision,
         Path(arguments.root),
         Path(arguments.depfile),
-        Path(arguments.driver) if arguments.driver is not None and getattr(arguments, "bind_context", True) else None,
+        Path(arguments.driver),
     )
+    if not manifest["complete"]:
+        raise ProvenanceError("candidate provenance is incomplete: " + "; ".join(manifest["issues"]))
     write_manifest(Path(arguments.output), manifest)
 
 
@@ -662,43 +533,12 @@ def command_bootstrap(arguments: argparse.Namespace) -> None:
     dependency_file = Path(arguments.depfile).absolute()
     driver = Path(arguments.driver).absolute()
     subprocess.run(driver_command(compiler, dependency_file, driver), cwd=root, check=True)
-    manifest = build_manifest(Path(arguments.repository), arguments.revision, root, dependency_file,
-                              driver if arguments.bind_context else None)
-    if arguments.bind_context and any(manifest["execution_context"][key] != value for key, value in identity.items()):
+    manifest = build_manifest(Path(arguments.repository), arguments.revision, root, dependency_file, driver)
+    if not manifest["complete"]:
+        raise ProvenanceError("candidate provenance is incomplete: " + "; ".join(manifest["issues"]))
+    if any(manifest["execution_context"][key] != value for key, value in identity.items()):
         raise ProvenanceError("Clang identity changed during driver compilation")
     write_manifest(Path(arguments.output), manifest)
-
-
-def command_select(arguments: argparse.Namespace) -> None:
-    record = select_campaign(
-        Path(arguments.repository),
-        arguments.event,
-        arguments.requested,
-        arguments.candidate_revision,
-        arguments.reference_revision,
-        Path(arguments.candidate_manifest),
-        Path(arguments.reference_manifest),
-    )
-    write_atomic(Path(arguments.output), record)
-
-
-def command_materialization(arguments: argparse.Namespace) -> None:
-    required = reference_materialization(
-        Path(arguments.repository),
-        arguments.event,
-        arguments.requested,
-        arguments.candidate_revision,
-        arguments.reference_revision,
-        Path(arguments.candidate_manifest) if arguments.candidate_manifest is not None else None,
-    )
-    print("true" if required else "false")
-
-
-def command_field(arguments: argparse.Namespace) -> None:
-    record = load_selection(Path(arguments.record))
-    if arguments.field not in SELECTION_KEYS:
-        raise ProvenanceError(f"unknown selection field {arguments.field!r}")
-    print(record[arguments.field])
 
 
 def parser() -> argparse.ArgumentParser:
@@ -711,41 +551,14 @@ def parser() -> argparse.ArgumentParser:
     manifest.add_argument("--root", required=True)
     manifest.add_argument("--depfile", required=True)
     manifest.add_argument("--output", required=True)
-    manifest.add_argument("--driver", help="bind and revalidate the exact executable context")
+    manifest.add_argument("--driver", required=True, help="bind and revalidate the exact executable context")
     manifest.set_defaults(handler=command_manifest)
 
     bootstrap = subparsers.add_parser("bootstrap", help="compile the driver with the recorded exact profile")
     for option in ("repository", "revision", "root", "depfile", "driver", "output"):
         bootstrap.add_argument("--" + option, required=True)
-    bootstrap.add_argument("--bind-context", action="store_true")
     bootstrap.set_defaults(handler=command_bootstrap)
 
-    select = subparsers.add_parser("select", help="select comparison or candidate-only analysis")
-    select.add_argument("--repository", required=True)
-    select.add_argument("--event", required=True)
-    select.add_argument("--requested", required=True)
-    select.add_argument("--candidate-revision", required=True)
-    select.add_argument("--reference-revision", required=True)
-    select.add_argument("--candidate-manifest", required=True)
-    select.add_argument("--reference-manifest", required=True)
-    select.add_argument("--output", required=True)
-    select.set_defaults(handler=command_select)
-
-    materialization = subparsers.add_parser(
-        "materialization", help="print whether the historical reference driver must be built"
-    )
-    materialization.add_argument("--repository", required=True)
-    materialization.add_argument("--event", required=True)
-    materialization.add_argument("--requested", required=True)
-    materialization.add_argument("--candidate-revision", required=True)
-    materialization.add_argument("--reference-revision", required=True)
-    materialization.add_argument("--candidate-manifest")
-    materialization.set_defaults(handler=command_materialization)
-
-    field = subparsers.add_parser("field", help="read one validated selection-record field")
-    field.add_argument("--record", required=True)
-    field.add_argument("--field", required=True)
-    field.set_defaults(handler=command_field)
     return result
 
 

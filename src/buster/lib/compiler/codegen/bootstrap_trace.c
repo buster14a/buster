@@ -57,7 +57,14 @@ BootstrapTrace bootstrap_trace_open(Arena* arena, String8 path, String8 kind)
 {
     String8Z terminated = {0};
     bool path_valid = string8z_copy_arena(arena, path, &terminated);
-    BootstrapTrace result = {.stream = path_valid ? fopen((char const*)terminated.pointer, "wb") : 0};
+#if defined(__linux__)
+    // glibc, musl and bionic accept "e", which atomically sets close-on-exec so
+    // a concurrent spawn cannot inherit the trace.
+    char const* mode = "wbe";
+#else
+    char const* mode = "wb";
+#endif
+    BootstrapTrace result = {.stream = path_valid ? fopen((char const*)terminated.pointer, mode) : 0};
     result.failed = !result.stream;
     if (!result.failed)
     {
@@ -420,6 +427,16 @@ void bootstrap_trace_ir(BootstrapTrace* trace, IrProgram* program, IrModule* mod
             bootstrap_trace_u64(trace, (u64)relocation->addend);
             bootstrap_trace_u64(trace, (u64)relocation->offset);
             bootstrap_trace_u64(trace, (u64)relocation->is_label_address);
+        }
+        bootstrap_trace_u64(trace, (u64)global->label_difference_count);
+        for (u32 j = 0; j < global->label_difference_count; j += 1)
+        {
+            IrGlobalLabelDifference* difference = &global->label_differences[j];
+            bootstrap_trace_u64(trace, (u64)difference->symbol.value);
+            bootstrap_trace_u64(trace, (u64)difference->label_block.value);
+            bootstrap_trace_u64(trace, (u64)difference->base_block.value);
+            bootstrap_trace_u64(trace, (u64)difference->size);
+            bootstrap_trace_u64(trace, difference->offset);
         }
     }
     bootstrap_trace_u64(trace, module->alias_count);

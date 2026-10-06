@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -96,6 +97,11 @@ class WorkerBudgetTest(unittest.TestCase):
             destination = self.root / "failed"
             result = self.run_campaign(destination)
             self.assertNotEqual(result.returncode, 0)
+            # A real failure is never qualified as an expected self-test rejection.
+            self.assertIn("\nerror: analyzer shard=", result.stdout)
+            self.assertNotIn("expected-error:", result.stdout)
+            self.assertNotIn("expected=1", result.stdout)
+            self.assertIn("ANALYZE_WORKER_SAMPLE sample=0 jobs=2", result.stdout)
             lines = (destination / "qualification.txt").read_text().splitlines()
             self.assertEqual(len(lines), 5)
             self.assertTrue(all("status=fail" in line for line in lines[1:]))
@@ -110,6 +116,39 @@ class WorkerBudgetTest(unittest.TestCase):
             result = self.run_campaign(destination, *extra)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(destination.exists())
+
+    def test_self_test_scopes_expected_rejections(self):
+        result = subprocess.run([str(self.driver), "clang_analyze", "--self-test"], cwd=REPOSITORY, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        lines = result.stdout.splitlines()
+        scope = None
+        qualified = 0
+        for line in lines[:-1]:
+            if line.startswith("ANALYZE_SELF_TEST_BEGIN "):
+                self.assertIsNone(scope, line)
+                scope = budget.fields(line, "ANALYZE_SELF_TEST_BEGIN")
+                self.assertIn(scope["expect"], ("accept", "reject"))
+            elif line.startswith("ANALYZE_SELF_TEST "):
+                verdict = budget.fields(line, "ANALYZE_SELF_TEST")
+                self.assertEqual(verdict["status"], "pass", line)
+                self.assertTrue(scope is None or scope["name"] == verdict["name"], line)
+                scope = None
+            else:
+                # No unqualified failure may appear in a passing self-test,
+                # and qualified ones only inside an announced rejection scope.
+                self.assertFalse(line.startswith("error:"), line)
+                status = re.search(r"^ANALYZE_[A-Z_]+ .*\bstatus=([a-z-]+)", line)
+                expected = line.startswith("expected-error:") or line.endswith(" expected=1") or " expected=1 " in line
+                self.assertTrue(status is None or status.group(1) == "pass" or expected, line)
+                if expected:
+                    self.assertTrue(scope is not None and scope["expect"] == "reject", line)
+                    qualified += 1
+        self.assertIsNone(scope)
+        summary = budget.fields(lines[-1], "ANALYZE_SELF_TEST_RESULT")
+        self.assertEqual((summary["status"], summary["failures"]), ("pass", "0"))
+        self.assertGreater(int(summary["expected_rejections"]), 0)
+        self.assertGreater(qualified, 0)
 
     def test_existing_campaign_cannot_be_reused(self):
         self.assertNotEqual(self.run_campaign(self.evidence / "campaign").returncode, 0)
