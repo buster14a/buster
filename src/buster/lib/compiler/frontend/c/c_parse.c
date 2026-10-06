@@ -5658,6 +5658,45 @@ BUSTER_GLOBAL_LOCAL void c_parse_expression_query_publish(CTypeParseMachine* mac
     machine->expression_query_flags[slot] = (u8)flags;
 }
 
+// The first top-level `?` of [start, end) and the `:` that returns its
+// nesting to zero, as the operator scan in c_type_parse_sizeof_step records
+// them. The scan stops at that `:`, so locating the next level of a
+// conditional chain costs its condition and true arm, not the rest of the
+// chain (GitHub #2715).
+BUSTER_C_INTERNAL bool c_parse_expression_next_conditional(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* question_out,
+                                                           u32* colon_out)
+{
+    u32 question = end;
+    u32 colon = end;
+    u32 nested_questions = 0;
+    bool balanced = true;
+    for (u32 index = start; balanced && colon == end && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            balanced = close < end;
+            index = balanced ? close : index;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            question = question == end ? index : question;
+            nested_questions += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) && nested_questions)
+        {
+            nested_questions -= 1;
+            colon = nested_questions ? colon : index;
+        }
+    }
+    bool found = question != end && colon != end;
+    *question_out = question;
+    *colon_out = colon;
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -5754,6 +5793,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start += 1;
                     task->end -= 1;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                     stripped = true;
                 }
             }
@@ -5821,6 +5861,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start = tail_start;
                     task->end = tail_end;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                 }
                 else
                 {
@@ -5862,6 +5903,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->start = identity->result_start;
                     task->end = identity->result_end;
                     task->operators_checked = false;
+                    task->conditional_hinted = false;
                 }
                 else
                 {
@@ -5876,7 +5918,21 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             u32 colon = task->end;
             u32 nested_questions = 0;
             u32 cast_prefix_close = UINT32_MAX;
-            for (u32 index = task->start; !task->operators_checked && index < task->end; index += 1)
+            // Every top-level operator at the loosest left-associative
+            // precedence, recorded downward from the top of this frame's
+            // free task slots (operator i at tasks[capacity - 1 - i]) so the
+            // split below can push the whole chain's nested prefixes at once
+            // instead of rescanning each prefix (GitHub #2715). A chain that
+            // would reach the live stack is dropped and the prefix scans.
+            u32 chain_count = 0;
+            bool chain_fits = true;
+            bool hinted = task->conditional_hinted && task->split >= task->start && task->colon < task->end;
+            if (hinted)
+            {
+                question = task->split;
+                colon = task->colon;
+            }
+            for (u32 index = task->start; !hinted && !task->operators_checked && index < task->end; index += 1)
             {
                 CToken token = preprocess.tokens[index];
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
@@ -5949,6 +6005,14 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 bool right_associative = precedence == 2;
                 if (binary && (precedence < best_precedence || (precedence == best_precedence && !right_associative)))
                 {
+                    bool loosened = precedence < best_precedence;
+                    chain_count = loosened ? 0 : chain_count;
+                    chain_fits = (loosened || chain_fits) && task_count + chain_count < capacity;
+                    if (chain_fits)
+                    {
+                        tasks[capacity - 1 - chain_count].start = index;
+                        chain_count += 1;
+                    }
                     best_precedence = precedence;
                     best_operator = index;
                 }
@@ -5994,9 +6058,33 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     last = C_TYPE_ID_INVALID;
                     break;
                 }
+                // `o0 op o1 op ... op ok` splits at its last operator, and the
+                // prefix ending before operator i splits at operator i - 1: a
+                // scan of that prefix reaches the same state at each of its
+                // tokens. Push those already-split prefixes outermost first,
+                // then the first operand, so each operand is scanned once.
+                // Operator i is read before the push into slot task_count + i
+                // can overwrite it, because the chain was kept below the
+                // live stack.
+                u32 chain_start = task->start;
+                CParseExpressionTypeOperation chain_operation = task->operation;
+                u32 prefix_count = chain_fits && best_precedence != 2 && chain_count ? chain_count - 1 : 0;
+                for (u32 prefix = prefix_count; prefix != 0; prefix -= 1)
+                {
+                    u32 prefix_end = tasks[capacity - 1 - prefix].start;
+                    u32 prefix_split = tasks[capacity - prefix].start;
+                    tasks[task_count++] = (CParseExpressionTypeTask){
+                        .start = chain_start,
+                        .end = prefix_end,
+                        .split = prefix_split,
+                        .operation = chain_operation,
+                        .state = 1,
+                    };
+                }
+                u32 first_operand_end = prefix_count ? tasks[capacity - 1].start : best_operator;
                 tasks[task_count++] = (CParseExpressionTypeTask){
-                    .start = task->start,
-                    .end = best_operator,
+                    .start = chain_start,
+                    .end = first_operand_end,
                 };
                 continue;
             }
@@ -6282,9 +6370,20 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 last = C_TYPE_ID_INVALID;
                 break;
             }
+            // A conditional's false arm is the rest of its chain. The arm
+            // chooses a conditional exactly when it has a top-level `?` and
+            // `:`, because the enclosing range already did and the arm's
+            // loosest binary operator cannot be looser than the range's.
+            u32 next_question = UINT32_MAX;
+            u32 next_colon = UINT32_MAX;
+            bool next_conditional = task->operation == C_PARSE_EXPRESSION_TYPE_CONDITIONAL &&
+                c_parse_expression_next_conditional(result, preprocess, right_start, task->end, &next_question, &next_colon);
             tasks[task_count++] = (CParseExpressionTypeTask){
                 .start = right_start,
                 .end = task->operation == C_PARSE_EXPRESSION_TYPE_SUBSCRIPT ? task->end - 1 : task->end,
+                .split = next_conditional ? next_question : 0,
+                .colon = next_conditional ? next_colon : 0,
+                .conditional_hinted = next_conditional,
             };
             continue;
         }
