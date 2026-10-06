@@ -107,7 +107,13 @@ scalar content for structural checks, but cannot select an action reference.
 
 Nonempty flow mappings, nested flow collections, YAML tags, explicit/quoted
 mapping keys, mapping anchors/aliases/merges and multiline action references
-are rejected. Literal/folded script blocks are skipped. It is not a general
+are rejected, with one reviewed exception: `.github/workflows/ci.yml` may
+declare `steps: &workflow_lint_steps` once in `lint` and reference it once
+with `steps: *workflow_lint_steps` in `queue_lint`. The definition remains
+fully scanned. Missing/duplicate definitions or aliases, other owners/paths,
+action-value aliases and merges remain rejected. This shares the complete
+ordinary/queue lint workload without hiding action references.
+Literal/folded script blocks are skipped. It is not a general
 YAML parser; adding syntax requires a reviewed scanner change and regression.
 General GitHub workflow validation continues to use actionlint independently.
 

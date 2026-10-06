@@ -40,6 +40,27 @@ class ActionPinsTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertTrue(PINS.check_text("  - uses: " + value, "case.yml"))
 
+
+    def test_only_reviewed_lint_steps_alias_is_allowed_and_body_is_scanned(self):
+        text = ("jobs:\n  lint:\n    steps: &workflow_lint_steps\n"
+                "      - uses: " + PIN + "\n"
+                "  queue_lint:\n    steps: *workflow_lint_steps\n")
+        path = ".github/workflows/ci.yml"
+        self.assertEqual(PINS.check_text(text, path), [])
+        for altered, location in (
+                (text, "case.yml"),
+                (text.replace("queue_lint:", "other:"), path),
+                (text.replace("lint:\n", "other:\n", 1), path),
+                (text.replace("&workflow_lint_steps", "&other"), path),
+                (text.replace("*workflow_lint_steps", "*other"), path),
+                (text.replace("    steps: *workflow_lint_steps\n", ""), path),
+                (text + "  other:\n    steps: *workflow_lint_steps\n", path),
+                (text.replace(PIN, "actions/checkout@main"), path),
+                (text.replace("- uses: " + PIN, "- uses: *workflow_lint_steps"), path),
+                (text + "  other:\n    <<: *workflow_lint_steps\n", path)):
+            with self.subTest(text=altered, path=location):
+                self.assertTrue(PINS.check_text(altered, location))
+
     def test_unsupported_yaml_forms_are_rejected(self):
         for text in (
             '"uses": ' + PIN, "'uses': " + PIN, '"u\\u0073es": ' + PIN,
