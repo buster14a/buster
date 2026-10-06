@@ -21603,7 +21603,17 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // _Generic and __builtin_choose_expr own their selected expression.
         // Deferred preparation lets that expression prepare its own calls.
         // __builtin_constant_p also discards side effects in its operand.
-        if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p)
+        if (builtin_generic)
+        {
+            // The selection's value is the callee of a directly following
+            // argument list, `_Generic(...)(3)`. Stop on the closing
+            // parenthesis rather than past it so that list classifies as the
+            // call of this selection's result; the opening parenthesis is
+            // folded here so the scan sees the group balanced.
+            c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index + 1);
+            index = close - 1;
+        }
+        else if (builtin_choose_expr || builtin_object_size || builtin_constant_p)
         {
             index = close;
         }
