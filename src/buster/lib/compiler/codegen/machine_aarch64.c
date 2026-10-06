@@ -1253,7 +1253,25 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
     IrType* early_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
     bool source_is_integer128 = early_source_type && early_source_type->kind == IR_TYPE_INTEGER && early_source_type->bit_width == 128;
     bool target_is_integer128 = early_target_type && early_target_type->kind == IR_TYPE_INTEGER && early_target_type->bit_width == 128;
-    if (early_target_type && early_target_type->kind == IR_TYPE_FLOAT && early_target_type->bit_width == 128)
+    if (instruction->conversion_operation == IR_CONVERSION_IDENTITY && early_source_type && early_target_type &&
+        function->values[instruction->operands[0].value].canonical_type.value == instruction->canonical_type.value &&
+        (early_target_type->kind == IR_TYPE_STRUCT || early_target_type->kind == IR_TYPE_UNION))
+    {
+        u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+        u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+        selected = early_target_type->layout.resolved && early_target_type->layout.size <= UINT32_MAX &&
+                   source_slot != UINT32_MAX && target_slot != UINT32_MAX;
+        if (selected && early_target_type->layout.size)
+        {
+            // Identity preserves the complete aggregate image, including
+            // partial eightbytes and indirect argument tails, in its own home.
+            machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot), machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                .payload = (u32)early_target_type->layout.size, .opcode = MACHINE_A64_COPY_FRAME_FROM_FRAME,
+            });
+        }
+    }
+    else if (early_target_type && early_target_type->kind == IR_TYPE_FLOAT && early_target_type->bit_width == 128)
     {
         selected = machine_a64_select_float_to_f128(selector, instruction, early_source_type, early_target_type);
     }
@@ -3418,13 +3436,19 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
                                             ? callee_type->parameter_types[argument_index]
                                             : function->values[instruction->operands[argument_index + 1].value].canonical_type;
-            bool windows_variadic = callee_type->is_variadic && selector->target.os == OPERATING_SYSTEM_WINDOWS;
+            // Windows uses the integer-register argument image for both a
+            // variadic call and a pre-C23 unprototyped call.  The latter is
+            // not a variadic function -- it owns no va_list save area -- but
+            // its promoted values cross this call boundary by the same ABI
+            // route.
+            bool windows_integer_arguments = selector->target.os == OPERATING_SYSTEM_WINDOWS &&
+                                             (callee_type->is_variadic || callee_type->is_unprototyped);
             bool anonymous_darwin = callee_type->is_variadic && argument_index >= callee_type->parameter_count &&
                 (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS);
-            IrAbiUse use = windows_variadic || argument_index >= callee_type->parameter_count ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
+            IrAbiUse use = windows_integer_arguments || argument_index >= callee_type->parameter_count ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
             planned = machine_a64_value_shape(program, argument_type_id, selector->target, use, plan->argument_shapes + argument_index) &&
                       machine_a64_place_variadic_argument(plan->argument_shapes + argument_index,
-                          ir_type_from_id(&program->types, argument_type_id), windows_variadic, anonymous_darwin,
+                          ir_type_from_id(&program->types, argument_type_id), windows_integer_arguments, anonymous_darwin,
                           darwin ? &packed_stack_bytes : 0,
                           &call_integer_count, &call_float_count, &plan->stack_part_count, plan->argument_placements + argument_index);
             if (planned)
@@ -3981,7 +4005,15 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_load(MachineA64Selector* selector, I
     IrFunction* function = selector->function;
 
     bool selected = false;
-    if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
+    IrType* loaded_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    if (instruction->opcode == IR_OPCODE_LOAD && instruction->operands[0].value < function->value_count && loaded_type &&
+        loaded_type->kind == IR_TYPE_VOID)
+    {
+        // The address expression is selected separately. A void dereference
+        // has no sized result or memory access to lower.
+        selected = true;
+    }
+    else if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
     {
         MachineSelectionAddress address = machine_a64_address(selector, instruction->operands[0]);
         if (address.opcode != IR_OPCODE_COUNT)
@@ -5586,30 +5618,36 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_switch(MachineA64Selector* selector,
     if (machine_a64_operand_register(selector, instruction->operands[0], &condition_register) && instruction->target_count &&
         instruction->target_count == instruction->immediate_count + 1 && instruction->immediates)
     {
-        // A case immediate carries the switched type's own bits, while a
-        // register may hold that value extended past them -- the cast a
-        // narrow switch takes to its promoted type emits `sxtb x, w`, which
-        // sign-extends to 64.  Comparing a 32-bit type at 64 bits therefore
-        // measures the extension rather than the value and `case -1` never
-        // matches.  Compare at the type's width, which is what the x86-64
-        // selector does with the same field.
-        u16 compare_width = 64;
+        u32 value_width = 64;
         if (instruction->operands[0].value < selector->function->value_count)
         {
             IrType* condition_type = ir_type_from_id(&selector->program->types,
                                                       selector->function->values[instruction->operands[0].value].canonical_type);
-            if (condition_type && (condition_type->kind == IR_TYPE_BOOLEAN ||
-                                   (condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width <= 32)))
+            if (condition_type && condition_type->kind == IR_TYPE_BOOLEAN)
             {
-                compare_width = 32;
+                value_width = 1;
             }
+            else if (condition_type && condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width < 64)
+            {
+                value_width = condition_type->bit_width;
+            }
+        }
+        u16 compare_width = value_width <= 32 ? 32 : 64;
+        u64 value_mask = value_width == 64 ? UINT64_MAX : (UINT64_C(1) << value_width) - 1;
+        // SWITCH compares selector-width images, independently of signedness
+        // and of any extension left in a register by its producer.
+        if (value_width < compare_width)
+        {
+            u32 mask_register = machine_a64_select_immediate_register(selector, value_mask);
+            condition_register = machine_a64_select_arithmetic_row(selector, compare_width == 32 ? MACHINE_A64_AND32 : MACHINE_A64_AND64,
+                                                                   condition_register, mask_register);
         }
         u32 first_case = selector->switch_cases.total_count;
         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
         {
             MachineSwitchCase* case_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
             *case_row = (MachineSwitchCase){
-                .value = instruction->immediates[case_index],
+                .value = instruction->immediates[case_index] & value_mask,
                 .target_block = machine_a64_block_entry(selector, instruction->targets[case_index].value),
                 .compare_width = compare_width,
             };
@@ -5933,6 +5971,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
     (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+{
+    u32 suffix_count = function->block_count - function->entry.value;
+    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+}
+
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                bool assume_validated, bool preserve_debug_values)
 {
@@ -5940,7 +5984,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (arena && program && function && target.cpu_arch == CPU_ARCH_AARCH64 && function->state == IR_FUNCTION_LOWERED && function->block_count &&
-        function->entry.value == 0)
+        function->entry.value < function->block_count)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
@@ -5968,13 +6012,15 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32 packed_stack_bytes = 0;
         bool darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
         bool windows_variadic = function_type->is_variadic && target.os == OPERATING_SYSTEM_WINDOWS;
+        bool windows_integer_arguments = target.os == OPERATING_SYSTEM_WINDOWS &&
+                                         (function_type->is_variadic || function_type->is_unprototyped);
         for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
         {
             if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target,
-                                         windows_variadic ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT,
+                                         windows_integer_arguments ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT,
                                          signature_parameter_shapes + parameter_index) ||
                 !machine_a64_place_variadic_argument(signature_parameter_shapes + parameter_index,
-                                            ir_type_from_id(&program->types, function_type->parameter_types[parameter_index]), windows_variadic, false,
+                                            ir_type_from_id(&program->types, function_type->parameter_types[parameter_index]), windows_integer_arguments, false,
                                             darwin ? &packed_stack_bytes : 0,
                                             &signature_integer_count, &signature_float_count,
                                             &signature_stack_part_count, signature_parameter_placements + parameter_index))
@@ -6042,8 +6088,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             selector.value_stack_slots[value_index] = UINT32_MAX;
             selector.value_indirect_slots[value_index] = UINT32_MAX;
         }
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             u32 parameter_count = 0;
             IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
             for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -6136,6 +6183,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         bool returns_twice_free = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
+        if (function->entry.value)
+        {
+            selector.block_entries = arena_allocate(arena, u32, function->block_count);
+            selector.block_exits = arena_allocate(arena, u32, function->block_count);
+        }
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
@@ -6304,6 +6356,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 promotable_locals[value_index] = 0;
             }
         }
+        if (function->entry.value)
+        {
+            u32 next_block = 0;
+            for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+            {
+                u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+                u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+                selector.block_entries[block_index] = next_block;
+                selector.block_exits[block_index] = next_block + block_width - 1u;
+                next_block += block_width;
+            }
+            BUSTER_CHECK(next_block == expanded_blocks);
+        }
         selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);
@@ -6419,8 +6484,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         // Classification pass: direct locals become stack slots, every other
         // scalar result becomes a virtual register, in stable value-id order.
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
@@ -6782,8 +6848,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         u32 typed_instruction_count = 0;
         u32 simd_operation_count = 0;
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             selector.current_block = block_index;
             machine_builder_block_begin(&selector.builder);
@@ -6806,7 +6873,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
             }
             selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
-            if (block_index == 0)
+            if (block_index == function->entry.value)
             {
                 if (windows_variadic)
                 {
@@ -7235,7 +7302,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             machine_selection_certify_stack_memory(arena, &result.function, function);
         }
-        if (!machine_function_split_parameter_edges(arena, &result.function))
+        if (!machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
+                                                                      &selector.block_entries, function->block_count))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
@@ -7249,6 +7317,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
+        result.canonical_block_entries = selector.block_entries;
         result.supported = true;
         result.selector_certified = true;
         result.returns_value = returns_value;
@@ -8160,6 +8229,40 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_frame_offset(u32 frame_area, u32 placement_o
     return frame_area - placement_offset;
 }
 
+// A LEA_FRAME row's address into `destination`. The payload is a byte offset
+// into the slot; the whole member address is one add when it fits an imm12,
+// or a materialized constant plus a register add when it does not —
+// mirroring the canonical base-address helper with the destination as its own
+// scratch. Rematerializing a frame-address value replays its defining row here.
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_address(MachineA64Encoder* encoder, MachineStackPlacement const* placement, u32 frame_area,
+                                                       MachineInstruction const* definition, u32 destination)
+{
+    u32 frame_offset =
+        machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[machine_ref_payload(definition->operands[1])] - definition->payload);
+    if (frame_offset <= A64_IMM12_MAX)
+    {
+        u32 fields[] = {destination, MACHINE_A64_X28, frame_offset};
+        machine_a64_emit_generated_form(encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+    }
+    else
+    {
+        machine_a64_emit_immediate(encoder, destination, frame_offset);
+        u32 fields[] = {destination, MACHINE_A64_X28, 0, destination};
+        machine_a64_emit_generated_form(encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+    }
+}
+
+// The reload of a value whose single definition is a LEA_FRAME row.
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_address_rematerialization(MachineA64Encoder* encoder, MachineFunction const* function,
+                                                                         MachineStackPlacement const* placement, u32 frame_area,
+                                                                         u32 virtual_register, u32 destination)
+{
+    MachinePoint definition_point = function->virtual_registers[virtual_register].definition_point;
+    MachineInstruction const* definition = function->instructions + machine_point_instruction(definition_point);
+    BUSTER_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_A64_LEA_FRAME);
+    machine_a64_emit_frame_address(encoder, placement, frame_area, definition, destination);
+}
+
 // X12 names a saved ABI slot or an overflow slot; X9 is the row's data
 // scratch. Never read the padding past an indirectly supplied object.
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_va_value(MachineA64Encoder* encoder, MachineVaArg* metadata,
@@ -8740,6 +8843,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, 
 
 MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
+    return machine_encode_aarch64_into(arena, function, placement, 0, 0);
+}
+
+MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement, u8* caller_bytes,
+                                                u64 caller_capacity)
+{
     MachineEncodeResult result = {0};
     u32 push_count = 0;
     for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
@@ -8780,6 +8889,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             break;
         case MACHINE_A64_MOV_RI:
         case MACHINE_A64_LEA_SYMBOL:
+            capacity64 += 16;
+            break;
+        case MACHINE_A64_TLS_WINDOWS:
+            capacity64 += 28;
+            break;
+        case MACHINE_A64_TLS_DARWIN:
             capacity64 += 16;
             break;
         case MACHINE_A64_RET:
@@ -8897,7 +9012,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         return result;
     }
     MachineA64Encoder encoder = {
-        .bytes = arena_allocate(arena, u8, capacity64),
+        .bytes = caller_bytes && capacity64 <= caller_capacity ? caller_bytes : arena_allocate(arena, u8, capacity64),
         .capacity = (u32)capacity64,
     };
     MachineBuilderStream fixups;
@@ -9044,6 +9159,10 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 {
                     machine_a64_emit_immediate(&encoder, edit->location, function->immediates[edit->subject]);
                 }
+                else if (edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME)
+                {
+                    machine_a64_emit_frame_address_rematerialization(&encoder, function, placement, frame_area, edit->subject, edit->location);
+                }
                 else
                 {
                     u32 edit_frame_offset = edit->kind == MACHINE_EDIT_TEMP_RELOAD ? placement->edge_copy_temporary_offset + edit->subject
@@ -9173,27 +9292,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[1], operand_registers[0], 0, 8, true);
                 break;
             case MACHINE_A64_LEA_FRAME:
-            {
-                // The payload is a byte offset into the slot; the whole
-                // member address is one add when it fits an imm12, or a
-                // materialized constant plus a register add when it does
-                // not — mirroring the canonical base-address helper with
-                // the destination as its own scratch.
-                u32 frame_offset = machine_a64_frame_offset(
-                    frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload);
-                if (frame_offset <= A64_IMM12_MAX)
-                {
-                    u32 fields[] = {operand_registers[0], MACHINE_A64_X28, frame_offset};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-                }
-                else
-                {
-                    machine_a64_emit_immediate(&encoder, operand_registers[0], frame_offset);
-                    u32 fields[] = {operand_registers[0], MACHINE_A64_X28, 0, operand_registers[0]};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, fields, BUSTER_ARRAY_LENGTH(fields));
-                }
-            }
-            break;
+                machine_a64_emit_frame_address(&encoder, placement, frame_area, instruction, operand_registers[0]);
+                break;
             case MACHINE_A64_LEA_OFFSET:
             {
                 u32 displacement = instruction->payload;
@@ -9352,7 +9452,10 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // unordered-false C semantics.
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[2], 0, 0, 1);
-                machine_a64_emit(&encoder, (instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u);
+                // == and != are quiet (fcmp); the relational conditions are
+                // signaling (fcmpe, opcode2 bit 4), as in GCC and Clang.
+                machine_a64_emit(&encoder, ((instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u) |
+                                           (((instruction->payload & 0xfu) > 1u) ? 0x10u : 0u));
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_CSET, operand_registers[0], 0, 0, instruction->payload & 0xfu);
                 break;
             case MACHINE_A64_CVT_F32_TO_F64:
@@ -10252,9 +10355,13 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     u32 index_fields[] = {destination, MACHINE_A64_X10, 3, destination};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, index_fields, BUSTER_ARRAY_LENGTH(index_fields));
                     machine_a64_emit_generated_unsigned_memory(&encoder, destination, destination, 0, 8, false);
+                    MachineCallSite* offset_high_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *offset_high_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
+                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                    machine_a64_emit(&encoder, UINT32_C(0x91400000) | (destination << 5) | destination);
                     MachineCallSite* offset_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                     *offset_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
-                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                        .is_thread_local = 1, .thread_local_low = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
                     u32 offset_fields[] = {destination, destination, 0};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, offset_fields, BUSTER_ARRAY_LENGTH(offset_fields));
                 }
@@ -10311,6 +10418,10 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
                 {
                     machine_a64_emit_immediate(&encoder, edit->location, function->immediates[edit->subject]);
+                }
+                else if (edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME)
+                {
+                    machine_a64_emit_frame_address_rematerialization(&encoder, function, placement, frame_area, edit->subject, edit->location);
                 }
                 else
                 {

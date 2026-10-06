@@ -1,7 +1,7 @@
 # GitHub workflow audit — 2026-09-07
 
 > Historical suite-level design/evidence. The subsequent internal desktop
-> partition and current 23-job completion contract are documented in
+> partition and current 25-job completion contract are documented in
 > [Desktop combination shards](ci-combination-shards.md). Historical timings
 > below are not matched before/after evidence for #333.
 
@@ -10,6 +10,10 @@ are unchanged from the measured revision `9834a4253c61934a8a253641a84741a25d3717
 This change concerns the public repository's GitHub workflows, **not** the
 source-free broker under `.forgejo/github-bridge/`. Broker cache/artifact and
 credential restrictions remain untouched.
+
+> The job inventories and measurements in this audit describe its recorded
+> revisions. Current CI uses the [25-job inventory](ci-combination-shards.md)
+> and [AArch64-only Apple policy](apple-ci-policy.md).
 
 ## Coverage contract and scheduling
 
@@ -108,10 +112,10 @@ the trusted TCC bootstrap:
 - Workflows: `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.
 
 To reproduce the hosted bootstrap on Unix, run `mkdir -p build && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build && ./build/build test_all_combinations_ci --verbose=1`.
-For the hosted mode gate, keep the second Clang-built driver outside `build/`
-and retain its `CFLAGS=-Wno-invalid-feature-combination`, as spelled out in the
-workflow. Windows reproduction must enter the architecture-specific VS shell
-and then put standalone LLVM first; the workflow contains the complete command.
+For the hosted mode gate, keep the second Clang-built driver outside `build/`,
+as spelled out in the workflow. Windows reproduction must enter the
+architecture-specific VS shell and then put standalone LLVM first; the workflow
+contains the complete command.
 Each job summary records the commit, suite outcome, and relevant entry points.
 
 ## Runtime evidence and limits

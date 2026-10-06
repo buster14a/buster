@@ -21,7 +21,6 @@ of trusting the event variables as self-authenticating evidence.
 | Lane | Required configurations | Effective execution |
 |---|---|---|
 | Android x86-64 | Debug and Release APKs | Both execute the registered suite on the exact emulator serial, AVD, ABI, API level, and system image recorded in the manifest. |
-| iOS x86-64 | Debug and Release app bundles | Compile, link, bundle, and architecture validation only. The manifest retains the hosted Xcode 26 Intel-runtime rationale. |
 | iOS AArch64 | Debug and Release app bundles | Both execute in the exact simulator runtime/UDID; cleanup must leave that device in `Shutdown`. |
 
 Every required row records the actual Clang/AppleClang executable identity,
@@ -29,8 +28,8 @@ target, Debug/Release configuration, sanitizer/fuzz state, ABI, artifact kind,
 execution class, artifact digest, and completion status. Explicit exclusions
 name the owning lane or policy reason for mobile omissions: sanitizer, fuzz,
 register-allocation mode matrix, static analysis, table audit, self-host,
-fixed point, Android AArch64, and hosted iOS Intel runtime execution where
-applicable.
+fixed point and Android AArch64 where applicable. Apple x86-64 is outside
+routine CI; see [Apple CI policy](apple-ci-policy.md).
 
 ## Fail-closed behavior
 
@@ -40,7 +39,7 @@ result step fails when the manifest is missing or malformed, either
 configuration is absent, final runtime/build-only evidence is not successful,
 an artifact/toolchain/evidence hash is stale, runner/event identity disagrees,
 an exclusion rationale changes, or the workflow no longer contains exactly
-the three reviewed mobile lanes. The required mobile matrix still feeds `CI
+the two reviewed mobile lanes. The required mobile matrix still feeds `CI
 complete`, so a smaller surviving lane set cannot certify the aggregate gate.
 
 The deterministic regression guard is also available locally:

@@ -185,6 +185,46 @@ class ContractTests(unittest.TestCase):
         return contract.validate_shards(list(reversed(self.shards)), output, require_clean,
                                         require_clean_acceptance)
 
+    def test_ios_subjects_require_the_same_adapter_before_the_pinned_sdk(self):
+        directory = self.shards[0]
+        _fields, rows = read_table(directory / "rows.tsv")
+        fixture = "tests/basic_doom_headless.c"
+        sdk_root = directory / "dependencies/project-include/sdk"
+        adapter = ["-isystem", str(sdk_root / "darwin-adapter")]
+        vendor = ["-isystem", str(sdk_root / "darwin")]
+        manifest = {"project_include_sha256": "a" * 64}
+        selected_adapters = frozenset(("dependencies/project-include/sdk/darwin-adapter/Availability.h",))
+        for target in ("x86_64-apple-ios", "aarch64-apple-ios"):
+            for allocator in ("none", "fast"):
+                with self.subTest(target=target, allocator=allocator):
+                    row = next(dict(item) for item in rows
+                               if item["target"] == target and item["allocator"] == allocator)
+                    row["fixture"] = fixture
+                    path = directory / row["argv_evidence"]
+                    argv = contract.read_argv(path)
+                    argv[argv.index(str(directory / "inputs/tests/unit.c"))] = str(directory / "inputs" / fixture)
+                    includes = argv.index("-I" + str(directory / "inputs/tests"))
+                    argv[includes:includes] = adapter + vendor
+                    project = "-I" + str(directory / "dependencies/project-include")
+                    argv.insert(includes + 5, project)
+                    path.write_bytes(b"\0".join(item.encode() for item in argv) + b"\0")
+                    contract.validate_argv(directory, manifest, row, {fixture: []}, selected_adapters)
+                    # Missing or late overlays must not be accepted for either
+                    # subject, even though the remaining argv is unchanged.
+                    for include_order in (vendor, vendor + adapter):
+                        altered = argv[:includes] + include_order + argv[includes + 4:]
+                        path.write_bytes(b"\0".join(item.encode() for item in altered) + b"\0")
+                        with self.assertRaises(AssertionError):
+                            contract.validate_argv(directory, manifest, row, {fixture: []}, selected_adapters)
+                    # Before policy admission, authenticated old declarations
+                    # select no adapter and must still replay the old argv.
+                    legacy = argv[:includes] + vendor + argv[includes + 4:]
+                    path.write_bytes(b"\0".join(item.encode() for item in legacy) + b"\0")
+                    contract.validate_argv(directory, manifest, row, {fixture: []}, frozenset())
+                    path.write_bytes(b"\0".join(item.encode() for item in argv) + b"\0")
+                    with self.assertRaises(AssertionError):
+                        contract.validate_argv(directory, manifest, row, {fixture: []}, frozenset())
+
     def declare_gaps(self, identities):
         """Install the same authenticated self-test gap ledger in every shard."""
         records = []
@@ -370,7 +410,15 @@ class ContractTests(unittest.TestCase):
                     "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "411"}
         inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
         for digest in (contract.FULL_SUPPORT_CONTRACT_SHA256,
-                       contract.NEXT_SUPPORT_CONTRACT_SHA256):
+                       contract.NEXT_SUPPORT_CONTRACT_SHA256,
+                       contract.APPLE_CI_SUPPORT_CONTRACT_SHA256,
+                       contract.PROPOSED_SUPPORT_CONTRACT_SHA256,
+                       contract.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
+                       contract.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
+                       contract.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
+                       contract.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
+                       contract.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+                       contract.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
@@ -406,7 +454,12 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(records), contract.FULL_APPLICABILITY_LEDGER_COUNT)
         self.assertEqual(len(set(identities)), contract.FULL_APPLICABILITY_LEDGER_COUNT)
         self.assertEqual(identities, sorted(identities))
-        self.assertEqual(sha(ledger_path.read_bytes()), contract.FULL_APPLICABILITY_LEDGER_SHA256)
+        ledger_sha256 = sha(ledger_path.read_bytes())
+        self.assertIn(ledger_sha256, contract.ACCEPTED_APPLICABILITY_LEDGER_SHA256)
+        producer = (ledger_path.parents[1] / "tools/native_retirement_census.c").read_text(encoding="utf-8")
+        match = re.search(r'nrc_applicability_ledger_sha256 = S8_INITIALIZER\("([0-9a-f]{64})"\);', producer)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), ledger_sha256)
         for record in records:
             self.assertIn(record["applicability"], contract.AUTHENTICATED_APPLICABILITY_CLASSES)
             fixture_path = ledger_path.parents[1] / record["fixture"]
@@ -1378,6 +1431,48 @@ class ContractTests(unittest.TestCase):
 
 
 class CheckedInDependencyTests(unittest.TestCase):
+    def test_native_dispatch_cannot_register_retired_direct_emitter(self):
+        root = Path(__file__).resolve().parents[1]
+        codegen = (root / "src/buster/lib/compiler/codegen/codegen.c").read_text(encoding="utf-8")
+        private = (root / "src/buster/lib/compiler/codegen/codegen_internal.h").read_text(encoding="utf-8")
+        public = (root / "src/buster/lib/compiler/codegen/codegen.h").read_text(encoding="utf-8")
+        cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
+        unity = (root / "src/buster/apps/ide/ide.c").read_text(encoding="utf-8")
+
+        self.assertIn("machine_select_validated_canonical_function(", codegen)
+        self.assertIn("options.register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;", codegen)
+        self.assertIn("machine_stack_placement_build(", codegen)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_NONE", public)
+        for retired in ("CCanonicalEmitter", "CCanonicalBranchPatch", "X64Builder",
+                        "CodegenRegisterAllocation", "X64Evex", "CODEGEN_X64_X87_SCRATCH_SIZE",
+                        "x64_emit_vector_native_memory", "x64_emit_vector_native_binary_operation",
+                        "codegen_canonical_x64_metadata_vector",
+                        "x64_emit_vzeroupper", "a64_emit_initialize_aggregate_result",
+                        "a64_emit_copy_memory_registers(", "a64_emit_float_load_offset(",
+                        "a64_emit_float_store_offset(", "x64_target_supports_native_vector(",
+                        "CodegenRelocation", "CodegenCanonicalCallArgument", "CodegenCanonicalCallLayout",
+                        "codegen_canonical_x64_call_layout", "CodegenCanonicalX64F80",
+                        "codegen_canonical_x64_f80_cache_", "codegen_canonical_x64_type_contains_f80",
+                        "codegen_canonical_x64_type_is_f80_x87_shape", "allocated_register_base",
+                        "a64_emit_stack_address", "a64_emit_store_offset", "a64_emit_store_value_component",
+                        "a64_value_component_offset", "a64_value_offset", "codegen_canonical_a64_adjust_stack",
+                        "codegen_canonical_aggregate_abi", "codegen_canonical_abi_part_is_float", "codegen_canonical_x64_abi_is_f80_complex_result",
+                        "codegen_canonical_x64_abi_value_in_registers", "codegen_canonical_x64_adjust_stack",
+                        "codegen_canonical_x64_native_vector_width", "codegen_canonical_x64_non_power_vector",
+                        "codegen_canonical_x64_stack_argument_offset", "codegen_canonical_x64_vector_result",
+                        "codegen_canonical_x64_type_is_f80_bytes_cached", "codegen_canonical_x64_type_is_f80_complex_cached",
+                        "codegen_canonical_x64_type_is_f80_opaque_cached", "codegen_canonical_x64_windows_non_power_vector_indirect",
+                        "canonical_prep", "canonical_emit("):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, codegen + private)
+
+        # Both source graphs register the shared codegen module. Neither may
+        # grow a second native emitter or link the archived reference compiler.
+        self.assertIn('buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")', cmake)
+        self.assertIn('#include <buster/lib/compiler/codegen/codegen.c>', unity)
+        for registry in (cmake, unity):
+            self.assertNotRegex(registry, r'(?m)^(?:.*register_module|\s*#include)\b[^\n]*(?:direct_native|native_direct|retirement_reference)')
+
     def test_historical_gap_ledger_maps_to_current_row_numbers(self):
         root = Path(__file__).resolve().parents[1]
         _fields, inputs = read_table(root / "docs/native-retirement-support-v1.tsv")

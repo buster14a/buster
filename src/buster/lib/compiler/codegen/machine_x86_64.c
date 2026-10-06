@@ -17,6 +17,10 @@
 // block_entries/block_exits preserve canonical control-flow destinations.
 // MachineX64ValueUse is the hot value-use projection; MachineX64LocalUse
 // holds sparse local-promotion store and alias state during selection.
+// machine_x64_condition_form_agrees joins retained exact keys with the shared
+// condition identity; serial prewarm refuses mismatched condition bindings.
+// machine_x64_plan_call reuses selector-owned variadic shape/placement rows;
+// machine_x64_select_call consumes their active prefix before the next call.
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
@@ -246,6 +250,11 @@ struct MachineX64Selector
     u32 call_argument_capacity;
     u32* call_argument_registers;
     u32* call_argument_slots;
+    // Variadic rows grow only for an actual tail-bearing call. Fixed calls
+    // continue to borrow the immutable signature rows, regardless of arity.
+    u32 variadic_argument_capacity;
+    MachineX64ValueShape* variadic_argument_shapes;
+    MachineX64ArgumentPlacement* variadic_argument_placements;
     // Frame slot holding the incoming hidden result pointer, or UINT32_MAX.
     u32 hidden_return_slot;
     // SysV variadic save area.  The row is emitted before incoming argument
@@ -298,19 +307,24 @@ struct MachineX64Selector
     MachineTypeClass const* type_classes;
     u32 type_class_count;
     IrOpcode failed_opcode;
+    String8 failure_detail;
     bool supported;
 };
 
 // The reference form a symbol takes in this module. An undefined ELF
 // function uses the PLT even in the default model, so an external linker can
 // place the -c object in a PIE. Under -fPIC, any interposable function uses
-// the PLT and any interposable address uses the GOT.
+// the PLT and any interposable address uses the GOT. Linux undefined
+// default-visible weak function addresses also use the GOT in the default
+// model so an absent provider stays zero; direct calls retain their PLT form.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
     IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
     bool elf_external_call = call_site && record && !record->is_definition &&
                              object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
-    bool indirect = elf_external_call ||
+    bool weak_function_address = !call_site && selector->target.os == OPERATING_SYSTEM_LINUX && record &&
+                                 record->kind == IR_SYMBOL_FUNCTION && !record->is_definition && record->is_weak && !record->is_hidden;
+    bool indirect = elf_external_call || weak_function_address ||
                     (selector->position_independent && ir_symbol_is_interposable(record));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }
@@ -528,8 +542,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_class_scalar_bit_width(MachineX64Selector co
     return result;
 }
 
-// The only sixteen-byte scalar float carried here is resolved SysV f80.
-// AArch64 binary128 and Win64 long double remain their own target shapes.
+// Resolved SysV f80 and Android binary128 are both sixteen-byte frame values,
+// but they use distinct x87 and XMM call shapes.
 BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selector, IrTypeId type_id)
 {
     MachineTypeClass type_class = machine_x64_type_class(selector, type_id);
@@ -539,6 +553,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selec
         result = codegen_canonical_x64_type_is_f80(ir_type_from_id(&selector->program->types, type_id));
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f128(IrProgram* program, Target target, IrTypeId type_id)
+{
+    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    return target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+           machine_x64_abi_convention(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type &&
+           type->layout.resolved && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 &&
+           type->layout.size == 16 && type->layout.alignment == 16;
 }
 
 // Darwin caps bare vector ABI alignment at the CPU's available width.
@@ -826,6 +849,26 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         };
         return true;
     }
+    if (machine_x64_type_is_f128(program, target, type_id))
+    {
+        IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+        if (abi.indirect || abi.memory || abi.part_count != 1 ||
+            abi.parts[0].abi_class != IR_ABI_CLASS_VECTOR || abi.parts[0].size != 16)
+        {
+            return false;
+        }
+        *shape = (MachineX64ValueShape){
+            .part_is_float = {1},
+            .part_sizes = {16},
+            .part_count = 1,
+            .byte_size = 16,
+            .exact_byte_size = 16,
+            .aggregate = true,
+            .xmm128 = true,
+            .stack_alignment = 16,
+        };
+        return true;
+    }
     if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && codegen_canonical_x64_type_is_f80(type))
     {
         *shape = (MachineX64ValueShape){.byte_size = 16, .aggregate = true,
@@ -860,6 +903,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         return false;
     }
     IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+    if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->layout.size == 0 &&
+        (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !abi.indirect && !abi.memory && !abi.part_count)
+    {
+        *shape = (MachineX64ValueShape){.aggregate = true};
+        return true;
+    }
     if (use == IR_ABI_USE_RESULT && convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !abi.memory && !abi.indirect &&
         ((abi.part_count == 2 && type->layout.size == 16 && abi.parts[0].abi_class == IR_ABI_CLASS_X87 &&
           abi.parts[1].abi_class == IR_ABI_CLASS_X87_UP) || ir_abi_value_is_complex_x87_result(program, type_id, convention)))
@@ -886,7 +935,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
                 .exact_byte_size = (u32)type->layout.size,
                 .aggregate = true,
                 .indirect = true,
-                .stack_alignment = use == IR_ABI_USE_RESULT ? 0 : BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(type), 16u),
+                .stack_alignment = use == IR_ABI_USE_RESULT ? codegen_canonical_x64_stack_argument_alignment(type)
+                                                          : BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(type), 16u),
             };
             return true;
         }
@@ -1861,7 +1911,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_member_write(MachineX64Selector* sel
     bool vector = value_register != UINT32_MAX && member_size == 64 && selector->vector_registers_supported &&
                   machine_x64_type_is_vector_register(selector->program, value_type);
     bool selected = member_offset <= INT32_MAX && member_size <= INT32_MAX;
-    if (selected && !vector && (value_register != UINT32_MAX || value_slot == UINT32_MAX))
+    if (selected && !member_size)
+    {
+        selected = value_type && value_type->layout.resolved && value_type->layout.size == 0 &&
+                   (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION) && value_slot != UINT32_MAX;
+    }
+    else if (selected && !vector && (value_register != UINT32_MAX || value_slot == UINT32_MAX))
     {
         u16 store_opcode = member_size == 1   ? MACHINE_X64_STORE_FRAME8
                            : member_size == 2 ? MACHINE_X64_STORE_FRAME16
@@ -1978,7 +2033,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_arg(MachineX64Selector* selector,
                           machine_x64_type_is_f80(selector, instruction->canonical_type));
         MachineVaArg metadata;
         bool vector = selector->vector_registers_supported && machine_x64_type_is_vector_register(selector->program, value_type);
-        if (machine_x64_target_is_windows(selector->target) && (scalar || aggregate || vector) && result_is_frame == aggregate)
+        MachineX64ValueShape empty_shape = {0};
+        bool empty_record = result_is_frame &&
+                            machine_x64_value_shape(program, instruction->canonical_type, IR_ABI_USE_VARIADIC_ARGUMENT,
+                                                    selector->target, &empty_shape) &&
+                            empty_shape.aggregate && !empty_shape.byte_size && !empty_shape.part_count;
+        if (empty_record)
+        {
+            selected = true;
+        }
+        else if (machine_x64_target_is_windows(selector->target) && (scalar || aggregate || vector) && result_is_frame == aggregate)
         {
             selected = machine_x64_select_windows_va_arg(selector, value_type, source_register, result_register, result_slot, aggregate);
         }
@@ -2501,8 +2565,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
         machine_x64_define(selector, result_register, row);
         selected = true;
     }
-    else if (machine_x64_type_is_f80(selector, instruction->canonical_type) && instruction->immediate_count == 2 &&
-             !(instruction->immediates[1] & ~UINT64_C(0xffff)))
+    else if (instruction->immediate_count == 2 &&
+             ((machine_x64_type_is_f80(selector, instruction->canonical_type) &&
+               !(instruction->immediates[1] & ~UINT64_C(0xffff))) ||
+              machine_x64_type_is_f128(selector->program, selector->target, instruction->canonical_type)))
     {
         u32 slot = selector->value_stack_slots[instruction->result.value];
         selected = slot != UINT32_MAX;
@@ -2544,6 +2610,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
 // truncations use the existing frame rows, a 128-bit reinterpret is a
 // byte-preserving frame copy, and other aggregate casts continue through the
 // explicit unsupported fallback.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                            IrType* source_type, IrType* target_type, u32 result_register);
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128(MachineX64Selector* selector, IrInstruction* instruction, IrType* source_type,
                                                       IrType* cast_target_type, u32 source_bits, u32 result_register)
 {
@@ -2777,15 +2846,39 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, I
         // Only the register conversions below read this, and only where the
         // operand lookup that fills it succeeded.
         u32 source_register = UINT32_MAX;
-        if (machine_x64_type_is_f80(selector, source_type_id) || machine_x64_type_is_f80(selector, instruction->canonical_type))
+        IrType* identity_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (instruction->conversion_operation == IR_CONVERSION_IDENTITY && source_type_id.value == instruction->canonical_type.value &&
+            identity_type && (identity_type->kind == IR_TYPE_STRUCT || identity_type->kind == IR_TYPE_UNION))
         {
-            selected = machine_x64_select_f80_unsigned64_cast(selector, instruction, result_register) ||
-                       machine_x64_select_f80_cast(selector, instruction, result_register);
+            u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+            u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+            selected = identity_type->layout.resolved && identity_type->layout.size <= UINT32_MAX &&
+                       source_slot != UINT32_MAX && target_slot != UINT32_MAX;
+            if (selected && identity_type->layout.size)
+            {
+                // Identity preserves the complete aggregate image, including
+                // partial eightbytes and indirect argument tails, in its own home.
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot), machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                    .payload = (u32)identity_type->layout.size, .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                });
+            }
+        }
+        else if (machine_x64_type_is_f80(selector, source_type_id) || machine_x64_type_is_f80(selector, instruction->canonical_type))
+        {
+            selected = (source_integer128 || target_integer128)
+                           ? machine_x64_select_cast_i128_float(selector, instruction, ir_type_from_id(&program->types, source_type_id),
+                                                                ir_type_from_id(&program->types, instruction->canonical_type), result_register)
+                           : machine_x64_select_f80_unsigned64_cast(selector, instruction, result_register) ||
+                                 machine_x64_select_f80_cast(selector, instruction, result_register);
         }
         else if (source_integer128 || target_integer128)
         {
-            selected = machine_x64_select_cast_i128(selector, instruction, ir_type_from_id(&program->types, source_type_id),
-                                                    ir_type_from_id(&program->types, instruction->canonical_type), source_bits, result_register);
+            IrType* source_type = ir_type_from_id(&program->types, source_type_id);
+            IrType* target_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            selected = (source_type && target_type && (source_type->kind == IR_TYPE_FLOAT || target_type->kind == IR_TYPE_FLOAT))
+                           ? machine_x64_select_cast_i128_float(selector, instruction, source_type, target_type, result_register)
+                           : machine_x64_select_cast_i128(selector, instruction, source_type, target_type, source_bits, result_register);
         }
         // Float conversions mirror the canonical forms.
         else if (result_register != UINT32_MAX && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
@@ -3480,6 +3573,234 @@ BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_apply_sign(MachineX64Selector* 
     *low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, inverted_low, sign);
     *high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, inverted_high, sign);
     *high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, *high, borrow);
+}
+
+// The extra binary modes set x87 precision for one closed frame transaction.
+// In particular the final i128 sum rounds once at the destination precision.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_f80_binary_slot(MachineX64Selector* selector, u32 destination, u32 left, u32 right, u32 mode)
+{
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, left),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, right)},
+        .payload = mode, .opcode = MACHINE_X64_F80_BINARY});
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_select_f80_convert_slot(MachineX64Selector* selector, u32 destination, u32 source, u32 mode)
+{
+    u32 scratch = machine_x64_append_slot(selector, 8, 8);
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, source),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, scratch)},
+        .payload = mode, .opcode = MACHINE_X64_F80_CONVERT});
+}
+
+// FILD consumes a signed eightbyte. Split the unsigned top bit before it and
+// add the exact 2^63 correction under a temporary 64-bit x87 precision mode.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_u64_to_f80_slot(MachineX64Selector* selector, u32 value, u32 destination)
+{
+    u32 sign = machine_x64_select_constrained_row(selector, MACHINE_X64_SAR64, value,
+                                                  machine_x64_select_immediate_register(selector, 63));
+    u32 low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, value,
+                                                machine_x64_select_immediate_register(selector, UINT64_C(0x7fffffffffffffff)));
+    u32 integer = machine_x64_append_slot(selector, 8, 8);
+    u32 bias = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_frame_store64(selector, integer, 0, low);
+    machine_x64_select_f80_convert_slot(selector, destination, integer, 4);
+    machine_x64_select_f80_u64_bias(selector, bias, sign);
+    machine_x64_select_f80_binary_slot(selector, destination, destination, bias, MACHINE_X64_F80_ADD_P64);
+}
+
+// Compare against 2^63, subtract the exact selected bias, then FISTP under
+// truncation. The correction bit is ORed back into the unsigned eightbyte.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_select_f80_slot_to_u64(MachineX64Selector* selector, u32 source)
+{
+    u32 bias = machine_x64_append_slot(selector, 16, 16);
+    u32 remainder = machine_x64_append_slot(selector, 16, 16);
+    u32 integer = machine_x64_append_slot(selector, 8, 8);
+    machine_x64_select_frame_store64(selector, bias, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, bias, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403e)));
+    u32 high = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high), machine_ref_make(MACHINE_REF_STACK_SLOT, source),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, bias)},
+        .payload = 5, .opcode = MACHINE_X64_F80_COMPARE});
+    u32 mask = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64,
+                                                 machine_x64_select_immediate_register(selector, 0), high);
+    u32 high_bit = machine_x64_select_f80_u64_bias(selector, bias, mask);
+    machine_x64_select_f80_binary_slot(selector, remainder, source, bias, MACHINE_X64_F80_SUBTRACT_P64);
+    machine_x64_select_f80_convert_slot(selector, integer, remainder, 5);
+    u32 low = machine_x64_select_frame_load64(selector, integer, 0);
+    return machine_x64_select_arithmetic_row(selector, MACHINE_X64_OR64, low, high_bit);
+}
+
+// A two-limb magnitude is exact in f80 until the final add. That add uses
+// destination precision (24/53/64 bits) and the caller's rounding mode;
+// changing the x87 control word never escapes the binary machine row.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_to_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                         IrType* target_type, u32 source_slot, u32 result_register)
+{
+    bool signed_value = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+    u32 low = machine_x64_select_frame_load64(selector, source_slot, 0);
+    u32 high = machine_x64_select_frame_load64(selector, source_slot, 8);
+    u32 sign = machine_x64_select_immediate_register(selector, 0);
+    if (signed_value)
+    {
+        sign = machine_x64_select_constrained_row(selector, MACHINE_X64_SAR64, high,
+                                                  machine_x64_select_immediate_register(selector, 63));
+        machine_x64_select_i128_apply_sign(selector, sign, &low, &high);
+    }
+    u32 low_float = machine_x64_append_slot(selector, 16, 16);
+    u32 high_float = machine_x64_append_slot(selector, 16, 16);
+    u32 scale = machine_x64_append_slot(selector, 16, 16);
+    u32 scaled_high = machine_x64_append_slot(selector, 16, 16);
+    u32 sum = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_u64_to_f80_slot(selector, low, low_float);
+    machine_x64_select_u64_to_f80_slot(selector, high, high_float);
+    machine_x64_select_frame_store64(selector, scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403f)));
+    machine_x64_select_f80_binary_slot(selector, scaled_high, high_float, scale, MACHINE_X64_F80_MULTIPLY_P64);
+    if (signed_value)
+    {
+        // Round a negative sum as a negative x87 value. Flipping the sign
+        // after a positive addition would reverse upward/downward rounding.
+        u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, sign,
+                                                         machine_x64_select_immediate_register(selector, UINT64_C(0x8000)));
+        u32 halves[] = {scaled_high, low_float};
+        for (u32 half = 0; half < BUSTER_ARRAY_LENGTH(halves); half += 1)
+        {
+            u32 exponent = machine_x64_select_frame_load64(selector, halves[half], 8);
+            machine_x64_select_frame_store64(selector, halves[half], 8,
+                machine_x64_select_arithmetic_row(selector, MACHINE_X64_XOR64, exponent, sign_bit));
+        }
+    }
+    u32 mode = target_type->bit_width == 32 ? MACHINE_X64_F80_ADD_P24 :
+               target_type->bit_width == 64 ? MACHINE_X64_F80_ADD_P53 : MACHINE_X64_F80_ADD_P64;
+    machine_x64_select_f80_binary_slot(selector, sum, scaled_high, low_float, mode);
+    if (target_type->bit_width == 80)
+    {
+        u32 destination = selector->value_stack_slots[instruction->result.value];
+        machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, sum)},
+            .payload = 16, .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME});
+    }
+    else
+    {
+        u32 scalar = machine_x64_append_slot(selector, 8, 8);
+        machine_x64_select_f80_convert_slot(selector, scalar, sum, target_type->bit_width == 32 ? 2u : 3u);
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register), machine_ref_make(MACHINE_REF_STACK_SLOT, scalar)},
+            .opcode = MACHINE_X64_LOAD_FRAME});
+        machine_x64_define(selector, result_register, row);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_select_float_to_i128(MachineX64Selector* selector, IrInstruction* instruction,
+                                                         IrType* source_type, u32 source_slot, u32 source_register, u32 result_slot)
+{
+    bool signed_value = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER;
+    u32 sign = machine_x64_select_immediate_register(selector, 0);
+    u32 magnitude = machine_x64_append_slot(selector, 16, 16);
+    if (source_type->bit_width == 80)
+    {
+        machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, magnitude), machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+            .payload = 16, .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME});
+        u32 exponent = machine_x64_select_frame_load64(selector, source_slot, 8);
+        if (signed_value)
+        {
+            u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, exponent,
+                                                              machine_x64_select_immediate_register(selector, UINT64_C(0x8000)));
+            sign = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, sign,
+                machine_x64_select_constrained_row(selector, MACHINE_X64_SHR64, sign_bit,
+                                                   machine_x64_select_immediate_register(selector, 15)));
+        }
+        u32 absolute = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, exponent,
+                                                          machine_x64_select_immediate_register(selector, UINT64_C(0x7fff)));
+        machine_x64_select_frame_store64(selector, magnitude, 8, absolute);
+    }
+    else
+    {
+        u64 sign_mask = source_type->bit_width == 32 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
+        if (signed_value)
+        {
+            u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, source_register,
+                                                              machine_x64_select_immediate_register(selector, sign_mask));
+            u32 shifted = machine_x64_select_constrained_row(selector, MACHINE_X64_SHR64, sign_bit,
+                                machine_x64_select_immediate_register(selector, source_type->bit_width - 1));
+            sign = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, sign, shifted);
+        }
+        u32 absolute = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, source_register,
+                                                          machine_x64_select_immediate_register(selector,
+                                                              source_type->bit_width == 32 ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff)));
+        u32 input = machine_x64_append_slot(selector, 8, 8);
+        machine_x64_select_frame_store64(selector, input, 0, absolute);
+        machine_x64_select_f80_convert_slot(selector, magnitude, input, source_type->bit_width == 32 ? 0u : 1u);
+    }
+    u32 inverse_scale = machine_x64_append_slot(selector, 16, 16);
+    u32 scaled = machine_x64_append_slot(selector, 16, 16);
+    u32 high_float = machine_x64_append_slot(selector, 16, 16);
+    u32 scale = machine_x64_append_slot(selector, 16, 16);
+    u32 contribution = machine_x64_append_slot(selector, 16, 16);
+    u32 residual = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_frame_store64(selector, inverse_scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, inverse_scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x3fbf)));
+    machine_x64_select_f80_binary_slot(selector, scaled, magnitude, inverse_scale, MACHINE_X64_F80_MULTIPLY_P64);
+    u32 high = machine_x64_select_f80_slot_to_u64(selector, scaled);
+    machine_x64_select_u64_to_f80_slot(selector, high, high_float);
+    machine_x64_select_frame_store64(selector, scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403f)));
+    machine_x64_select_f80_binary_slot(selector, contribution, high_float, scale, MACHINE_X64_F80_MULTIPLY_P64);
+    machine_x64_select_f80_binary_slot(selector, residual, magnitude, contribution, MACHINE_X64_F80_SUBTRACT_P64);
+    u32 low = machine_x64_select_f80_slot_to_u64(selector, residual);
+    if (signed_value)
+    {
+        machine_x64_select_i128_apply_sign(selector, sign, &low, &high);
+    }
+    machine_x64_select_frame_store64(selector, result_slot, 0, low);
+    machine_x64_select_frame_store64(selector, result_slot, 8, high);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                            IrType* source_type, IrType* target_type, u32 result_register)
+{
+    bool from_integer = source_type && target_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128 &&
+                        target_type->kind == IR_TYPE_FLOAT &&
+                        (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
+                         instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT);
+    bool to_integer = source_type && target_type && source_type->kind == IR_TYPE_FLOAT &&
+                      target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128 &&
+                      (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+                       instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER);
+    bool source_float = source_type && (source_type->bit_width == 32 || source_type->bit_width == 64 ||
+                                        (source_type->bit_width == 80 && machine_x64_type_is_f80(selector,
+                                            selector->function->values[instruction->operands[0].value].canonical_type)));
+    bool target_float = target_type && (target_type->bit_width == 32 || target_type->bit_width == 64 ||
+                                        (target_type->bit_width == 80 && machine_x64_type_is_f80(selector, instruction->canonical_type)));
+    u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+    u32 result_slot = selector->value_stack_slots[instruction->result.value];
+    u32 source_register = UINT32_MAX;
+    bool selected = from_integer ? target_float && source_slot != UINT32_MAX &&
+                                   (target_type->bit_width == 80 ? result_slot != UINT32_MAX : result_register != UINT32_MAX)
+                    : to_integer ? source_float && result_slot != UINT32_MAX &&
+                                   (source_type->bit_width == 80 ? source_slot != UINT32_MAX :
+                                    machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+                                 : false;
+    if (selected)
+    {
+        if (from_integer)
+        {
+            machine_x64_select_i128_to_float(selector, instruction, target_type, source_slot, result_register);
+        }
+        else
+        {
+            machine_x64_select_float_to_i128(selector, instruction, source_type, source_slot, source_register, result_slot);
+        }
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_divide_edge(MachineX64Selector* selector, u32 source, u32 destination, u32 const* values)
@@ -4264,7 +4585,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_aggregate(MachineX64Selector* select
                 // left no room for a declared-type unit of carries a narrower
                 // one, and every other field reads its own size back.
                 u64 field_size = ir_field_access_size(&program->types, type->fields + field_index);
-                if (!field_size || field_offset > INT32_MAX)
+                if (field_offset > INT32_MAX)
                 {
                     selected = false;
                 }
@@ -4442,7 +4763,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
     IrIdUnderlying index = value_id.value;
 
     bool value_valid = (index < function->value_count) & (instruction->result.value != IR_ID_UNDERLYING_INVALID);
-    if (value_valid)
+    IrType* void_load_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    if (instruction->opcode == IR_OPCODE_LOAD && index < function->value_count && void_load_type && void_load_type->kind == IR_TYPE_VOID)
+    {
+        // An expression such as *void_pointer evaluates its address but has no
+        // object bytes to read. Its address-producing rows have already been
+        // selected; emitting a machine load would invent an access width.
+        selected = true;
+    }
+    else if (value_valid)
     {
         u8 place_kind = selector->place_kinds[index];
 
@@ -4592,7 +4921,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                 // record is fetched here for the copy's byte count.
                 IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
                 BUSTER_CHECK(loaded_type);
-                bool aggregate_supported = loaded_type->layout.resolved & (loaded_type->layout.size <= UINT32_MAX);
+                bool zero_record = loaded_type->layout.size == 0 &&
+                                   (loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION);
+                bool aggregate_supported = loaded_type->layout.resolved & (loaded_type->layout.size <= UINT32_MAX) &
+                                           (loaded_type->layout.size != 0 || zero_record);
                 if (aggregate_supported)
                 {
                     bool local_slot_valid = (place_kind == MACHINE_X64_PLACE_LOCAL) & (slot != UINT32_MAX);
@@ -4610,7 +4942,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                     bool address_register_selected = machine_x64_operand_register(selector, value_id, &address_register) & place_is_addressed;
                     selected = local_slot_valid | address_register_selected;
 
-                    if (selected)
+                    if (selected && loaded_type->layout.size)
                     {
                         MachineRef destination = machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot);
                         u32 source_payload = address_register_selected ? address_register : slot;
@@ -4662,23 +4994,30 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_aggregate_store(MachineX64Selector* 
                                                             u32 value_slot)
 {
     bool selected = false;
-    if (instruction->opcode != IR_OPCODE_ATOMIC_STORE && size && size <= UINT32_MAX)
+    IrType* value_type = ir_type_from_id(&selector->program->types,
+                                         selector->function->values[instruction->operands[1].value].canonical_type);
+    bool zero_record = value_type && value_type->layout.resolved && value_type->layout.size == 0 &&
+                       (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION);
+    if (instruction->opcode != IR_OPCODE_ATOMIC_STORE && (size || zero_record) && size <= UINT32_MAX)
     {
         if (place_kind == MACHINE_X64_PLACE_LOCAL && slot != UINT32_MAX)
         {
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                 .payload = (u32)size,
-                                                 .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
-                                             });
+            if (size)
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = (u32)size,
+                                                     .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                                                 });
+            }
             selected = true;
         }
         else if (machine_x64_place_is_addressed(selector, instruction->operands[0], place_kind))
         {
             u32 address_register;
             selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
-            if (selected)
+            if (selected && size)
             {
                 machine_x64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
@@ -4849,7 +5188,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
 {
     String8 resolved = {0};
     bool selected = codegen_inline_assembly_resolve_template(selector->arena, selector->program, selector->function, instruction, extra,
-                                                              registers, vector_registers, ASSEMBLY_SYNTAX_ATT, &resolved, 0);
+                                                              registers, vector_registers, ASSEMBLY_SYNTAX_ATT, &resolved,
+                                                              &selector->failure_detail);
     // Each retained line below gets a newline, including a final unterminated
     // template line. Reserve that byte instead of overwriting the next arena
     // object before the standalone assembler parses it.
@@ -4888,7 +5228,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
     {
         encoded = assembly_encode(selector->arena, (String8){.pointer = instructions, .length = instruction_length},
                                   (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_ATT,
-                                                          .private_inline_labels = true});
+                                                          .private_inline_labels = true, .inline_assembly = true});
         selected = encoded.diagnostic_count == 0;
     }
     if (selected)
@@ -4967,6 +5307,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     bool general_goto = instruction->target_count && first_continuation != UINT32_MAX;
     MachineAssemblyLabelPlan label_plan = {.literal = extra.literal};
     bool labels_planned = !general_goto || machine_selection_assembly_label_plan(selector->arena, function, instruction, extra, &label_plan);
+    u32 label_reference_count = 0;
+    if (!labels_planned && machine_selection_assembly_label_reference_capacity(extra.literal, &label_reference_count) &&
+        label_reference_count)
+    {
+        selector->failure_detail = S8("inline assembly label references (%l) are unsupported in this template form");
+    }
     IrInstructionExtra source_extra = extra;
     source_extra.literal = label_plan.literal;
     bool selected = instruction->operand_count <= MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT &&
@@ -5933,8 +6279,9 @@ BUSTER_GLOBAL_LOCAL MachineX64SignaturePlan const* machine_x64_signature_plan(Ma
 // Everything CALL selection resolves before it emits a row: who is called,
 // where each argument travels, and how the result comes back. The shapes
 // and placements are the signature plan's rows; a variadic call's tail is
-// classified per call into arena rows that start with a copy of the fixed
-// part, so the staging below indexes one array either way.
+// classified per call into selector-owned rows that start with a copy of
+// the fixed part, so the staging below indexes one array either way. These
+// rows are consumed synchronously and no pointer is retained in MIR.
 typedef struct MachineX64CallPlan MachineX64CallPlan;
 struct MachineX64CallPlan
 {
@@ -6030,15 +6377,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
                 // An unused indirect result still needs backing storage.
                 plan->indirect_result_slot = machine_x64_append_slot(selector, plan->return_shape.byte_size, 8);
             }
-            if (planned && plan->return_shape.stack_alignment > 16)
+            if (planned && plan->return_shape.stack_alignment > 8)
             {
                 u64 backing_size = (u64)plan->return_shape.byte_size + plan->return_shape.stack_alignment - 1;
                 planned = backing_size <= UINT32_MAX;
                 if (planned)
                 {
                     // Internal aggregate slots are only eight-aligned. Give
-                    // an external callee enough slack for its naturally
-                    // aligned vector store, then copy back after the call.
+                    // a callee enough slack for the result type's natural
+                    // alignment, including sixteen, then copy back after the call.
                     plan->indirect_result_backing_slot = machine_x64_append_slot(selector, (u32)backing_size, 8);
                 }
             }
@@ -6061,8 +6408,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
         plan->argument_placements = signature->argument_placements;
         if (plan->argument_count > signature->parameter_count)
         {
-            MachineX64ValueShape* tail_shapes = arena_allocate(selector->arena, MachineX64ValueShape, plan->argument_count);
-            MachineX64ArgumentPlacement* tail_placements = arena_allocate(selector->arena, MachineX64ArgumentPlacement, plan->argument_count);
+            if (plan->argument_count > selector->variadic_argument_capacity)
+            {
+                // Exact growth keeps each request equal to one old per-call
+                // request; retained logical bytes cannot exceed their sum.
+                selector->variadic_argument_shapes = arena_allocate(selector->arena, MachineX64ValueShape, plan->argument_count);
+                selector->variadic_argument_placements = arena_allocate(selector->arena, MachineX64ArgumentPlacement, plan->argument_count);
+                selector->variadic_argument_capacity = plan->argument_count;
+            }
+            MachineX64ValueShape* tail_shapes = selector->variadic_argument_shapes;
+            MachineX64ArgumentPlacement* tail_placements = selector->variadic_argument_placements;
             for (u32 parameter_index = 0; parameter_index < signature->parameter_count; parameter_index += 1)
             {
                 tail_shapes[parameter_index] = signature->argument_shapes[parameter_index];
@@ -7195,24 +7550,35 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_switch(MachineX64Selector* selector,
     if (machine_x64_operand_register(selector, instruction->operands[0], &condition_register) && instruction->target_count &&
         instruction->target_count == instruction->immediate_count + 1 && instruction->immediates)
     {
-        u16 compare_width = 64;
+        u32 value_width = 64;
         if (instruction->operands[0].value < selector->function->value_count)
         {
-            MachineTypeClass condition_class =
-                machine_x64_type_class(selector, selector->function->values[instruction->operands[0].value].canonical_type);
-            // An integer at most 32 bits wide is one the class does not call
-            // wide.
-            if (condition_class.kind == IR_TYPE_BOOLEAN ||
-                (condition_class.kind == IR_TYPE_INTEGER && !(condition_class.flags & MACHINE_TYPE_CLASS_WIDE)))
+            IrType* condition_type = ir_type_from_id(&selector->program->types,
+                                                      selector->function->values[instruction->operands[0].value].canonical_type);
+            if (condition_type && condition_type->kind == IR_TYPE_BOOLEAN)
             {
-                compare_width = 32;
+                value_width = 1;
             }
+            else if (condition_type && condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width < 64)
+            {
+                value_width = condition_type->bit_width;
+            }
+        }
+        u16 compare_width = value_width <= 32 ? 32 : 64;
+        u64 value_mask = value_width == 64 ? UINT64_MAX : (UINT64_C(1) << value_width) - 1;
+        // SWITCH compares selector-width images, independently of signedness
+        // and of any extension left in a register by its producer.
+        if (value_width < compare_width)
+        {
+            u32 mask_register = machine_x64_select_immediate_register(selector, value_mask);
+            condition_register = machine_x64_select_arithmetic_row(selector, compare_width == 32 ? MACHINE_X64_AND32 : MACHINE_X64_AND64,
+                                                                   condition_register, mask_register);
         }
         u32 first_case = selector->switch_cases.total_count;
         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
         {
             machine_x64_append_switch_case(selector, (MachineSwitchCase){
-                                                         .value = instruction->immediates[case_index],
+                                                         .value = instruction->immediates[case_index] & value_mask,
                                                          .target_block = machine_x64_select_block_entry(selector, instruction->targets[case_index].value),
                                                          .compare_width = compare_width,
                                                      });
@@ -7510,6 +7876,14 @@ struct MachineX64CandidateRow
 
 #include <buster/lib/compiler/codegen/machine_x86_64_predicate.c>
 
+// Canonical block IDs need not start at the function entry. Preserve their
+// identity while publishing entry-first MIR and remapping every CFG edge.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+{
+    u32 suffix_count = function->block_count - function->entry.value;
+    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+}
+
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                               bool position_independent, bool assume_validated, bool predicate_residency,
                                                               bool preserve_debug_values, MachineSelectionModule* module)
@@ -7518,7 +7892,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (!arena || !program || !function || target.cpu_arch != CPU_ARCH_X86_64 || function->state != IR_FUNCTION_LOWERED || !function->block_count ||
-        function->entry.value != 0)
+        function->entry.value >= function->block_count)
     {
         return result;
     }
@@ -7634,8 +8008,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     selector.parameter_placements = signature_parameter_placements;
     selector.parameter_count = function_type->parameter_count;
     selector.argument_values = arena_allocate(arena, u32, function_type->parameter_count);
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         u32 parameter_count = 0;
         IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
         for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -7645,6 +8020,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             bool windows_va_list = machine_x64_type_is_windows_va_list(ir_type_from_id(&program->types, parameter->canonical_type), target);
             bool wide = (parameter_class.flags & MACHINE_TYPE_CLASS_INTEGER128) != 0 ||
                         machine_x64_type_is_f80(&selector, parameter->canonical_type) ||
+                        machine_x64_type_is_f128(program, target, parameter->canonical_type) ||
                         (parameter_class.kind == IR_TYPE_VECTOR && (parameter_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
                          parameter_class.size_log2 <= 4);
             bool vector = selector.vector_registers_supported && (parameter_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER);
@@ -7786,6 +8162,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     bool returns_twice_free = true;
     u32 walk_ordinal = 0;
     u32 expanded_blocks = 0;
+    if (function->entry.value)
+    {
+        selector.block_entries = arena_allocate(arena, u32, function->block_count);
+        selector.block_exits = arena_allocate(arena, u32, function->block_count);
+    }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -7952,6 +8333,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
         block_candidate_counts[block_index] = block_candidate_count;
     }
+    if (function->entry.value)
+    {
+        u32 next_block = 0;
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+        {
+            u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
+            u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+            selector.block_entries[block_index] = next_block;
+            selector.block_exits[block_index] = next_block + block_width - 1u;
+            next_block += block_width;
+        }
+        BUSTER_CHECK(next_block == expanded_blocks);
+    }
     // Block-parameter incoming values are uses on CFG edges rather than row
     // operands. Keep them visible to aliasing and branch fusion: in
     // particular, a comparison that also supplies a promoted local is not a
@@ -8077,8 +8471,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
     // Classification pass: direct locals become stack slots, every other
     // scalar result becomes a virtual register, in stable value-id order.
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         IrBlock* block = function->blocks + block_index;
         u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
         u32 block_first_row = block->first_instruction.value;
@@ -8183,8 +8578,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             // Address producers hold an 8-byte address in their vreg no
             // matter what their declared canonical type is, exactly like
             // the canonical path stores an address in the value's slot.
-            bool float_scalar = (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
-                                (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
+            bool float_scalar =
+                !machine_x64_type_is_f128(program, selector.target, value->canonical_type) &&
+                (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
+                    (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
             bool windows_va_list_register = windows_va_list &&
                                             (instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
                                              instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL);
@@ -8198,7 +8595,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                                          });
                 selector.value_virtual_registers[instruction->result.value] = register_index;
             }
-            else if (machine_x64_type_is_f80(&selector, value->canonical_type))
+            else if (machine_x64_type_is_f80(&selector, value->canonical_type) ||
+                     machine_x64_type_is_f128(program, selector.target, value->canonical_type))
             {
                 selector.value_stack_slots[instruction->result.value] = machine_x64_append_slot(&selector, 16, 16);
             }
@@ -8482,8 +8880,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         selector.virtual_register_count ? (MachineVirtualRegister*)(selector.builder.virtual_registers.first + 1) : 0;
     u32 typed_instruction_count = 0;
     u32 simd_operation_count = 0;
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         IrBlock* block = function->blocks + block_index;
         selector.current_block = block_index;
         machine_builder_block_begin(&selector.builder);
@@ -8506,7 +8905,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
         selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
-        if (block_index == 0)
+        if (block_index == function->entry.value)
         {
             if (function_type->is_variadic && windows_abi)
             {
@@ -9196,6 +9595,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     if (!selector.supported)
     {
         result.failed_opcode = selector.failed_opcode;
+        result.failure_detail = selector.failure_detail;
         return result;
     }
     u32 canonical_edge_offset = selector.builder.edges.total_count;
@@ -9280,7 +9680,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
-    if (!machine_function_split_parameter_edges(arena, &result.function))
+    if (!machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
+                                                                  &selector.block_entries, function->block_count))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
@@ -9302,6 +9703,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
+    result.canonical_block_entries = selector.block_entries;
     result.supported = true;
     result.selector_certified = true;
     result.returns_value = returns_value;
@@ -9320,8 +9722,16 @@ struct MachineX64Encoder
     // Logical frame offsets remain relative to the top of the fixed frame.
     // Dynamic Win64 frames put physical RBP at its bottom for PE unwinding.
     u32 frame_base_offset;
+    // The last allocator edit that stored a general register to a frame
+    // offset, and the byte count it ended at. A reload of the same register
+    // from the same offset starting exactly there, inside the same block, is
+    // the verified store-reload-same-slot-64 rewrite: it emits nothing.
+    u32 frame_store_end;
+    u32 frame_store_offset;
+    u8 frame_store_register;
+    bool frame_store_valid;
     bool overflow;
-    u8 reserved[3];
+    u8 reserved[1];
 };
 
 // These exact-form keys are generated-snapshot identities, not architectural
@@ -9424,29 +9834,70 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512_features[] = {S8_INITIALIZE
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER("cx16")};
 
 // Expansion/prologue instructions use a small, closed set of physical
-// shapes.  Resolve each shape through the metadata selector once during the
-// serial prewarm lane and publish only the resulting opaque machine token to
+// shapes.  Each shape resolves through the metadata selector once, on a
+// serial thread, and only the resulting opaque machine token is published to
 // workers.  The signature deliberately describes physical shape/value
 // classes, not register numbers or byte templates; dynamic registers,
 // displacements, and immediates are still validated by the metadata transform
 // on every emission.
+//
+// The serial prewarm registers the closed set rather than resolving it.  Its
+// 336 queries each run a generic selector search -- about 45 M instructions
+// in total, more than a one-function compile spends on everything else --
+// while an ordinary compile reaches a few dozen of the 267 distinct shapes.
+// Registration hashes each query and keeps its parameters; the first serial
+// lookup of a registered shape resolves the same query the eager walk would
+// have resolved first, and a shape outside the closed set still misses and
+// fails closed.  machine_x86_64_exact_prewarm_all_shapes resolves every
+// registration, including the duplicate-signature agreement checks, and must
+// run before a gang may emit.
 #define MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY 288u
 #define MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY 512u
+#define MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY 384u
+#define MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY 4u
+#define MACHINE_X64_METADATA_SHAPE_PENDING 0u
+#define MACHINE_X64_METADATA_SHAPE_VALID 1u
+#define MACHINE_X64_METADATA_SHAPE_INVALID 2u
 typedef struct MachineX64MetadataShapeCacheEntry MachineX64MetadataShapeCacheEntry;
 struct MachineX64MetadataShapeCacheEntry
 {
     u64 signature;
     u64 guard;
     BusterX86MetadataMachineExactToken token;
+    // First registration of this signature: the query eager resolution
+    // would have selected with.
+    u16 registration;
+    u8 state;
+    u8 reserved;
+};
+BUSTER_CT_CHECK(sizeof(MachineX64MetadataShapeCacheEntry) == 24);
+// One registered closed-set query.  Mnemonics are string literals and every
+// feature list names a static machine_x64_*_features array, so a query stays
+// valid until it is resolved.
+typedef struct MachineX64MetadataShapeRegistration MachineX64MetadataShapeRegistration;
+struct MachineX64MetadataShapeRegistration
+{
+    String8 mnemonic;
+    BusterX86MetadataFeatureInput features;
+    BusterX86MetadataPhysicalAttributes attributes;
+    BusterX86MetadataPhysicalOperand operands[MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY];
+    u32 operand_count;
+    u32 entry;
 };
 BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeCacheEntry machine_x64_metadata_shape_cache[MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY];
 BUSTER_GLOBAL_LOCAL u16 machine_x64_metadata_shape_cache_slots[MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY];
+BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeRegistration machine_x64_metadata_shape_registrations[MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY];
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_registration_count;
 BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_count;
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_resolved_count;
 BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_invalid_count;
 BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_ready;
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_complete;
 BUSTER_CT_CHECK((MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u)) == 0);
+BUSTER_CT_CHECK(MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY <= UINT16_MAX);
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void);
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void);
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fixed_templates(void);
 
 enum
@@ -10411,6 +10862,10 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_farith_sequ
 // FCMP_SET's parity repair is encoded with the exact SETNP/AND pair as the
 // primary token.  For the OR-parity variants the worker swaps those two
 // metadata tokens for SETP/OR; no byte template enters the sequence path.
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_float_comparison_conditions[] = {
+    BUSTER_X86_CONDITION_EQUAL, BUSTER_X86_CONDITION_NOT_EQUAL, BUSTER_X86_CONDITION_BELOW,
+    BUSTER_X86_CONDITION_BELOW_EQUAL, BUSTER_X86_CONDITION_ABOVE, BUSTER_X86_CONDITION_ABOVE_EQUAL,
+};
 #define MACHINE_X64_FCMP_MOVQ_TO_STEP(slot_value) MACHINE_X64_FP_MOVQ_TO_STEP(slot_value)
 #define MACHINE_X64_FCMP_MOVQ_TO_XMM1_STEP(slot_value) MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(slot_value)
 #define MACHINE_X64_FCMP_COMI_STEP(form_id, form_hash) \
@@ -10433,14 +10888,14 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_farith_sequ
      MACHINE_X64_FCMP_SETCC_STEP(set_id, set_hash), MACHINE_X64_FCMP_PARITY_SETNP_STEP, MACHINE_X64_FCMP_PARITY_AND_STEP, MACHINE_X64_FCMP_MOVZX_STEP}
 
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_fcmp_set_sequence_steps[12][7] = {
-    [0] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10265u, 0x261b81212af08017),
-    [1] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10267u, 0x99647caf50cf7fff),
+    [0] = MACHINE_X64_FCMP_STEPS(10430u, 0x758a837bb57fa186, 10265u, 0x261b81212af08017),
+    [1] = MACHINE_X64_FCMP_STEPS(10430u, 0x758a837bb57fa186, 10267u, 0x99647caf50cf7fff),
     [2] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10261u, 0x0bc47fa18ee6a6de),
     [3] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10269u, 0x73419bd793371f04),
     [4] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10271u, 0x4c681fe5d1e14b1),
     [5] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10263u, 0x7022443cd4a81cf5),
-    [6] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10265u, 0x261b81212af08017),
-    [7] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10267u, 0x99647caf50cf7fff),
+    [6] = MACHINE_X64_FCMP_STEPS(10457u, 0xf0a4b9d9331f46de, 10265u, 0x261b81212af08017),
+    [7] = MACHINE_X64_FCMP_STEPS(10457u, 0xf0a4b9d9331f46de, 10267u, 0x99647caf50cf7fff),
     [8] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10261u, 0x0bc47fa18ee6a6de),
     [9] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10269u, 0x73419bd793371f04),
     [10] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10271u, 0x4c681fe5d1e14b1),
@@ -10470,41 +10925,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_fcmp_alternate_tokens_valid;
 #define MACHINE_X64_SETCC_MOVZX_STEP \
     {.key = {MACHINE_X64_MOVZX8_RR_EXACT_FORM_ID, UINT64_C(0xa9d675ab86fb1641)}, .operand_count = 2, .operand_slots = {0, 0}, \
      .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX, MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX}, .operand_widths = {64, 8}}
-BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_setcc_sequence_steps[16][2] = {
-    [0] = {MACHINE_X64_SETCC_STEP(10257u, 0x31ddc1ed865a5575), MACHINE_X64_SETCC_MOVZX_STEP},
-    [1] = {MACHINE_X64_SETCC_STEP(10259u, 0x81dd033fae75c1c6), MACHINE_X64_SETCC_MOVZX_STEP},
-    [2] = {MACHINE_X64_SETCC_STEP(10261u, 0x0bc47fa18ee6a6de), MACHINE_X64_SETCC_MOVZX_STEP},
-    [3] = {MACHINE_X64_SETCC_STEP(10263u, 0x7022443cd4a81cf5), MACHINE_X64_SETCC_MOVZX_STEP},
-    [4] = {MACHINE_X64_SETCC_STEP(10265u, 0x261b81212af08017), MACHINE_X64_SETCC_MOVZX_STEP},
-    [5] = {MACHINE_X64_SETCC_STEP(10267u, 0x99647caf50cf7fff), MACHINE_X64_SETCC_MOVZX_STEP},
-    [6] = {MACHINE_X64_SETCC_STEP(10269u, 0x73419bd793371f04), MACHINE_X64_SETCC_MOVZX_STEP},
-    [7] = {MACHINE_X64_SETCC_STEP(10271u, 0x4c681fe5d1e14b1), MACHINE_X64_SETCC_MOVZX_STEP},
-    [8] = {MACHINE_X64_SETCC_STEP(10643u, 0x0f501b348d5ad3ab), MACHINE_X64_SETCC_MOVZX_STEP},
-    [9] = {MACHINE_X64_SETCC_STEP(10645u, 0xe718192d18926b3f), MACHINE_X64_SETCC_MOVZX_STEP},
-    [10] = {MACHINE_X64_SETCC_STEP(10647u, 0x65dc8e342334f3cb), MACHINE_X64_SETCC_MOVZX_STEP},
-    [11] = {MACHINE_X64_SETCC_STEP(10649u, 0xd15c6a2ed2b79fc2), MACHINE_X64_SETCC_MOVZX_STEP},
-    [12] = {MACHINE_X64_SETCC_STEP(10651u, 0xb45e8ae6fd038751), MACHINE_X64_SETCC_MOVZX_STEP},
-    [13] = {MACHINE_X64_SETCC_STEP(10653u, 0x4efeb1d47cbd56a0), MACHINE_X64_SETCC_MOVZX_STEP},
-    [14] = {MACHINE_X64_SETCC_STEP(10655u, 0x6e81bfd37e941496), MACHINE_X64_SETCC_MOVZX_STEP},
-    [15] = {MACHINE_X64_SETCC_STEP(10657u, 0xa2843c8dd1c8c547), MACHINE_X64_SETCC_MOVZX_STEP},
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_setcc_sequence_steps[BUSTER_X86_CONDITION_COUNT][2] = {
+    [BUSTER_X86_CONDITION_OVERFLOW] = {MACHINE_X64_SETCC_STEP(10257u, 0x31ddc1ed865a5575), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_NOT_OVERFLOW] = {MACHINE_X64_SETCC_STEP(10259u, 0x81dd033fae75c1c6), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_BELOW] = {MACHINE_X64_SETCC_STEP(10261u, 0x0bc47fa18ee6a6de), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_ABOVE_EQUAL] = {MACHINE_X64_SETCC_STEP(10263u, 0x7022443cd4a81cf5), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_EQUAL] = {MACHINE_X64_SETCC_STEP(10265u, 0x261b81212af08017), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_NOT_EQUAL] = {MACHINE_X64_SETCC_STEP(10267u, 0x99647caf50cf7fff), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_BELOW_EQUAL] = {MACHINE_X64_SETCC_STEP(10269u, 0x73419bd793371f04), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_ABOVE] = {MACHINE_X64_SETCC_STEP(10271u, 0x4c681fe5d1e14b1), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_SIGN] = {MACHINE_X64_SETCC_STEP(10643u, 0x0f501b348d5ad3ab), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_NOT_SIGN] = {MACHINE_X64_SETCC_STEP(10645u, 0xe718192d18926b3f), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_PARITY] = {MACHINE_X64_SETCC_STEP(10647u, 0x65dc8e342334f3cb), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_NOT_PARITY] = {MACHINE_X64_SETCC_STEP(10649u, 0xd15c6a2ed2b79fc2), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_LESS] = {MACHINE_X64_SETCC_STEP(10651u, 0xb45e8ae6fd038751), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_GREATER_EQUAL] = {MACHINE_X64_SETCC_STEP(10653u, 0x4efeb1d47cbd56a0), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_LESS_EQUAL] = {MACHINE_X64_SETCC_STEP(10655u, 0x6e81bfd37e941496), MACHINE_X64_SETCC_MOVZX_STEP},
+    [BUSTER_X86_CONDITION_GREATER] = {MACHINE_X64_SETCC_STEP(10657u, 0xa2843c8dd1c8c547), MACHINE_X64_SETCC_MOVZX_STEP},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_setcc_sequence_variants[] = {
-    [0] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[0]},
-    [1] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[1]},
-    [2] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[2]},
-    [3] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[3]},
-    [4] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[4]},
-    [5] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[5]},
-    [6] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[6]},
-    [7] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[7]},
-    [8] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[8]},
-    [9] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[9]},
-    [10] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[10]},
-    [11] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[11]},
-    [12] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[12]},
-    [13] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[13]},
-    [14] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[14]},
-    [15] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[15]},
+#define BUSTER_X86_CONDITION(name, nibble, suffix, alias1, alias2, jump, set, move) \
+    [BUSTER_X86_CONDITION_##name] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[BUSTER_X86_CONDITION_##name]},
+#include <buster/lib/compiler/assembly/x86_64_conditions.inc>
+#undef BUSTER_X86_CONDITION
 };
 
 #define MACHINE_X64_JCC_STEP(form_id, form_hash) \
@@ -10513,41 +10956,29 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_setcc_seque
 #define MACHINE_X64_JMP_STEP \
     {.key = {MACHINE_X64_JMP_EXACT_FORM_ID, UINT64_C(0xab9c4b53fce14f6e)}, .operand_count = 1, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP, \
      .operand_slots = {1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO}, .operand_widths = {32}}
-BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_jcc_sequence_steps[16][2] = {
-    [0] = {MACHINE_X64_JCC_STEP(10240u, 0x663680e7ff926f87), MACHINE_X64_JMP_STEP},
-    [1] = {MACHINE_X64_JCC_STEP(10243u, 0x5b0b1a9540ee71fb), MACHINE_X64_JMP_STEP},
-    [2] = {MACHINE_X64_JCC_STEP(10245u, 0x311d2176cc680771), MACHINE_X64_JMP_STEP},
-    [3] = {MACHINE_X64_JCC_STEP(10247u, 0xb78eb0afc41232dd), MACHINE_X64_JMP_STEP},
-    [4] = {MACHINE_X64_JCC_STEP(10249u, 0x5b6e3cd6eb63b76c), MACHINE_X64_JMP_STEP},
-    [5] = {MACHINE_X64_JCC_STEP(10251u, 0x4d8e220c403f8696), MACHINE_X64_JMP_STEP},
-    [6] = {MACHINE_X64_JCC_STEP(10253u, 0xd3e93216ca69f952), MACHINE_X64_JMP_STEP},
-    [7] = {MACHINE_X64_JCC_STEP(10255u, 0x0da05f55f9ead40a), MACHINE_X64_JMP_STEP},
-    [8] = {MACHINE_X64_JCC_STEP(10627u, 0x1b3720aa4829444c), MACHINE_X64_JMP_STEP},
-    [9] = {MACHINE_X64_JCC_STEP(10629u, 0x744e31783e151c7b), MACHINE_X64_JMP_STEP},
-    [10] = {MACHINE_X64_JCC_STEP(10631u, 0xf3d3864103433402), MACHINE_X64_JMP_STEP},
-    [11] = {MACHINE_X64_JCC_STEP(10633u, 0xf6a6442e85dfa8e4), MACHINE_X64_JMP_STEP},
-    [12] = {MACHINE_X64_JCC_STEP(10635u, 0xad1a1b6b4487b442), MACHINE_X64_JMP_STEP},
-    [13] = {MACHINE_X64_JCC_STEP(10637u, 0xdc02d320fd463c30), MACHINE_X64_JMP_STEP},
-    [14] = {MACHINE_X64_JCC_STEP(10639u, 0xbbb60554e5ce4380), MACHINE_X64_JMP_STEP},
-    [15] = {MACHINE_X64_JCC_STEP(10641u, 0x6c77826ff61644d0), MACHINE_X64_JMP_STEP},
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_jcc_sequence_steps[BUSTER_X86_CONDITION_COUNT][2] = {
+    [BUSTER_X86_CONDITION_OVERFLOW] = {MACHINE_X64_JCC_STEP(10240u, 0x663680e7ff926f87), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_NOT_OVERFLOW] = {MACHINE_X64_JCC_STEP(10243u, 0x5b0b1a9540ee71fb), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_BELOW] = {MACHINE_X64_JCC_STEP(10245u, 0x311d2176cc680771), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_ABOVE_EQUAL] = {MACHINE_X64_JCC_STEP(10247u, 0xb78eb0afc41232dd), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_EQUAL] = {MACHINE_X64_JCC_STEP(10249u, 0x5b6e3cd6eb63b76c), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_NOT_EQUAL] = {MACHINE_X64_JCC_STEP(10251u, 0x4d8e220c403f8696), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_BELOW_EQUAL] = {MACHINE_X64_JCC_STEP(10253u, 0xd3e93216ca69f952), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_ABOVE] = {MACHINE_X64_JCC_STEP(10255u, 0x0da05f55f9ead40a), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_SIGN] = {MACHINE_X64_JCC_STEP(10627u, 0x1b3720aa4829444c), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_NOT_SIGN] = {MACHINE_X64_JCC_STEP(10629u, 0x744e31783e151c7b), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_PARITY] = {MACHINE_X64_JCC_STEP(10631u, 0xf3d3864103433402), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_NOT_PARITY] = {MACHINE_X64_JCC_STEP(10633u, 0xf6a6442e85dfa8e4), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_LESS] = {MACHINE_X64_JCC_STEP(10635u, 0xad1a1b6b4487b442), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_GREATER_EQUAL] = {MACHINE_X64_JCC_STEP(10637u, 0xdc02d320fd463c30), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_LESS_EQUAL] = {MACHINE_X64_JCC_STEP(10639u, 0xbbb60554e5ce4380), MACHINE_X64_JMP_STEP},
+    [BUSTER_X86_CONDITION_GREATER] = {MACHINE_X64_JCC_STEP(10641u, 0x6c77826ff61644d0), MACHINE_X64_JMP_STEP},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_jcc_sequence_variants[] = {
-    [0] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[0]},
-    [1] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[1]},
-    [2] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[2]},
-    [3] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[3]},
-    [4] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[4]},
-    [5] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[5]},
-    [6] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[6]},
-    [7] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[7]},
-    [8] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[8]},
-    [9] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[9]},
-    [10] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[10]},
-    [11] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[11]},
-    [12] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[12]},
-    [13] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[13]},
-    [14] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[14]},
-    [15] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[15]},
+#define BUSTER_X86_CONDITION(name, nibble, suffix, alias1, alias2, jump, set, move) \
+    [BUSTER_X86_CONDITION_##name] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[BUSTER_X86_CONDITION_##name]},
+#include <buster/lib/compiler/assembly/x86_64_conditions.inc>
+#undef BUSTER_X86_CONDITION
 };
 
 #undef MACHINE_X64_JMP_STEP
@@ -10709,8 +11140,8 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequence const machine_x64_exact_sequence_tab
     },
     [44] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 44, .variant_count = 8, .variants = machine_x64_farith_sequence_variants},
     [45] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 45, .variant_count = 12, .variants = machine_x64_fcmp_set_sequence_variants},
-    [47] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 47, .variant_count = 16, .variants = machine_x64_setcc_sequence_variants},
-    [48] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 48, .variant_count = 16, .variants = machine_x64_jcc_sequence_variants},
+    [47] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 47, .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_setcc_sequence_variants), .variants = machine_x64_setcc_sequence_variants},
+    [48] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 48, .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_jcc_sequence_variants), .variants = machine_x64_jcc_sequence_variants},
 };
 
 // DIRECT recipe index -> compact unique exact-plan identity.  Width variants
@@ -10987,7 +11418,6 @@ enum
     MACHINE_X64_FIXED_TEMPLATE_CMP32_RAX_RCX = MACHINE_X64_FIXED_TEMPLATE_CMP64_RCX + 16,
     MACHINE_X64_FIXED_TEMPLATE_CMP64_RAX_RCX,
     MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP,
-    MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP,
     // sub rsp, imm8 / imm32 with the immediate patched.  The prologue passes
     // 1..127 to the byte form and 128..4096 to the wide one, which are the
     // value classes the two rows were proven with.
@@ -11014,7 +11444,18 @@ enum
     MACHINE_X64_FIXED_TEMPLATE_IDIV_RCX = MACHINE_X64_FIXED_TEMPLATE_DIV_RCX + 2,
     MACHINE_X64_FIXED_TEMPLATE_CDQ_CQO = MACHINE_X64_FIXED_TEMPLATE_IDIV_RCX + 2,
     MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX = MACHINE_X64_FIXED_TEMPLATE_CDQ_CQO + 2,
-    MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT = MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + 2,
+    // Verified local rewrites (docs/machine-rewrite-campaign.md): xor r32, r32
+    // for a zero materialization whose flags are dead, and LEAVE for a System
+    // V epilogue without callee-saved pushes.
+    MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF = MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + 2,
+    MACHINE_X64_FIXED_TEMPLATE_LEAVE = MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + 16,
+    // movups xmm0 <-> [rbp + disp8/disp32] with the displacement patched: one
+    // sixteen-byte aggregate-copy chunk at a frame offset (frame-copy-16).
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32,
+    MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT,
 };
 // Recipe variants and sequence steps whose operands are all fixed -- a zero
 // relative, a rip-relative zero, RAX/RDX/RSP, XMM0/XMM1, k0/k1 -- plus at
@@ -11271,6 +11712,46 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_plans(BusterX86MetadataFormKe
     }
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_x64_condition_checked_bindings;
+BUSTER_GLOBAL_LOCAL u32 machine_x64_condition_mismatched_bindings;
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_condition_form_agrees(u32 family, u32 condition, BusterX86MetadataFormKey key)
+{
+    BusterX86MetadataForm form = {0};
+    bool agrees = family < BUSTER_X86_CONDITION_FAMILY_COUNT && condition < BUSTER_X86_CONDITION_COUNT &&
+                  buster_x86_metadata_form(key.form_id, &form) && form.stable_hash == key.stable_hash;
+    if (agrees)
+    {
+        String8 expected = buster_x86_metadata_condition_mnemonic(family, condition);
+        agrees = expected.length != 0 && string_equal(expected, buster_x86_metadata_string_span(form.iclass));
+    }
+    return agrees;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_check_condition_binding(u32 family, u32 condition, BusterX86MetadataFormKey key)
+{
+    bool agrees = machine_x64_condition_form_agrees(family, condition, key);
+    machine_x64_condition_checked_bindings += 1;
+    machine_x64_condition_mismatched_bindings += !agrees;
+    return agrees;
+}
+
+#if BUSTER_INCLUDE_TESTS
+MachineX64ConditionBindingAudit machine_x64_test_condition_binding_audit(void)
+{
+    machine_x86_64_exact_prewarm();
+    return (MachineX64ConditionBindingAudit){
+        .checked_bindings = machine_x64_condition_checked_bindings,
+        .mismatched_bindings = machine_x64_condition_mismatched_bindings,
+    };
+}
+
+bool machine_x64_test_condition_form_agrees(u32 family, u32 condition, u32 form_id, u64 stable_hash)
+{
+    return machine_x64_condition_form_agrees(family, condition, (BusterX86MetadataFormKey){form_id, stable_hash});
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fcmp_alternate_tokens(void)
 {
     // FCMP_SET's OR-parity repair uses two alternate BASE forms.  Prepare
@@ -11279,7 +11760,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fcmp_alternate_tokens(void)
     machine_x64_fcmp_alternate_tokens_valid = false;
     BusterX86MetadataExactPlan setp_plan = {0};
     BusterX86MetadataExactPlan or_plan = {0};
-    bool setp_prepared = buster_x86_metadata_exact_plan_prepare((BusterX86MetadataFormKey){10647u, UINT64_C(0x65dc8e342334f3cb)}, &setp_plan);
+    BusterX86MetadataFormKey setp_key = {10647u, UINT64_C(0x65dc8e342334f3cb)};
+    bool setp_agrees = machine_x64_exact_check_condition_binding(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_PARITY, setp_key);
+    bool setp_prepared = setp_agrees && buster_x86_metadata_exact_plan_prepare(setp_key, &setp_plan);
     bool or_prepared = buster_x86_metadata_exact_plan_prepare((BusterX86MetadataFormKey){9631u, UINT64_C(0x89a3abb502bbc55a)}, &or_plan);
     machine_x64_fcmp_alternate_tokens_valid = setp_prepared && or_prepared &&
                                                buster_x86_metadata_machine_exact_token_for_plan(setp_plan, (BusterX86MetadataFeatureInput){0}, &machine_x64_fcmp_setp_token) &&
@@ -11310,11 +11793,24 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_sequence_entry(MachineX64Prep
         }
         for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
         {
-        MachineX64ExactSequenceStep const* step = variant->steps + step_index;
+            MachineX64ExactSequenceStep const* step = variant->steps + step_index;
             BusterX86MetadataExactPlan step_plan = {0};
             BusterX86MetadataMachineExactToken* token = entry->sequence_tokens +
                 variant_index * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS + step_index;
-            bool prepared_step = buster_x86_metadata_exact_plan_prepare(step->key, &step_plan);
+            bool condition_step = true;
+            if ((registry_entry->opcode == MACHINE_X64_SETCC || registry_entry->opcode == MACHINE_X64_JCC) && step_index == 0)
+            {
+                u32 family = registry_entry->opcode == MACHINE_X64_SETCC ? BUSTER_X86_CONDITION_FAMILY_SET : BUSTER_X86_CONDITION_FAMILY_JUMP;
+                condition_step = machine_x64_exact_check_condition_binding(family, variant_index, step->key);
+            }
+            else if (registry_entry->opcode == MACHINE_X64_FCMP_SET && (step_index == 3 || step_index == 4))
+            {
+                u32 condition = step_index == 3
+                                    ? machine_x64_float_comparison_conditions[variant_index % BUSTER_ARRAY_LENGTH(machine_x64_float_comparison_conditions)]
+                                    : BUSTER_X86_CONDITION_NOT_PARITY;
+                condition_step = machine_x64_exact_check_condition_binding(BUSTER_X86_CONDITION_FAMILY_SET, condition, step->key);
+            }
+            bool prepared_step = condition_step && buster_x86_metadata_exact_plan_prepare(step->key, &step_plan);
             bool identity_step = prepared_step && step_plan.form_id == step->key.form_id && step_plan.stable_hash == step->key.stable_hash;
             bool token_step = identity_step && buster_x86_metadata_machine_exact_token_for_plan(
                                                         step_plan,
@@ -11414,8 +11910,13 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
         return 0;
 
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + machine_x64_gpr_encoding_table_count;
+    // The checked projection consumes zero, one, or two register nibbles.
+    // Higher key bits cannot affect any physical operand, feature, or patch
+    // probe. Ask the metadata authority once per distinct input, not once
+    // per duplicate dense-table row. The full 256-row representation stays.
+    u32 distinct_register_keys = 1u << (4u * register_operand_count);
     bool compact = true;
-    for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    for (u32 register_key = 0; register_key < distinct_register_keys; register_key += 1)
     {
         u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
         u32 register_value_index = 0;
@@ -11549,6 +12050,17 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
         }
         compact &= emitted.byte_count <= 3;
     }
+    // Replicate only the bytes the old metadata query would write. In
+    // particular, retain each destination's unused padding if an earlier
+    // rejected staging attempt touched this table slot. Publish neither the
+    // table count nor the ready bit until every distinct query/probe passed.
+    for (u32 register_key = distinct_register_keys; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    {
+        MachineX64GprEncoding const* source = table->encodings + (register_key & (distinct_register_keys - 1u));
+        MachineX64GprEncoding* destination = table->encodings + register_key;
+        memcpy(destination->bytes, source->bytes, source->byte_count);
+        destination->byte_count = source->byte_count;
+    }
     if (compact)
     {
         for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
@@ -11576,6 +12088,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
                         ? MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD
                         : 0u);
     machine_x64_gpr_encoding_table_count += 1;
+    WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLES_BUILT, 1);
     return (u8)machine_x64_gpr_encoding_table_count;
 }
 
@@ -11700,6 +12213,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_variable_memory_encoding_table(
     table->gpr_operand_slot = variant->operand_slots[gpr_operand_index];
     table->memory_operand_slot = variant->operand_slots[memory_operand_index];
     machine_x64_variable_memory_encoding_table_count += 1;
+    WORK_LEDGER_RECORD(TARGET_X86_VARIABLE_MEMORY_TABLES_BUILT, 1);
     return (u8)machine_x64_variable_memory_encoding_table_count;
 }
 
@@ -11779,14 +12293,17 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
 #define MACHINE_X64_CHUNK_DIRECTION_LOAD 0u
 #define MACHINE_X64_CHUNK_DIRECTION_STORE 1u
 BUSTER_GLOBAL_LOCAL u8 machine_x64_chunk_memory_tables[2][MACHINE_X64_CHUNK_WIDTH_COUNT];
-// Frame chunks are the closed RBP, forced-disp32 row of those same tables:
-// the record depends only on direction, width and data register, so prewarm
-// copies the sixteen RBP records of each table here and a spill or reload
-// reads one record instead of re-validating the table index and re-deriving
-// the displacement class and row stride per call. The frame base offset is
-// still added at emission time; it is a per-function fact. A zero byte count
+// Frame chunks are the closed RBP rows of those same tables: the record
+// depends only on direction, width, data register and displacement class, so
+// prewarm copies the sixteen RBP disp32 and disp8 records of each table here
+// and a spill or reload reads one record instead of re-validating the table
+// index and re-deriving the row stride per call. The frame base offset is
+// still added at emission time; it is a per-function fact, and the final
+// displacement picks the class: disp8 when it is a nonzero signed byte (the
+// same instruction, three bytes shorter), disp32 otherwise. A zero byte count
 // is the same refusal an unprepared table gave.
 BUSTER_GLOBAL_LOCAL MachineX64GprEncoding machine_x64_frame_chunk_encodings[2][MACHINE_X64_CHUNK_WIDTH_COUNT][16];
+BUSTER_GLOBAL_LOCAL MachineX64GprEncoding machine_x64_frame_chunk_disp8_encodings[2][MACHINE_X64_CHUNK_WIDTH_COUNT][16];
 // Chunk byte counts are 1, 2, 4 and 8 (machine_x64_copy_chunk); every other
 // value took the ladder's 64-bit arm, so it maps to the last width here.
 BUSTER_GLOBAL_LOCAL u8 const machine_x64_chunk_width_index[9] = {3, 0, 1, 3, 2, 3, 3, 3, 3};
@@ -11826,12 +12343,15 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
         for (u32 direction = 0; direction < 2; direction += 1)
         {
             u8 table_plus_one = machine_x64_chunk_memory_tables[direction][width_slot];
+            bool table_valid = table_plus_one && table_plus_one <= machine_x64_variable_memory_encoding_table_count;
             for (u32 reg = 0; reg < 16; reg += 1)
             {
                 machine_x64_frame_chunk_encodings[direction][width_slot][reg] =
-                    table_plus_one && table_plus_one <= machine_x64_variable_memory_encoding_table_count
-                        ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[2][reg + (MACHINE_X64_RBP << 4)]
-                        : (MachineX64GprEncoding){0};
+                    table_valid ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[2][reg + (MACHINE_X64_RBP << 4)]
+                                : (MachineX64GprEncoding){0};
+                machine_x64_frame_chunk_disp8_encodings[direction][width_slot][reg] =
+                    table_valid ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[1][reg + (MACHINE_X64_RBP << 4)]
+                                : (MachineX64GprEncoding){0};
             }
         }
     }
@@ -11878,6 +12398,8 @@ void machine_x86_64_exact_prewarm(void)
     bool plan_valid[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     machine_x64_gpr_encoding_table_count = 0;
     machine_x64_variable_memory_encoding_table_count = 0;
+    machine_x64_condition_checked_bindings = 0;
+    machine_x64_condition_mismatched_bindings = 0;
     machine_x64_exact_collect_plan_keys(keys, key_found);
     machine_x64_exact_prepare_plans(keys, key_found, prepared, plan_valid);
     machine_x64_exact_prepare_fcmp_alternate_tokens();
@@ -11890,7 +12412,18 @@ void machine_x86_64_exact_prewarm(void)
 
     // Every row was staged serially above.  The ready bit is written last;
     // codegen_prewarm() completes before any worker lane can observe globals.
+    // Closed-set shapes the templates did not reach stay registered but
+    // unresolved: a serial compile resolves the few it emits on first use.
     machine_x64_exact_opcode_map_ready = true;
+}
+
+// The gang form of the prewarm: also resolves every registered shape, so a
+// worker lane's bridge lookup is a plain read.  Call it serially before any
+// lane_run that may emit x86-64 code, like buster_x86_metadata_prewarm_all_forms.
+void machine_x86_64_exact_prewarm_all_shapes(void)
+{
+    machine_x86_64_exact_prewarm();
+    machine_x64_metadata_shape_cache_resolve_all();
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -12222,11 +12755,14 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
     {S8_INITIALIZER("SETBE"), 71},
     {S8_INITIALIZER("SETNB"), 73},
     {S8_INITIALIZER("SETNP"), 75},
+    {S8_INITIALIZER("LEAVE"), 82},
     {S8_INITIALIZER("KXNORQ"), 51},
     {S8_INITIALIZER("XGETBV"), 55},
     {S8_INITIALIZER("MOVDQU"), 76},
     {S8_INITIALIZER("FNSTCW"), 66},
+    {S8_INITIALIZER("FCOMIP"), 84},
     {S8_INITIALIZER("SETNBE"), 72},
+    {S8_INITIALIZER("MOVUPS"), 83},
     {S8_INITIALIZER("CMPXCHG"), 34},
     {S8_INITIALIZER("UCOMISD"), 35},
     {S8_INITIALIZER("UCOMISS"), 36},
@@ -12246,9 +12782,9 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
 
 // First row of each length, indexed by length - 2, with a closing bound. There
 // Closing bound for each mnemonic length group.
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 64, 69, 74, 77, 79, 81};
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 65, 72, 77, 80, 82, 84};
 
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 81);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 84);
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
                 MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH + 2u);
 
@@ -12376,17 +12912,17 @@ BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeHashes machine_x64_metadata_shape_has
     return hashes;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
-                                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                               BusterX86MetadataFeatureInput features,
-                                                               BusterX86MetadataPhysicalAttributes attributes)
+// Resolves one registered query exactly as the eager walk resolved it: the
+// generic selector, then the serial plan preparation and its machine token.
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_resolve(MachineX64MetadataShapeRegistration const* registration,
+                                                            BusterX86MetadataMachineExactToken* token)
 {
     BusterX86MetadataPhysicalQuery query = {
-        .mnemonic = mnemonic,
-        .operands = operands,
-        .operand_count = operand_count,
-        .features = features,
-        .attributes = attributes,
+        .mnemonic = registration->mnemonic,
+        .operands = registration->operand_count ? registration->operands : 0,
+        .operand_count = registration->operand_count,
+        .features = registration->features,
+        .attributes = registration->attributes,
         .address_size = 64,
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = false,
@@ -12395,66 +12931,155 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
         .source_semantics = false,
     };
     BusterX86MetadataSelectResult selected = buster_x86_metadata_select_form(query);
-    if (!machine_x64_metadata_shape_mnemonic_id(mnemonic) || selected.status != BUSTER_X86_METADATA_ENCODE_SUCCESS ||
-        selected.form_id == UINT32_MAX || !selected.stable_hash)
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
     BusterX86MetadataFormKey key = {.form_id = selected.form_id, .stable_hash = selected.stable_hash};
     BusterX86MetadataExactPlan plan = {0};
-    BusterX86MetadataMachineExactToken token = {0};
-    if (!buster_x86_metadata_exact_plan_prepare(key, &plan) ||
-        !buster_x86_metadata_machine_exact_token_for_plan(plan, features, &token))
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
-    MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
-    for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
-    {
-        MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + entry_index;
-        if (entry->signature != hashes.signature) continue;
-        if (entry->guard != hashes.guard || entry->token.slot_plus_one != token.slot_plus_one ||
-            entry->token.policy_flags != token.policy_flags ||
-            entry->token.integrity != token.integrity)
-        {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-            return false;
-        }
-        return true;
-    }
-    if (machine_x64_metadata_shape_cache_count >= MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY)
-    {
-        machine_x64_metadata_shape_cache_invalid_count += 1;
-        return false;
-    }
-    machine_x64_metadata_shape_cache[machine_x64_metadata_shape_cache_count++] = (MachineX64MetadataShapeCacheEntry){
-        .signature = hashes.signature,
-        .guard = hashes.guard,
-        .token = token,
-    };
-    return true;
+    *token = (BusterX86MetadataMachineExactToken){0};
+    bool result = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && selected.form_id != UINT32_MAX && selected.stable_hash &&
+                  buster_x86_metadata_exact_plan_prepare(key, &plan) &&
+                  buster_x86_metadata_machine_exact_token_for_plan(plan, registration->features, token);
+
+    return result;
 }
 
+// Registers one closed-set query.  Nothing is selected here: a new signature
+// gets a pending entry that remembers this first query, and a repeated
+// signature only has its guard checked; its token agreement is checked by
+// machine_x64_metadata_shape_cache_resolve_all.
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
+                                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                               BusterX86MetadataFeatureInput features,
+                                                               BusterX86MetadataPhysicalAttributes attributes)
+{
+    MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
+    u32 entry_index = 0;
+    while (entry_index < machine_x64_metadata_shape_cache_count && machine_x64_metadata_shape_cache[entry_index].signature != hashes.signature)
+    {
+        entry_index += 1;
+    }
+    bool existing = entry_index < machine_x64_metadata_shape_cache_count;
+    bool result = machine_x64_metadata_shape_mnemonic_id(mnemonic) != 0 &&
+                  operand_count <= MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY &&
+                  machine_x64_metadata_shape_registration_count < MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY &&
+                  (existing ? machine_x64_metadata_shape_cache[entry_index].guard == hashes.guard
+                            : machine_x64_metadata_shape_cache_count < MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY);
+    if (result)
+    {
+        u32 registration_index = machine_x64_metadata_shape_registration_count;
+        MachineX64MetadataShapeRegistration* registration = machine_x64_metadata_shape_registrations + registration_index;
+        *registration = (MachineX64MetadataShapeRegistration){
+            .mnemonic = mnemonic,
+            .features = features,
+            .attributes = attributes,
+            .operand_count = operand_count,
+            .entry = entry_index,
+        };
+        for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+        {
+            registration->operands[operand_index] = operands[operand_index];
+        }
+        machine_x64_metadata_shape_registration_count += 1;
+        if (!existing)
+        {
+            machine_x64_metadata_shape_cache[machine_x64_metadata_shape_cache_count] = (MachineX64MetadataShapeCacheEntry){
+                .signature = hashes.signature,
+                .guard = hashes.guard,
+                .registration = (u16)registration_index,
+                .state = MACHINE_X64_METADATA_SHAPE_PENDING,
+            };
+            machine_x64_metadata_shape_cache_count += 1;
+        }
+    }
+    else
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+    }
+
+    return result;
+}
+
+// A failed resolution refuses every later bridge emission, as a failed eager
+// walk refused all of them.
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_entry(MachineX64MetadataShapeCacheEntry* entry)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    bool valid = machine_x64_metadata_shape_resolve(machine_x64_metadata_shape_registrations + entry->registration, &entry->token);
+    entry->state = valid ? MACHINE_X64_METADATA_SHAPE_VALID : MACHINE_X64_METADATA_SHAPE_INVALID;
+    machine_x64_metadata_shape_cache_resolved_count += 1;
+    if (!valid)
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+        machine_x64_metadata_shape_cache_ready = false;
+    }
+}
+
+// Resolves every registration in registration order -- the order of the
+// eager walk -- and repeats its check that queries sharing a signature select
+// the same token, so no gang can reach a pending entry.
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void)
+{
+    if (!machine_x64_metadata_shape_cache_complete)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        for (u32 registration_index = 0; registration_index < machine_x64_metadata_shape_registration_count; registration_index += 1)
+        {
+            MachineX64MetadataShapeRegistration const* registration = machine_x64_metadata_shape_registrations + registration_index;
+            MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + registration->entry;
+            if (entry->registration == registration_index)
+            {
+                if (entry->state == MACHINE_X64_METADATA_SHAPE_PENDING)
+                {
+                    machine_x64_metadata_shape_cache_resolve_entry(entry);
+                }
+            }
+            else
+            {
+                BusterX86MetadataMachineExactToken token;
+                bool agrees = machine_x64_metadata_shape_resolve(registration, &token) &&
+                              entry->state == MACHINE_X64_METADATA_SHAPE_VALID && entry->token.slot_plus_one == token.slot_plus_one &&
+                              entry->token.policy_flags == token.policy_flags && entry->token.integrity == token.integrity;
+                if (!agrees)
+                {
+                    machine_x64_metadata_shape_cache_invalid_count += 1;
+                    machine_x64_metadata_shape_cache_ready = false;
+                }
+            }
+        }
+        machine_x64_metadata_shape_cache_complete = true;
+    }
+}
+
+// A registered shape still pending is resolved here, on its first lookup;
+// only a serial thread may do that, which BUSTER_CHECK_SERIAL_INITIALIZATION
+// enforces.  Shapes outside the closed set still miss.
 BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken const* machine_x64_metadata_shape_cache_find(
     String8 mnemonic, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
     BusterX86MetadataFeatureInput features, BusterX86MetadataPhysicalAttributes attributes)
 {
     MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
     u32 slot = (u32)hashes.signature & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
-    for (u32 probe = 0; probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
+    MachineX64MetadataShapeCacheEntry* found = 0;
+    bool searching = true;
+    for (u32 probe = 0; searching && probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
     {
         u16 entry_plus_one = machine_x64_metadata_shape_cache_slots[slot];
-        if (!entry_plus_one) return 0;
-        MachineX64MetadataShapeCacheEntry const* entry = machine_x64_metadata_shape_cache + (entry_plus_one - 1u);
-        if (entry->signature == hashes.signature)
+        if (!entry_plus_one)
         {
-            return entry->guard == hashes.guard ? &entry->token : 0;
+            searching = false;
+        }
+        else if (machine_x64_metadata_shape_cache[entry_plus_one - 1u].signature == hashes.signature)
+        {
+            MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + (entry_plus_one - 1u);
+            found = entry->guard == hashes.guard ? entry : 0;
+            searching = false;
         }
         slot = (slot + 1u) & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
     }
-    return 0;
+    if (found && found->state == MACHINE_X64_METADATA_SHAPE_PENDING)
+    {
+        machine_x64_metadata_shape_cache_resolve_entry(found);
+    }
+
+    return found && found->state == MACHINE_X64_METADATA_SHAPE_VALID ? &found->token : 0;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_publish_slots(void)
@@ -12554,13 +13179,18 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_x87(void)
     }
     pair[0] = machine_x64_x87_operand(0); pair[1] = machine_x64_x87_operand(1);
     (void)machine_x64_metadata_shape_cache_add(S8("FUCOMIP"), pair + 1, 1, features, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("FCOMIP"), pair + 1, 1, features, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("FSTP"), pair, 1, features, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("FCHS"), 0, 0, features, attributes);
-    String8 comparisons[] = {S8("SETZ"), S8("SETNZ"), S8("SETB"), S8("SETBE"), S8("SETNBE"), S8("SETNB"), S8("SETP"), S8("SETNP")};
+    u8 const comparisons[] = {
+        BUSTER_X86_CONDITION_EQUAL, BUSTER_X86_CONDITION_NOT_EQUAL, BUSTER_X86_CONDITION_BELOW,
+        BUSTER_X86_CONDITION_BELOW_EQUAL, BUSTER_X86_CONDITION_ABOVE, BUSTER_X86_CONDITION_ABOVE_EQUAL,
+        BUSTER_X86_CONDITION_PARITY, BUSTER_X86_CONDITION_NOT_PARITY,
+    };
     BusterX86MetadataPhysicalOperand byte = machine_x64_exact_gpr_operand(0, 8);
     for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(comparisons); name += 1)
     {
-        (void)machine_x64_metadata_shape_cache_add(comparisons[name], &byte, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+        (void)machine_x64_metadata_shape_cache_add(buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_SET, comparisons[name]), &byte, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     }
     BusterX86MetadataPhysicalOperand truncate[] = {machine_x64_exact_gpr_operand(0, 32), machine_x64_exact_immediate_operand(0x0c00, 32)};
     (void)machine_x64_metadata_shape_cache_add(S8("OR"), truncate, 2, (BusterX86MetadataFeatureInput){0}, attributes);
@@ -12574,6 +13204,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_zero(void)
     (void)machine_x64_metadata_shape_cache_add(S8("CDQ"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CQO"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("RET"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("LEAVE"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("UD2"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CPUID"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("NOP"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
@@ -12797,18 +13428,23 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_memory(void)
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_relative(void)
 {
     BusterX86MetadataPhysicalAttributes attributes = {0};
-    String8 names[] = {S8("CALL"), S8("JMP"), S8("JNS"), S8("JB"), S8("JNBE"), S8("JNZ"), S8("JZ")};
+    String8 names[] = {
+        S8("CALL"), S8("JMP"),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_NOT_SIGN),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_BELOW),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_ABOVE),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_NOT_EQUAL),
+        buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_EQUAL),
+    };
     u16 widths[] = {8, 32};
+    // Preserve the compiler's prepared shapes: bit 0 is rel8, bit 1 rel32.
+    u8 const width_masks[] = {2, 3, 1, 1, 2, 2, 2};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == BUSTER_ARRAY_LENGTH(width_masks));
     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
     {
         for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
         {
-            if (string_equal(names[name_index], S8("CALL")) && widths[width_index] != 32) continue;
-            if (string_equal(names[name_index], S8("JNS")) && widths[width_index] != 8) continue;
-            if (string_equal(names[name_index], S8("JB")) && widths[width_index] != 8) continue;
-            if (string_equal(names[name_index], S8("JNBE")) && widths[width_index] != 32) continue;
-            if (string_equal(names[name_index], S8("JNZ")) && widths[width_index] != 32) continue;
-            if (string_equal(names[name_index], S8("JZ")) && widths[width_index] != 32) continue;
+            if (!(width_masks[name_index] & (1u << width_index))) continue;
             BusterX86MetadataPhysicalOperand operand = machine_x64_exact_relative_operand(0, widths[width_index]);
             (void)machine_x64_metadata_shape_cache_add(names[name_index], &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
         }
@@ -12869,9 +13505,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_float_vector_a
         memory_operands[0] = xmm_operand;
         memory_operands[1] = memory_operand;
         (void)machine_x64_metadata_shape_cache_add(S8("MOVDQU"), memory_operands, 2, sse2, attributes);
+        (void)machine_x64_metadata_shape_cache_add(S8("MOVUPS"), memory_operands, 2, sse, attributes);
         memory_operands[0] = memory_operand;
         memory_operands[1] = xmm_operand;
         (void)machine_x64_metadata_shape_cache_add(S8("MOVDQU"), memory_operands, 2, sse2, attributes);
+        (void)machine_x64_metadata_shape_cache_add(S8("MOVUPS"), memory_operands, 2, sse, attributes);
         memory_operand.width = 256;
         BusterX86MetadataPhysicalOperand ymm_operand = machine_x64_exact_ymm_operand(0);
         BusterX86MetadataFeatureInput avx = {.names = machine_x64_avx_features, .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)};
@@ -12908,30 +13546,44 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_float_vector_a
     (void)machine_x64_metadata_shape_cache_add(S8("CMPXCHG16B"), &cmpxchg16_operand, 1, cx16, attributes);
 }
 
+// Registers the closed set and publishes its slots; resolution waits for
+// the first lookup of each shape or for machine_x86_64_exact_prewarm_all_shapes.
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void)
 {
-    if (machine_x64_metadata_shape_cache_ready) return;
-    machine_x64_metadata_shape_cache_count = 0;
-    machine_x64_metadata_shape_cache_invalid_count = 0;
-    machine_x64_metadata_shape_cache_prepare_zero();
-    machine_x64_metadata_shape_cache_prepare_predicates();
-    machine_x64_metadata_shape_cache_prepare_unary();
-    machine_x64_metadata_shape_cache_prepare_registers();
-    machine_x64_metadata_shape_cache_prepare_immediates();
-    machine_x64_metadata_shape_cache_prepare_memory();
-    machine_x64_metadata_shape_cache_prepare_relative();
-    machine_x64_metadata_shape_cache_prepare_float_vector_atomic();
-    machine_x64_metadata_shape_cache_prepare_x87();
-    machine_x64_metadata_shape_cache_publish_slots();
-    machine_x64_metadata_shape_cache_ready = machine_x64_metadata_shape_cache_invalid_count == 0;
+    if (!machine_x64_metadata_shape_registration_count)
+    {
+        machine_x64_metadata_shape_cache_count = 0;
+        machine_x64_metadata_shape_cache_resolved_count = 0;
+        machine_x64_metadata_shape_cache_invalid_count = 0;
+        machine_x64_metadata_shape_cache_complete = false;
+        machine_x64_metadata_shape_cache_prepare_zero();
+        machine_x64_metadata_shape_cache_prepare_predicates();
+        machine_x64_metadata_shape_cache_prepare_unary();
+        machine_x64_metadata_shape_cache_prepare_registers();
+        machine_x64_metadata_shape_cache_prepare_immediates();
+        machine_x64_metadata_shape_cache_prepare_memory();
+        machine_x64_metadata_shape_cache_prepare_relative();
+        machine_x64_metadata_shape_cache_prepare_float_vector_atomic();
+        machine_x64_metadata_shape_cache_prepare_x87();
+        machine_x64_metadata_shape_cache_publish_slots();
+        machine_x64_metadata_shape_cache_ready = machine_x64_metadata_shape_cache_invalid_count == 0;
+    }
 }
 
 #if BUSTER_INCLUDE_TESTS
 MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void)
 {
-    machine_x86_64_exact_prewarm();
+    machine_x86_64_exact_prewarm_all_shapes();
+    u32 pending_rows = 0;
+    for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
+    {
+        pending_rows += machine_x64_metadata_shape_cache[entry_index].state == MACHINE_X64_METADATA_SHAPE_PENDING;
+    }
     return (MachineX64MetadataShapeCacheAudit){
         .prepared_rows = machine_x64_metadata_shape_cache_count,
+        .registered_queries = machine_x64_metadata_shape_registration_count,
+        .resolved_rows = machine_x64_metadata_shape_cache_resolved_count,
+        .pending_rows = pending_rows,
         .invalid_rows = machine_x64_metadata_shape_cache_invalid_count,
         .valid = machine_x64_metadata_shape_cache_ready && machine_x64_metadata_shape_cache_count != 0 &&
                  machine_x64_metadata_shape_cache_invalid_count == 0,
@@ -13024,7 +13676,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_instruction(MachineX64Encoder
     if (!features.count)
     {
         if (string_equal(mnemonic, S8("CVTSI2SS")) || string_equal(mnemonic, S8("ADDSS")) || string_equal(mnemonic, S8("UCOMISS")) ||
-            string_equal(mnemonic, S8("SUBSS")) || string_equal(mnemonic, S8("CVTTSS2SI")) || string_equal(mnemonic, S8("MOVSS")))
+            string_equal(mnemonic, S8("SUBSS")) || string_equal(mnemonic, S8("CVTTSS2SI")) || string_equal(mnemonic, S8("MOVSS")) ||
+            string_equal(mnemonic, S8("MOVUPS")))
         {
             features.names = machine_x64_sse_features;
             features.count = BUSTER_ARRAY_LENGTH(machine_x64_sse_features);
@@ -13037,10 +13690,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_instruction(MachineX64Encoder
             features.count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features);
         }
     }
-    // Workers never re-enter the generic selector.  The serial prewarm lane
-    // populated one immutable token per finite physical shape; a stale or
-    // unclassified shape fails closed instead of falling back to handwritten
-    // bytes or a checked query lookup.
+    // Workers never re-enter the generic selector: a gang starts only after
+    // machine_x86_64_exact_prewarm_all_shapes has resolved one immutable token
+    // per finite physical shape, and a serial compile resolves a registered
+    // shape on its first lookup.  A stale or unclassified shape fails closed
+    // instead of falling back to handwritten bytes or a checked query lookup.
     if (!machine_x64_metadata_shape_cache_ready)
     {
         return machine_x64_exact_reject(encoder, counters);
@@ -13162,13 +13816,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_atomic_memory(MachineX64Encod
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_relative(MachineX64Encoder* encoder, String8 mnemonic, s64 displacement, u16 width,
                                                             MachineX64ExactEmitCounters* counters)
 {
-    // The metadata snapshot uses one canonical spelling per condition-code
-    // opcode.  JA/JNE are architectural aliases of JNBE/JNZ, respectively;
-    // route those spellings through the canonical metadata rows while the
-    // caller continues to express the branch semantics naturally.
-    String8 metadata_mnemonic = mnemonic;
-    if (string_equal(mnemonic, S8("JA"))) metadata_mnemonic = S8("JNBE");
-    else if (string_equal(mnemonic, S8("JNE"))) metadata_mnemonic = S8("JNZ");
+    // Syntax projection happens before the canonical-key shape cache.
+    // Branch policy remains at the caller; exact bytes remain metadata-owned.
+    String8 metadata_mnemonic = buster_x86_metadata_condition_canonical_mnemonic(mnemonic);
     BusterX86MetadataPhysicalOperand operand = machine_x64_exact_relative_operand(displacement, width);
     return machine_x64_emit_metadata_instruction(encoder, metadata_mnemonic, &operand, 1, (BusterX86MetadataFeatureInput){0},
                                                  (BusterX86MetadataPhysicalAttributes){0}, counters);
@@ -13326,6 +13976,29 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_static_fixed_templates(void)
         scratch = machine_x64_fixed_template_scratch(scratch_bytes);
         (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RCX, reg, 64, 0);
         machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CMP64_RCX + reg, &scratch, 0);
+        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        (void)machine_x64_emit_metadata_registers(&scratch, S8("XOR"), reg, reg, 32, 0);
+        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + reg, &scratch, 0);
+    }
+    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+    (void)machine_x64_emit_metadata_instruction(&scratch, S8("LEAVE"), 0, 0, no_features, attributes, 0);
+    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_LEAVE, &scratch, 0);
+    for (u32 store = 0; store < 2; store += 1)
+    {
+        u32 short_row = store ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8;
+        u32 wide_row = store ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32;
+        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -8, store != 0, 128, 0);
+        machine_x64_fixed_template_publish(short_row, &scratch, 1);
+        probe = machine_x64_fixed_template_scratch(probe_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5b, store != 0, 128, 0);
+        machine_x64_fixed_template_prove(short_row, &probe, (u8)(-0x5b));
+        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x1000, store != 0, 128, 0);
+        machine_x64_fixed_template_publish(wide_row, &scratch, 4);
+        probe = machine_x64_fixed_template_scratch(probe_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5aa55aa5, store != 0, 128, 0);
+        machine_x64_fixed_template_prove(wide_row, &probe, (u32)-0x5aa55aa5);
     }
     scratch = machine_x64_fixed_template_scratch(scratch_bytes);
     (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 32, 0);
@@ -13336,9 +14009,6 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_static_fixed_templates(void)
     scratch = machine_x64_fixed_template_scratch(scratch_bytes);
     (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64, 0);
     machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP, &scratch, 0);
 
     // The patched rows: publish a representative of the value class the
     // site passes, then prove a second value of the same class moves only
@@ -13696,6 +14366,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
     bool force_disp32, MachineX64ExactEmitCounters* counters);
 
+// The displacement class of a frame chunk: its final RBP displacement fits a
+// disp8 field when it is a nonzero signed byte. Zero keeps disp32 (RBP has no
+// displacement-free form), as does every wider value.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_frame_displacement_is_short(u32 offset, u32 frame_base_offset)
+{
+    s32 displacement = (s32)((0u - offset) + frame_base_offset);
+    return displacement != 0 && displacement >= INT8_MIN && displacement <= INT8_MAX;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
                                                                       MachineX64ExactEmitCounters* counters)
 {
@@ -13710,6 +14389,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64E
         return machine_x64_exact_reject(encoder, counters);
     }
     BusterX86MetadataPhysicalOperand operands[2];
+    bool force_disp32 = !machine_x64_frame_displacement_is_short(offset, encoder->frame_base_offset);
     if (load)
     {
         operands[0] = machine_x64_exact_gpr_operand(reg, chunk <= 2 ? 64 : width);
@@ -13721,16 +14401,41 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64E
         operands[1] = machine_x64_exact_gpr_operand(reg, width);
     }
     MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 0);
-    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, force_disp32, false, 0, false,
+                                       counters);
+}
+
+// Recomputes a frame-address value into `reg`: `lea reg, [rbp - offset]` for
+// the slot and member displacement of the value's defining LEA_FRAME row,
+// the same address that row produced.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_address(MachineX64Encoder* encoder, MachineFunction const* function,
+                                                             MachineStackPlacement const* placement, u32 virtual_register, u32 reg)
+{
+    MachinePoint definition_point = function->virtual_registers[virtual_register].definition_point;
+    MachineInstruction const* definition = function->instructions + machine_point_instruction(definition_point);
+    BUSTER_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_X64_LEA_FRAME);
+    u32 offset = placement->stack_slot_offsets[machine_ref_payload(definition->operands[1])] - definition->payload;
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_LEA_FRAME);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(reg, 64),
+        machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, 64, true),
+    };
+    bool result = entry && entry->descriptor && entry->plan_valid &&
+                  machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, 2, true, false, 0, false, 0);
+    encoder->overflow |= !result;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
                                                                            MachineX64ExactEmitCounters* counters)
 {
     bool result = false;
+    bool short_form = machine_x64_frame_displacement_is_short(offset, encoder->frame_base_offset);
+    u32 direction = load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE;
     MachineX64GprEncoding const* encoding =
-        machine_x64_frame_chunk_encodings[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
-                                         [machine_x64_chunk_width_slot(chunk)] + (reg & 15u);
+        (short_form ? machine_x64_frame_chunk_disp8_encodings : machine_x64_frame_chunk_encodings)[direction]
+                                                                                                  [machine_x64_chunk_width_slot(chunk)] +
+        (reg & 15u);
     u32 byte_count = encoding->byte_count;
     if (reg < 16 && byte_count)
     {
@@ -13747,7 +14452,14 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(Machin
         {
             machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
             u32 value = (0u - offset) + encoder->frame_base_offset;
-            memcpy(encoder->bytes + encoder->count + byte_count - (u32)sizeof(u32), &value, sizeof(value));
+            if (short_form)
+            {
+                encoder->bytes[encoder->count + byte_count - 1u] = (u8)value;
+            }
+            else
+            {
+                memcpy(encoder->bytes + encoder->count + byte_count - (u32)sizeof(u32), &value, sizeof(value));
+            }
             encoder->count += byte_count;
             if (counters)
             {
@@ -13775,7 +14487,8 @@ bool machine_x64_test_frame_chunk_prepared(void)
             for (u32 reg = 0; reg < 16; reg += 1)
             {
                 u32 byte_count = machine_x64_frame_chunk_encodings[direction][width_slot][reg].byte_count;
-                result &= byte_count > sizeof(u32) && byte_count <= 15;
+                u32 short_count = machine_x64_frame_chunk_disp8_encodings[direction][width_slot][reg].byte_count;
+                result &= byte_count > sizeof(u32) && byte_count <= 15 && short_count + 3u == byte_count;
             }
         }
     }
@@ -13921,6 +14634,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encode
         else
         {
             MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + table_index;
+            WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLE_READS, 1);
             MachineX64GprEncoding const* encoding = table->encodings + reg;
             if (table->operand_count != 1 || table->operand_slots[0] != 0 ||
                 table->flags != MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE ||
@@ -14009,6 +14723,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     u32 displacement_class = force_disp32 ? 2 : displacement == 0 ? 0 : displacement >= INT8_MIN && displacement <= INT8_MAX ? 1 : 2;
     MachineX64VariableMemoryEncodingTable const* table =
         machine_x64_variable_memory_encoding_tables + (table_plus_one - 1u);
+    WORK_LEDGER_RECORD(TARGET_X86_VARIABLE_MEMORY_TABLE_READS, 1);
     MachineX64GprEncoding const* encoding =
         table->encodings[displacement_class] + reg + (base << 4);
     u32 byte_count = encoding->byte_count;
@@ -14177,6 +14892,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count)
     {
         MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (gpr_table_plus_one - 1u);
+        WORK_LEDGER_RECORD(TARGET_X86_GPR_TABLE_READS, 1);
         u8 low_register = table->operand_count ? operand_registers[table->operand_slots[0]] : 0;
         u8 high_register = table->operand_count > 1 ? operand_registers[table->operand_slots[1]] : 0;
         if (low_register < 16 && high_register < 16)
@@ -14435,6 +15151,143 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, force_disp32, false, 0, false, counters);
 }
 
+#if BUSTER_INCLUDE_TESTS
+// Both sides consume the same recipe/token authority. The reference disables
+// prepared consumers in a private entry copy, never in the published map.
+// This deliberately exercises the worker's ordinary operand projection rather
+// than copying the preparer's projection or spelling any architectural bytes.
+MachineX64GprPreparationAudit machine_x64_test_gpr_preparation(void)
+{
+    MachineX64GprPreparationAudit result = {0};
+    bool visited[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY] = {0};
+    machine_x86_64_exact_prewarm();
+    for (u32 ordinal = 0; ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map); ordinal += 1)
+    {
+        MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_map + ordinal;
+        for (u32 variant_index = 0; entry->descriptor && variant_index < entry->variant_count; variant_index += 1)
+        {
+            u8 table_plus_one = entry->gpr_encoding_tables[variant_index];
+            if (!table_plus_one || table_plus_one > machine_x64_gpr_encoding_table_count || visited[table_plus_one - 1u])
+            {
+                continue;
+            }
+            visited[table_plus_one - 1u] = true;
+            MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (table_plus_one - 1u);
+            MachineX64GprEncodingTable snapshot = *table;
+            u32 distinct_keys = 1u << (4u * table->operand_count);
+            result.tables += 1;
+            result.zero_register_tables += table->operand_count == 0;
+            result.one_register_tables += table->operand_count == 1;
+            result.two_register_tables += table->operand_count == 2;
+            result.distinct_rows += distinct_keys;
+            result.replicated_rows += 256u - distinct_keys;
+            MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, variant_index);
+            MachineX64ExactRecipe descriptor = {
+                .recipe = entry->descriptor->recipe, .key = variant.key,
+                .features = variant.features, .feature_count = variant.feature_count,
+                .operand_count = variant.operand_count, .flags = variant.flags,
+                .operand_slots = {variant.operand_slots[0], variant.operand_slots[1], variant.operand_slots[2], variant.operand_slots[3]},
+                .operand_kinds = {variant.operand_kinds[0], variant.operand_kinds[1], variant.operand_kinds[2], variant.operand_kinds[3]},
+                .operand_widths = {variant.operand_widths[0], variant.operand_widths[1], variant.operand_widths[2], variant.operand_widths[3]},
+                .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED,
+            };
+            MachineX64PreparedExactOpcode prepared = {
+                .descriptor = &descriptor, .metadata_tokens = {entry->metadata_tokens[variant_index]},
+                .gpr_encoding_tables = {table_plus_one}, .single_gpr_encoding_table = table_plus_one,
+                .variant_count = 1, .variant_valid_mask = 1, .plan_valid = true,
+            };
+            MachineX64PreparedExactOpcode reference = prepared;
+            reference.gpr_encoding_tables[0] = 0;
+            reference.single_gpr_encoding_table = 0;
+            for (u32 key = 0; key < BUSTER_ARRAY_LENGTH(table->encodings); key += 1)
+            {
+                MachineX64GprEncoding const* encoding = table->encodings + key;
+                MachineX64GprEncoding const* canonical = table->encodings + (key & (distinct_keys - 1u));
+                bool row_valid = encoding->byte_count && encoding->byte_count <= sizeof(encoding->bytes) &&
+                                 encoding->byte_count == canonical->byte_count;
+                if (row_valid)
+                {
+                    row_valid = memcmp(encoding->bytes, canonical->bytes, encoding->byte_count) == 0;
+                }
+                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT)
+                {
+                    row_valid &= encoding->byte_count <= 3 && encoding->bytes[3] == encoding->byte_count;
+                }
+                result.rows += 1;
+                result.failures += !row_valid;
+                u8 registers[4] = {0};
+                if (table->operand_count) registers[table->operand_slots[0]] = (u8)(key & 15u);
+                if (table->operand_count > 1) registers[table->operand_slots[1]] = (u8)(key >> 4);
+                // All dense rows get an independent metadata-byte comparison.
+                // The affected zero/one-register representatives additionally
+                // get patched values, rebased frames, offsets, and tight tails.
+                u32 probe_count = table->operand_count < 2 && key < distinct_keys ? 3u : 1u;
+                for (u32 probe = 0; row_valid && probe < probe_count; probe += 1)
+                {
+                    u32 offset = probe == 2 ? 129u : 0u;
+                    MachineStackPlacement placement = {.stack_slot_offsets = &offset, .valid = true};
+                    MachineInstruction instruction = {0};
+                    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction.operands); slot += 1)
+                    {
+                        instruction.operands[slot] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+                    }
+                    u32 frame_base_offset = probe == 2 && (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT) ? 4096u : 0u;
+                    u64 immediate = probe ? 0x5au : 0u;
+                    u32 payload = (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD) ? (u32)immediate : 0u;
+                    u32 tail_count = probe_count > 1 ? 5u : 1u;
+                    for (u32 tail = 0; tail < tail_count; tail += 1)
+                    {
+                        u32 available = tail == 0 ? 15u : tail == 1 ? encoding->byte_count :
+                                        tail == 2 ? (u32)encoding->byte_count - 1u : tail == 3 ? 16u : 0u;
+                        u32 start = tail ? 7u : 0u;
+                        u8 bytes[32];
+                        u8 expected[32];
+                        u8 untouched[32];
+                        memset(bytes, 0xa5, sizeof(bytes));
+                        memset(expected, 0xa5, sizeof(expected));
+                        memset(untouched, 0xa5, sizeof(untouched));
+                        MachineX64Encoder actual = {.bytes = bytes, .count = start, .capacity = start + available,
+                                                    .frame_base_offset = frame_base_offset};
+                        MachineX64Encoder oracle = {.bytes = expected, .count = start, .capacity = start + available,
+                                                    .frame_base_offset = frame_base_offset};
+                        MachineX64ExactEmitCounters actual_counts = {0};
+                        MachineX64ExactEmitCounters oracle_counts = {0};
+                        bool actual_valid = machine_x64_emit_exact_recipe(&actual, &prepared, &instruction, &placement, registers,
+                                                                          payload, immediate, true, &actual_counts);
+                        bool oracle_valid = machine_x64_emit_exact_recipe(&oracle, &reference, &instruction, &placement, registers,
+                                                                          payload, immediate, true, &oracle_counts);
+                        bool fits = available >= encoding->byte_count;
+                        bool equal = actual_valid == fits && oracle_valid == fits && actual.overflow == !fits && oracle.overflow == !fits &&
+                                     actual.count == start + (fits ? encoding->byte_count : 0u) && actual.count == oracle.count &&
+                                     actual_counts.attempts == 1 && actual_counts.successes == (u32)fits && actual_counts.fallbacks == (u32)!fits &&
+                                     memcmp(&actual_counts, &oracle_counts, sizeof(actual_counts)) == 0;
+                        if (fits)
+                        {
+                            equal &= memcmp(bytes + start, expected + start, encoding->byte_count) == 0;
+                        }
+                        else
+                        {
+                            equal &= memcmp(bytes, untouched, sizeof(bytes)) == 0 && memcmp(expected, untouched, sizeof(expected)) == 0;
+                        }
+                        equal &= memcmp(bytes, untouched, start) == 0 && memcmp(expected, untouched, start) == 0 &&
+                                 memcmp(bytes + actual.capacity, untouched + actual.capacity, sizeof(bytes) - actual.capacity) == 0 &&
+                                 memcmp(expected + oracle.capacity, untouched + oracle.capacity, sizeof(expected) - oracle.capacity) == 0;
+                        result.cases += 1;
+                        result.failures += !equal;
+                    }
+                }
+            }
+            // Repeated prewarm is read-only, including table padding/flags.
+            machine_x86_64_exact_prewarm();
+            result.failures += memcmp(table, &snapshot, sizeof(snapshot)) != 0;
+        }
+    }
+    result.valid = result.failures == 0 && result.tables == machine_x64_gpr_encoding_table_count &&
+                   result.rows == result.tables * 256u && result.distinct_rows + result.replicated_rows == result.rows;
+    return result;
+}
+#endif
+
 // Allocator copies and rematerializations are not a separate encoding
 // population.  Feed them through the same prepared recipe lane as ordinary
 // machine rows so they consume its dense register tables and patch kernels.
@@ -14488,10 +15341,13 @@ bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 plac
 }
 #endif
 
+// `step_limit` bounds how many leading steps are emitted; the JCC row passes
+// one to keep only its Jcc when the other successor is the next block.
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
                                                          MachineInstruction const* instruction, MachineStackPlacement const* placement,
                                                          u8 const* operand_registers, u32 payload, u64 immediate_value,
-                                                         MachineX64ExactEmitCounters* counters, Arena* arena, MachineBuilderStream* fixups)
+                                                         MachineX64ExactEmitCounters* counters, Arena* arena, MachineBuilderStream* fixups,
+                                                         u32 step_limit)
 {
     MachineX64ExactSequence const* sequence = entry ? entry->sequence : 0;
     if (!sequence || !entry->plan_valid || sequence->variant_count == 0 || entry->variant_count != sequence->variant_count ||
@@ -14522,7 +15378,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 45)
     {
         u32 condition = payload & 0xfu;
-        u32 condition_index = condition == 4 ? 0 : condition == 5 ? 1 : condition == 2 ? 2 : condition == 6 ? 3 : condition == 7 ? 4 : condition == 3 ? 5 : UINT32_MAX;
+        u32 condition_index = condition == BUSTER_X86_CONDITION_EQUAL ? 0 : condition == BUSTER_X86_CONDITION_NOT_EQUAL ? 1 :
+                                  condition == BUSTER_X86_CONDITION_BELOW ? 2 : condition == BUSTER_X86_CONDITION_BELOW_EQUAL ? 3 :
+                                  condition == BUSTER_X86_CONDITION_ABOVE ? 4 : condition == BUSTER_X86_CONDITION_ABOVE_EQUAL ? 5 : UINT32_MAX;
         variant_index = condition_index == UINT32_MAX ? UINT32_MAX : condition_index + ((payload & 0x100u) ? 6u : 0u);
     }
     else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 43)
@@ -14551,7 +15409,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     }
     u32 sequence_start = encoder->count;
     u32 parity_mode = (payload >> 9) & 0x3u;
-    for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
+    for (u32 step_index = 0; step_index < variant->step_count && step_index < step_limit; step_index += 1)
     {
         if (allocated_predicate && step_index == (predicate_result ? 1u : 0u)) continue;
         MachineX64ExactSequenceStep const* step = variant->steps + step_index;
@@ -14706,6 +15564,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     return true;
 }
 
+// Aggregate copies move whole sixteen-byte chunks first, through XMM0 with
+// MOVUPS (frame-copy-16 and pointer-*-copy-16 in
+// tools/machine_rewrite_search.py): an unaligned, uninterpreted data move of
+// the same bytes two 8-byte chunk pairs move, valid because a copy's source
+// and destination objects are disjoint or identical (distinct frame slots
+// never partially overlap, and C11 6.5.16.1p3 leaves any other overlapping
+// assignment undefined). The rows declare XMM0 clobbered and join the
+// implicit vector-state chain, so no staged XMM argument or result can be
+// live across them. The remainder keeps the general-register chunks.
+#define MACHINE_X64_COPY_VECTOR_CHUNK 16u
+
+BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_vector_chunk(MachineX64Encoder* encoder, bool load, u32 offset)
+{
+    u32 value = (0u - offset) + encoder->frame_base_offset;
+    bool short_form = machine_x64_frame_displacement_is_short(offset, encoder->frame_base_offset);
+    u32 row = load ? (short_form ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32)
+                   : (short_form ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32);
+    if (machine_x64_emit_fixed_template(encoder, row, short_form ? (u8)value : value) == MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED)
+    {
+        (void)machine_x64_emit_metadata_xmm_memory(encoder, S8("MOVUPS"), 0, MACHINE_X64_RBP, -(s64)(s32)offset, !load, 128, 0);
+    }
+}
+
 // Sized chunk moves shared by the aggregate copy loops, chunked 8/4/2/1
 // exactly like the canonical copy code: narrow loads zero-extend through
 // movzx, narrow stores write their exact width.
@@ -14775,9 +15656,187 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_predicate_frame(MachineX64Encoder* enc
 // their interpretation outside the machine-row dispatcher so the common row
 // path does not duplicate spill/reload/copy/rematerialization policy around
 // every instruction.
+// Flag liveness for the verified zero idiom (zero-idiom in
+// tools/machine_rewrite_search.py): XOR r32, r32 equals MOV r32, 0 except
+// that it writes the arithmetic flags, so it may replace a zero
+// materialization only where no later reader can observe the flags.
+//
+// The proof is deliberately conservative. A reader is any row the opcode
+// metadata marks MACHINE_OPCODE_ROW_FLAGS_USE (SETCC, JCC) plus inline
+// assembly. A killer is a row whose instruction unconditionally writes every
+// consumed flag (CF, PF, ZF, SF, OF): CMP, TEST and the two-operand ALU rows
+// and NEG. Every other row, including the partial or conditional definers
+// (shifts by CL, BSF/BSR, IMUL, calls, expansions), is transparent. Edits
+// never touch the flags. A block's successors come from its JMP or JCC
+// terminator; RET and UD2 have none; any other ending is taken to read the
+// flags. Liveness is the least fixed point of the usual backward equations,
+// one bit per block, so it terminates after at most block_count sweeps.
+typedef struct MachineX64FlagsLiveness MachineX64FlagsLiveness;
+struct MachineX64FlagsLiveness
+{
+    Arena* arena;
+    MachineFunction* function;
+    // One byte per row: nonzero when a later reader may observe the flags
+    // the row leaves behind. Null until the first query.
+    u8* live_after;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_flags_reader(MachineOpcodeRow const* rows, u16 opcode)
+{
+    return (rows[opcode].flags & MACHINE_OPCODE_ROW_FLAGS_USE) != 0 || opcode == MACHINE_X64_INLINE_ASSEMBLY;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_flags_killer(u16 opcode)
+{
+    bool result;
+    switch (opcode)
+    {
+        case MACHINE_X64_CMP32:
+        case MACHINE_X64_CMP64:
+        case MACHINE_X64_TEST_RR:
+        case MACHINE_X64_ADD32:
+        case MACHINE_X64_ADD64:
+        case MACHINE_X64_SUB32:
+        case MACHINE_X64_SUB64:
+        case MACHINE_X64_AND32:
+        case MACHINE_X64_AND64:
+        case MACHINE_X64_OR32:
+        case MACHINE_X64_OR64:
+        case MACHINE_X64_XOR32:
+        case MACHINE_X64_XOR64:
+        case MACHINE_X64_NEG32:
+        case MACHINE_X64_NEG64:
+            result = true;
+            break;
+        default:
+            result = false;
+            break;
+    }
+    return result;
+}
+
+// Whether the flags may be live when block `block_index` ends.
+BUSTER_GLOBAL_LOCAL bool machine_x64_flags_live_out(MachineFunction* function, u32 block_index, u8 const* live_in)
+{
+    MachineBlock const* block = function->blocks + block_index;
+    bool result = true;
+    if (block->instruction_count)
+    {
+        MachineInstruction const* last = function->instructions + block->first_instruction + block->instruction_count - 1u;
+        u32 taken = machine_ref_payload(last->operands[0]);
+        u32 fallthrough = machine_ref_payload(last->operands[1]);
+        bool taken_block = machine_ref_kind(last->operands[0]) == MACHINE_REF_BLOCK && taken < function->block_count;
+        bool fallthrough_block = machine_ref_kind(last->operands[1]) == MACHINE_REF_BLOCK && fallthrough < function->block_count;
+        switch (last->opcode)
+        {
+            case MACHINE_X64_RET:
+            case MACHINE_X64_UD2:
+                result = false;
+                break;
+            case MACHINE_X64_JMP:
+                result = !taken_block || live_in[taken];
+                break;
+            case MACHINE_X64_JCC:
+                result = !taken_block || !fallthrough_block || live_in[taken] || live_in[fallthrough];
+                break;
+            default:
+                result = true;
+                break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_flags_liveness_solve(MachineX64FlagsLiveness* liveness)
+{
+    MachineFunction* function = liveness->function;
+    MachineOpcodeRow const* rows = machine_opcode_row_table();
+    u32 block_count = function->block_count;
+    u8* live_after = arena_allocate(liveness->arena, u8, function->instruction_count ? function->instruction_count : 1u);
+    // Per block: what the first flag-relevant row does on entry (0 nothing,
+    // 1 reads, 2 kills), then the live-in bit being solved for.
+    u8* entry = arena_allocate(liveness->arena, u8, block_count ? block_count : 1u);
+    u8* live_in = arena_allocate(liveness->arena, u8, block_count ? block_count : 1u);
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        MachineBlock const* block = function->blocks + block_index;
+        u8 state = 0;
+        for (u32 offset = 0; offset < block->instruction_count && !state; offset += 1)
+        {
+            u16 opcode = function->instructions[block->first_instruction + offset].opcode;
+            state = machine_x64_flags_reader(rows, opcode) ? 1 : machine_x64_flags_killer(opcode) ? 2 : 0;
+        }
+        entry[block_index] = state;
+        live_in[block_index] = 0;
+    }
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (u32 reverse = block_count; reverse > 0; reverse -= 1)
+        {
+            u32 block_index = reverse - 1u;
+            u8 live = entry[block_index] == 1 ? 1 : entry[block_index] == 2 ? 0 : (u8)machine_x64_flags_live_out(function, block_index, live_in);
+            if (live != live_in[block_index])
+            {
+                live_in[block_index] = live;
+                changed = true;
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        MachineBlock const* block = function->blocks + block_index;
+        bool live = machine_x64_flags_live_out(function, block_index, live_in);
+        for (u32 reverse = block->instruction_count; reverse > 0; reverse -= 1)
+        {
+            u32 row = block->first_instruction + reverse - 1u;
+            u16 opcode = function->instructions[row].opcode;
+            live_after[row] = (u8)live;
+            live = machine_x64_flags_reader(rows, opcode) || (!machine_x64_flags_killer(opcode) && live);
+        }
+    }
+    liveness->live_after = live_after;
+}
+
+// Whether no reader can observe the flags at `point`. A BEFORE point sees
+// the row's own read or kill; later phases see only what follows the row.
+BUSTER_GLOBAL_LOCAL bool machine_x64_flags_dead_at(MachineX64FlagsLiveness* liveness, MachinePoint point)
+{
+    if (!liveness->live_after)
+    {
+        machine_x64_flags_liveness_solve(liveness);
+    }
+    u32 row = machine_point_instruction(point);
+    bool live = true;
+    if (row < liveness->function->instruction_count)
+    {
+        live = liveness->live_after[row] != 0;
+        if (machine_point_phase(point) == MACHINE_POINT_BEFORE || machine_point_phase(point) == MACHINE_POINT_EARLY)
+        {
+            u16 opcode = liveness->function->instructions[row].opcode;
+            live = machine_x64_flags_reader(machine_opcode_row_table(), opcode) || (!machine_x64_flags_killer(opcode) && live);
+        }
+    }
+    return !live;
+}
+
+// xor r32, r32: the zero idiom, for a caller that has proved the flags dead.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_zero_idiom(MachineX64Encoder* encoder, u32 reg, MachineX64ExactEmitCounters* counters)
+{
+    bool result = true;
+    if (machine_x64_emit_fixed_template_counted(encoder, MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + reg, counters) ==
+        MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED)
+    {
+        result = machine_x64_emit_metadata_registers(encoder, S8("XOR"), reg, reg, 32, counters);
+    }
+    return result && !encoder->overflow;
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encoder* encoder, MachineFunction* function,
                                                                 MachineStackPlacement* placement, u32 edit_cursor,
-                                                                MachinePoint point, bool default_store)
+                                                                MachinePoint point, bool default_store,
+                                                                MachineX64FlagsLiveness* flags)
 {
     while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == point)
     {
@@ -14786,7 +15845,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
         bool vector_location = edit->location >= MACHINE_X64_ZMM0 && !predicate_location;
         if (edit->kind == MACHINE_EDIT_COPY)
         {
-            if (predicate_location)
+            if (edit->location == edit->subject)
+            {
+                // self-copy-64: a whole-register copy onto itself changes no
+                // state, for general, vector and predicate registers alike.
+            }
+            else if (predicate_location)
             {
                 u8 regs[4] = {(u8)edit->location, (u8)edit->subject, 0, 0};
                 (void)machine_x64_emit_predicate_row(encoder, &(MachineInstruction){.opcode = MACHINE_X64_KMOV, .payload = 64}, regs);
@@ -14806,8 +15870,15 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
         }
         else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
         {
-            if (predicate_location) (void)machine_x64_emit_predicate_constant(encoder, edit->location, function->immediates[edit->subject]);
-            else (void)machine_x64_emit_exact_immediate_value(encoder, edit->location, function->immediates[edit->subject], 0);
+            u64 value = function->immediates[edit->subject];
+            if (predicate_location) (void)machine_x64_emit_predicate_constant(encoder, edit->location, value);
+            else if (value == 0 && edit->location < 16 && machine_x64_flags_dead_at(flags, point))
+                (void)machine_x64_emit_zero_idiom(encoder, edit->location, 0);
+            else (void)machine_x64_emit_exact_immediate_value(encoder, edit->location, value, 0);
+        }
+        else if (edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME)
+        {
+            (void)machine_x64_emit_exact_frame_address(encoder, function, placement, edit->subject, edit->location);
         }
         else
         {
@@ -14832,8 +15903,24 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
             }
             else
             {
-                (void)machine_x64_emit_exact_frame_chunk(
-                    encoder, !store, edit->location, frame_offset, 8, 0);
+                // store-reload-same-slot-64: an allocator reload that reads
+                // back the register just stored to the same offset, with
+                // nothing emitted in between, is already satisfied.
+                bool reloads_last_store = !store && encoder->frame_store_valid && encoder->frame_store_end == encoder->count &&
+                                          encoder->frame_store_register == edit->location &&
+                                          encoder->frame_store_offset == frame_offset &&
+                                          (edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_TEMP_RELOAD);
+                if (!reloads_last_store)
+                {
+                    (void)machine_x64_emit_exact_frame_chunk(encoder, !store, edit->location, frame_offset, 8, 0);
+                }
+                if (store)
+                {
+                    encoder->frame_store_valid = !encoder->overflow;
+                    encoder->frame_store_end = encoder->count;
+                    encoder->frame_store_register = (u8)edit->location;
+                    encoder->frame_store_offset = frame_offset;
+                }
             }
         }
         edit_cursor += 1;
@@ -14877,11 +15964,36 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
     if (instruction->opcode == MACHINE_X64_F80_BINARY)
     {
         String8 names[] = {S8("FADDP"), S8("FSUBP"), S8("FMULP"), S8("FDIVP")};
+        u32 mode = instruction->payload;
+        bool controlled = mode >= MACHINE_X64_F80_ADD_P24;
+        u32 operation = mode == MACHINE_X64_F80_MULTIPLY_P64 ? MACHINE_X64_F80_MULTIPLY :
+                        mode == MACHINE_X64_F80_SUBTRACT_P64 ? MACHINE_X64_F80_SUBTRACT : controlled ? MACHINE_X64_F80_ADD : mode;
+        u32 precision = mode == MACHINE_X64_F80_ADD_P24 ? 0u : mode == MACHINE_X64_F80_ADD_P53 ? 0x200u : 0x300u;
+        if (controlled)
+        {
+            // The six padding bytes in the destination frame hold the saved
+            // and temporary control words until this closed transaction ends.
+            machine_x64_emit_x87_memory(encoder, S8("FNSTCW"), offsets[0] + 10, 16);
+            (void)machine_x64_emit_metadata_register_memory(encoder, S8("MOVZX"), MACHINE_X64_RAX, MACHINE_X64_RBP,
+                                                           offsets[0] + 10, 64, 16, 0);
+            (void)machine_x64_emit_metadata_register_immediate(encoder, S8("AND"), MACHINE_X64_RAX, ~UINT32_C(0x300), 32, 32, 0);
+            if (precision)
+            {
+                (void)machine_x64_emit_metadata_register_immediate(encoder, S8("OR"), MACHINE_X64_RAX, precision, 32, 32, 0);
+            }
+            (void)machine_x64_emit_metadata_memory_register(encoder, S8("MOV"), MACHINE_X64_RBP, offsets[0] + 12,
+                                                           MACHINE_X64_RAX, 16, 16, 0);
+            machine_x64_emit_x87_memory(encoder, S8("FLDCW"), offsets[0] + 12, 16);
+        }
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[1], 80);
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[2], 80);
         BusterX86MetadataPhysicalOperand operands[] = {machine_x64_x87_operand(1), machine_x64_x87_operand(0)};
-        (void)machine_x64_emit_x87(encoder, names[instruction->payload], operands, 1);
+        (void)machine_x64_emit_x87(encoder, names[operation], operands, 1);
         machine_x64_emit_x87_memory(encoder, S8("FSTP"), offsets[0], 80);
+        if (controlled)
+        {
+            machine_x64_emit_x87_memory(encoder, S8("FLDCW"), offsets[0] + 10, 16);
+        }
         machine_x64_emit_f80_padding(encoder, offsets[0]);
     }
     else if (instruction->opcode == MACHINE_X64_F80_NEGATE)
@@ -14896,14 +16008,19 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[2], 80);
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[1], 80);
         BusterX86MetadataPhysicalOperand operands[] = {machine_x64_x87_operand(0), machine_x64_x87_operand(1)};
-        (void)machine_x64_emit_x87(encoder, S8("FUCOMIP"), operands + 1, 1);
+        // == and != are quiet (fucomip); the relational payloads are
+        // signaling (fcomip), so a quiet NaN raises FE_INVALID only there.
+        (void)machine_x64_emit_x87(encoder, instruction->payload < 2 ? S8("FUCOMIP") : S8("FCOMIP"), operands + 1, 1);
         (void)machine_x64_emit_x87(encoder, S8("FSTP"), operands, 1);
-        String8 names[] = {S8("SETZ"), S8("SETNZ"), S8("SETB"), S8("SETBE"), S8("SETNBE"), S8("SETNB")};
-        (void)machine_x64_emit_metadata_register(encoder, names[instruction->payload], MACHINE_X64_RAX, 8, 0);
+        u32 condition = machine_x64_float_comparison_conditions[instruction->payload];
+        String8 mnemonic = buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_SET, condition);
+        (void)machine_x64_emit_metadata_register(encoder, mnemonic, MACHINE_X64_RAX, 8, 0);
         if (instruction->payload < 4)
         {
             bool unequal = instruction->payload == 1;
-            (void)machine_x64_emit_metadata_register(encoder, unequal ? S8("SETP") : S8("SETNP"), MACHINE_X64_RCX, 8, 0);
+            u32 parity_condition = unequal ? BUSTER_X86_CONDITION_PARITY : BUSTER_X86_CONDITION_NOT_PARITY;
+            String8 parity_mnemonic = buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_SET, parity_condition);
+            (void)machine_x64_emit_metadata_register(encoder, parity_mnemonic, MACHINE_X64_RCX, 8, 0);
             (void)machine_x64_emit_metadata_registers(encoder, unequal ? S8("OR") : S8("AND"), MACHINE_X64_RAX, MACHINE_X64_RCX, 8, 0);
         }
         BusterX86MetadataPhysicalOperand extend[] = {machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 64), machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 8)};
@@ -14952,6 +16069,12 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
 }
 
 MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
+{
+    return machine_encode_x86_64_into(arena, function, placement, 0, 0);
+}
+
+MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement, u8* caller_bytes,
+                                               u64 caller_capacity)
 {
     MachineEncodeResult result = {0};
     if (!placement->valid)
@@ -15010,7 +16133,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         return result;
     }
     MachineX64Encoder encoder = {
-        .bytes = arena_allocate(arena, u8, capacity64),
+        .bytes = caller_bytes && capacity64 <= caller_capacity ? caller_bytes : arena_allocate(arena, u8, capacity64),
         .capacity = (u32)capacity64,
     };
     MachineX64ExactEmitCounters exact_counters = {0};
@@ -15134,10 +16257,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         encoder.frame_base_offset = placement->frame_size;
     }
     u32 edit_cursor = 0;
+    MachineX64FlagsLiveness flags_liveness = {.arena = arena, .function = function};
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
         result.block_offsets[block_index] = encoder.count;
+        // A block start may be a branch target: nothing stored before it can
+        // stand in for a reload after it.
+        encoder.frame_store_valid = false;
         for (u32 offset = 0; offset < block->instruction_count; offset += 1)
         {
             u32 instruction_index = block->first_instruction + offset;
@@ -15147,7 +16274,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             MachinePoint before = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
             if (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
             {
-                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, before, false);
+                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, before, false, &flags_liveness);
             }
             MachineX64PreparedExactOpcode const* exact_entry = machine_x64_exact_opcode_for_opcode(machine_x64_predicate_legacy_opcode(instruction->opcode));
             bool exact_required = exact_entry && exact_entry->exact_required;
@@ -15176,16 +16303,65 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     exact_immediate = instruction->payload;
                 }
                 bool exact_emitted = false;
-                if (!exact_immediate_valid)
+                // Branch layout (docs/machine-rewrite-campaign.md): blocks are
+                // emitted in index order, so a terminator's successor at
+                // block_index + 1 is reached by falling through. A JMP there
+                // emits nothing; a JCC keeps only its Jcc when the fallthrough
+                // is next, or inverts the condition (x86 nibbles pair at bit
+                // 0) and branches to the fallthrough when the taken block is
+                // next. Allocator edits after the terminator, a non-final
+                // row, or an asm-goto landing addend on the JMP keep the full
+                // form.
+                MachineInstruction layout_row = *instruction;
+                u32 layout_step_limit = UINT32_MAX;
+                bool layout_elided = false;
+                bool layout_final = offset + 1u == block->instruction_count &&
+                                    !(edit_cursor < placement->edit_count &&
+                                      placement->edits[edit_cursor].point == machine_point_make(instruction_index, MACHINE_POINT_AFTER));
+                u32 next_block = block_index + 1u;
+                bool taken_is_block = machine_ref_kind(instruction->operands[0]) == MACHINE_REF_BLOCK;
+                bool fallthrough_is_block = machine_ref_kind(instruction->operands[1]) == MACHINE_REF_BLOCK;
+                if (layout_final && instruction->opcode == MACHINE_X64_JMP && taken_is_block &&
+                    machine_ref_payload(instruction->operands[0]) == next_block &&
+                    !(block_addend_targets && block_addend_targets[block_index] == next_block))
+                {
+                    layout_elided = true;
+                }
+                else if (layout_final && instruction->opcode == MACHINE_X64_JCC && taken_is_block && fallthrough_is_block &&
+                         (instruction->payload & ~0xfu) == 0)
+                {
+                    if (machine_ref_payload(instruction->operands[1]) == next_block)
+                    {
+                        layout_step_limit = 1;
+                    }
+                    else if (machine_ref_payload(instruction->operands[0]) == next_block)
+                    {
+                        layout_row.payload = instruction->payload ^ 1u;
+                        layout_row.operands[0] = instruction->operands[1];
+                        layout_row.operands[1] = instruction->operands[0];
+                        layout_step_limit = 1;
+                    }
+                }
+                if (layout_elided)
+                {
+                    exact_emitted = true;
+                }
+                else if (!exact_immediate_valid)
                 {
                     exact_counters.attempts += 1;
                     exact_counters.fallbacks += 1;
                 }
+                else if (instruction->opcode == MACHINE_X64_MOV_RI && exact_immediate == 0 && operand_registers[0] < 16 &&
+                         machine_x64_flags_dead_at(&flags_liveness, machine_point_make(instruction_index, MACHINE_POINT_AFTER)))
+                {
+                    exact_emitted = machine_x64_emit_zero_idiom(&encoder, operand_registers[0], &exact_counters);
+                }
                 else
                 {
                     exact_emitted = exact_entry->sequence_required
-                                         ? machine_x64_emit_exact_sequence(&encoder, exact_entry, instruction, placement, operand_registers,
-                                                                           instruction->payload, exact_immediate, &exact_counters, arena, &fixups)
+                                         ? machine_x64_emit_exact_sequence(&encoder, exact_entry, &layout_row, placement, operand_registers,
+                                                                           layout_row.payload, exact_immediate, &exact_counters, arena, &fixups,
+                                                                           layout_step_limit)
                                          : machine_x64_emit_exact_recipe(&encoder, exact_entry, instruction, placement, operand_registers,
                                                                          instruction->payload, exact_immediate, false, &exact_counters);
                 }
@@ -15207,7 +16383,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     // authoritative.
                     encoder.overflow = true;
                 }
-                else if (exact_entry->descriptor)
+                else if (exact_entry->descriptor && !layout_elided)
                 {
                     // Relative and symbolic forms deliberately query the
                     // metadata encoder with a neutral zero displacement. The
@@ -15355,12 +16531,20 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                 }
                             }
                         }
-                        else if (!saves_first)
+                        if (!placement->callee_saved_mask && !saves_first)
                         {
-                            machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP, S8("MOV"),
-                                                             MACHINE_X64_RSP, MACHINE_X64_RBP, 64);
+                            // epilogue-leave: LEAVE is MOV RSP, RBP; POP RBP
+                            // and has no flag effect. System V unwind records
+                            // describe only the prologue; Win64 frames, whose
+                            // epilogue grammar excludes LEAVE, save first.
+                            machine_x64_emit_fixed_instruction(&encoder, MACHINE_X64_FIXED_TEMPLATE_LEAVE, S8("LEAVE"),
+                                                               (BusterX86MetadataFeatureInput){0});
                         }
-                        machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_POP + MACHINE_X64_RBP, S8("POP"), MACHINE_X64_RBP, 64);
+                        else
+                        {
+                            machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_POP + MACHINE_X64_RBP, S8("POP"),
+                                                            MACHINE_X64_RBP, 64);
+                        }
                         machine_x64_emit_fixed_instruction(&encoder, MACHINE_X64_FIXED_TEMPLATE_RET, S8("RET"), (BusterX86MetadataFeatureInput){0});
                     }
                     break; case MACHINE_X64_CALL_DIRECT:
@@ -15815,6 +16999,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
                         u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            machine_x64_emit_frame_vector_chunk(&encoder, true, source_offset - copied);
+                            machine_x64_emit_frame_vector_chunk(&encoder, false, destination_offset - copied);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
@@ -15828,6 +17017,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
                         u32 source_register = operand_registers[1];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVUPS"), 0, source_register, (s64)copied, false, 128, 0);
+                            machine_x64_emit_frame_vector_chunk(&encoder, false, destination_offset - copied);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
@@ -15841,6 +17035,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_register = operand_registers[0];
                         u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            machine_x64_emit_frame_vector_chunk(&encoder, true, source_offset - copied);
+                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVUPS"), 0, destination_register, (s64)copied, true, 128, 0);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
@@ -16399,7 +17598,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             MachinePoint after = machine_point_make(instruction_index, MACHINE_POINT_AFTER);
             if (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
             {
-                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, after, true);
+                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, after, true, &flags_liveness);
             }
         }
     }

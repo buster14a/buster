@@ -3,7 +3,9 @@
 // per-architecture probes live in x86_64.c and aarch64.c), the canonical
 // CPU model names and their feature tables that -march/-mcpu resolve
 // through (cpu_model_from_string, cpu_model_to_string_os), model/arch
-// compatibility checks, target triple splitting/printing, and per-target
+// compatibility checks (cpu_model_supports_arch), validated model defaults
+// (target_cpu_features_default; x86 table in target_cpu_features_x86_default),
+// target triple splitting/printing, and per-target
 // data layouts. New CPU models are added to the tables here, spelled the
 // way cpu_model_to_string_os prints them.
 
@@ -220,17 +222,25 @@ TargetDataLayout target_data_layout(Target target)
     bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
     bool llp64 = target_uses_llp64_data_model(target);
     bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool wasm32 = target.cpu_arch == CPU_ARCH_WASM32;
     bool wasm64 = target.cpu_arch == CPU_ARCH_WASM64;
     bool bpfel = target.cpu_arch == CPU_ARCH_BPFEL;
+    bool spirv_compute = target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE;
+    bool wasm = wasm32 || wasm64;
     bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
-    u32 long_size = llp64 ? 4 : 8;
-    bool double_long_double = llp64 || wasm64 || bpfel || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
+    u32 pointer_size = wasm32 || spirv_compute ? 4 : 8;
+    u32 long_size = llp64 || wasm32 || spirv_compute ? 4 : 8;
+    bool plain_char_is_signed = target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED ||
+                                (target.plain_char_policy != TARGET_PLAIN_CHAR_POLICY_UNSIGNED && !arm_plain_char_unsigned);
+    // WebAssembly uses IEEE binary128 long double in both pointer-width ABIs.
+    bool double_long_double = llp64 || bpfel || spirv_compute || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
     bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
     u32 long_double_bits = double_long_double ? 64 : x87_long_double ? 80 : 128;
     bool aarch64_pointer_list = target.cpu_arch == CPU_ARCH_AARCH64 && (apple || windows);
-    u32 va_list_size = llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
+    u32 va_list_size = wasm32 || spirv_compute ? 4 : llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
                        target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
+    u32 va_list_alignment = wasm32 || spirv_compute ? 4 : 8;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
@@ -252,16 +262,16 @@ TargetDataLayout target_data_layout(Target target)
         .float_type = {.size = 4, .alignment = 4, .bit_width = 32},
         .double_type = {.size = 8, .alignment = 8, .bit_width = 64},
         .long_double_type = {.size = long_double_size, .alignment = long_double_size, .bit_width = long_double_bits},
-        .pointer = {.size = 8, .alignment = 8, .bit_width = 64},
-        .va_list = {.size = va_list_size, .alignment = 8, .bit_width = va_list_size * 8},
+        .pointer = {.size = pointer_size, .alignment = pointer_size, .bit_width = pointer_size * 8},
+        .va_list = {.size = va_list_size, .alignment = va_list_alignment, .bit_width = va_list_size * 8},
         .atomic_min_width = 8,
-        .atomic_max_width = wasm64 || bpfel ? 64 : 128,
-        .atomic_alignment = wasm64 || bpfel ? 8 : 16,
+        .atomic_max_width = wasm || bpfel ? 64 : 128,
+        .atomic_alignment = wasm || bpfel ? 8 : 16,
         .abi_stack_alignment = bpfel ? 8 : 16,
         .abi_max_alignment = bpfel ? 8 : 16,
         .endianness = TARGET_ENDIAN_LITTLE,
-        .plain_char_is_signed = !arm_plain_char_unsigned,
-        .has_128_bit_integer = !wasm64 && !bpfel,
+        .plain_char_is_signed = plain_char_is_signed,
+        .has_128_bit_integer = !wasm && !bpfel && !spirv_compute,
     };
     return layout;
 }
@@ -305,7 +315,8 @@ bool target_data_layout_is_valid(TargetDataLayout layout)
             return false;
         }
     }
-    return layout.endianness < TARGET_ENDIAN_COUNT && layout.pointer.size == 8 && layout.pointer.alignment == 8 && layout.atomic_min_width &&
+    return layout.endianness < TARGET_ENDIAN_COUNT && (layout.pointer.size == 4 || layout.pointer.size == 8) &&
+           layout.pointer.alignment == layout.pointer.size && layout.atomic_min_width &&
            layout.atomic_min_width <= layout.atomic_max_width && layout.atomic_max_width <= 128 && target_layout_alignment_valid(layout.atomic_alignment) &&
            target_layout_alignment_valid(layout.abi_stack_alignment) && target_layout_alignment_valid(layout.abi_max_alignment) &&
            layout.abi_stack_alignment <= layout.abi_max_alignment;
@@ -405,6 +416,15 @@ TargetParseResult target_parse_triple(String8 triple)
 
     u64 component_start = 0;
     u32 component_index = 0;
+    String8 gnu_environment = {0};
+    // The execution environment is part of this exact spelling. Generic
+    // SPIR-V triples remain owned by the external GPU pipeline parser.
+    if (string_equal(triple, S8("spirv-vulkan1.2-compute")))
+    {
+        result.target.cpu_arch = CPU_ARCH_SPIRV_COMPUTE;
+        result.target.os = OPERATING_SYSTEM_FREESTANDING;
+        component_start = triple.length;
+    }
     while (component_start < triple.length)
     {
         u64 component_end = component_start;
@@ -425,6 +445,10 @@ TargetParseResult target_parse_triple(String8 triple)
             else if (target_component_equal(component, S8("aarch64")) || target_component_equal(component, S8("arm64")))
             {
                 result.target.cpu_arch = CPU_ARCH_AARCH64;
+            }
+            else if (target_component_equal(component, S8("wasm32")))
+            {
+                result.target.cpu_arch = CPU_ARCH_WASM32;
             }
             else if (target_component_equal(component, S8("wasm64")))
             {
@@ -499,14 +523,31 @@ TargetParseResult target_parse_triple(String8 triple)
                 result.target.os = OPERATING_SYSTEM_LINUX;
             }
         }
+        else if (target_component_equal(component, S8("mingw32")))
+        {
+            result.invalid_component = component;
+            result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
+            break;
+        }
         else if (target_component_equal(component, S8("windows")) || target_component_equal(component, S8("win32")) ||
-                 target_component_equal(component, S8("mingw32")) || target_component_equal(component, S8("msvc")))
+                 target_component_equal(component, S8("msvc")))
         {
             result.target.os = OPERATING_SYSTEM_WINDOWS;
+        }
+        else if (result.target.os == OPERATING_SYSTEM_WINDOWS &&
+                 (target_component_equal(component, S8("gnu")) || target_component_equal(component, S8("gnullvm"))))
+        {
+            // These name MinGW after Windows; before its OS they remain
+            // free-form vendor spellings, including an explicit MSVC target.
+            gnu_environment = component;
         }
         else if (target_component_equal(component, S8("uefi")))
         {
             result.target.os = OPERATING_SYSTEM_UEFI;
+        }
+        else if (target_component_equal(component, S8("wasip1")) || target_component_equal(component, S8("wasi")))
+        {
+            result.target.os = OPERATING_SYSTEM_WASI;
         }
         else if (target_component_equal(component, S8("freestanding")) || target_component_equal(component, S8("elf")))
         {
@@ -516,17 +557,25 @@ TargetParseResult target_parse_triple(String8 triple)
         component_index += 1;
         component_start = component_end < triple.length ? component_end + 1 : triple.length;
     }
-    if (result.target.os == OPERATING_SYSTEM_COUNT)
+    if (result.error == TARGET_PARSE_ERROR_NONE && result.target.os == OPERATING_SYSTEM_COUNT)
     {
         result.invalid_component = triple;
         result.error = TARGET_PARSE_ERROR_OPERATING_SYSTEM;
+    }
+    else if (result.error == TARGET_PARSE_ERROR_NONE && result.target.os == OPERATING_SYSTEM_WINDOWS && gnu_environment.length)
+    {
+        result.invalid_component = gnu_environment;
+        result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
     }
     return result;
 }
 
 CpuModel cpu_model_resolve_detected(CpuModel model)
 {
-    return model == CPU_MODEL_ERROR ? CPU_MODEL_NATIVE : model;
+    // Virtualized CPUID family/model identities can resemble an IA-32-only
+    // processor while the host actually executes x86-64. Keep the probed
+    // feature set and use the dynamic native identity in that case.
+    return cpu_model_supports_arch(model, target_native.cpu_arch) ? model : CPU_MODEL_NATIVE;
 }
 
 CpuModel cpu_detect_model(void)
@@ -567,75 +616,97 @@ CpuModel cpu_model_from_string(String8 string)
 
 bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
 {
+    bool result;
     if (model == CPU_MODEL_BASELINE)
     {
-        return arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_AARCH64 || arch == CPU_ARCH_WASM64 || arch == CPU_ARCH_BPFEL;
+        result = (u32)arch < CPU_ARCH_COUNT;
     }
-    if (model == CPU_MODEL_NATIVE)
+    else if (model == CPU_MODEL_NATIVE)
     {
-        return arch == target_native.cpu_arch;
+        result = arch == target_native.cpu_arch;
     }
-    if (arch == CPU_ARCH_X86_64)
+    else if (arch == CPU_ARCH_X86_64)
     {
-        return model >= CPU_MODEL_AMD_I486 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+        // Execution-mode capability is independent of the family enum order.
+        // The legacy i486 through Athlon XP models have no AMD64 long mode.
+        switch (model)
+        {
+        case CPU_MODEL_AMD_K8:
+        case CPU_MODEL_AMD_K8_SSE3:
+        case CPU_MODEL_AMD_AMD_FAMILY_10:
+        case CPU_MODEL_AMD_BT_1:
+        case CPU_MODEL_AMD_BT_2:
+        case CPU_MODEL_AMD_BD_1:
+        case CPU_MODEL_AMD_BD_2:
+        case CPU_MODEL_AMD_BD_3:
+        case CPU_MODEL_AMD_BD_4:
+        case CPU_MODEL_AMD_ZEN_1:
+        case CPU_MODEL_AMD_ZEN_2:
+        case CPU_MODEL_AMD_ZEN_3:
+        case CPU_MODEL_AMD_ZEN_4:
+        case CPU_MODEL_AMD_ZEN_5:
+        case CPU_MODEL_INTEL_CORE_2:
+        case CPU_MODEL_INTEL_PENRYN:
+        case CPU_MODEL_INTEL_NEHALEM:
+        case CPU_MODEL_INTEL_WESTMERE:
+        case CPU_MODEL_INTEL_SANDY_BRIDGE:
+        case CPU_MODEL_INTEL_IVY_BRIDGE:
+        case CPU_MODEL_INTEL_HASWELL:
+        case CPU_MODEL_INTEL_BROADWELL:
+        case CPU_MODEL_INTEL_SKYLAKE:
+        case CPU_MODEL_INTEL_SKYLAKE_AVX512:
+        case CPU_MODEL_INTEL_ROCKETLAKE:
+        case CPU_MODEL_INTEL_COOPERLAKE:
+        case CPU_MODEL_INTEL_CASCADELAKE:
+        case CPU_MODEL_INTEL_CANNONLAKE:
+        case CPU_MODEL_INTEL_ICELAKE_CLIENT:
+        case CPU_MODEL_INTEL_TIGERLAKE:
+        case CPU_MODEL_INTEL_ALDERLAKE:
+        case CPU_MODEL_INTEL_RAPTORLAKE:
+        case CPU_MODEL_INTEL_METEORLAKE:
+        case CPU_MODEL_INTEL_GRACEMONT:
+        case CPU_MODEL_INTEL_ARROWLAKE:
+        case CPU_MODEL_INTEL_ARROWLAKE_S:
+        case CPU_MODEL_INTEL_LUNARLAKE:
+        case CPU_MODEL_INTEL_PANTHERLAKE:
+        case CPU_MODEL_INTEL_ICELAKE_SERVER:
+        case CPU_MODEL_INTEL_EMERALD_RAPIDS:
+        case CPU_MODEL_INTEL_SAPPHIRE_RAPIDS:
+        case CPU_MODEL_INTEL_GRANITE_RAPIDS:
+        case CPU_MODEL_INTEL_GRANITE_RAPIDS_D:
+        case CPU_MODEL_INTEL_BONNELL:
+        case CPU_MODEL_INTEL_SILVERMONT:
+        case CPU_MODEL_INTEL_GOLDMONT:
+        case CPU_MODEL_INTEL_GOLDMONT_PLUS:
+        case CPU_MODEL_INTEL_TREMONT:
+        case CPU_MODEL_INTEL_SIERRAFOREST:
+        case CPU_MODEL_INTEL_GRANDRIDGE:
+        case CPU_MODEL_INTEL_CLEARWATERFOREST:
+        case CPU_MODEL_INTEL_KNL:
+        case CPU_MODEL_INTEL_KNM:
+        case CPU_MODEL_INTEL_DIAMOND_RAPIDS:
+            result = true;
+            break;
+        default:
+            result = false;
+            break;
+        }
     }
-    if (arch == CPU_ARCH_AARCH64)
+    else if (arch == CPU_ARCH_AARCH64)
     {
-        return model == CPU_MODEL_A64_GENERIC || model == CPU_MODEL_A64_ARM_CORTEX_R82 || model == CPU_MODEL_A64_ARM_CORTEX_R82AE ||
-               (model >= CPU_MODEL_A64_ARM_CORTEX_A34 && model <= CPU_MODEL_A64_ARM_NEOVERSE_V3AE) ||
-               (model >= CPU_MODEL_A64_APPLE_A7 && model <= CPU_MODEL_A64_APPLE_M4);
+        result = model == CPU_MODEL_A64_GENERIC || model == CPU_MODEL_A64_ARM_CORTEX_R82 || model == CPU_MODEL_A64_ARM_CORTEX_R82AE ||
+                 (model >= CPU_MODEL_A64_ARM_CORTEX_A34 && model <= CPU_MODEL_A64_ARM_NEOVERSE_V3AE) ||
+                 (model >= CPU_MODEL_A64_APPLE_A7 && model <= CPU_MODEL_A64_APPLE_M4);
     }
-    return false;
+    else
+    {
+        result = false;
+    }
+    return result;
 }
 
-TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
+BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel model)
 {
-    if (arch == CPU_ARCH_AARCH64)
-    {
-        if (model == CPU_MODEL_A64_APPLE_M1)
-        {
-            return target_cpu_features_from_array((TargetCpuFeature const[]){
-                TARGET_CPU_FEATURE_AARCH64_V8_4A,
-                TARGET_CPU_FEATURE_AARCH64_AES,
-                TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
-                TARGET_CPU_FEATURE_AARCH64_CCDP,
-                TARGET_CPU_FEATURE_AARCH64_CCPP,
-                TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
-                TARGET_CPU_FEATURE_AARCH64_CRC,
-                TARGET_CPU_FEATURE_AARCH64_DOTPROD,
-                TARGET_CPU_FEATURE_AARCH64_FLAGM,
-                TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
-                TARGET_CPU_FEATURE_AARCH64_FP16FML,
-                TARGET_CPU_FEATURE_AARCH64_FPTOINT,
-                TARGET_CPU_FEATURE_AARCH64_FULLFP16,
-                TARGET_CPU_FEATURE_AARCH64_JSCONV,
-                TARGET_CPU_FEATURE_AARCH64_LSE,
-                TARGET_CPU_FEATURE_AARCH64_LOR,
-                TARGET_CPU_FEATURE_AARCH64_NEON,
-                TARGET_CPU_FEATURE_AARCH64_PAUTH,
-                TARGET_CPU_FEATURE_AARCH64_PERFMON,
-                TARGET_CPU_FEATURE_AARCH64_PREDRES,
-                TARGET_CPU_FEATURE_AARCH64_RAS,
-                TARGET_CPU_FEATURE_AARCH64_RCPC,
-                TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
-                TARGET_CPU_FEATURE_AARCH64_RDM,
-                TARGET_CPU_FEATURE_AARCH64_SB,
-                TARGET_CPU_FEATURE_AARCH64_SHA2,
-                TARGET_CPU_FEATURE_AARCH64_SHA3,
-                TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
-                TARGET_CPU_FEATURE_AARCH64_SSBS,
-                TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
-            }, 30);
-        }
-        return target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
-            TARGET_CPU_FEATURE_AARCH64_NEON,
-        }, 2);
-    }
-    if (arch != CPU_ARCH_X86_64)
-    {
-        return target_cpu_features_empty();
-    }
     TargetCpuFeatures result = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
     if (model >= CPU_MODEL_AMD_K8_SSE3 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS)
     {
@@ -1195,6 +1266,69 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     return result;
 }
 
+TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
+{
+    TargetCpuFeatures result;
+    if (arch == CPU_ARCH_X86_64 && !cpu_model_supports_arch(model, arch))
+    {
+        result = target_cpu_features_empty();
+    }
+    else if (arch == CPU_ARCH_AARCH64)
+    {
+        if (model == CPU_MODEL_A64_APPLE_M1)
+        {
+            result = target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_AARCH64_V8_4A,
+                TARGET_CPU_FEATURE_AARCH64_AES,
+                TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
+                TARGET_CPU_FEATURE_AARCH64_CCDP,
+                TARGET_CPU_FEATURE_AARCH64_CCPP,
+                TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+                TARGET_CPU_FEATURE_AARCH64_CRC,
+                TARGET_CPU_FEATURE_AARCH64_DOTPROD,
+                TARGET_CPU_FEATURE_AARCH64_FLAGM,
+                TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+                TARGET_CPU_FEATURE_AARCH64_FP16FML,
+                TARGET_CPU_FEATURE_AARCH64_FPTOINT,
+                TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+                TARGET_CPU_FEATURE_AARCH64_JSCONV,
+                TARGET_CPU_FEATURE_AARCH64_LSE,
+                TARGET_CPU_FEATURE_AARCH64_LOR,
+                TARGET_CPU_FEATURE_AARCH64_NEON,
+                TARGET_CPU_FEATURE_AARCH64_PAUTH,
+                TARGET_CPU_FEATURE_AARCH64_PERFMON,
+                TARGET_CPU_FEATURE_AARCH64_PREDRES,
+                TARGET_CPU_FEATURE_AARCH64_RAS,
+                TARGET_CPU_FEATURE_AARCH64_RCPC,
+                TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
+                TARGET_CPU_FEATURE_AARCH64_RDM,
+                TARGET_CPU_FEATURE_AARCH64_SB,
+                TARGET_CPU_FEATURE_AARCH64_SHA2,
+                TARGET_CPU_FEATURE_AARCH64_SHA3,
+                TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
+                TARGET_CPU_FEATURE_AARCH64_SSBS,
+                TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
+            }, 30);
+        }
+        else
+        {
+            result = target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+                TARGET_CPU_FEATURE_AARCH64_NEON,
+            }, 2);
+        }
+    }
+    else if (arch == CPU_ARCH_X86_64)
+    {
+        result = target_cpu_features_x86_default(model);
+    }
+    else
+    {
+        result = target_cpu_features_empty();
+    }
+    return result;
+}
+
 bool target_cpu_features_are_valid(Target target)
 {
     if (!cpu_model_supports_arch(target.cpu_model, target.cpu_arch))
@@ -1204,7 +1338,8 @@ bool target_cpu_features_are_valid(Target target)
     if (target.cpu_features_explicit)
     {
         TargetCpuFeatures features = target.cpu_features;
-        if (target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL)
+        if (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL ||
+            target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE)
         {
             return !target_cpu_features_any(features);
         }
@@ -1836,11 +1971,18 @@ String8 cpu_arch_to_string_os(CpuArch arch)
     case CPU_ARCH_AARCH64:
         result = S8("aarch64");
         break;
+    case CPU_ARCH_WASM32:
+        result = S8("wasm32");
+        break;
+        break;
     case CPU_ARCH_WASM64:
         result = S8("wasm64");
         break;
     case CPU_ARCH_BPFEL:
         result = S8("bpfel");
+        break;
+    case CPU_ARCH_SPIRV_COMPUTE:
+        result = S8("spirv-vulkan1.2-compute");
         break;
     default:
         result = S8("");
@@ -1894,6 +2036,10 @@ String8 operating_system_to_string_os(OperatingSystem os)
         break;
     case OPERATING_SYSTEM_IOS:
         result = S8("ios");
+        break;
+    case OPERATING_SYSTEM_WASI:
+        result = S8("wasip1");
+        break;
         break;
     case OPERATING_SYSTEM_FREESTANDING:
         result = S8("freestanding");

@@ -1,4 +1,5 @@
 name: Native retirement trusted integration
+run-name: ${{ inputs.authorization_mode == 'automation' && format('Native retirement request {0}', inputs.automation_key) || format('Native retirement PR {0}', inputs.pull_request) }}
 
 on:
   workflow_dispatch:
@@ -22,9 +23,17 @@ on:
         required: true
         default: configured
         type: choice
-        options: [configured, independent-review, solo-maintainer]
+        options: [configured, independent-review, solo-maintainer, automation]
       expected_base:
         description: Optional main override; blank uses the immutable dispatch revision
+        required: false
+        type: string
+      automation_request:
+        description: Exact sealed controller request; leave blank for manual integration
+        required: false
+        type: string
+      automation_key:
+        description: Immutable controller request identity
         required: false
         type: string
 
@@ -49,6 +58,8 @@ env:
   TRANSITION_KIND: ${{ inputs.transition_kind }}
   AUTHORIZATION_MODE: ${{ inputs.authorization_mode }}
   EXPECTED_BASE: ${{ inputs.expected_base }}
+  AUTOMATION_REQUEST: ${{ inputs.automation_request }}
+  AUTOMATION_KEY: ${{ inputs.automation_key }}
   NATIVE_RETIREMENT_SOLO_MAINTAINER: ${{ vars.NATIVE_RETIREMENT_SOLO_MAINTAINER }}
 
 jobs:
@@ -66,6 +77,7 @@ jobs:
       actions: read
       statuses: read
     outputs:
+      superseded: ${{ steps.identities.outputs.superseded }}
       base: ${{ steps.identities.outputs.base }}
       head: ${{ steps.identities.outputs.head }}
       source_head: ${{ steps.identities.outputs.source_head }}
@@ -84,10 +96,12 @@ jobs:
           persist-credentials: false
       - name: Resolve and authorize the immutable candidate
         id: identities
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'code=$?; if [[ $code == 75 || $code == 76 ]]; then echo "superseded=true" >> "$GITHUB_OUTPUT"; fi; exit "$code"' ERR
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
           base=$(git -C trusted rev-parse HEAD)
           git -C trusted fetch --no-tags origin \
@@ -117,6 +131,7 @@ jobs:
             --transition-kind "$TRANSITION_KIND" \
             --authorization-mode "$AUTHORIZATION_MODE" \
             --expected-base "$EXPECTED_BASE" \
+            --repo-root trusted --source-head "$source_head" \
             | tee "$RUNNER_TEMP/native-retirement/authorization.json"
           printf 'base=%s\nhead=%s\nsource_head=%s\n' \
             "$base" "$head" "$source_head" >> "$GITHUB_OUTPUT"
@@ -186,13 +201,28 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Prepare pinned closure with trusted main tools
         run: |
           python3 trusted/tools/native_retirement_sdks.py \
-            --source-root "$GITHUB_WORKSPACE/integration"
+            --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct exact generated state and record evidence
         id: evidence
         run: |
@@ -230,6 +260,8 @@ jobs:
       TRANSITION_KIND: ${{ needs.prepare.outputs.classification }}
       AUTHORIZATION_MODE: ${{ needs.prepare.outputs.authorization_mode }}
     needs: prepare
+    outputs:
+      superseded: ${{ steps.candidate.outputs.superseded }}
     name: Validate exact final candidate without write authority
     runs-on: ubuntu-26.04
     timeout-minutes: 35
@@ -245,11 +277,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Fetch and stage the immutable candidate
+        id: candidate
+        shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'code=$?; if [[ $code == 75 || $code == 76 ]]; then echo "superseded=true" >> "$GITHUB_OUTPUT"; fi; exit "$code"' ERR
           git -C trusted fetch --no-tags origin \
             "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/native-retirement-candidate"
-          test "$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)" = "$EXPECTED_HEAD"
+          [[ "$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)" == "$EXPECTED_HEAD" ]] || { echo "superseded=true" >> "$GITHUB_OUTPUT"; exit 76; }
           python3 trusted/tools/native_retirement_integration.py stage \
             --repo-root trusted \
             --worktree "$GITHUB_WORKSPACE/integration" \
@@ -314,9 +349,18 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct independently with trusted tools
         run: |
-          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
@@ -330,6 +374,12 @@ jobs:
           actual=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
           test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
           test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Prove the candidate authority accepts the trusted final state
         working-directory: integration
         run: |
@@ -340,6 +390,8 @@ jobs:
         run: |
           python3 tools/native_retirement_dependency_binding_test.py -v
           python3 tools/native_retirement_integration_test.py -v
+          python3 tools/native_retirement_automation_test.py -v
+          python3 tools/native_retirement_controller_test.py -v
           python3 tools/native_retirement_merge_gate_test.py -v
           python3 tools/merge_conflict_preflight_test.py -v
           python3 tools/native_retirement_rebind_test.py -v
@@ -347,7 +399,7 @@ jobs:
           python3 tools/native_retirement_materializer_test.py -v
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
-          python3 tests/ci_tools_test.py
+          python3 tools/ci_workflow_policy_test.py
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c \
             -o "$RUNNER_TEMP/native-retirement-build"
           "$RUNNER_TEMP/native-retirement-build" native_retirement_census --self-test
@@ -359,12 +411,15 @@ jobs:
       TRANSITION_KIND: ${{ needs.prepare.outputs.classification }}
       AUTHORIZATION_MODE: ${{ needs.prepare.outputs.authorization_mode }}
     needs: [prepare, validate]
+    outputs:
+      superseded: ${{ steps.candidate.outputs.superseded == 'true' || steps.authorization.outputs.superseded == 'true' || steps.publication.outputs.superseded == 'true' }}
     name: Publish one lease-guarded PR integration head
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     environment: native-retirement-integration
     permissions:
       contents: write
+      actions: read
       pull-requests: read
       statuses: write
     steps:
@@ -377,11 +432,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Fetch and stage the immutable candidate without executing it
+        id: candidate
+        shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'code=$?; if [[ $code == 75 || $code == 76 ]]; then echo "superseded=true" >> "$GITHUB_OUTPUT"; fi; exit "$code"' ERR
           git -C trusted fetch --no-tags origin \
             "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/native-retirement-candidate"
-          test "$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)" = "$EXPECTED_HEAD"
+          [[ "$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)" == "$EXPECTED_HEAD" ]] || { echo "superseded=true" >> "$GITHUB_OUTPUT"; exit 76; }
           python3 trusted/tools/native_retirement_integration.py stage \
             --repo-root trusted \
             --worktree "$GITHUB_WORKSPACE/integration" \
@@ -446,9 +504,18 @@ jobs:
           path: integration/external/musl
           fetch-depth: 1
           persist-credentials: false
+      # Archives are content-addressed and re-verified against the pinned
+      # sha256 before use, so a cache entry can only skip the download.
+      - name: Restore pinned SDK archives
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct and compare without running candidate code
         run: |
-          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration" \
+            --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
@@ -462,46 +529,62 @@ jobs:
           actual=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
           test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
           test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reauthorize immediately before the only mutation
+        id: authorization
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'code=$?; if [[ $code == 75 || $code == 76 ]]; then echo "superseded=true" >> "$GITHUB_OUTPUT"; fi; exit "$code"' ERR
           python3 trusted/tools/native_retirement_integration.py authorize \
             --pull-request "$PR_NUMBER" \
             --expected-head "$EXPECTED_HEAD" \
             --transition-kind "$TRANSITION_KIND" \
             --authorization-mode "$AUTHORIZATION_MODE" \
             --expected-base "$EXPECTED_BASE" \
+            --repo-root trusted --source-head '${{ needs.prepare.outputs.source_head }}' \
+            --automation-publication \
             | tee "$RUNNER_TEMP/native-retirement/authorization.json"
       - name: Publish and attest exact integration head
+        id: publication
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ secrets.NATIVE_RETIREMENT_PUBLICATION_TOKEN || github.token }}
           AUTOMATIC_PR_CI: ${{ secrets.NATIVE_RETIREMENT_PUBLICATION_TOKEN != '' }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'code=$?; if [[ $code == 75 || $code == 76 ]]; then echo "superseded=true" >> "$GITHUB_OUTPUT"; fi; exit "$code"' ERR
           base='${{ needs.prepare.outputs.base }}'
           head='${{ needs.prepare.outputs.head }}'
           source_head='${{ needs.prepare.outputs.source_head }}'
           final_tree='${{ needs.prepare.outputs.final_tree }}'
           evidence='${{ needs.prepare.outputs.evidence_sha256 }}'
           transition='${{ needs.prepare.outputs.classification }}'
+          if [[ "$AUTHORIZATION_MODE" == automation && "$AUTOMATIC_PR_CI" != true ]]; then
+            echo '::error::Automatic integration requires NATIVE_RETIREMENT_PUBLICATION_TOKEN.'
+            exit 1
+          fi
           pr_json=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
           head_repo=$(jq -r '.head.repo.full_name' <<<"$pr_json")
           head_ref=$(jq -r '.head.ref' <<<"$pr_json")
           head_sha=$(jq -r '.head.sha' <<<"$pr_json")
           test "$head_repo" = "$GITHUB_REPOSITORY"
-          test "$head_sha" = "$head"
+          test "$head_sha" = "$head" || { echo "superseded=true" >> "$GITHUB_OUTPUT"; exit 76; }
           git check-ref-format --branch "$head_ref" >/dev/null
           main_remote=$(git -C trusted ls-remote --refs origin refs/heads/main | cut -f1)
           pull_remote=$(git -C trusted ls-remote --refs origin "refs/pull/$PR_NUMBER/head" | cut -f1)
           branch_remote=$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)
-          test "$main_remote" = "$base"
-          test "$pull_remote" = "$head"
-          test "$branch_remote" = "$head"
+          test "$main_remote" = "$base" || { echo "superseded=true" >> "$GITHUB_OUTPUT"; exit 75; }
+          test "$pull_remote" = "$head" || { echo "superseded=true" >> "$GITHUB_OUTPUT"; exit 76; }
+          test "$branch_remote" = "$head" || { echo "superseded=true" >> "$GITHUB_OUTPUT"; exit 76; }
           printf -v message '%s\n' \
             "Integrate pull request #$PR_NUMBER with native-retirement binding" \
             "" \
@@ -528,8 +611,8 @@ jobs:
           SH
           chmod 700 "$askpass"
           trap 'rm -f "$askpass"' EXIT
-          test "$(git -C trusted ls-remote --refs origin refs/heads/main | cut -f1)" = "$base"
-          test "$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)" = "$head"
+          test "$(git -C trusted ls-remote --refs origin refs/heads/main | cut -f1)" = "$base" || { echo "superseded=true" >> "$GITHUB_OUTPUT"; exit 75; }
+          test "$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)" = "$head" || { echo "superseded=true" >> "$GITHUB_OUTPUT"; exit 76; }
           if [[ "$AUTOMATIC_PR_CI" != true ]]; then
             echo '::warning::No publication token configured; approve the new PR workflow runs in GitHub after publication.'
             echo 'Automatic PR CI is disabled: configure NATIVE_RETIREMENT_PUBLICATION_TOKEN.' >> "$GITHUB_STEP_SUMMARY"
@@ -542,14 +625,60 @@ jobs:
             -f context='Native retirement trusted integration' \
             -f description="evidence ${evidence:0:16}" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          GIT_ASKPASS="$askpass" git -C trusted push --porcelain \
-            --force-with-lease="refs/heads/$head_ref:$head" \
-            origin "$commit:refs/heads/$head_ref"
+          # Re-read the live standing policy and controller kill switch after
+          # staging/attestation and immediately before the leased PR update.
+          if [[ "$AUTHORIZATION_MODE" == automation ]]; then
+            python3 trusted/tools/native_retirement_integration.py authorize \
+              --pull-request "$PR_NUMBER" --expected-head "$head" \
+              --transition-kind "$transition" --authorization-mode automation \
+              --expected-base "$base" --repo-root trusted --source-head "$source_head" \
+              --automation-publication > "$RUNNER_TEMP/native-retirement/authorization.json"
+          fi
+          if ! GIT_ASKPASS="$askpass" git -C trusted push --porcelain \
+              --force-with-lease="refs/heads/$head_ref:$head" \
+              origin "$commit:refs/heads/$head_ref"; then
+            # Only independently observed ref movement is supersession. An
+            # uncertain or transport-failed publication is not a fresh retry.
+            current_head=$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)
+            current_base=$(git -C trusted ls-remote --refs origin refs/heads/main | cut -f1)
+            if [[ "$current_head" != "$commit" && "$current_head" != "$head" ]]; then
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
+              exit 76
+            fi
+            if [[ "$current_head" == "$head" && "$current_base" != "$base" ]]; then
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
+              exit 75
+            fi
+            exit 1
+          fi
           test "$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)" = "$commit"
           GIT_ASKPASS="$askpass" git -C trusted push --porcelain --delete origin "$staging_ref"
           printf '{\n  "status": "published",\n  "commit": "%s",\n  "tree": "%s",\n  "evidence_sha256": "%s"\n}\n' \
             "$commit" "$final_tree" "$evidence" \
             > "$RUNNER_TEMP/native-retirement/publication.json"
+          # A bot-owned catch-up (#1893) is queued by the writer, not its
+          # opener: GitHub starts no merge_group workflows for an entry that
+          # GITHUB_TOKEN enqueued, so enable auto-merge with the publication
+          # credential, replacing any enablement the built-in token made.
+          catch_up_owner=$(jq -r '"\(.user.login)/\(.user.type)"' <<<"$pr_json")
+          if [[ "$head_ref" == native-retirement/catch-up && "$catch_up_owner" == 'github-actions[bot]/Bot' ]]; then
+            if [[ "$AUTOMATIC_PR_CI" != true ]]; then
+              echo '::error::Published catch-up was not queued: enabling auto-merge requires NATIVE_RETIREMENT_PUBLICATION_TOKEN.'
+              exit 1
+            fi
+            node=$(jq -r '.node_id' <<<"$pr_json")
+            enabled_by=$(GH_TOKEN="$GITHUB_TOKEN" gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '.auto_merge.enabled_by.login // ""')
+            if [[ -n "$enabled_by" ]]; then
+              # $id is a GraphQL variable, not a shell expansion.
+              # shellcheck disable=SC2016
+              GH_TOKEN="$GITHUB_TOKEN" gh api graphql -f id="$node" \
+                -f query='mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }' >/dev/null
+            fi
+            # shellcheck disable=SC2016
+            GH_TOKEN="$GITHUB_TOKEN" gh api graphql -f id="$node" \
+              -f query='mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }' >/dev/null
+          fi
       - name: Retain publication evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -561,3 +690,40 @@ jobs:
             ${{ runner.temp }}/native-retirement/authorization.json
           if-no-files-found: error
           retention-days: 7
+
+
+  automation_outcome:
+    name: Native retirement automation outcome
+    needs: [prepare, validate, publish]
+    if: ${{ always() && !cancelled() && inputs.authorization_mode == 'automation' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Classify trusted job outcomes
+        id: outcome
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          state = "published"
+          for name in ("prepare", "validate", "publish"):
+              job = needs[name]
+              if job["result"] != "success":
+                  state = ("superseded" if job["result"] == "failure" and
+                           job.get("outputs", {}).get("superseded") == "true" else "blocked")
+                  break
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("state=" + state + "\n")
+          PY
+      - name: Superseded request
+        if: ${{ steps.outcome.outputs.state == 'superseded' }}
+        run: echo 'Immutable input changed; a fresh request may be planned.'
+      - name: Published request
+        if: ${{ steps.outcome.outputs.state == 'published' }}
+        run: echo 'Publication completed; exact-head CI and merge admission remain required.'
+      - name: Blocked request
+        if: ${{ steps.outcome.outputs.state == 'blocked' }}
+        run: echo 'Request failed or was interrupted; do not automatically retry this source.'

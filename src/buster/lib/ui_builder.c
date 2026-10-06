@@ -125,8 +125,10 @@ UI_WidgetResult ui_checkbox(String8 string, bool checked)
     ui_box_set_display_string(box, display);
     UI_Signal signal = ui_signal_from_box(box);
     UI_WidgetResult result = ui_widget_result(box, signal);
-    result.value = checked ^ ui_clicked(signal);
-    result.changed = ui_clicked(signal);
+    // Every accepted activation toggles; consumed events leave only their count.
+    bool toggled = !!(signal.activation_count & 1u);
+    result.value = checked ^ toggled;
+    result.changed = toggled;
     return result;
 }
 
@@ -153,18 +155,22 @@ UI_WidgetResult ui_slider(String8 string, f32 value, f32 minimum, f32 maximum)
     ui_set_next_pref_height(ui_text_dim(4.0f, 1.0f));
     ui_set_next_child_layout_axis(AXIS2_X);
     UI_BoxFlags flags = UI_BoxFlag_DrawText | UI_BoxFlag_DrawBackground | UI_BoxFlag_DrawBorder | UI_BoxFlag_DrawHotEffects |
-                        UI_BoxFlag_DrawActiveEffects | UI_BoxFlag_Clip | ui_interactive_widget_flags();
+                        UI_BoxFlag_DrawActiveEffects | UI_BoxFlag_Clip | UI_BoxFlag_OwnsHorizontalArrows | ui_interactive_widget_flags();
     UI_Box* box = ui_widget_box(S8("slider"), string, flags);
     UI_Signal signal = ui_signal_from_box(box);
     UI_WidgetResult result = ui_widget_result(box, signal);
     result.value_f32 = BUSTER_CLAMP(minimum, value, maximum);
+    // Activation alone is not a value change; only the paths below set it.
+    result.changed = false;
     f32 span = maximum - minimum;
-    if (span > 0.0f && (ui_dragging(signal) || ui_clicked(signal)))
+    if (span > 0.0f && (ui_dragging(signal) || (signal.f & UI_SignalFlag_LeftClicked)))
     {
         f32 width = box->rect.x1 - box->rect.x0;
         if (width > 0.0f)
         {
-            f32 percentage = BUSTER_CLAMP(0.0f, (float2_element(ui_state_get()->mouse, AXIS2_X) - box->rect.x0) / width, 1.0f);
+            float2 pointer = (signal.f & UI_SignalFlag_LeftClicked) && !ui_dragging(signal) ? signal.left_click_position : ui_state_get()->mouse;
+            f32 pointer_percentage = (float2_element(pointer, AXIS2_X) - box->rect.x0) / width;
+            f32 percentage = BUSTER_CLAMP(0.0f, pointer_percentage, 1.0f);
             result.value_f32 = minimum + span * percentage;
             result.changed = result.value_f32 != value;
         }
@@ -308,6 +314,7 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
                 bool shift = !!(event->modifiers & (1u << WM_MODIFIER_SHIFT));
                 bool control = !!(event->modifiers & (1u << WM_MODIFIER_CONTROL));
                 u64 old_cursor = state->cursor;
+                bool deleted = false;
                 if (event->key == WM_KEY_HOME)
                 {
                     state->cursor = 0;
@@ -344,6 +351,7 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
                         ui_text_delete_range(value, first, last);
                         state->cursor = first;
                         result.changed = true;
+                        deleted = true;
                     }
                 }
                 else if (event->key == WM_KEY_DELETE)
@@ -363,6 +371,7 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
                         ui_text_delete_range(value, first, last);
                         state->cursor = first;
                         result.changed = true;
+                        deleted = true;
                     }
                 }
                 else if (control && event->key == WM_KEY_A)
@@ -377,7 +386,8 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
                 {
                     continue;
                 }
-                if (shift)
+                // A destructive edit collapses the selection even with Shift held.
+                if (shift && !deleted)
                 {
                     state->mark = state->mark == old_cursor ? old_cursor : state->mark;
                     state->selecting = true;

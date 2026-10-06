@@ -1,0 +1,1 @@
+{"before":0,"case":"dense","types":23,"cold_iterations":2048,"queries_per_trace":46,"preparation_ns":609537,"first_queries_ns":32823594,"warm_ns":57346280,"warm_queries":1507328,"prepared_classifications":0,"cold_classifications":46,"warm_misses":0,"cache_bytes":7200,"cache_allocations":4,"type_bytes":2944,"checksum":17895938,"fingerprint":"1f07eef246e10ab4"}

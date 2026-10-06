@@ -27,6 +27,39 @@ The trusted digest-reader bootstrap must already be installed before this
 support policy is integrated; the generated source snapshot and aggregate
 binding are published only by the trusted writer.
 
+The #1007 support decision updates only the byte/hash identity of
+`tests/basic_c_f80_machine.c` to add a runtime f80-to-signed-64 assertion at
+`0x1p31L`. The fixture retains its x86-64 SysV x87 guard and independent
+Clang HOST/LIBRARY modes. This is a coverage refinement, not a claim that a
+compiler defect was demonstrated; the input and expected result are in range.
+The fixture remains one subject with the same applicability and compilation
+obligation. The inventory remains 559 inputs, 411 subjects, and 78,912 row
+identities. The exact successor declaration digest is
+`a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932` (derived
+from `50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210` with
+only this row changed to 7,233 bytes and
+`3f5b829b9afa84528debbd00d726644834ff66e9885cac8207bdd5bd8e54d142`). The four
+`docs/native-retirement-applicability-v1.tsv` rows for this fixture carry the
+same new fixture hash, so that ledger becomes
+`31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9` with the
+same 374 identities, and the census producer pins it. All previous declaration
+and ledger digests remain accepted for historical evidence. Trusted-reader
+bootstrap #1086 admitted both exact digests before this separate policy
+transition updated the fixture, its ledger rows, the producer pin, and the
+benchmark-service support pin.
+
+The #1808 support decision updates only the byte/hash identity of
+`tests/ci_tools_test.py`, whose workflow-policy assertions now cover the
+main-push reuse decision (642 aggregate cases). Its role and compilation
+obligation are unchanged, and so are the 559 inputs, 411 subjects and 78,912
+row identities. The exact successor declaration digest is
+`434ef9a356cd11e7af0b37907172becf173a6855c98a6168f640ce769f0bcf61`: the #1007
+declaration with only this row changed to 80,307 bytes and
+`05a30118d2fef4bd069e92541ea723d9efa5123f4011203c89d5a435334be08c`. Trusted-reader
+bootstrap #2069 admitted it before this policy transition updated the test, its
+row and the benchmark-service support pin. Earlier digests remain accepted for
+historical evidence.
+
 The September 17, 2026 integration retains every subject admitted by the
 current support ledger. The integrated profile has 559 inputs,
 411 subjects, 19,728 groups and 78,912 rows: 405 supported-object

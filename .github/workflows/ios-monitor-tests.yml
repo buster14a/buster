@@ -35,6 +35,36 @@ permissions:
   contents: read
 
 jobs:
+  native-probes:
+    if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    runs-on: macos-26
+    # Includes the launcher's existing readiness continuation/replacement and
+    # bounded context probes; each production command keeps its own deadline.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Ensure bounded native simulator probes are available
+        shell: bash
+        run: brew install coreutils
+      - name: Exercise timeout diagnostics on the hosted ARM64 simulator
+        shell: bash
+        env:
+          BUSTER_MOBILE_TEST_EVIDENCE_DIR: ${{ runner.temp }}/ios-native-probe-evidence
+        run: |
+          set -euo pipefail
+          /bin/bash ios/launch_diagnostics_simulator_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-native-probes.log"
+      - name: Retain native simulator probe results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-native-probes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ios-native-probes.log
+            ${{ runner.temp }}/ios-native-probe-evidence/
+          if-no-files-found: error
+          retention-days: 7
   fake-tools:
     if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
     strategy:
@@ -57,7 +87,26 @@ jobs:
             brew install bash coreutils
             echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
             echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          elif [[ "$RUNNER_OS" == Linux ]]; then
+            timer_status=0
+            python3 ios/gnu_timeout.py || timer_status=$?
+            if [[ $timer_status -eq 1 ]]; then
+              # Keep the selected system coreutils provider; install GNU aliases.
+              sudo apt-get update
+              sudo apt-get install --no-install-recommends gnu-coreutils
+            elif [[ $timer_status -ne 0 ]]; then
+              exit "$timer_status"
+            fi
           fi
+          python3 ios/gnu_timeout.py
+      - name: Verify timer and mobile workflow contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ios/gnu_timeout_test.py -v 2>&1 | tee "$RUNNER_TEMP/ios-gnu-timeout.log"
+          python3 ios/launch_trace_test.py -v
+          /bin/bash ios/launch_trace_monitor_test.sh
+          python3 ios/monitor_workflow_test.py -v 2>&1 | tee "$RUNNER_TEMP/ios-monitor-workflow.log"
       - name: Exercise mobile script and attached monitor lifecycles
         id: lifecycle
         shell: bash
@@ -66,12 +115,16 @@ jobs:
         run: |
           set -euo pipefail
           /bin/bash --version
-          python3 ios/hosted_signing_budget_test.py 2>&1 | tee "$RUNNER_TEMP/ios-signing-budget.log"
-          bash ios/install_lifecycle_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-install-lifecycle.log"
-          bash tests/mobile_ci_scripts_test.sh 2>&1 | tee "$RUNNER_TEMP/mobile-lifecycle.log"
+          # Each owned child expands its repository and log paths after startup.
+          # shellcheck disable=SC2016
+          exec python3 ios/monitor_groups.py \
+            'python3 "$BUSTER_MOBILE_TEST_REPO_ROOT/ios/hosted_signing_budget_test.py" 2>&1 | tee "$RUNNER_TEMP/ios-signing-budget.log"' \
+            'bash "$BUSTER_MOBILE_TEST_REPO_ROOT/ios/install_lifecycle_test.sh" 2>&1 | tee "$RUNNER_TEMP/ios-install-lifecycle.log"' \
+            '/bin/bash "$BUSTER_MOBILE_TEST_REPO_ROOT/ios/launch_diagnostics_mock_test.sh" 2>&1 | tee "$RUNNER_TEMP/ios-launch-diagnostics.log"' \
+            'bash "$BUSTER_MOBILE_TEST_REPO_ROOT/tests/mobile_ci_scripts_test.sh" 2>&1 | tee "$RUNNER_TEMP/mobile-lifecycle.log"'
       - name: Exercise Android monitor and batch status attribution
         id: android_status
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.lifecycle.outcome == 'success' }}
         shell: bash
         env:
           BUSTER_MOBILE_TEST_EVIDENCE_DIR: ${{ runner.temp }}/mobile-lifecycle-evidence
@@ -84,7 +137,7 @@ jobs:
           } 2>&1 | tee "$RUNNER_TEMP/android-status.log"
       - name: Exercise Android job summary diagnostics
         id: android_summary
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.lifecycle.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -99,7 +152,7 @@ jobs:
         run: |
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nShared suite: **%s**. Android status suite: **%s**. Android summary suite: **%s**.\n\nReproduce: `python3 ios/hosted_signing_budget_test.py`, `bash ios/install_lifecycle_test.sh`, `bash tests/mobile_ci_scripts_test.sh`, `bash android/payload_deadline_policy_test.sh`, `bash android/run_tests_test.sh`, and `python3 android/ci_summary_test.py -v` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" "$ANDROID_SUMMARY_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nLifecycle suites: **%s**. Android status suite: **%s**. Android summary suite: **%s**.\n\nReproduce: `python3 ios/gnu_timeout_test.py -v`, `python3 ios/monitor_workflow_test.py -v`, `python3 ios/hosted_signing_budget_test.py`, `bash ios/install_lifecycle_test.sh`, `/bin/bash ios/launch_diagnostics_mock_test.sh`, `bash tests/mobile_ci_scripts_test.sh`, `bash android/payload_deadline_policy_test.sh`, `bash android/run_tests_test.sh`, and `python3 android/ci_summary_test.py -v` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" "$ANDROID_SUMMARY_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lifecycle log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -109,6 +162,10 @@ jobs:
             ${{ runner.temp }}/mobile-lifecycle.log
             ${{ runner.temp }}/ios-signing-budget.log
             ${{ runner.temp }}/ios-install-lifecycle.log
+            ${{ runner.temp }}/ios-launch-diagnostics.log
+            ${{ runner.temp }}/ios-gnu-timeout.log
+            ${{ runner.temp }}/ios-monitor-workflow.log
+            ${{ runner.temp }}/ios-lifecycle-groups.log
             ${{ runner.temp }}/android-status.log
             ${{ runner.temp }}/android-summary.log
             ${{ runner.temp }}/mobile-lifecycle-evidence/

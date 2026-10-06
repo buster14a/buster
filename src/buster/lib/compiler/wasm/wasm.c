@@ -1,11 +1,34 @@
 #include <buster/lib/compiler/wasm/wasm_internal.h>
+#include <buster/lib/hash.h>
 
-// This file is deliberately self-contained.  The only state shared with the
-// rest of the compiler is the canonical IR model; all temporary vectors and
-// encoded bytes belong to the caller supplied arena.
+// wasm_emit owns direct WebAssembly output for Memory64 freestanding and
+// wasm32 WASI Preview 1. wasm64_emit keeps the original Memory64 API. Both
+// consume canonical IR; all temporary vectors and encoded bytes belong to
+// the caller supplied arena. wasm64_collect_functions derives which symbols are
+// defined and which are called once per module, not once per symbol, before it
+// orders imports; wasm64_prepare_wasi_imports reserves command imports before
+// definitions, and wasm64_fe_emit_wasi_start writes the adapter.
+// wasm64_fe_emit_instruction keeps scalar bit counts at their semantic width,
+// with zero extended operands, CLZ padding bias and a narrow CTZ zero sentinel.
+// wasm64_fe_emit_switch compares zero-extended selector-width images without
+// changing the caller's case keys or targets.
 // Local aggregate snapshots use private shadow-stack slots. Their SSA locals
 // carry slot addresses; loads copy immediately, so later stores cannot change
 // an earlier value. Function ABIs and block parameters remain scalar-only.
+// wasm64_fe_initialize plans actual place alignment; wasm64_fe_emit_prologue
+// aligns the fixed-frame base while retaining the unrounded entry SP for returns
+// and deliberate stack traps. Dynamic allocations may publish odd end pointers.
+// wasm64_signature_add interns signatures through an open-addressing table
+// keyed by a structural hash, resolved by exact equality, and numbers types in
+// first-use order; wasm64_build_export_payload checks export-name uniqueness
+// with a hash set filled in record order, so both stay linear in the module.
+// wasm64_build_name_payload names the data segments of section-attributed
+// data in the name section.
+// Memory64 scalar function pointers are i64 handles into a private i32-indexed
+// table. Collection assigns import/definition indices before relocation and
+// emission; table and element payloads follow that order, with a null slot 0.
+// wasm64_fe_emit_instruction confines Wasm32 function markers to direct calls
+// and refuses their conversion to runtime addresses.
 
 // Linear-memory layout policy: static data starts one 64 KiB region above
 // address zero. Its aligned end is the initial pointer and inclusive lower
@@ -15,6 +38,7 @@ enum
 {
     WASM64_DATA_BASE = 0x10000,
     WASM64_STACK_SIZE = 0x10000,
+    WASM64_NAME_SUBSECTION_DATA_SEGMENT = 9,
 };
 
 #define WASM64_MAX_MEMORY_PAGES (UINT64_C(1) << 48)
@@ -47,14 +71,53 @@ struct Wasm64Signature
     u32 type_index;
 };
 
+typedef struct Wasm64SignatureSlot Wasm64SignatureSlot;
+struct Wasm64SignatureSlot
+{
+    u64 hash;
+    u32 index_plus_one;
+    u32 reserved;
+};
+
+enum
+{
+    WASM64_SIGNATURE_SLOTS_INITIAL = 16,
+    WASM64_EXPORT_SLOTS_INITIAL = 16,
+};
+
+typedef struct Wasm64ExportNameSlot Wasm64ExportNameSlot;
+struct Wasm64ExportNameSlot
+{
+    u64 hash;
+    String8 name; // an exported name is never empty, so length zero marks a free slot
+};
+
+typedef enum Wasm64SyntheticFunction
+{
+    WASM64_SYNTHETIC_FUNCTION_NONE,
+    WASM64_SYNTHETIC_FUNCTION_WASI_PROC_EXIT,
+    WASM64_SYNTHETIC_FUNCTION_WASI_ARGS_SIZES_GET,
+    WASM64_SYNTHETIC_FUNCTION_WASI_ARGS_GET,
+    WASM64_SYNTHETIC_FUNCTION_WASI_ENVIRON_SIZES_GET,
+    WASM64_SYNTHETIC_FUNCTION_WASI_ENVIRON_GET,
+    WASM64_SYNTHETIC_FUNCTION_WASI_START,
+    WASM64_SYNTHETIC_FUNCTION_COUNT,
+} Wasm64SyntheticFunction;
+
 typedef struct Wasm64FunctionRecord Wasm64FunctionRecord;
 struct Wasm64FunctionRecord
 {
     IrFunction* function;
     IrSymbol* symbol;
+    String8 import_module;
+    String8 import_name;
+    String8 export_name;
     Wasm64Signature signature;
     u32 function_index;
     u32 defined_index;
+    u32 source_module_index;
+    u32 source_function_index;
+    Wasm64SyntheticFunction synthetic;
     bool imported;
     bool exported;
 };
@@ -78,6 +141,8 @@ struct Wasm64StringRecord
     IrInstructionId instruction;
     String8 literal;
     u64 offset;
+    u32 module_index;
+    u32 function_index;
 };
 
 typedef struct Wasm64Context Wasm64Context;
@@ -94,14 +159,25 @@ struct Wasm64Context
     Wasm64Buffer type_payload;
     Wasm64Buffer import_payload;
     Wasm64Buffer function_payload;
+    Wasm64Buffer table_payload;
     Wasm64Buffer memory_payload;
     Wasm64Buffer global_payload;
     Wasm64Buffer export_payload;
+    Wasm64Buffer element_payload;
     Wasm64Buffer code_payload;
     Wasm64Buffer data_payload;
+    Wasm64Buffer name_payload;
     Wasm64Signature* signatures;
     u32 signature_count;
     u32 signature_capacity;
+    // Open-addressing index over `signatures` keyed by the structural hash;
+    // slots store index plus one so zero is empty. The scratch row holds the
+    // parameter types of the signature being built until interning decides
+    // whether a copy is needed.
+    Wasm64SignatureSlot* signature_slots;
+    u32 signature_slot_capacity;
+    Wasm64ValType* signature_scratch;
+    u32 signature_scratch_capacity;
     Wasm64FunctionRecord* functions;
     u32 function_count;
     u32 function_capacity;
@@ -118,7 +194,18 @@ struct Wasm64Context
     u64 stack_base;
     u64 stack_limit;
     u32 stack_global_index;
+    u32 stack_limit_global_index;
     u32 memory_export_count;
+    u32 wasi_main_function_index;
+    u32 wasi_start_function_index;
+    u32 wasi_proc_exit_function_index;
+    u32 wasi_args_sizes_get_function_index;
+    u32 wasi_args_get_function_index;
+    u32 wasi_environ_sizes_get_function_index;
+    u32 wasi_environ_get_function_index;
+    IrSymbolId wasi_main_symbol;
+    u8 wasi_main_parameter_count;
+    bool wasi_main_has_result;
 };
 
 typedef struct Wasm64FunctionEmitter Wasm64FunctionEmitter;
@@ -127,12 +214,15 @@ struct Wasm64FunctionEmitter
     Wasm64Context* context;
     IrFunction* function;
     Wasm64FunctionRecord* record;
+    u32 module_index;
+    u32 function_index;
     Wasm64Buffer body;
     u32* value_locals;
     u8* value_types;
     u32* value_offsets;
     u32* parameter_locals;
     u32 pc_local;
+    u32 entry_sp_local;
     u32 fp_local;
     u32 sp_local;
     u32 scratch_local;
@@ -142,6 +232,7 @@ struct Wasm64FunctionEmitter
     u32 local_count;
     u32 extra_local_count;
     u32 frame_size;
+    u32 frame_alignment;
 };
 
 static String8 wasm64_s8(char8 const* pointer)
@@ -421,6 +512,21 @@ static IrSymbol* wasm64_symbol(Wasm64Context* context, IrSymbolId id)
     return ir_symbol_from_id(&context->program->symbols, id);
 }
 
+static bool wasm64_is_memory64(Wasm64Context* context)
+{
+    return context->options.pointer_size == 8;
+}
+
+static u32 wasm64_pointer_size(Wasm64Context* context)
+{
+    return wasm64_is_memory64(context) ? 8 : 4;
+}
+
+static Wasm64ValType wasm64_pointer_valtype(Wasm64Context* context)
+{
+    return wasm64_is_memory64(context) ? WASM64_VALTYPE_I64 : WASM64_VALTYPE_I32;
+}
+
 static bool wasm64_type_is_scalar(IrType* type)
 {
     return type && (type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_POINTER ||
@@ -461,13 +567,13 @@ static u32 wasm64_integer_bits(IrType* type)
     return result;
 }
 
-static bool wasm64_valtype_for_type(IrType* type, bool place, Wasm64ValType* result)
+static bool wasm64_valtype_for_type(Wasm64Context* context, IrType* type, bool place, Wasm64ValType* result)
 {
     if (place || wasm64_type_is_pointer(type))
     {
         if (result)
         {
-            *result = WASM64_VALTYPE_I64;
+            *result = wasm64_pointer_valtype(context);
         }
         return true;
     }
@@ -574,21 +680,92 @@ static bool wasm64_signature_equal(Wasm64Signature* a, Wasm64Signature* b)
     return result;
 }
 
-static u32 wasm64_signature_add(Wasm64Context* context, Wasm64Signature signature)
+// Structural key: parameter count, parameter types, and the optional result.
+// Equal signatures hash equally whichever buffer holds their parameters.
+static u64 wasm64_signature_hash(Wasm64Signature* signature)
 {
-    for (u32 index = 0; index < context->signature_count; index += 1)
+    u64 params_hash = signature->param_count ? buster_hash_64((u8*)signature->params, (u64)signature->param_count * sizeof(*signature->params)) : 0;
+    u64 shape = (u64)signature->param_count | ((u64)(signature->has_result ? signature->result : 0) << 32) | ((u64)signature->has_result << 48);
+    u64 result = (params_hash ^ shape) * UINT64_C(0x9e3779b97f4a7c15);
+    result ^= result >> 32;
+    return result;
+}
+
+static void wasm64_signature_slot_insert(Wasm64SignatureSlot* slots, u32 capacity, u64 hash, u32 index_plus_one)
+{
+    u32 mask = capacity - 1;
+    u32 slot = (u32)hash & mask;
+    while (slots[slot].index_plus_one)
     {
-        if (wasm64_signature_equal(context->signatures + index, &signature))
-        {
-            return context->signatures[index].type_index;
-        }
+        slot = (slot + 1) & mask;
     }
-    wasm64_vec_reserve(context->arena, (void**)&context->signatures, &context->signature_capacity, context->signature_count + 1,
-                       sizeof(*context->signatures));
-    signature.type_index = context->signature_count;
-    context->signatures[context->signature_count] = signature;
-    context->signature_count += 1;
-    return signature.type_index;
+    slots[slot].hash = hash;
+    slots[slot].index_plus_one = index_plus_one;
+}
+
+// Interns by structure and numbers signatures in first-use order. A hit or a
+// new entry leaves `signature` pointing at the interned parameter row, so the
+// caller may build parameters in the shared scratch row.
+static u32 wasm64_signature_add(Wasm64Context* context, Wasm64Signature* signature)
+{
+    if (!context->signature_slot_capacity)
+    {
+        context->signature_slots = arena_allocate_zeroed(context->arena, Wasm64SignatureSlot, WASM64_SIGNATURE_SLOTS_INITIAL);
+        context->signature_slot_capacity = WASM64_SIGNATURE_SLOTS_INITIAL;
+    }
+    u64 hash = wasm64_signature_hash(signature);
+    u32 mask = context->signature_slot_capacity - 1;
+    u32 slot = (u32)hash & mask;
+    Wasm64Signature* found = 0;
+    while (!found && context->signature_slots[slot].index_plus_one)
+    {
+        context->stats.signature_lookup_probes += 1;
+        if (context->signature_slots[slot].hash == hash)
+        {
+            Wasm64Signature* candidate = context->signatures + (context->signature_slots[slot].index_plus_one - 1);
+            context->stats.signature_comparisons += 1;
+            found = wasm64_signature_equal(candidate, signature) ? candidate : 0;
+        }
+        slot = (slot + 1) & mask;
+    }
+    u32 result;
+    if (found)
+    {
+        signature->params = found->params;
+        result = found->type_index;
+    }
+    else
+    {
+        if ((u64)(context->signature_count + 1) * 2 > context->signature_slot_capacity)
+        {
+            u32 new_capacity = context->signature_slot_capacity * 2;
+            Wasm64SignatureSlot* grown = arena_allocate_zeroed(context->arena, Wasm64SignatureSlot, new_capacity);
+            for (u32 index = 0; index < context->signature_slot_capacity; index += 1)
+            {
+                Wasm64SignatureSlot* old = context->signature_slots + index;
+                if (old->index_plus_one)
+                {
+                    wasm64_signature_slot_insert(grown, new_capacity, old->hash, old->index_plus_one);
+                }
+            }
+            context->signature_slots = grown;
+            context->signature_slot_capacity = new_capacity;
+        }
+        if (signature->param_count)
+        {
+            Wasm64ValType* params = arena_allocate(context->arena, Wasm64ValType, signature->param_count);
+            memcpy(params, signature->params, sizeof(*params) * signature->param_count);
+            signature->params = params;
+        }
+        wasm64_vec_reserve(context->arena, (void**)&context->signatures, &context->signature_capacity, context->signature_count + 1,
+                           sizeof(*context->signatures));
+        signature->type_index = context->signature_count;
+        context->signatures[context->signature_count] = *signature;
+        context->signature_count += 1;
+        wasm64_signature_slot_insert(context->signature_slots, context->signature_slot_capacity, hash, context->signature_count);
+        result = signature->type_index;
+    }
+    return result;
 }
 
 static bool wasm64_function_signature(Wasm64Context* context, IrTypeId function_type_id, Wasm64Signature* result, IrFunction* function,
@@ -602,21 +779,24 @@ static bool wasm64_function_signature(Wasm64Context* context, IrTypeId function_
     }
     if (function_type->is_variadic)
     {
-        wasm64_fail(context, WASM64_ERROR_VARIADIC, wasm64_s8("variadic functions are not supported by Wasm64"), function, 0, 0, symbol);
+        wasm64_fail(context, WASM64_ERROR_VARIADIC, wasm64_s8("variadic functions are not supported by WebAssembly"), function, 0, 0, symbol);
         return false;
     }
     Wasm64Signature signature = {0};
     signature.param_count = function_type->parameter_count;
     if (signature.param_count)
     {
-        signature.params = arena_allocate(context->arena, Wasm64ValType, signature.param_count);
+        // Built in the scratch row; wasm64_signature_add interns a copy.
+        wasm64_vec_reserve(context->arena, (void**)&context->signature_scratch, &context->signature_scratch_capacity, signature.param_count,
+                           sizeof(*context->signature_scratch));
+        signature.params = context->signature_scratch;
     }
     for (u32 index = 0; index < signature.param_count; index += 1)
     {
         IrType* parameter_type = wasm64_type(context, function_type->parameter_types[index]);
-        if (!wasm64_valtype_for_type(parameter_type, false, signature.params + index))
+        if (!wasm64_valtype_for_type(context, parameter_type, false, signature.params + index))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate or unsupported parameter ABI in Wasm64 function"),
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate or unsupported parameter ABI in WebAssembly function"),
                         function, 0, 0, symbol);
             return false;
         }
@@ -624,14 +804,14 @@ static bool wasm64_function_signature(Wasm64Context* context, IrTypeId function_
     IrType* return_type = wasm64_type(context, function_type->return_type);
     if (!return_type)
     {
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("missing Wasm64 return type"), function, 0, 0, symbol);
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("missing WebAssembly return type"), function, 0, 0, symbol);
         return false;
     }
     if (return_type->kind != IR_TYPE_VOID)
     {
-        if (!wasm64_valtype_for_type(return_type, false, &signature.result))
+        if (!wasm64_valtype_for_type(context, return_type, false, &signature.result))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate or unsupported result ABI in Wasm64 function"),
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate or unsupported result ABI in WebAssembly function"),
                         function, 0, 0, symbol);
             return false;
         }
@@ -649,35 +829,6 @@ static IrTypeId wasm64_function_type_from_symbol(Wasm64Context* context, IrSymbo
         symbol_type = wasm64_type(context, symbol_type->element_type);
     }
     return symbol_type && symbol_type->kind == IR_TYPE_FUNCTION ? symbol_type->id : IR_TYPE_ID_INVALID;
-}
-
-static bool wasm64_symbol_is_function_definition(Wasm64Context* context, IrSymbolId symbol_id, IrFunction** function_out, u32* module_out)
-{
-    if (context->program && symbol_id.value < context->program->symbols.count)
-    {
-        for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
-        {
-            IrModule* module = context->modules + module_index;
-            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-            {
-                IrFunction* function = module->functions + function_index;
-                if (function->symbol.value == symbol_id.value && function->state == IR_FUNCTION_LOWERED)
-                {
-                    if (function_out)
-                    {
-                        *function_out = function;
-                    }
-                    if (module_out)
-                    {
-                        *module_out = module_index;
-                    }
-                    return true;
-                }
-            }
-        }
-    }
-
-    return false;
 }
 
 static String8 wasm64_import_module(String8 link_name)
@@ -746,13 +897,22 @@ static Wasm64DataRecord* wasm64_data_record_for_symbol(Wasm64Context* context, I
 
 static bool wasm64_add_function_record(Wasm64Context* context, IrFunction* function, IrSymbol* symbol, bool imported)
 {
+    // Table slot zero is null and every handle is its function index plus one,
+    // so the last index must still fit a 32-bit table size.
+    bool within_table = context->function_count < UINT32_MAX - 1;
+    if (!within_table)
+    {
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 function table exceeds 32-bit indices"), function, 0, 0,
+                    symbol ? symbol->id : IR_SYMBOL_ID_INVALID);
+    }
     Wasm64Signature signature = {0};
     IrTypeId type_id = function ? function->canonical_type : wasm64_function_type_from_symbol(context, symbol);
-    if (type_id.value == IR_ID_UNDERLYING_INVALID || !wasm64_function_signature(context, type_id, &signature, function, symbol ? symbol->id : IR_SYMBOL_ID_INVALID))
+    if (!within_table || type_id.value == IR_ID_UNDERLYING_INVALID ||
+        !wasm64_function_signature(context, type_id, &signature, function, symbol ? symbol->id : IR_SYMBOL_ID_INVALID))
     {
         return false;
     }
-    signature.type_index = wasm64_signature_add(context, signature);
+    signature.type_index = wasm64_signature_add(context, &signature);
     wasm64_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
                        sizeof(*context->functions));
     Wasm64FunctionRecord* record = context->functions + context->function_count;
@@ -777,25 +937,249 @@ static bool wasm64_add_function_record(Wasm64Context* context, IrFunction* funct
     return true;
 }
 
-static bool wasm64_symbol_is_called(Wasm64Context* context, IrSymbolId symbol_id)
+static String8 wasm64_symbol_external_name(IrSymbol* symbol)
 {
-    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    String8 result = {0};
+    if (symbol)
+    {
+        String8 link_name = symbol->link_name.length ? symbol->link_name : symbol->name;
+        u64 hash = 0;
+        result = wasm64_string_has_hash(link_name, &hash) ? wasm64_string_slice(link_name, hash + 1, link_name.length) : link_name;
+    }
+    return result;
+}
+
+static IrFunction* wasm64_find_defined_function(Wasm64Context* context, String8 name, IrSymbol** symbol_out)
+{
+    IrFunction* result = 0;
+    IrSymbol* result_symbol = 0;
+    for (u32 module_index = 0; module_index < context->module_count && !wasm64_failed(context); module_index += 1)
     {
         IrModule* module = context->modules + module_index;
-        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        for (u32 function_index = 0; function_index < module->function_count && !wasm64_failed(context); function_index += 1)
         {
             IrFunction* function = module->functions + function_index;
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            if (function->state != IR_FUNCTION_LOWERED)
             {
-                IrInstruction* instruction = function->instructions + instruction_index;
-                if (instruction->opcode == IR_OPCODE_CALL && instruction->symbol.value == symbol_id.value)
+                continue;
+            }
+            IrSymbol* symbol = wasm64_symbol(context, function->symbol);
+            if (!symbol || !wasm64_string_equal(wasm64_symbol_external_name(symbol), name))
+            {
+                continue;
+            }
+            if (result && result != function)
+            {
+                wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("duplicate WebAssembly entry point"), function, 0, 0, symbol->id);
+                result = 0;
+                result_symbol = 0;
+            }
+            else
+            {
+                result = function;
+                result_symbol = symbol;
+            }
+        }
+    }
+    if (symbol_out)
+    {
+        *symbol_out = result_symbol;
+    }
+    return result;
+}
+
+static bool wasm64_add_synthetic_function(Wasm64Context* context, Wasm64SyntheticFunction synthetic, Wasm64ValType const* params,
+                                          u32 param_count, bool has_result, Wasm64ValType result_type, bool imported, String8 import_name,
+                                          String8 export_name, u32* function_index_out)
+{
+    Wasm64Signature signature = {
+        .param_count = param_count,
+        .has_result = has_result,
+        .result = result_type,
+    };
+    if (param_count)
+    {
+        signature.params = arena_allocate(context->arena, Wasm64ValType, param_count);
+        memcpy(signature.params, params, sizeof(*params) * param_count);
+    }
+    signature.type_index = wasm64_signature_add(context, &signature);
+    bool reused = false;
+    bool valid = true;
+    if (imported)
+    {
+        String8 module_name = wasm64_s8("wasi_snapshot_preview1");
+        for (u32 index = 0; index < context->function_count && !reused && valid; index += 1)
+        {
+            Wasm64FunctionRecord* existing = context->functions + index;
+            if (!existing->imported)
+            {
+                continue;
+            }
+            IrSymbol* existing_symbol = existing->symbol;
+            String8 link_name = existing_symbol && existing_symbol->link_name.length
+                                    ? existing_symbol->link_name
+                                    : existing_symbol ? existing_symbol->name : (String8){0};
+            String8 existing_module = existing->import_module.length ? existing->import_module : wasm64_import_module(link_name);
+            String8 existing_name = existing->import_name.length
+                                        ? existing->import_name
+                                        : wasm64_import_name(link_name, existing_symbol ? existing_symbol->name : (String8){0});
+            if (!wasm64_string_equal(existing_module, module_name) || !wasm64_string_equal(existing_name, import_name))
+            {
+                continue;
+            }
+            if (!wasm64_signature_equal(&existing->signature, &signature))
+            {
+                wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL,
+                            wasm64_s8("WASI import declaration has an incompatible function signature"), 0, 0, 0,
+                            existing_symbol ? existing_symbol->id : IR_SYMBOL_ID_INVALID);
+                valid = false;
+            }
+            else
+            {
+                if (function_index_out)
                 {
-                    return true;
+                    *function_index_out = existing->function_index;
+                }
+                reused = true;
+            }
+        }
+    }
+    if (valid && !reused)
+    {
+        wasm64_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
+                           sizeof(*context->functions));
+        Wasm64FunctionRecord* record = context->functions + context->function_count;
+        *record = (Wasm64FunctionRecord){
+            .import_module = imported ? wasm64_s8("wasi_snapshot_preview1") : (String8){0},
+            .import_name = import_name,
+            .export_name = export_name,
+            .signature = signature,
+            .function_index = context->function_count,
+            .defined_index = UINT32_MAX,
+            .synthetic = synthetic,
+            .imported = imported,
+            .exported = export_name.length != 0,
+        };
+        if (function_index_out)
+        {
+            *function_index_out = record->function_index;
+        }
+        context->function_count += 1;
+    }
+    return valid;
+}
+
+static bool wasm64_validate_wasi_main(Wasm64Context* context, IrFunction* function, IrSymbol* symbol)
+{
+    IrType* function_type = function ? wasm64_type(context, function->canonical_type) : 0;
+    IrType* return_type = function_type && function_type->kind == IR_TYPE_FUNCTION ? wasm64_type(context, function_type->return_type) : 0;
+    bool valid = function_type && function_type->kind == IR_TYPE_FUNCTION;
+    if (!valid)
+    {
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("WASI main has no canonical function type"), function, 0, 0,
+                    symbol ? symbol->id : IR_SYMBOL_ID_INVALID);
+    }
+    else if (!return_type || (return_type->kind != IR_TYPE_VOID &&
+                              !(wasm64_type_is_integer(return_type) && wasm64_integer_bits(return_type) <= 32)))
+    {
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("WASI main must return void or a 32-bit integer"), function, 0, 0,
+                    symbol ? symbol->id : IR_SYMBOL_ID_INVALID);
+        valid = false;
+    }
+    else if (function_type->parameter_count != 0 && function_type->parameter_count != 2 && function_type->parameter_count != 3)
+    {
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE,
+                    wasm64_s8("WASI main must have signature main(void), main(argc, argv), or main(argc, argv, envp)"), function, 0, 0,
+                    symbol ? symbol->id : IR_SYMBOL_ID_INVALID);
+        valid = false;
+    }
+    else if (function_type->parameter_count)
+    {
+        IrType* argc_type = wasm64_type(context, function_type->parameter_types[0]);
+        IrType* argv_type = wasm64_type(context, function_type->parameter_types[1]);
+        IrType* envp_type = function_type->parameter_count == 3 ? wasm64_type(context, function_type->parameter_types[2]) : 0;
+        if (!argc_type || !wasm64_type_is_integer(argc_type) || wasm64_integer_bits(argc_type) > 32 || !argv_type ||
+            argv_type->kind != IR_TYPE_POINTER || (envp_type && envp_type->kind != IR_TYPE_POINTER))
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE,
+                        wasm64_s8("WASI main arguments must be a 32-bit argc followed by pointer-valued argv and optional envp"), function, 0, 0,
+                        symbol ? symbol->id : IR_SYMBOL_ID_INVALID);
+            valid = false;
+        }
+    }
+    if (valid)
+    {
+        context->wasi_main_symbol = symbol->id;
+        context->wasi_main_parameter_count = (u8)function_type->parameter_count;
+        context->wasi_main_has_result = return_type->kind != IR_TYPE_VOID;
+    }
+    return valid;
+}
+
+static bool wasm64_prepare_wasi_imports(Wasm64Context* context)
+{
+    bool valid = true;
+    if (context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1 && context->options.synthesize_start)
+    {
+        IrSymbol* explicit_start_symbol = 0;
+        IrFunction* explicit_start = wasm64_find_defined_function(context, wasm64_s8("_start"), &explicit_start_symbol);
+        valid = !wasm64_failed(context);
+        if (valid && explicit_start)
+        {
+            IrType* type = wasm64_type(context, explicit_start->canonical_type);
+            IrType* return_type = type && type->kind == IR_TYPE_FUNCTION ? wasm64_type(context, type->return_type) : 0;
+            valid = type && type->kind == IR_TYPE_FUNCTION && !type->parameter_count && return_type && return_type->kind == IR_TYPE_VOID;
+            if (!valid)
+            {
+                wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("WASI _start must have signature void _start(void)"), explicit_start, 0, 0,
+                            explicit_start_symbol ? explicit_start_symbol->id : IR_SYMBOL_ID_INVALID);
+            }
+        }
+        else if (valid)
+        {
+            IrSymbol* main_symbol = 0;
+            IrFunction* main_function = wasm64_find_defined_function(context, wasm64_s8("main"), &main_symbol);
+            valid = main_function && main_symbol && !wasm64_failed(context);
+            if (!valid && !wasm64_failed(context))
+            {
+                wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL,
+                            wasm64_s8("WASI command output requires main or an explicit void _start(void)"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+            }
+            if (valid)
+            {
+                valid = wasm64_validate_wasi_main(context, main_function, main_symbol);
+            }
+            if (valid)
+            {
+                Wasm64ValType pointer = wasm64_pointer_valtype(context);
+                Wasm64ValType proc_exit_params[] = {WASM64_VALTYPE_I32};
+                valid = wasm64_add_synthetic_function(context, WASM64_SYNTHETIC_FUNCTION_WASI_PROC_EXIT, proc_exit_params, 1, false,
+                                                      WASM64_VALTYPE_INVALID, true, wasm64_s8("proc_exit"), (String8){0},
+                                                      &context->wasi_proc_exit_function_index);
+                if (valid && context->wasi_main_parameter_count)
+                {
+                    Wasm64ValType pair_params[] = {pointer, pointer};
+                    valid = wasm64_add_synthetic_function(context, WASM64_SYNTHETIC_FUNCTION_WASI_ARGS_SIZES_GET, pair_params, 2, true,
+                                                          WASM64_VALTYPE_I32, true, wasm64_s8("args_sizes_get"), (String8){0},
+                                                          &context->wasi_args_sizes_get_function_index) &&
+                            wasm64_add_synthetic_function(context, WASM64_SYNTHETIC_FUNCTION_WASI_ARGS_GET, pair_params, 2, true,
+                                                          WASM64_VALTYPE_I32, true, wasm64_s8("args_get"), (String8){0},
+                                                          &context->wasi_args_get_function_index);
+                }
+                if (valid && context->wasi_main_parameter_count == 3)
+                {
+                    Wasm64ValType pair_params[] = {pointer, pointer};
+                    valid = wasm64_add_synthetic_function(context, WASM64_SYNTHETIC_FUNCTION_WASI_ENVIRON_SIZES_GET, pair_params, 2, true,
+                                                          WASM64_VALTYPE_I32, true, wasm64_s8("environ_sizes_get"), (String8){0},
+                                                          &context->wasi_environ_sizes_get_function_index) &&
+                            wasm64_add_synthetic_function(context, WASM64_SYNTHETIC_FUNCTION_WASI_ENVIRON_GET, pair_params, 2, true,
+                                                          WASM64_VALTYPE_I32, true, wasm64_s8("environ_get"), (String8){0},
+                                                          &context->wasi_environ_get_function_index);
                 }
             }
         }
     }
-    return false;
+    return valid && !wasm64_failed(context);
 }
 
 static bool wasm64_collect_functions(Wasm64Context* context)
@@ -809,17 +1193,69 @@ static bool wasm64_collect_functions(Wasm64Context* context)
         context->symbol_seen[symbol_index] = 0;
     }
 
-    // Imports occupy the first function indices.  Walk symbol ids, which are
+    // Which symbols a lowered function defines, and which some CALL names,
+    // are facts of the whole module, not of one symbol. Derive them once:
+    // definitions from one pass over the functions, then calls from one pass
+    // over every row, taken only when some function symbol is neither defined
+    // nor an import or external (only those ask), instead of rescanning every
+    // function, and every row, for each symbol asked about.
+    enum
+    {
+        WASM64_SYMBOL_DEFINED = 1,
+        WASM64_SYMBOL_CALLED = 2,
+    };
+    u8* symbol_facts = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
+    memset(symbol_facts, 0, symbol_count ? symbol_count : 1);
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state == IR_FUNCTION_LOWERED && function->symbol.value < symbol_count)
+            {
+                symbol_facts[function->symbol.value] |= WASM64_SYMBOL_DEFINED;
+            }
+        }
+    }
+    bool calls_asked = false;
+    for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
+    {
+        IrSymbol* symbol = context->program->symbols.symbols + symbol_index;
+        u8 facts = symbol->id.value < symbol_count ? symbol_facts[symbol->id.value] : 0;
+        calls_asked |= symbol->kind == IR_SYMBOL_FUNCTION && !(facts & WASM64_SYMBOL_DEFINED) &&
+                       symbol->linkage != IR_LINKAGE_IMPORT && symbol->linkage != IR_LINKAGE_EXTERNAL;
+    }
+    for (u32 module_index = 0; calls_asked && module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_CALL && instruction->symbol.value < symbol_count)
+                {
+                    symbol_facts[instruction->symbol.value] |= WASM64_SYMBOL_CALLED;
+                }
+            }
+            context->stats.call_fact_instruction_visits += function->instruction_count;
+        }
+    }
+
+    // Imports occupy the first function indices. Walk symbol ids, which are
     // stable across module emission, and retain only symbols used by the IR or
     // explicitly declared as imports/externals.
     for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
     {
         IrSymbol* symbol = context->program->symbols.symbols + symbol_index;
-        if (symbol->kind != IR_SYMBOL_FUNCTION || wasm64_symbol_is_function_definition(context, symbol->id, 0, 0))
+        u8 facts = symbol->id.value < symbol_count ? symbol_facts[symbol->id.value] : 0;
+        if (symbol->kind != IR_SYMBOL_FUNCTION || (facts & WASM64_SYMBOL_DEFINED))
         {
             continue;
         }
-        bool needed = symbol->linkage == IR_LINKAGE_IMPORT || symbol->linkage == IR_LINKAGE_EXTERNAL || wasm64_symbol_is_called(context, symbol->id);
+        bool needed = symbol->linkage == IR_LINKAGE_IMPORT || symbol->linkage == IR_LINKAGE_EXTERNAL || (facts & WASM64_SYMBOL_CALLED);
         if (!needed)
         {
             continue;
@@ -828,6 +1264,13 @@ static bool wasm64_collect_functions(Wasm64Context* context)
         {
             return false;
         }
+    }
+
+    // The command adapter's Preview 1 imports must also precede every defined
+    // function because WebAssembly function indices are import-first.
+    if (!wasm64_prepare_wasi_imports(context))
+    {
+        return false;
     }
 
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
@@ -844,8 +1287,8 @@ static bool wasm64_collect_functions(Wasm64Context* context)
             {
                 if (function->state == IR_FUNCTION_REJECTED)
                 {
-                    wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("IR function was rejected before Wasm64 emission"), function, 0, 0,
-                                function->symbol);
+                    wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("IR function was rejected before WebAssembly emission"), function, 0,
+                                0, function->symbol);
                     return false;
                 }
                 continue;
@@ -853,16 +1296,51 @@ static bool wasm64_collect_functions(Wasm64Context* context)
             IrSymbol* symbol = wasm64_symbol(context, function->symbol);
             if (!symbol || symbol->kind != IR_SYMBOL_FUNCTION)
             {
-                wasm64_fail(context, WASM64_ERROR_INVALID_ARGUMENT, wasm64_s8("lowered Wasm64 function has no function symbol"), function, 0, 0,
-                            function->symbol);
+                wasm64_fail(context, WASM64_ERROR_INVALID_ARGUMENT, wasm64_s8("lowered WebAssembly function has no function symbol"), function, 0,
+                            0, function->symbol);
                 return false;
             }
             if (!wasm64_add_function_record(context, function, symbol, false))
             {
                 return false;
             }
+            Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(context, symbol->id);
+            if (record)
+            {
+                record->source_module_index = module_index;
+                record->source_function_index = function_index;
+            }
+            String8 external_name = wasm64_symbol_external_name(symbol);
+            if (record && wasm64_string_equal(external_name, wasm64_s8("_start")) &&
+                context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1)
+            {
+                // A WASI command entry point is part of the ABI even when the
+                // source-level declaration was given internal linkage.
+                record->exported = true;
+                record->export_name = wasm64_s8("_start");
+                context->wasi_start_function_index = record->function_index;
+            }
         }
     }
+
+    if (context->wasi_main_symbol.value != IR_ID_UNDERLYING_INVALID)
+    {
+        Wasm64FunctionRecord* main_record = wasm64_function_record_for_symbol(context, context->wasi_main_symbol);
+        if (!main_record || main_record->imported)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("WASI main was not emitted as a defined function"), 0, 0, 0,
+                        context->wasi_main_symbol);
+            return false;
+        }
+        context->wasi_main_function_index = main_record->function_index;
+
+        if (!wasm64_add_synthetic_function(context, WASM64_SYNTHETIC_FUNCTION_WASI_START, 0, 0, false, WASM64_VALTYPE_INVALID, false,
+                                           (String8){0}, wasm64_s8("_start"), &context->wasi_start_function_index))
+        {
+            return false;
+        }
+    }
+
     context->stats.function_count = context->function_count;
     context->stats.import_count = 0;
     context->stats.defined_function_count = 0;
@@ -882,12 +1360,65 @@ static bool wasm64_collect_functions(Wasm64Context* context)
     return !wasm64_failed(context);
 }
 
+BUSTER_GLOBAL_LOCAL bool wasm64_collect_indirect_signatures(Wasm64Context* context)
+{
+    bool valid = true;
+    for (u32 module_index = 0; valid && module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; valid && function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            for (u32 instruction_index = 0; valid && instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode != IR_OPCODE_CALL || !instruction->operand_count ||
+                    instruction->operands[0].value >= function->value_count)
+                {
+                    continue;
+                }
+                IrType* callee = wasm64_type(context, function->values[instruction->operands[0].value].canonical_type);
+                if (callee && callee->kind == IR_TYPE_POINTER)
+                {
+                    IrType* signature_type = wasm64_type(context, callee->element_type);
+                    if (!signature_type || signature_type->kind != IR_TYPE_FUNCTION || signature_type->is_unprototyped)
+                    {
+                        wasm64_fail(context, WASM64_ERROR_INDIRECT_CALL, wasm64_s8("Wasm64 indirect call requires a prototyped function pointer"),
+                                    function, 0, instruction, instruction->symbol);
+                        valid = false;
+                    }
+                    else
+                    {
+                        Wasm64Signature signature = {0};
+                        valid = wasm64_function_signature(context, signature_type->id, &signature, function, instruction->symbol);
+                        if (valid && instruction->operand_count - 1 != signature.param_count)
+                        {
+                            wasm64_fail(context, WASM64_ERROR_VARIADIC, wasm64_s8("Wasm64 indirect call argument count differs from its prototype"),
+                                        function, 0, instruction, instruction->symbol);
+                            valid = false;
+                        }
+                        if (valid)
+                        {
+                            wasm64_signature_add(context, &signature);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 static bool wasm64_global_initializer_bytes(Wasm64Context* context, IrGlobal* global, IrType* type, u8** bytes_out, u64* size_out)
 {
     u64 size = type && type->layout.resolved ? type->layout.size : 0;
     if (size > ARENA_MAX_RESERVATION)
     {
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("Wasm64 global is too large"), 0, 0, 0, global->symbol);
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("WebAssembly global is too large"), 0, 0, 0, global->symbol);
         return false;
     }
     u8* bytes = size ? arena_allocate(context->arena, u8, size) : 0;
@@ -902,7 +1433,7 @@ static bool wasm64_global_initializer_bytes(Wasm64Context* context, IrGlobal* gl
     case IR_GLOBAL_INITIALIZER_BYTES:
         if (global->bytes.length != size || (size && !global->bytes.pointer))
         {
-            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid Wasm64 global byte initializer"), 0, 0, 0, global->symbol);
+            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid WebAssembly global byte initializer"), 0, 0, 0, global->symbol);
             return false;
         }
         if (size)
@@ -914,7 +1445,7 @@ static bool wasm64_global_initializer_bytes(Wasm64Context* context, IrGlobal* gl
     case IR_GLOBAL_INITIALIZER_FLOAT:
         if (size > sizeof(u64))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("wide global initializer ABI is unsupported by Wasm64"), 0, 0, 0,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("wide global initializer ABI is unsupported by WebAssembly"), 0, 0, 0,
                         global->symbol);
             return false;
         }
@@ -928,16 +1459,16 @@ static bool wasm64_global_initializer_bytes(Wasm64Context* context, IrGlobal* gl
         }
         break;
     case IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS:
-        if (size < 8)
+        if (size < wasm64_pointer_size(context))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("pointer global is smaller than a Memory64 address"), 0, 0, 0,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("pointer global is smaller than the target WebAssembly address"), 0, 0, 0,
                         global->symbol);
             return false;
         }
         break;
     case IR_GLOBAL_INITIALIZER_NONE:
     case IR_GLOBAL_INITIALIZER_COUNT:
-        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 global initializer"), 0, 0, 0, global->symbol);
+        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing WebAssembly global initializer"), 0, 0, 0, global->symbol);
         return false;
     }
     *bytes_out = bytes;
@@ -951,17 +1482,17 @@ static bool wasm64_data_add_global(Wasm64Context* context, IrGlobal* global, u32
     IrType* type = wasm64_type(context, global->type);
     if (!symbol || symbol->kind != IR_SYMBOL_DATA || !type || !type->layout.resolved || symbol->id.value >= context->program->symbols.count)
     {
-        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid Wasm64 global symbol or type"), 0, 0, 0, global->symbol);
+        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid WebAssembly global symbol or type"), 0, 0, 0, global->symbol);
         return false;
     }
     if (symbol->is_thread_local || global->is_thread_local)
     {
-        wasm64_fail(context, WASM64_ERROR_TLS, wasm64_s8("TLS globals are not supported by Wasm64"), 0, 0, 0, global->symbol);
+        wasm64_fail(context, WASM64_ERROR_TLS, wasm64_s8("TLS globals are not supported by WebAssembly"), 0, 0, 0, global->symbol);
         return false;
     }
     if (context->symbol_data_indices[global->symbol.value] != UINT32_MAX)
     {
-        wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("duplicate Wasm64 data symbol"), 0, 0, 0, global->symbol);
+        wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("duplicate WebAssembly data symbol"), 0, 0, 0, global->symbol);
         return false;
     }
     u8* bytes = 0;
@@ -984,7 +1515,7 @@ static bool wasm64_data_add_global(Wasm64Context* context, IrGlobal* global, u32
     }
     Wasm64DataRecord record = {.global = global, .symbol = symbol, .bytes = bytes, .size = size, .offset = context->data_cursor, .module_index = module_index,
                                .has_bytes = false};
-    if (size && (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO || global->relocation_count))
+    if (size && (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO || global->relocation_count || symbol->section_name.length))
     {
         record.has_bytes = true;
     }
@@ -1035,7 +1566,7 @@ static bool wasm64_collect_data(Wasm64Context* context)
                 IrType* type = wasm64_type(context, instruction->canonical_type);
                 if (!type || type->kind != IR_TYPE_POINTER)
                 {
-                    wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("string aggregate ABI is unsupported by Wasm64"), function,
+                    wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("string aggregate ABI is unsupported by WebAssembly"), function,
                                 0, instruction, IR_SYMBOL_ID_INVALID);
                     return false;
                 }
@@ -1048,7 +1579,12 @@ static bool wasm64_collect_data(Wasm64Context* context)
                                 IR_SYMBOL_ID_INVALID);
                     return false;
                 }
-                Wasm64StringRecord record = {.function = function, .instruction = ir_instruction_self_id(function, instruction), .literal = literal, .offset = context->data_cursor};
+                Wasm64StringRecord record = {.function = function,
+                                             .instruction = ir_instruction_self_id(function, instruction),
+                                             .literal = literal,
+                                             .offset = context->data_cursor,
+                                             .module_index = module_index,
+                                             .function_index = function_index};
                 context->data_cursor = string_end;
                 wasm64_vec_reserve(context->arena, (void**)&context->strings, &context->string_capacity, context->string_count + 1, sizeof(*context->strings));
                 context->strings[context->string_count] = record;
@@ -1058,7 +1594,13 @@ static bool wasm64_collect_data(Wasm64Context* context)
     }
     if (!wasm64_align_cursor(&context->data_cursor, 16) || !wasm64_u64_add(context->data_cursor, WASM64_STACK_SIZE, &context->stack_limit))
     {
-        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 memory layout overflow"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("WebAssembly memory layout overflow"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+        return false;
+    }
+    if (!wasm64_is_memory64(context) && context->stack_limit > UINT32_MAX)
+    {
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm32 static data and stack exceed addressable memory"), 0, 0, 0,
+                    IR_SYMBOL_ID_INVALID);
         return false;
     }
     context->stack_base = context->data_cursor;
@@ -1071,38 +1613,60 @@ static bool wasm64_collect_data(Wasm64Context* context)
 static bool wasm64_apply_data_relocation(Wasm64Context* context, Wasm64DataRecord* record, IrSymbolId symbol, u64 offset, s64 addend,
                                          bool is_label_address)
 {
-    u32 const pointer_size = 8;
+    u32 pointer_size = wasm64_pointer_size(context);
     if (is_label_address)
     {
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("label-address relocations are unsupported by Wasm64"), 0, 0, 0, symbol);
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("label-address relocations are unsupported by WebAssembly"), 0, 0, 0, symbol);
         return false;
     }
     Wasm64DataRecord* target = wasm64_data_record_for_symbol(context, symbol);
+    Wasm64FunctionRecord* function_target = 0;
     if (!target)
     {
         IrSymbol* target_symbol = wasm64_symbol(context, symbol);
         if (target_symbol && target_symbol->kind == IR_SYMBOL_FUNCTION)
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("function-address relocations are unsupported by Wasm64"), 0, 0, 0,
-                        symbol);
+            if (!wasm64_is_memory64(context))
+            {
+                wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION,
+                            wasm64_s8("function-address relocations are unsupported by Wasm32"), 0, 0, 0, symbol);
+            }
+            else
+            {
+                function_target = wasm64_function_record_for_symbol(context, symbol);
+                if (!function_target)
+                {
+                    wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved Wasm64 function relocation"), 0, 0, 0, symbol);
+                }
+                else if (addend)
+                {
+                    wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("Wasm64 function-address addends are unsupported"), 0, 0, 0,
+                                symbol);
+                }
+            }
         }
         else
         {
-            wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved Wasm64 data relocation"), 0, 0, 0, symbol);
+            wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved WebAssembly data relocation"), 0, 0, 0, symbol);
         }
-        return false;
     }
-    if (!record->bytes || offset > record->size || pointer_size > record->size - offset)
+    // A data target, or a function handle that raised no diagnostic above.
+    bool resolved = target || (function_target && !wasm64_failed(context));
+    bool offset_valid = record->bytes && offset <= record->size && pointer_size <= record->size - offset;
+    if (resolved && !offset_valid)
     {
-        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid Wasm64 data relocation offset"), 0, 0, 0, record->symbol->id);
+        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid WebAssembly data relocation offset"), 0, 0, 0, record->symbol->id);
+    }
+    if (!resolved || !offset_valid)
+    {
         return false;
     }
-    u64 value = target->offset;
+    u64 value = function_target ? (u64)function_target->function_index + 1 : target->offset;
     if (addend >= 0)
     {
         if (value > UINT64_MAX - (u64)addend)
         {
-            wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 data relocation overflow"), 0, 0, 0, symbol);
+            wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("WebAssembly data relocation overflow"), 0, 0, 0, symbol);
             return false;
         }
         value += (u64)addend;
@@ -1112,10 +1676,15 @@ static bool wasm64_apply_data_relocation(Wasm64Context* context, Wasm64DataRecor
         u64 magnitude = (u64)(-(addend + 1)) + 1;
         if (value < magnitude)
         {
-            wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 data relocation underflow"), 0, 0, 0, symbol);
+            wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("WebAssembly data relocation underflow"), 0, 0, 0, symbol);
             return false;
         }
         value -= magnitude;
+    }
+    if (pointer_size == 4 && value > UINT32_MAX)
+    {
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm32 data relocation exceeds the 32-bit address space"), 0, 0, 0, symbol);
+        return false;
     }
     wasm64_buffer_u64_fixed(&(Wasm64Buffer){.arena = context->arena, .data = record->bytes + offset, .capacity = pointer_size, .length = 0}, value,
                             pointer_size);
@@ -1182,8 +1751,8 @@ static bool wasm64_build_import_payload(Wasm64Context* context)
         }
         IrSymbol* symbol = record->symbol;
         String8 link_name = symbol && symbol->link_name.length ? symbol->link_name : symbol ? symbol->name : (String8){0};
-        String8 module_name = wasm64_import_module(link_name);
-        String8 import_name = wasm64_import_name(link_name, symbol ? symbol->name : (String8){0});
+        String8 module_name = record->import_module.length ? record->import_module : wasm64_import_module(link_name);
+        String8 import_name = record->import_name.length ? record->import_name : wasm64_import_name(link_name, symbol ? symbol->name : (String8){0});
         wasm64_buffer_string(&context->import_payload, module_name);
         wasm64_buffer_string(&context->import_payload, import_name);
         wasm64_buffer_u8(&context->import_payload, 0x00); // function import
@@ -1202,6 +1771,34 @@ static bool wasm64_build_function_payload(Wasm64Context* context)
         {
             wasm64_buffer_u32_leb(&context->function_payload, record->signature.type_index);
         }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool wasm64_build_table_payload(Wasm64Context* context)
+{
+    // Slot zero is null. Every import and definition has a stable nonzero
+    // 64-bit C handle, while call_indirect consumes its checked 32-bit index.
+    u32 entries = context->function_count + 1;
+    wasm64_buffer_u32_leb(&context->table_payload, 1);
+    wasm64_buffer_u8(&context->table_payload, 0x70); // funcref
+    wasm64_buffer_u8(&context->table_payload, 0x01); // minimum and maximum
+    wasm64_buffer_u32_leb(&context->table_payload, entries);
+    wasm64_buffer_u32_leb(&context->table_payload, entries);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool wasm64_build_element_payload(Wasm64Context* context)
+{
+    wasm64_buffer_u32_leb(&context->element_payload, 1);
+    wasm64_buffer_u32_leb(&context->element_payload, 0); // active table 0, function indices
+    wasm64_buffer_u8(&context->element_payload, 0x41); // i32.const 1
+    wasm64_buffer_s32_leb(&context->element_payload, 1);
+    wasm64_buffer_u8(&context->element_payload, 0x0b);
+    wasm64_buffer_u32_leb(&context->element_payload, context->function_count);
+    for (u32 index = 0; index < context->function_count; index += 1)
+    {
+        wasm64_buffer_u32_leb(&context->element_payload, context->functions[index].function_index);
     }
     return true;
 }
@@ -1253,70 +1850,103 @@ static bool wasm64_build_memory_payload(Wasm64Context* context)
     u64 maximum = context->options.maximum_pages;
     if (maximum && maximum < minimum)
     {
-        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 memory maximum is smaller than its minimum"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("WebAssembly memory maximum is smaller than its minimum"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
         return false;
     }
-    context->stats.memory64 = true;
+    bool memory64 = wasm64_is_memory64(context);
+    if (!memory64 && (minimum > 65536 || maximum > 65536))
+    {
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm32 memory exceeds the 4 GiB linear-memory limit"), 0, 0, 0,
+                    IR_SYMBOL_ID_INVALID);
+        return false;
+    }
+    context->stats.memory64 = memory64;
     context->stats.memory_min_pages = minimum;
     context->stats.memory_max_pages = maximum;
     wasm64_buffer_u32_leb(&context->memory_payload, 1);
-    wasm64_buffer_u8(&context->memory_payload, maximum ? 0x05 : 0x04); // maximum + memory64, or memory64 alone
-    wasm64_buffer_u64_leb(&context->memory_payload, minimum);
-    if (maximum)
+    if (memory64)
     {
-        wasm64_buffer_u64_leb(&context->memory_payload, maximum);
+        wasm64_buffer_u8(&context->memory_payload, maximum ? 0x05 : 0x04); // maximum + memory64, or memory64 alone
+        wasm64_buffer_u64_leb(&context->memory_payload, minimum);
+        if (maximum)
+        {
+            wasm64_buffer_u64_leb(&context->memory_payload, maximum);
+        }
+    }
+    else
+    {
+        wasm64_buffer_u8(&context->memory_payload, maximum ? 0x01 : 0x00);
+        wasm64_buffer_u32_leb(&context->memory_payload, (u32)minimum);
+        if (maximum)
+        {
+            wasm64_buffer_u32_leb(&context->memory_payload, (u32)maximum);
+        }
     }
     return true;
 }
 
 static String8 wasm64_function_export_name(Wasm64FunctionRecord* record)
 {
-    if (!record->symbol)
+    String8 result = {0};
+    if (record->export_name.length)
     {
-        return (String8){0};
+        result = record->export_name;
     }
-    String8 link_name = record->symbol->link_name.length ? record->symbol->link_name : record->symbol->name;
-    u64 hash = 0;
-    String8 result;
-    if (wasm64_string_has_hash(link_name, &hash))
+    else if (record->symbol)
     {
-        result = wasm64_string_slice(link_name, hash + 1, link_name.length);
+        String8 link_name = record->symbol->link_name.length ? record->symbol->link_name : record->symbol->name;
+        u64 hash = 0;
+        result = wasm64_string_has_hash(link_name, &hash) ? wasm64_string_slice(link_name, hash + 1, link_name.length) : link_name;
     }
-    else
-    {
-        result = link_name;
-    }
-
     return result;
 }
 
 static bool wasm64_build_global_payload(Wasm64Context* context)
 {
-    // One mutable i64 stack pointer.  Every generated function saves/restores
-    // it around its linear-memory frame, making nested direct calls safe.
-    wasm64_buffer_u32_leb(&context->global_payload, 1);
-    wasm64_buffer_u8(&context->global_payload, WASM64_VALTYPE_I64);
+    // WASI startup may grow memory to hold host-sized arguments. Its second
+    // mutable global tracks the new stack limit for generated functions.
+    bool wasi = context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1;
+    wasm64_buffer_u32_leb(&context->global_payload, wasi ? 2 : 1);
+    wasm64_buffer_u8(&context->global_payload, (u8)wasm64_pointer_valtype(context));
     wasm64_buffer_u8(&context->global_payload, 0x01); // mutable
-    wasm64_buffer_u8(&context->global_payload, 0x42);
-    wasm64_buffer_s64_leb(&context->global_payload, (s64)context->stack_base);
+    if (wasm64_is_memory64(context))
+    {
+        wasm64_buffer_u8(&context->global_payload, 0x42);
+        wasm64_buffer_s64_leb(&context->global_payload, (s64)context->stack_base);
+    }
+    else
+    {
+        wasm64_buffer_u8(&context->global_payload, 0x41);
+        wasm64_buffer_s32_leb(&context->global_payload, (s32)(u32)context->stack_base);
+    }
     wasm64_buffer_u8(&context->global_payload, 0x0b);
     context->stack_global_index = 0;
-    context->stats.global_count = 1;
+    context->stack_limit_global_index = 1;
+    if (wasi)
+    {
+        wasm64_buffer_u8(&context->global_payload, WASM64_VALTYPE_I32);
+        wasm64_buffer_u8(&context->global_payload, 0x01); // mutable
+        wasm64_buffer_u8(&context->global_payload, 0x41); // i32.const
+        wasm64_buffer_s32_leb(&context->global_payload, (s32)(u32)context->stack_limit);
+        wasm64_buffer_u8(&context->global_payload, 0x0b);
+    }
+    context->stats.global_count = wasi ? 2 : 1;
     return true;
 }
 
 static bool wasm64_build_export_payload(Wasm64Context* context)
 {
     String8 memory_name = context->options.memory_export_name.length ? context->options.memory_export_name : wasm64_s8("memory");
-    u32 export_count = context->options.export_memory ? 1 : 0;
+    u32 function_export_count = 0;
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         Wasm64FunctionRecord* record = context->functions + index;
         if (record->exported)
         {
-            export_count += 1;
+            function_export_count += 1;
         }
     }
+    u32 export_count = function_export_count + (context->options.export_memory ? 1 : 0);
     wasm64_buffer_u32_leb(&context->export_payload, export_count);
     if (context->options.export_memory)
     {
@@ -1324,8 +1954,21 @@ static bool wasm64_build_export_payload(Wasm64Context* context)
         wasm64_buffer_u8(&context->export_payload, 0x02); // memory
         wasm64_buffer_u32_leb(&context->export_payload, 0);
     }
+    // Names are hashed once, in record order, into a set sized for every
+    // exported function at no more than half load, so the first record whose
+    // name repeats an earlier one is the one reported.
+    // Always allocated, even with no exported functions, so the table is never
+    // null where a record is looked up.
+    u32 slot_capacity = WASM64_EXPORT_SLOTS_INITIAL;
+    while (slot_capacity / 2 < function_export_count && slot_capacity <= UINT32_MAX / 2)
+    {
+        slot_capacity *= 2;
+    }
+    Wasm64ExportNameSlot* slots = arena_allocate_zeroed(context->arena, Wasm64ExportNameSlot, slot_capacity);
+    u32 mask = slot_capacity - 1;
     u32 emitted = 0;
-    for (u32 index = 0; index < context->function_count; index += 1)
+    bool valid = true;
+    for (u32 index = 0; valid && index < context->function_count; index += 1)
     {
         Wasm64FunctionRecord* record = context->functions + index;
         if (!record->exported)
@@ -1335,29 +1978,52 @@ static bool wasm64_build_export_payload(Wasm64Context* context)
         String8 name = wasm64_function_export_name(record);
         if (!name.length || (context->options.export_memory && wasm64_string_equal(name, memory_name)))
         {
-            wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("empty or reserved Wasm64 export name"), record->function, 0, 0,
+            wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("empty or reserved WebAssembly export name"), record->function, 0, 0,
                         record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
-            return false;
+            valid = false;
         }
-        // Export names must be unique.  A duplicate is an error rather than a
-        // silently replaced entry, which would make link order observable.
-        for (u32 previous = 0; previous < index; previous += 1)
+        else
         {
-            Wasm64FunctionRecord* prior = context->functions + previous;
-            if (prior->exported && wasm64_string_equal(name, wasm64_function_export_name(prior)))
+            // Export names must be unique.  A duplicate is an error rather than a
+            // silently replaced entry, which would make link order observable.
+            u64 hash = buster_hash_64((u8*)name.pointer, name.length);
+            u32 slot = (u32)hash & mask;
+            bool duplicate = false;
+            while (!duplicate && slots[slot].name.length)
             {
-                wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("duplicate Wasm64 export name"), record->function, 0, 0,
+                context->stats.export_name_probes += 1;
+                if (slots[slot].hash == hash)
+                {
+                    context->stats.export_name_comparisons += 1;
+                    duplicate = wasm64_string_equal(slots[slot].name, name);
+                }
+                if (!duplicate)
+                {
+                    slot = (slot + 1) & mask;
+                }
+            }
+            if (duplicate)
+            {
+                wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("duplicate WebAssembly export name"), record->function, 0, 0,
                             record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
-                return false;
+                valid = false;
+            }
+            else
+            {
+                slots[slot].hash = hash;
+                slots[slot].name = name;
+                wasm64_buffer_string(&context->export_payload, name);
+                wasm64_buffer_u8(&context->export_payload, 0x00); // function
+                wasm64_buffer_u32_leb(&context->export_payload, record->function_index);
+                emitted += 1;
             }
         }
-        wasm64_buffer_string(&context->export_payload, name);
-        wasm64_buffer_u8(&context->export_payload, 0x00); // function
-        wasm64_buffer_u32_leb(&context->export_payload, record->function_index);
-        emitted += 1;
     }
-    context->stats.export_count = emitted + (context->options.export_memory ? 1 : 0);
-    return true;
+    if (valid)
+    {
+        context->stats.export_count = emitted + (context->options.export_memory ? 1 : 0);
+    }
+    return valid;
 }
 
 static void wasm64_fe_u8(Wasm64FunctionEmitter* emitter, u8 value)
@@ -1408,6 +2074,33 @@ static void wasm64_fe_i64_const(Wasm64FunctionEmitter* emitter, s64 value)
 {
     wasm64_fe_u8(emitter, 0x42);
     wasm64_fe_i64(emitter, value);
+}
+
+static void wasm64_fe_pointer_const(Wasm64FunctionEmitter* emitter, u64 value)
+{
+    if (wasm64_is_memory64(emitter->context))
+    {
+        wasm64_fe_i64_const(emitter, (s64)value);
+    }
+    else
+    {
+        wasm64_fe_i32_const(emitter, (s32)(u32)value);
+    }
+}
+
+static void wasm64_fe_pointer_add(Wasm64FunctionEmitter* emitter)
+{
+    wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x7c : 0x6a);
+}
+
+static void wasm64_fe_pointer_multiply(Wasm64FunctionEmitter* emitter)
+{
+    wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x7e : 0x6c);
+}
+
+static void wasm64_fe_pointer_and(Wasm64FunctionEmitter* emitter)
+{
+    wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x83 : 0x71);
 }
 
 static void wasm64_fe_f32_const(Wasm64FunctionEmitter* emitter, u32 bits)
@@ -1461,7 +2154,7 @@ static void wasm64_fe_integer_normalize(Wasm64FunctionEmitter* emitter, IrType* 
     {
         u32 bits = wasm64_integer_bits(type);
         Wasm64ValType valtype = 0;
-        wasm64_valtype_for_type(type, false, &valtype);
+        wasm64_valtype_for_type(emitter->context, type, false, &valtype);
         if (type->kind == IR_TYPE_BOOLEAN)
         {
             wasm64_fe_u8(emitter, valtype == WASM64_VALTYPE_I64 ? 0x50 : 0x45); // eqz
@@ -1554,7 +2247,7 @@ static void wasm64_fe_load(Wasm64FunctionEmitter* emitter, IrType* type)
     u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(BUSTER_MIN(type->layout.alignment, BUSTER_MIN(size, 8u))) : 0;
     if (type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION))
     {
-        wasm64_fe_u8(emitter, 0x29); // i64.load
+        wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x29 : 0x28);
         wasm64_fe_emit_memarg(emitter, alignment, 0);
     }
     else if (type && type->kind == IR_TYPE_FLOAT)
@@ -1565,7 +2258,7 @@ static void wasm64_fe_load(Wasm64FunctionEmitter* emitter, IrType* type)
     else if (type && wasm64_type_is_integer(type))
     {
         Wasm64ValType valtype = 0;
-        wasm64_valtype_for_type(type, false, &valtype);
+        wasm64_valtype_for_type(emitter->context, type, false, &valtype);
         bool sign = type->kind == IR_TYPE_INTEGER && type->is_signed;
         if (valtype == WASM64_VALTYPE_I64)
         {
@@ -1594,7 +2287,7 @@ static void wasm64_fe_store(Wasm64FunctionEmitter* emitter, IrType* type)
     u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(BUSTER_MIN(type->layout.alignment, BUSTER_MIN(size, 8u))) : 0;
     if (type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION))
     {
-        wasm64_fe_u8(emitter, 0x37); // i64.store
+        wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x37 : 0x36);
         wasm64_fe_emit_memarg(emitter, alignment, 0);
     }
     else if (type && type->kind == IR_TYPE_FLOAT)
@@ -1605,7 +2298,7 @@ static void wasm64_fe_store(Wasm64FunctionEmitter* emitter, IrType* type)
     else if (type && wasm64_type_is_integer(type))
     {
         Wasm64ValType valtype = 0;
-        wasm64_valtype_for_type(type, false, &valtype);
+        wasm64_valtype_for_type(emitter->context, type, false, &valtype);
         if (valtype == WASM64_VALTYPE_I64)
         {
             if (size <= 1)
@@ -1648,7 +2341,7 @@ static void wasm64_fe_emit_binary_opcode(Wasm64FunctionEmitter* emitter, IrBinar
     if (type)
     {
         Wasm64ValType valtype = 0;
-        wasm64_valtype_for_type(type, false, &valtype);
+        wasm64_valtype_for_type(emitter->context, type, false, &valtype);
         is_i64 = valtype == WASM64_VALTYPE_I64;
     }
     u8 opcode = 0;
@@ -1698,8 +2391,8 @@ static void wasm64_fe_emit_binary_opcode(Wasm64FunctionEmitter* emitter, IrBinar
         case IR_BINARY_UNSIGNED_LESS_EQUAL: opcode = is_i64 ? 0x58 : 0x4d; break;
         case IR_BINARY_SIGNED_GREATER_EQUAL: opcode = is_i64 ? 0x59 : 0x4e; break;
         case IR_BINARY_UNSIGNED_GREATER_EQUAL: opcode = is_i64 ? 0x5a : 0x4f; break;
-        case IR_BINARY_POINTER_EQUAL: opcode = 0x51; break;
-        case IR_BINARY_POINTER_NOT_EQUAL: opcode = 0x52; break;
+        case IR_BINARY_POINTER_EQUAL: opcode = is_i64 ? 0x51 : 0x46; break;
+        case IR_BINARY_POINTER_NOT_EQUAL: opcode = is_i64 ? 0x52 : 0x47; break;
         case IR_BINARY_BOOLEAN_AND: opcode = 0x71; break;
         case IR_BINARY_BOOLEAN_OR: opcode = 0x72; break;
         case IR_BINARY_BOOLEAN_EQUAL: opcode = 0x46; break;
@@ -1709,7 +2402,7 @@ static void wasm64_fe_emit_binary_opcode(Wasm64FunctionEmitter* emitter, IrBinar
     }
     if (!opcode)
     {
-        wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("unsupported scalar Wasm64 binary operation"), emitter->function, 0, 0,
+        wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("unsupported scalar WebAssembly binary operation"), emitter->function, 0, 0,
                     IR_SYMBOL_ID_INVALID);
         return;
     }
@@ -1719,7 +2412,7 @@ static void wasm64_fe_emit_binary_opcode(Wasm64FunctionEmitter* emitter, IrBinar
 static void wasm64_fe_emit_unary_opcode(Wasm64FunctionEmitter* emitter, IrUnaryOperation operation, IrType* type)
 {
     Wasm64ValType valtype = 0;
-    wasm64_valtype_for_type(type, false, &valtype);
+    wasm64_valtype_for_type(emitter->context, type, false, &valtype);
     bool is_i64 = valtype == WASM64_VALTYPE_I64;
     u8 opcode = 0;
     switch (operation)
@@ -1744,7 +2437,7 @@ static void wasm64_fe_emit_parallel_copy(Wasm64FunctionEmitter* emitter, IrBlock
         IrCfgEdge const* edge = ir_function_cfg_edge(emitter->function, predecessor->id, target->id);
         if (!edge)
         {
-            wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 block-parameter incoming value"), emitter->function,
+            wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing WebAssembly block-parameter incoming value"), emitter->function,
                         target, 0, IR_SYMBOL_ID_INVALID);
         }
         else
@@ -1765,17 +2458,41 @@ static void wasm64_fe_emit_parallel_copy(Wasm64FunctionEmitter* emitter, IrBlock
     }
 }
 
-static Wasm64StringRecord* wasm64_string_record_find(Wasm64Context* context, IrFunction* function, IrInstructionId instruction)
+// wasm64_collect_data appends records in (module, function, instruction)
+// order, so the context-wide array is sorted by that key.
+static Wasm64StringRecord* wasm64_string_record_find(Wasm64FunctionEmitter* emitter, IrInstructionId instruction)
 {
-    for (u32 index = 0; index < context->string_count; index += 1)
+    Wasm64Context* context = emitter->context;
+    u32 low = 0;
+    u32 high = context->string_count;
+    while (low < high)
     {
-        Wasm64StringRecord* record = context->strings + index;
-        if (record->function == function && record->instruction.value == instruction.value)
+        u32 middle = low + (high - low) / 2;
+        Wasm64StringRecord* record = context->strings + middle;
+        context->stats.string_record_lookup_probes += 1;
+        bool before = record->module_index != emitter->module_index       ? record->module_index < emitter->module_index
+                      : record->function_index != emitter->function_index ? record->function_index < emitter->function_index
+                                                                          : record->instruction.value < instruction.value;
+        if (before)
         {
-            return record;
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
         }
     }
-    return 0;
+    Wasm64StringRecord* result = 0;
+    if (low < context->string_count)
+    {
+        Wasm64StringRecord* record = context->strings + low;
+        context->stats.string_record_lookup_probes += 1;
+        if (record->function == emitter->function && record->instruction.value == instruction.value)
+        {
+            result = record;
+        }
+    }
+    return result;
 }
 
 static void wasm64_fe_emit_cast(Wasm64FunctionEmitter* emitter, IrInstruction* instruction, IrType* source, IrType* destination)
@@ -1788,9 +2505,9 @@ static void wasm64_fe_emit_cast(Wasm64FunctionEmitter* emitter, IrInstruction* i
     {
         source_place = emitter->function->values[instruction->operands[0].value].category == IR_VALUE_PLACE;
     }
-    if (!wasm64_valtype_for_type(source, source_place, &source_type) || !wasm64_valtype_for_type(destination, destination_place, &destination_type))
+    if (!wasm64_valtype_for_type(emitter->context, source, source_place, &source_type) || !wasm64_valtype_for_type(emitter->context, destination, destination_place, &destination_type))
     {
-        wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("unsupported Wasm64 cast shape"), emitter->function, 0,
+        wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("unsupported WebAssembly cast shape"), emitter->function, 0,
                     instruction, IR_SYMBOL_ID_INVALID);
         return;
     }
@@ -1905,7 +2622,10 @@ static u32 wasm64_fe_count_block_parameters(IrFunction* function)
 static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* context, Wasm64FunctionRecord* record)
 {
     IrFunction* function = record->function;
-    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record};
+    // Source ordinals come from collection, independently of import-first
+    // function indices or the addresses of unrelated module allocations.
+    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record,
+                                     .module_index = record->source_module_index, .function_index = record->source_function_index};
     wasm64_buffer_init(&emitter->body, context->arena);
     emitter->value_locals = arena_allocate(context->arena, u32, function->value_count ? function->value_count : 1);
     emitter->value_types = arena_allocate(context->arena, u8, function->value_count ? function->value_count : 1);
@@ -1923,15 +2643,15 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         // calls do not look like aggregate ABI traffic.
         if (type && type->kind == IR_TYPE_FUNCTION)
         {
-            valtype = WASM64_VALTYPE_I64;
+            valtype = wasm64_pointer_valtype(context);
         }
         else if (wasm64_type_is_local_aggregate(type))
         {
-            valtype = WASM64_VALTYPE_I64;
+            valtype = wasm64_pointer_valtype(context);
         }
-        else if (!wasm64_valtype_for_type(type, value->category == IR_VALUE_PLACE, &valtype))
+        else if (!wasm64_valtype_for_type(context, type, value->category == IR_VALUE_PLACE, &valtype))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate Wasm64 SSA value is unsupported"), function, 0, 0,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate WebAssembly SSA value is unsupported"), function, 0, 0,
                         IR_SYMBOL_ID_INVALID);
             return false;
         }
@@ -1939,6 +2659,7 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
     }
 
     u64 frame_cursor = 0;
+    emitter->frame_alignment = 16;
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         IrInstruction* instruction = function->instructions + instruction_index;
@@ -1954,10 +2675,11 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         }
         u64 size = type && type->layout.resolved ? type->layout.size : 0;
         u64 alignment = type && type->layout.alignment ? type->layout.alignment : 1;
+        alignment = BUSTER_MAX(alignment, function->values[instruction->result.value].alignment);
         if (!size || size > UINT32_MAX || alignment > UINT32_MAX || alignment == 0 || alignment > (UINT64_C(1) << 31) ||
             (snapshot && alignment > 16))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("invalid Wasm64 local frame layout"), function, 0, instruction, IR_SYMBOL_ID_INVALID);
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("invalid WebAssembly local frame layout"), function, 0, instruction, IR_SYMBOL_ID_INVALID);
             return false;
         }
         if (!wasm64_align_cursor(&frame_cursor, alignment))
@@ -1968,26 +2690,28 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         }
         if (frame_cursor > UINT32_MAX - size)
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("Wasm64 local frame exceeds 32-bit offset"), function, 0, instruction,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("WebAssembly local frame exceeds 32-bit offset"), function, 0, instruction,
                         IR_SYMBOL_ID_INVALID);
             return false;
         }
         emitter->value_offsets[instruction->result.value] = (u32)frame_cursor;
         frame_cursor += size;
+        emitter->frame_alignment = BUSTER_MAX(emitter->frame_alignment, (u32)alignment);
     }
     if (!wasm64_align_cursor(&frame_cursor, 16) || frame_cursor > UINT32_MAX)
     {
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("Wasm64 local frame exceeds 32-bit offset"), function, 0, 0, IR_SYMBOL_ID_INVALID);
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("WebAssembly local frame exceeds 32-bit offset"), function, 0, 0, IR_SYMBOL_ID_INVALID);
         return false;
     }
     emitter->frame_size = (u32)frame_cursor;
     u32 temp_count = wasm64_fe_count_block_parameters(function);
     emitter->pc_local = record->signature.param_count + function->value_count;
-    emitter->fp_local = emitter->pc_local + 1;
+    emitter->entry_sp_local = emitter->pc_local + 1;
+    emitter->fp_local = emitter->entry_sp_local + 1;
     emitter->sp_local = emitter->fp_local + 1;
     emitter->scratch_local = emitter->sp_local + 1;
     emitter->temp_base = emitter->scratch_local + 1;
-    emitter->extra_local_count = 4 + temp_count;
+    emitter->extra_local_count = 5 + temp_count;
     emitter->local_count = record->signature.param_count + function->value_count + emitter->extra_local_count;
     u32 declared_local_count = function->value_count + emitter->extra_local_count;
     emitter->local_types = arena_allocate(context->arena, u8, declared_local_count ? declared_local_count : 1);
@@ -1997,9 +2721,10 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
     }
     u32 local_type_index = function->value_count;
     emitter->local_types[local_type_index++] = WASM64_VALTYPE_I32;
-    emitter->local_types[local_type_index++] = WASM64_VALTYPE_I64;
-    emitter->local_types[local_type_index++] = WASM64_VALTYPE_I64;
-    emitter->local_types[local_type_index++] = WASM64_VALTYPE_I64;
+    emitter->local_types[local_type_index++] = (u8)wasm64_pointer_valtype(context);
+    emitter->local_types[local_type_index++] = (u8)wasm64_pointer_valtype(context);
+    emitter->local_types[local_type_index++] = (u8)wasm64_pointer_valtype(context);
+    emitter->local_types[local_type_index++] = (u8)wasm64_pointer_valtype(context);
     emitter->block_temp_bases = arena_allocate(context->arena, u32, function->block_count);
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -2012,9 +2737,9 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
             IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
             Wasm64ValType type = 0;
             IrType* parameter_type = wasm64_type(context, parameter->canonical_type);
-            if (!wasm64_valtype_for_type(parameter_type, function->values[parameter->value.value].category == IR_VALUE_PLACE, &type))
+            if (!wasm64_valtype_for_type(context, parameter_type, function->values[parameter->value.value].category == IR_VALUE_PLACE, &type))
             {
-                wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate Wasm64 block parameter is unsupported"), function,
+                wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate WebAssembly block parameter is unsupported"), function,
                             function->blocks + block_index, 0, IR_SYMBOL_ID_INVALID);
                 return false;
             }
@@ -2029,7 +2754,7 @@ static void wasm64_fe_emit_stack_trap_if(Wasm64FunctionEmitter* emitter)
     wasm64_fe_u8(emitter, 0x04); // if
     wasm64_fe_u8(emitter, 0x40);
     // Restore this function's entry pointer before the deliberate trap.
-    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->entry_sp_local);
     wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
     wasm64_fe_u8(emitter, 0x00); // unreachable
     wasm64_fe_u8(emitter, 0x0b); // end if
@@ -2038,27 +2763,49 @@ static void wasm64_fe_emit_stack_trap_if(Wasm64FunctionEmitter* emitter)
 static void wasm64_fe_emit_stack_bounds_check(Wasm64FunctionEmitter* emitter, u32 local)
 {
     wasm64_fe_local_get(emitter, local);
-    wasm64_fe_i64_const(emitter, (s64)emitter->context->stack_base);
-    wasm64_fe_u8(emitter, 0x54); // i64.lt_u
+    wasm64_fe_pointer_const(emitter, emitter->context->stack_base);
+    wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x54 : 0x49); // unsigned less
     wasm64_fe_emit_stack_trap_if(emitter);
     wasm64_fe_local_get(emitter, local);
-    wasm64_fe_i64_const(emitter, (s64)emitter->context->stack_limit);
-    wasm64_fe_u8(emitter, 0x56); // i64.gt_u
+    if (emitter->context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1)
+    {
+        wasm64_fe_global_get(emitter, emitter->context->stack_limit_global_index);
+    }
+    else
+    {
+        wasm64_fe_pointer_const(emitter, emitter->context->stack_limit);
+    }
+    wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x56 : 0x4b); // unsigned greater
     wasm64_fe_emit_stack_trap_if(emitter);
 }
 
 static void wasm64_fe_emit_prologue(Wasm64FunctionEmitter* emitter)
 {
     wasm64_fe_global_get(emitter, emitter->context->stack_global_index);
+    wasm64_fe_local_set(emitter, emitter->entry_sp_local);
+    wasm64_fe_emit_stack_bounds_check(emitter, emitter->entry_sp_local);
+    // Offsets alone cannot align a fixed object when a caller's live alloca
+    // leaves an odd SP. Check the padding addition before rounding the base.
+    wasm64_fe_local_get(emitter, emitter->entry_sp_local);
+    wasm64_fe_pointer_const(emitter, emitter->frame_alignment - 1);
+    wasm64_fe_pointer_add(emitter);
+    wasm64_fe_local_set(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->entry_sp_local);
+    wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x54 : 0x49); // padding addition wrapped
+    wasm64_fe_emit_stack_trap_if(emitter);
+    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_pointer_const(emitter, ~((u64)emitter->frame_alignment - 1));
+    wasm64_fe_pointer_and(emitter);
     wasm64_fe_local_set(emitter, emitter->fp_local);
     wasm64_fe_emit_stack_bounds_check(emitter, emitter->fp_local);
     wasm64_fe_local_get(emitter, emitter->fp_local);
-    wasm64_fe_i64_const(emitter, emitter->frame_size);
-    wasm64_fe_u8(emitter, 0x7c); // i64.add
+    wasm64_fe_pointer_const(emitter, emitter->frame_size);
+    wasm64_fe_pointer_add(emitter);
     wasm64_fe_local_set(emitter, emitter->sp_local);
     wasm64_fe_local_get(emitter, emitter->sp_local);
     wasm64_fe_local_get(emitter, emitter->fp_local);
-    wasm64_fe_u8(emitter, 0x54); // i64.lt_u: addition wrapped
+    wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x54 : 0x49); // addition wrapped
     wasm64_fe_emit_stack_trap_if(emitter);
     wasm64_fe_emit_stack_bounds_check(emitter, emitter->sp_local);
     wasm64_fe_local_get(emitter, emitter->sp_local);
@@ -2068,8 +2815,8 @@ static void wasm64_fe_emit_prologue(Wasm64FunctionEmitter* emitter)
         if (emitter->value_offsets[index] != UINT32_MAX && emitter->function->values[index].category == IR_VALUE_VALUE)
         {
             wasm64_fe_local_get(emitter, emitter->fp_local);
-            wasm64_fe_i64_const(emitter, emitter->value_offsets[index]);
-            wasm64_fe_u8(emitter, 0x7c); // i64.add
+            wasm64_fe_pointer_const(emitter, emitter->value_offsets[index]);
+            wasm64_fe_pointer_add(emitter);
             wasm64_fe_local_set(emitter, emitter->value_locals[index]);
         }
     }
@@ -2083,41 +2830,52 @@ static void wasm64_fe_emit_stack_allocate(Wasm64FunctionEmitter* emitter, IrInst
     bool valid = alignment && !(alignment & (alignment - 1)) && alignment <= UINT32_MAX;
     if (!valid)
     {
-        wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid Wasm64 dynamic stack alignment"), emitter->function, 0, instruction,
+        wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid WebAssembly dynamic stack alignment"), emitter->function, 0, instruction,
                     IR_SYMBOL_ID_INVALID);
     }
     if (valid)
     {
         wasm64_fe_emit_stack_bounds_check(emitter, emitter->sp_local);
         wasm64_fe_local_get(emitter, emitter->sp_local);
-        wasm64_fe_i64_const(emitter, (s64)(alignment - 1));
-        wasm64_fe_u8(emitter, 0x7c); // add
+        wasm64_fe_pointer_const(emitter, alignment - 1);
+        wasm64_fe_pointer_add(emitter);
         wasm64_fe_local_set(emitter, emitter->scratch_local);
         wasm64_fe_local_get(emitter, emitter->scratch_local);
         wasm64_fe_local_get(emitter, emitter->sp_local);
-        wasm64_fe_u8(emitter, 0x54); // i64.lt_u: alignment addition wrapped
+        wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x54 : 0x49); // alignment addition wrapped
         wasm64_fe_emit_stack_trap_if(emitter);
         wasm64_fe_local_get(emitter, emitter->scratch_local);
-        wasm64_fe_i64_const(emitter, (s64)~(alignment - 1));
-        wasm64_fe_u8(emitter, 0x83); // i64.and
+        wasm64_fe_pointer_const(emitter, ~(alignment - 1));
+        wasm64_fe_pointer_and(emitter);
         wasm64_fe_local_set(emitter, emitter->scratch_local);
         wasm64_fe_emit_stack_bounds_check(emitter, emitter->scratch_local);
         wasm64_fe_local_get(emitter, emitter->scratch_local);
         wasm64_fe_local_set(emitter, emitter->value_locals[instruction->result.value]);
         wasm64_fe_local_get(emitter, emitter->scratch_local);
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
         IrType* size_type = wasm64_fe_value_ir_type(emitter, instruction->operands[0]);
         Wasm64ValType size_valtype = 0;
-        wasm64_valtype_for_type(size_type, false, &size_valtype);
-        if (size_valtype == WASM64_VALTYPE_I32)
+        wasm64_valtype_for_type(emitter->context, size_type, false, &size_valtype);
+        if (!wasm64_is_memory64(emitter->context) && size_valtype == WASM64_VALTYPE_I64)
+        {
+            wasm64_fe_emit_value(emitter, instruction->operands[0]);
+            wasm64_fe_i64_const(emitter, UINT32_MAX);
+            wasm64_fe_u8(emitter, 0x56); // i64.gt_u
+            wasm64_fe_emit_stack_trap_if(emitter);
+        }
+        wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        if (wasm64_is_memory64(emitter->context) && size_valtype == WASM64_VALTYPE_I32)
         {
             wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
         }
-        wasm64_fe_u8(emitter, 0x7c); // add
+        else if (!wasm64_is_memory64(emitter->context) && size_valtype == WASM64_VALTYPE_I64)
+        {
+            wasm64_fe_u8(emitter, 0xa7); // i32.wrap_i64
+        }
+        wasm64_fe_pointer_add(emitter);
         wasm64_fe_local_set(emitter, emitter->sp_local);
         wasm64_fe_local_get(emitter, emitter->sp_local);
         wasm64_fe_local_get(emitter, emitter->scratch_local);
-        wasm64_fe_u8(emitter, 0x54); // i64.lt_u: allocation addition wrapped
+        wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x54 : 0x49); // allocation addition wrapped
         wasm64_fe_emit_stack_trap_if(emitter);
         wasm64_fe_emit_stack_bounds_check(emitter, emitter->sp_local);
         wasm64_fe_local_get(emitter, emitter->sp_local);
@@ -2129,19 +2887,63 @@ static void wasm64_fe_emit_address_add(Wasm64FunctionEmitter* emitter, u64 offse
 {
     if (offset)
     {
-        wasm64_fe_i64_const(emitter, (s64)offset);
-        wasm64_fe_u8(emitter, 0x7c);
+        wasm64_fe_pointer_const(emitter, offset);
+        wasm64_fe_pointer_add(emitter);
     }
 }
 
 BUSTER_GLOBAL_LOCAL void wasm64_fe_copy_bytes(Wasm64FunctionEmitter* emitter, u64 size)
 {
-    // Memory64 memory.copy consumes i64 destination, source and byte count.
-    wasm64_fe_i64_const(emitter, (s64)size);
+    // Bulk memory uses the memory's address width for all three operands.
+    wasm64_fe_pointer_const(emitter, size);
     wasm64_fe_u8(emitter, 0xfc);
     wasm64_fe_u32(emitter, 10); // memory.copy
     wasm64_fe_u32(emitter, 0);
     wasm64_fe_u32(emitter, 0);
+}
+
+// ORs a bit-field's value into zeroed little-endian aggregate storage one byte
+// at a time, so packed spans and neighbouring fields need no wider access.
+BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_bit_field_insert(Wasm64FunctionEmitter* emitter, IrValueId aggregate, u64 offset, IrValueId operand,
+                                                         IrType* operand_type, IrField* field)
+{
+    Wasm64ValType valtype = 0;
+    wasm64_valtype_for_type(emitter->context, operand_type, false, &valtype);
+    u32 first = field->bit_offset / 8;
+    u32 end = field->bit_width ? (field->bit_offset + field->bit_width + 7) / 8 : first;
+    for (u32 byte = first; byte < end; byte += 1)
+    {
+        wasm64_fe_emit_value(emitter, aggregate);
+        wasm64_fe_emit_address_add(emitter, offset + byte);
+        wasm64_fe_emit_value(emitter, aggregate);
+        wasm64_fe_emit_address_add(emitter, offset + byte);
+        wasm64_fe_u8(emitter, 0x31); // i64.load8_u
+        wasm64_fe_emit_memarg(emitter, 0, 0);
+        wasm64_fe_emit_value(emitter, operand);
+        if (valtype != WASM64_VALTYPE_I64)
+        {
+            wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
+        }
+        if (field->bit_width < 64)
+        {
+            wasm64_fe_i64_const(emitter, (s64)((UINT64_C(1) << field->bit_width) - 1));
+            wasm64_fe_u8(emitter, 0x83); // i64.and
+        }
+        u32 bit = byte * 8;
+        if (bit > field->bit_offset)
+        {
+            wasm64_fe_i64_const(emitter, (s64)(bit - field->bit_offset));
+            wasm64_fe_u8(emitter, 0x88); // i64.shr_u
+        }
+        else if (bit < field->bit_offset)
+        {
+            wasm64_fe_i64_const(emitter, (s64)(field->bit_offset - bit));
+            wasm64_fe_u8(emitter, 0x86); // i64.shl
+        }
+        wasm64_fe_u8(emitter, 0x84); // i64.or
+        wasm64_fe_u8(emitter, 0x3c); // i64.store8
+        wasm64_fe_emit_memarg(emitter, 0, 0);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter, IrBlock* block, IrInstruction* instruction, IrType* type)
@@ -2153,7 +2955,7 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter
         // volatile accesses, and keeps partially populated unions deterministic.
         wasm64_fe_emit_value(emitter, instruction->result);
         wasm64_fe_i32_const(emitter, 0);
-        wasm64_fe_i64_const(emitter, (s64)type->layout.size);
+        wasm64_fe_pointer_const(emitter, type->layout.size);
         wasm64_fe_u8(emitter, 0xfc);
         wasm64_fe_u32(emitter, 11); // memory.fill
         wasm64_fe_u32(emitter, 0);
@@ -2166,13 +2968,15 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter
         valid = operand_type && operand_type->layout.resolved &&
                 emitter->function->values[operand.value].category == IR_VALUE_VALUE &&
                 (wasm64_type_is_scalar(operand_type) || wasm64_type_is_local_aggregate(operand_type));
+        IrField* bit_field = 0;
         if (valid && instruction->opcode == IR_OPCODE_AGGREGATE)
         {
             u64 field_index = instruction->immediates[index];
-            valid = field_index < type->field_count && !type->fields[field_index].is_bit_field;
+            valid = field_index < type->field_count;
             if (valid)
             {
                 offset = type->fields[field_index].offset;
+                bit_field = type->fields[field_index].is_bit_field ? type->fields + field_index : 0;
             }
         }
         else if (valid)
@@ -2183,8 +2987,20 @@ BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter
                 offset = (u64)index * operand_type->layout.size;
             }
         }
-        valid = valid && offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
-        if (valid)
+        if (valid && bit_field)
+        {
+            valid = wasm64_type_is_integer(operand_type) && bit_field->bit_width <= 64 &&
+                    offset <= type->layout.size && (bit_field->bit_offset + bit_field->bit_width + 7) / 8 <= type->layout.size - offset;
+            if (valid)
+            {
+                wasm64_fe_emit_bit_field_insert(emitter, instruction->result, offset, operand, operand_type, bit_field);
+            }
+        }
+        else if (valid)
+        {
+            valid = offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
+        }
+        if (valid && !bit_field)
         {
             wasm64_fe_emit_value(emitter, instruction->result);
             wasm64_fe_emit_address_add(emitter, offset);
@@ -2220,7 +3036,7 @@ static void wasm64_fe_emit_integer_constant(Wasm64FunctionEmitter* emitter, IrIn
         bits = 0 - bits;
     }
     Wasm64ValType valtype = 0;
-    wasm64_valtype_for_type(type, false, &valtype);
+    wasm64_valtype_for_type(emitter->context, type, false, &valtype);
     if (valtype == WASM64_VALTYPE_I64)
     {
         wasm64_fe_i64_const(emitter, (s64)bits);
@@ -2235,7 +3051,7 @@ static void wasm64_fe_emit_integer_constant(Wasm64FunctionEmitter* emitter, IrIn
 static void wasm64_fe_emit_return(Wasm64FunctionEmitter* emitter, IrInstruction* instruction)
 {
     bool has_value = instruction->operand_count == 1;
-    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->entry_sp_local);
     wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
     if (has_value)
     {
@@ -2246,67 +3062,125 @@ static void wasm64_fe_emit_return(Wasm64FunctionEmitter* emitter, IrInstruction*
 
 static void wasm64_fe_emit_call(Wasm64FunctionEmitter* emitter, IrInstruction* instruction)
 {
-    if (!instruction->operand_count)
+    Wasm64Context* context = emitter->context;
+    bool valid = instruction->operand_count != 0;
+    if (!valid)
     {
-        wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("Wasm64 call has no callee"), emitter->function, 0, instruction,
+        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("WebAssembly call has no callee"), emitter->function, 0, instruction,
                     instruction->symbol);
-        return;
     }
-    IrValue* callee_value = emitter->function->values + instruction->operands[0].value;
-    IrType* callee_type = wasm64_type(emitter->context, callee_value->canonical_type);
-    bool indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
-    if (indirect)
+    bool indirect = false;
+    Wasm64Signature signature = {0};
+    Wasm64FunctionRecord* record = 0;
+    if (valid)
     {
-        wasm64_fail(emitter->context, WASM64_ERROR_INDIRECT_CALL, wasm64_s8("indirect calls are unsupported by Wasm64"), emitter->function, 0,
-                    instruction, instruction->symbol);
-        return;
-    }
-    Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(emitter->context, instruction->symbol);
-    if (!record)
-    {
-        wasm64_fail(emitter->context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved direct Wasm64 call"), emitter->function, 0, instruction,
-                    instruction->symbol);
-        return;
+        IrValue* callee_value = emitter->function->values + instruction->operands[0].value;
+        IrType* callee_type = wasm64_type(context, callee_value->canonical_type);
+        indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
+        if (indirect && !wasm64_is_memory64(context))
+        {
+            wasm64_fail(context, WASM64_ERROR_INDIRECT_CALL, wasm64_s8("indirect calls are unsupported by Wasm32"), emitter->function, 0, instruction,
+                        instruction->symbol);
+            valid = false;
+        }
+        else if (indirect)
+        {
+            IrType* function_type = wasm64_type(context, callee_type->element_type);
+            valid = function_type && function_type->kind == IR_TYPE_FUNCTION && !function_type->is_unprototyped &&
+                    wasm64_function_signature(context, function_type->id, &signature, emitter->function, instruction->symbol);
+            if (!valid)
+            {
+                wasm64_fail(context, WASM64_ERROR_INDIRECT_CALL, wasm64_s8("Wasm64 indirect call requires a prototyped function pointer"),
+                            emitter->function, 0, instruction, instruction->symbol);
+            }
+            else
+            {
+                signature.type_index = wasm64_signature_add(context, &signature);
+                valid = signature.type_index < context->stats.type_count;
+                if (!valid)
+                {
+                    wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("missing Wasm64 indirect call type"), emitter->function, 0, instruction,
+                                instruction->symbol);
+                }
+            }
+        }
+        else
+        {
+            record = wasm64_function_record_for_symbol(context, instruction->symbol);
+            valid = record != 0;
+            if (valid)
+            {
+                signature = record->signature;
+            }
+            else
+            {
+                wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved direct Wasm64 call"), emitter->function, 0, instruction,
+                            instruction->symbol);
+            }
+        }
     }
     // Wasm types every call by the callee's own declared signature, so a call
     // that carries a signature of its own cannot be encoded: that is what a
     // pre-C23 `()` declaration produces, since it names no parameters and each
     // call site supplies them (see IrType.is_unprototyped).
-    if (instruction->operand_count - 1 != record->signature.param_count)
+    if (valid && instruction->operand_count - 1 != signature.param_count)
     {
-        wasm64_fail(emitter->context, WASM64_ERROR_VARIADIC,
+        wasm64_fail(context, WASM64_ERROR_VARIADIC,
                     wasm64_s8("a call whose arguments the callee's declaration does not describe is unsupported by Wasm64"), emitter->function, 0,
                     instruction, instruction->symbol);
-        return;
+        valid = false;
     }
-    for (u32 argument_index = 1; argument_index < instruction->operand_count; argument_index += 1)
+    if (valid)
     {
-        wasm64_fe_emit_value(emitter, instruction->operands[argument_index]);
-    }
-    wasm64_fe_u8(emitter, 0x10);
-    wasm64_fe_u32(emitter, record->function_index);
-    if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
-    {
-        wasm64_fe_local_set(emitter, emitter->value_locals[instruction->result.value]);
+        for (u32 argument_index = 1; argument_index < instruction->operand_count; argument_index += 1)
+        {
+            wasm64_fe_emit_value(emitter, instruction->operands[argument_index]);
+        }
+        if (indirect)
+        {
+            wasm64_fe_emit_value(emitter, instruction->operands[0]);
+            wasm64_fe_i64_const(emitter, UINT32_MAX);
+            wasm64_fe_u8(emitter, 0x56); // i64.gt_u: reject before narrowing
+            wasm64_fe_emit_stack_trap_if(emitter);
+            wasm64_fe_emit_value(emitter, instruction->operands[0]);
+            wasm64_fe_u8(emitter, 0xa7); // i32.wrap_i64
+            wasm64_fe_u8(emitter, 0x11); // call_indirect
+            wasm64_fe_u32(emitter, signature.type_index);
+            wasm64_fe_u32(emitter, 0); // private table
+        }
+        else
+        {
+            wasm64_fe_u8(emitter, 0x10);
+            wasm64_fe_u32(emitter, record->function_index);
+        }
+        if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            wasm64_fe_local_set(emitter, emitter->value_locals[instruction->result.value]);
+        }
     }
 }
 
 static void wasm64_fe_emit_switch(Wasm64FunctionEmitter* emitter, IrBlock* predecessor, IrInstruction* instruction)
 {
     IrType* switched_type = wasm64_fe_value_ir_type(emitter, instruction->operands[0]);
+    u32 width = wasm64_integer_bits(switched_type);
+    u64 mask = width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
     Wasm64ValType valtype = 0;
-    wasm64_valtype_for_type(switched_type, false, &valtype);
+    wasm64_valtype_for_type(emitter->context, switched_type, false, &valtype);
     for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
     {
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        // SWITCH equality is modulo the declared width, even for a signed
+        // argument with dirty carrier bits or a raw singleton key alias.
+        wasm64_fe_emit_integer_value(emitter, instruction->operands[0], false);
+        u64 key = instruction->immediates[case_index] & mask;
         if (valtype == WASM64_VALTYPE_I64)
         {
-            wasm64_fe_i64_const(emitter, (s64)instruction->immediates[case_index]);
+            wasm64_fe_i64_const(emitter, (s64)key);
             wasm64_fe_u8(emitter, 0x51); // i64.eq
         }
         else
         {
-            wasm64_fe_i32_const(emitter, (s32)(u32)instruction->immediates[case_index]);
+            wasm64_fe_i32_const(emitter, (s32)(u32)key);
             wasm64_fe_u8(emitter, 0x46); // i32.eq
         }
         wasm64_fe_u8(emitter, 0x04); // if
@@ -2340,10 +3214,24 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
 {
     Wasm64Context* context = emitter->context;
     IrType* type = wasm64_type(context, instruction->canonical_type);
-    if (!type)
+    // Function-typed values are inert direct-call markers on Wasm32. Every
+    // other operand use would expose the raw function index as an address.
+    bool runtime_function_operand = false;
+    if (type && !wasm64_is_memory64(context))
     {
-        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing canonical Wasm64 instruction type"), emitter->function, block, instruction,
-                    IR_SYMBOL_ID_INVALID);
+        for (u32 operand_index = 0; operand_index < instruction->operand_count && !runtime_function_operand; operand_index += 1)
+        {
+            IrType* operand_type = wasm64_fe_value_ir_type(emitter, instruction->operands[operand_index]);
+            runtime_function_operand = operand_type && operand_type->kind == IR_TYPE_FUNCTION &&
+                                       !(instruction->opcode == IR_OPCODE_CALL && operand_index == 0);
+        }
+    }
+    String8 function_address_error = wasm64_s8("runtime function addresses are unsupported by Wasm32");
+    if (!type || runtime_function_operand)
+    {
+        wasm64_fail(context, type ? WASM64_ERROR_UNSUPPORTED_INSTRUCTION : WASM64_ERROR_IR_VALIDATION,
+                    type ? function_address_error : wasm64_s8("missing canonical WebAssembly instruction type"),
+                    emitter->function, block, instruction, IR_SYMBOL_ID_INVALID);
         return;
     }
     switch (instruction->opcode)
@@ -2352,7 +3240,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
     {
         if (instruction->immediate_count != 1 || instruction->immediates[0] >= emitter->record->signature.param_count)
         {
-            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid Wasm64 argument index"), emitter->function, block, instruction,
+            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid WebAssembly argument index"), emitter->function, block, instruction,
                         IR_SYMBOL_ID_INVALID);
             return;
         }
@@ -2365,7 +3253,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         u32 offset = emitter->value_offsets[instruction->result.value];
         if (offset == UINT32_MAX)
         {
-            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 local frame offset"), emitter->function, block, instruction,
+            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing WebAssembly local frame offset"), emitter->function, block, instruction,
                         IR_SYMBOL_ID_INVALID);
             return;
         }
@@ -2386,9 +3274,9 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         wasm64_fe_local_set(emitter, emitter->scratch_local);
         wasm64_fe_local_get(emitter, emitter->scratch_local);
         wasm64_fe_local_get(emitter, emitter->fp_local);
-        wasm64_fe_i64_const(emitter, emitter->frame_size);
-        wasm64_fe_u8(emitter, 0x7c); // i64.add
-        wasm64_fe_u8(emitter, 0x54); // i64.lt_u: never restore into the fixed frame
+        wasm64_fe_pointer_const(emitter, emitter->frame_size);
+        wasm64_fe_pointer_add(emitter);
+        wasm64_fe_u8(emitter, wasm64_is_memory64(context) ? 0x54 : 0x49); // never restore into the fixed frame
         wasm64_fe_emit_stack_trap_if(emitter);
         wasm64_fe_emit_stack_bounds_check(emitter, emitter->scratch_local);
         wasm64_fe_local_get(emitter, emitter->scratch_local);
@@ -2400,11 +3288,11 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         Wasm64DataRecord* record = wasm64_data_record_for_symbol(context, instruction->symbol);
         if (!record)
         {
-            wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved Wasm64 global"), emitter->function, block, instruction,
+            wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved WebAssembly global"), emitter->function, block, instruction,
                         instruction->symbol);
             return;
         }
-        wasm64_fe_i64_const(emitter, (s64)record->offset);
+        wasm64_fe_pointer_const(emitter, record->offset);
         wasm64_fe_local_set(emitter, emitter->value_locals[instruction->result.value]);
     }
     break;
@@ -2436,7 +3324,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         }
         if (!stored_type || !wasm64_type_is_scalar(stored_type))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate Wasm64 store is unsupported"), emitter->function, block,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate WebAssembly store is unsupported"), emitter->function, block,
                         instruction, IR_SYMBOL_ID_INVALID);
             return;
         }
@@ -2461,7 +3349,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         }
         else
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("unsupported Wasm64 float width"), emitter->function, block, instruction,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("unsupported WebAssembly float width"), emitter->function, block, instruction,
                         IR_SYMBOL_ID_INVALID);
             return;
         }
@@ -2469,14 +3357,14 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         break;
     case IR_OPCODE_CONSTANT_STRING:
     {
-        Wasm64StringRecord* record = wasm64_string_record_find(context, emitter->function, ir_instruction_self_id(emitter->function, instruction));
+        Wasm64StringRecord* record = wasm64_string_record_find(emitter, ir_instruction_self_id(emitter->function, instruction));
         if (!record)
         {
-            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 string data record"), emitter->function, block, instruction,
+            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing WebAssembly string data record"), emitter->function, block, instruction,
                         IR_SYMBOL_ID_INVALID);
             return;
         }
-        wasm64_fe_i64_const(emitter, (s64)record->offset);
+        wasm64_fe_pointer_const(emitter, record->offset);
         wasm64_fe_emit_result_set(emitter, instruction, false, false);
     }
     break;
@@ -2494,8 +3382,9 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         }
         else if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM)
         {
-            wasm64_valtype_for_type(type, false, 0);
-            if (wasm64_integer_bits(type) > 32 || type->kind == IR_TYPE_POINTER)
+            Wasm64ValType undefined_type = 0;
+            wasm64_valtype_for_type(context, type, false, &undefined_type);
+            if (undefined_type == WASM64_VALTYPE_I64)
             {
                 wasm64_fe_i64_const(emitter, 0);
             }
@@ -2506,7 +3395,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         }
         else
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate Wasm64 undefined value is unsupported"), emitter->function,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate WebAssembly undefined value is unsupported"), emitter->function,
                         block, instruction, IR_SYMBOL_ID_INVALID);
             return;
         }
@@ -2517,15 +3406,21 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(context, instruction->symbol);
         if (!record)
         {
-            wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved Wasm64 function reference"), emitter->function, block, instruction,
+            wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved WebAssembly function reference"), emitter->function, block, instruction,
                         instruction->symbol);
             return;
         }
-        // Function values cannot be called indirectly; the numeric marker is
-        // retained only for diagnostics and for frontends that carry an unused
-        // function reference alongside a direct call.
-        wasm64_fe_i64_const(emitter, record->function_index);
-        wasm64_fe_emit_result_set(emitter, instruction, false, false);
+        if (!wasm64_is_memory64(context) && type->kind == IR_TYPE_POINTER)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, function_address_error, emitter->function, block, instruction,
+                        instruction->symbol);
+        }
+        else
+        {
+            // Wasm32 retains its direct-call-only marker; Wasm64 uses a nonzero table handle.
+            wasm64_fe_pointer_const(emitter, (u64)record->function_index + (wasm64_is_memory64(context) ? 1 : 0));
+            wasm64_fe_emit_result_set(emitter, instruction, false, false);
+        }
     }
     break;
     case IR_OPCODE_LENGTH:
@@ -2534,11 +3429,20 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         IrType* iterable = wasm64_type(context, operand->canonical_type);
         if (!iterable || (iterable->kind != IR_TYPE_ARRAY && iterable->kind != IR_TYPE_VECTOR))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("dynamic Wasm64 slice/range length is unsupported"), emitter->function,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("dynamic WebAssembly slice/range length is unsupported"), emitter->function,
                         block, instruction, IR_SYMBOL_ID_INVALID);
             return;
         }
-        wasm64_fe_i64_const(emitter, (s64)iterable->element_count);
+        Wasm64ValType length_type = 0;
+        wasm64_valtype_for_type(context, type, false, &length_type);
+        if (length_type == WASM64_VALTYPE_I64)
+        {
+            wasm64_fe_i64_const(emitter, (s64)iterable->element_count);
+        }
+        else
+        {
+            wasm64_fe_i32_const(emitter, (s32)(u32)iterable->element_count);
+        }
         wasm64_fe_emit_result_set(emitter, instruction, false, false);
     }
     break;
@@ -2548,22 +3452,27 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         IrType* element = base ? wasm64_type(context, base->element_type) : 0;
         if (!element || !element->layout.resolved)
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("invalid Wasm64 index element type"), emitter->function, block, instruction,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("invalid WebAssembly index element type"), emitter->function, block, instruction,
                         IR_SYMBOL_ID_INVALID);
             return;
         }
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
-        wasm64_fe_emit_value(emitter, instruction->operands[1]);
         IrType* index_type = wasm64_fe_value_ir_type(emitter, instruction->operands[1]);
+        bool signed_index = index_type && index_type->kind == IR_TYPE_INTEGER && index_type->is_signed;
+        wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        wasm64_fe_emit_integer_value(emitter, instruction->operands[1], signed_index);
         Wasm64ValType index_valtype = 0;
-        wasm64_valtype_for_type(index_type, false, &index_valtype);
-        if (index_valtype == WASM64_VALTYPE_I32)
+        wasm64_valtype_for_type(context, index_type, false, &index_valtype);
+        if (wasm64_is_memory64(context) && index_valtype == WASM64_VALTYPE_I32)
         {
-            wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
+            wasm64_fe_u8(emitter, signed_index ? 0xac : 0xad); // i64.extend_i32_s/u
         }
-        wasm64_fe_i64_const(emitter, (s64)element->layout.size);
-        wasm64_fe_u8(emitter, 0x7e); // i64.mul
-        wasm64_fe_u8(emitter, 0x7c); // i64.add
+        else if (!wasm64_is_memory64(context) && index_valtype == WASM64_VALTYPE_I64)
+        {
+            wasm64_fe_u8(emitter, 0xa7); // i32.wrap_i64
+        }
+        wasm64_fe_pointer_const(emitter, element->layout.size);
+        wasm64_fe_pointer_multiply(emitter);
+        wasm64_fe_pointer_add(emitter);
         wasm64_fe_emit_result_set(emitter, instruction, false, false);
     }
     break;
@@ -2573,7 +3482,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         u64 field_index = instruction->immediate_count ? instruction->immediates[0] : UINT64_MAX;
         if (!base || (base->kind != IR_TYPE_STRUCT && base->kind != IR_TYPE_UNION) || field_index >= base->field_count)
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("invalid Wasm64 field address"), emitter->function, block, instruction,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("invalid WebAssembly field address"), emitter->function, block, instruction,
                         IR_SYMBOL_ID_INVALID);
             return;
         }
@@ -2598,7 +3507,14 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
             instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
             instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)
         {
-            wasm64_fe_emit_integer_value(emitter, instruction->operands[0], operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->is_signed);
+            u32 bit_width = wasm64_integer_bits(type);
+            u32 carrier_width = bit_width <= 32 ? 32 : 64;
+            bool count_bits = bit_width != 0 &&
+                              (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                               instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
+                               instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT);
+            wasm64_fe_emit_integer_value(emitter, instruction->operands[0],
+                                         !count_bits && operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->is_signed);
             if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE)
             {
                 if (wasm64_integer_bits(type) > 32)
@@ -2626,7 +3542,34 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
             }
             else
             {
+                // Count semantic bits, with zero extended carrier padding.
+                // The sentinel makes CTZ(0) return the semantic width too.
+                bool narrow = count_bits && bit_width < carrier_width;
+                if (narrow && instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
+                {
+                    if (carrier_width == 64)
+                    {
+                        wasm64_fe_i64_const(emitter, (s64)(UINT64_C(1) << bit_width));
+                    }
+                    else
+                    {
+                        wasm64_fe_i32_const(emitter, (s32)(UINT32_C(1) << bit_width));
+                    }
+                    wasm64_fe_emit_binary_opcode(emitter, IR_BINARY_INTEGER_BITWISE_OR, type);
+                }
                 wasm64_fe_emit_unary_opcode(emitter, instruction->unary_operation, type);
+                if (narrow && instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS)
+                {
+                    if (carrier_width == 64)
+                    {
+                        wasm64_fe_i64_const(emitter, (s64)(carrier_width - bit_width));
+                    }
+                    else
+                    {
+                        wasm64_fe_i32_const(emitter, (s32)(carrier_width - bit_width));
+                    }
+                    wasm64_fe_emit_binary_opcode(emitter, IR_BINARY_INTEGER_SUBTRACT, type);
+                }
             }
             wasm64_fe_emit_result_set(emitter, instruction, true, type->kind == IR_TYPE_INTEGER && type->is_signed);
         }
@@ -2653,7 +3596,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         }
         else
         {
-            wasm64_fail(context, WASM64_ERROR_SIMD, wasm64_s8("vector/SIMD unary operation is unsupported by Wasm64"), emitter->function, block,
+            wasm64_fail(context, WASM64_ERROR_SIMD, wasm64_s8("vector/SIMD unary operation is unsupported by WebAssembly"), emitter->function, block,
                         instruction, IR_SYMBOL_ID_INVALID);
         }
     }
@@ -2666,7 +3609,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         bool signed_value = operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->is_signed;
         if (operation == IR_BINARY_RANGE)
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("range aggregate is unsupported by Wasm64"), emitter->function, block,
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("range aggregate is unsupported by WebAssembly"), emitter->function, block,
                         instruction, IR_SYMBOL_ID_INVALID);
             return;
         }
@@ -2740,7 +3683,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         wasm64_fe_u8(emitter, 0x00);
         break;
     case IR_OPCODE_REVERSE:
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate reverse is unsupported by Wasm64"), emitter->function, block,
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate reverse is unsupported by WebAssembly"), emitter->function, block,
                     instruction, IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_ARRAY:
@@ -2754,14 +3697,14 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
     case IR_OPCODE_VA_ARG:
         wasm64_fail(context, instruction->opcode >= IR_OPCODE_VA_START && instruction->opcode <= IR_OPCODE_VA_ARG ? WASM64_ERROR_VARIADIC
                                                                                                                      : WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI,
-                    wasm64_s8("aggregate or variadic Wasm64 operation is unsupported"), emitter->function, block, instruction, IR_SYMBOL_ID_INVALID);
+                    wasm64_s8("aggregate or variadic WebAssembly operation is unsupported"), emitter->function, block, instruction, IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_ATOMIC_LOAD:
     case IR_OPCODE_ATOMIC_STORE:
     case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
     case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
     case IR_OPCODE_ATOMIC_FENCE:
-        wasm64_fail(context, WASM64_ERROR_ATOMIC, wasm64_s8("atomic operations are unsupported by Wasm64"), emitter->function, block, instruction,
+        wasm64_fail(context, WASM64_ERROR_ATOMIC, wasm64_s8("atomic operations are unsupported by WebAssembly"), emitter->function, block, instruction,
                     IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_SIMD:
@@ -2769,23 +3712,345 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                     IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_INLINE_ASSEMBLY:
-        wasm64_fail(context, WASM64_ERROR_INLINE_ASSEMBLY, wasm64_s8("inline assembly is unsupported by Wasm64"), emitter->function, block, instruction,
+        wasm64_fail(context, WASM64_ERROR_INLINE_ASSEMBLY, wasm64_s8("inline assembly is unsupported by WebAssembly"), emitter->function, block, instruction,
                     IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_LABEL_ADDRESS:
     case IR_OPCODE_INDIRECT_BRANCH:
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("label control flow is unsupported by Wasm64"), emitter->function, block,
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("label control flow is unsupported by WebAssembly"), emitter->function, block,
                     instruction, IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("instruction-cache operations are unsupported by Wasm64"), emitter->function,
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("instruction-cache operations are unsupported by WebAssembly"), emitter->function,
                     block, instruction, IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_COUNT:
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("invalid Wasm64 opcode"), emitter->function, block, instruction,
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("invalid WebAssembly opcode"), emitter->function, block, instruction,
                     IR_SYMBOL_ID_INVALID);
         break;
     }
+}
+
+static void wasm64_fe_call_index(Wasm64FunctionEmitter* emitter, u32 function_index)
+{
+    wasm64_fe_u8(emitter, 0x10);
+    wasm64_fe_u32(emitter, function_index);
+}
+
+static void wasm64_fe_i32_load(Wasm64FunctionEmitter* emitter, u64 offset)
+{
+    wasm64_fe_u8(emitter, 0x28);
+    wasm64_fe_emit_memarg(emitter, 2, offset);
+}
+
+static void wasm64_fe_i32_store(Wasm64FunctionEmitter* emitter, u64 offset)
+{
+    wasm64_fe_u8(emitter, 0x36);
+    wasm64_fe_emit_memarg(emitter, 2, offset);
+}
+
+static void wasm64_fe_emit_wasi_checked_call(Wasm64FunctionEmitter* emitter, u32 function_index, u32 status_local)
+{
+    wasm64_fe_call_index(emitter, function_index);
+    wasm64_fe_local_tee(emitter, status_local);
+    wasm64_fe_u8(emitter, 0x04); // if status != 0
+    wasm64_fe_u8(emitter, 0x40);
+    wasm64_fe_local_get(emitter, status_local);
+    wasm64_fe_call_index(emitter, emitter->context->wasi_proc_exit_function_index);
+    wasm64_fe_u8(emitter, 0x00); // proc_exit must not return
+    wasm64_fe_u8(emitter, 0x0b);
+}
+
+// Consume an i32 condition and terminate the command before arithmetic can
+// wrap an address or a pointer-table byte count supplied by the host.
+static void wasm64_fe_emit_wasi_abort_if(Wasm64FunctionEmitter* emitter)
+{
+    wasm64_fe_u8(emitter, 0x04); // if
+    wasm64_fe_u8(emitter, 0x40);
+    wasm64_fe_i32_const(emitter, 1);
+    wasm64_fe_call_index(emitter, emitter->context->wasi_proc_exit_function_index);
+    wasm64_fe_u8(emitter, 0x00); // proc_exit must not return
+    wasm64_fe_u8(emitter, 0x0b);
+}
+
+static bool wasm64_fe_emit_wasi_start(Wasm64Context* context, Wasm64FunctionRecord* record)
+{
+    enum
+    {
+        WASI_LOCAL_BASE,
+        WASI_LOCAL_ARGC,
+        WASI_LOCAL_ARGV_BYTES,
+        WASI_LOCAL_ENVC,
+        WASI_LOCAL_ENV_BYTES,
+        WASI_LOCAL_CURSOR,
+        WASI_LOCAL_ARGV,
+        WASI_LOCAL_ARGV_BUFFER,
+        WASI_LOCAL_ENVP,
+        WASI_LOCAL_ENV_BUFFER,
+        WASI_LOCAL_STATUS,
+        WASI_LOCAL_REQUIRED_PAGES,
+        WASI_LOCAL_CURRENT_PAGES,
+        WASI_LOCAL_COUNT,
+    };
+
+    bool valid = !wasm64_is_memory64(context) && context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1 &&
+                 context->wasi_main_function_index != UINT32_MAX && context->wasi_proc_exit_function_index != UINT32_MAX;
+    if (!valid)
+    {
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("invalid WASI command adapter state"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+    }
+    if (valid)
+    {
+        Wasm64FunctionEmitter emitter = {.context = context, .record = record};
+        wasm64_buffer_init(&emitter.body, context->arena);
+
+        // All Preview 1 command ABI values are wasm32 addresses or 32-bit sizes.
+        wasm64_buffer_u32_leb(&emitter.body, 1);
+        wasm64_buffer_u32_leb(&emitter.body, WASI_LOCAL_COUNT);
+        wasm64_buffer_u8(&emitter.body, WASM64_VALTYPE_I32);
+
+        wasm64_fe_global_get(&emitter, context->stack_global_index);
+        wasm64_fe_local_set(&emitter, WASI_LOCAL_BASE);
+
+        if (context->wasi_main_parameter_count)
+        {
+            // args_sizes_get(&argc, &argv_buffer_size)
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+            wasm64_fe_i32_const(&emitter, 4);
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_emit_wasi_checked_call(&emitter, context->wasi_args_sizes_get_function_index, WASI_LOCAL_STATUS);
+
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+            wasm64_fe_i32_load(&emitter, 0);
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_ARGC);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+            wasm64_fe_i32_load(&emitter, 4);
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_ARGV_BYTES);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGC);
+            wasm64_fe_i32_const(&emitter, (s32)(UINT32_MAX / 4 - 1));
+            wasm64_fe_u8(&emitter, 0x4b); // i32.gt_u: (argc + 1) * 4 would wrap
+            wasm64_fe_emit_wasi_abort_if(&emitter);
+        }
+
+        if (context->wasi_main_parameter_count == 3)
+        {
+            // environ_sizes_get(&envc, &environment_buffer_size)
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+            wasm64_fe_i32_const(&emitter, 8);
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+            wasm64_fe_i32_const(&emitter, 12);
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_emit_wasi_checked_call(&emitter, context->wasi_environ_sizes_get_function_index, WASI_LOCAL_STATUS);
+
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+            wasm64_fe_i32_load(&emitter, 8);
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_ENVC);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+            wasm64_fe_i32_load(&emitter, 12);
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_ENV_BYTES);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENVC);
+            wasm64_fe_i32_const(&emitter, (s32)(UINT32_MAX / 4 - 1));
+            wasm64_fe_u8(&emitter, 0x4b); // i32.gt_u: (envc + 1) * 4 would wrap
+            wasm64_fe_emit_wasi_abort_if(&emitter);
+        }
+
+        // The four size fields occupy the first 16 bytes. argv follows, including
+        // its conventional null sentinel, then the packed argument strings.
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_BASE);
+        wasm64_fe_i32_const(&emitter, 16);
+        wasm64_fe_u8(&emitter, 0x6a); // i32.add
+        wasm64_fe_local_set(&emitter, WASI_LOCAL_CURSOR);
+
+        if (context->wasi_main_parameter_count)
+        {
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_ARGV);
+
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGC);
+            wasm64_fe_i32_const(&emitter, 1);
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_i32_const(&emitter, 4);
+            wasm64_fe_u8(&emitter, 0x6c); // i32.mul
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_local_tee(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_ARGV_BUFFER);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGV);
+            wasm64_fe_u8(&emitter, 0x49); // i32.lt_u: table address wrapped
+            wasm64_fe_emit_wasi_abort_if(&emitter);
+
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGV_BYTES);
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGV_BUFFER);
+            wasm64_fe_u8(&emitter, 0x49); // i32.lt_u: argument bytes wrapped
+            wasm64_fe_emit_wasi_abort_if(&emitter);
+        }
+
+        if (context->wasi_main_parameter_count == 3)
+        {
+            // Align the environment pointer table independently of the packed
+            // argument bytes that precede it.
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_i32_const(&emitter, -4);
+            wasm64_fe_u8(&emitter, 0x4b); // i32.gt_u: cursor + 3 would wrap
+            wasm64_fe_emit_wasi_abort_if(&emitter);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_i32_const(&emitter, 3);
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_i32_const(&emitter, -4);
+            wasm64_fe_u8(&emitter, 0x71); // i32.and
+            wasm64_fe_local_tee(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_ENVP);
+
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENVC);
+            wasm64_fe_i32_const(&emitter, 1);
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_i32_const(&emitter, 4);
+            wasm64_fe_u8(&emitter, 0x6c); // i32.mul
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_local_tee(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_ENV_BUFFER);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENVP);
+            wasm64_fe_u8(&emitter, 0x49); // i32.lt_u: table address wrapped
+            wasm64_fe_emit_wasi_abort_if(&emitter);
+
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENV_BYTES);
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_local_set(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENV_BUFFER);
+            wasm64_fe_u8(&emitter, 0x49); // i32.lt_u: environment bytes wrapped
+            wasm64_fe_emit_wasi_abort_if(&emitter);
+        }
+
+        // Keep the compiler's normal function-frame invariant for main and any
+        // callees by publishing a 16-byte-aligned stack pointer above the adapter.
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+        wasm64_fe_i32_const(&emitter, -16);
+        wasm64_fe_u8(&emitter, 0x4b); // i32.gt_u: cursor + 15 would wrap
+        wasm64_fe_emit_wasi_abort_if(&emitter);
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+        wasm64_fe_i32_const(&emitter, 15);
+        wasm64_fe_u8(&emitter, 0x6a); // i32.add
+        wasm64_fe_i32_const(&emitter, -16);
+        wasm64_fe_u8(&emitter, 0x71); // i32.and
+        wasm64_fe_local_tee(&emitter, WASI_LOCAL_CURSOR);
+
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+        wasm64_fe_i32_const(&emitter, (s32)(UINT32_MAX - WASM64_STACK_SIZE));
+        wasm64_fe_u8(&emitter, 0x4b); // i32.gt_u: reserve a representable 64 KiB stack limit
+        wasm64_fe_emit_wasi_abort_if(&emitter);
+
+        // The static module minimum only reserves a modest initial stack window.
+        // Command arguments and environment strings are host-sized, so grow
+        // memory before asking Preview 1 to populate the tables.  Compute
+        // ceil(cursor / 64 KiB) without an overflowing cursor + 65535 addition,
+        // then retain one complete page for main's upward-growing stack frame.
+        wasm64_fe_i32_const(&emitter, 16);
+        wasm64_fe_u8(&emitter, 0x76); // i32.shr_u
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+        wasm64_fe_i32_const(&emitter, 65535);
+        wasm64_fe_u8(&emitter, 0x71); // i32.and
+        wasm64_fe_u8(&emitter, 0x45); // i32.eqz
+        wasm64_fe_u8(&emitter, 0x45); // non-zero low bits => one extra page
+        wasm64_fe_u8(&emitter, 0x6a); // i32.add
+        wasm64_fe_i32_const(&emitter, 1);
+        wasm64_fe_u8(&emitter, 0x6a); // i32.add: reserve one stack page
+        wasm64_fe_local_set(&emitter, WASI_LOCAL_REQUIRED_PAGES);
+
+        wasm64_fe_u8(&emitter, 0x3f); // memory.size
+        wasm64_fe_u8(&emitter, 0x00); // memory index 0
+        wasm64_fe_local_tee(&emitter, WASI_LOCAL_CURRENT_PAGES);
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_REQUIRED_PAGES);
+        wasm64_fe_u8(&emitter, 0x49); // current_pages < required_pages (unsigned)
+        wasm64_fe_u8(&emitter, 0x04); // if
+        wasm64_fe_u8(&emitter, 0x40);
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_REQUIRED_PAGES);
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_CURRENT_PAGES);
+        wasm64_fe_u8(&emitter, 0x6b); // i32.sub
+        wasm64_fe_u8(&emitter, 0x40); // memory.grow
+        wasm64_fe_u8(&emitter, 0x00); // memory index 0
+        wasm64_fe_i32_const(&emitter, -1);
+        wasm64_fe_u8(&emitter, 0x46); // i32.eq
+        wasm64_fe_u8(&emitter, 0x04); // if growth failed
+        wasm64_fe_u8(&emitter, 0x40);
+        wasm64_fe_i32_const(&emitter, 1);
+        wasm64_fe_call_index(&emitter, context->wasi_proc_exit_function_index);
+        wasm64_fe_u8(&emitter, 0x00); // proc_exit must not return
+        wasm64_fe_u8(&emitter, 0x0b);
+        wasm64_fe_u8(&emitter, 0x0b);
+
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+        wasm64_fe_i32_const(&emitter, WASM64_STACK_SIZE);
+        wasm64_fe_u8(&emitter, 0x6a); // i32.add, checked above
+        wasm64_fe_global_set(&emitter, context->stack_limit_global_index);
+        wasm64_fe_local_get(&emitter, WASI_LOCAL_CURSOR);
+        wasm64_fe_global_set(&emitter, context->stack_global_index);
+
+        if (context->wasi_main_parameter_count)
+        {
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGV);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGV_BUFFER);
+            wasm64_fe_emit_wasi_checked_call(&emitter, context->wasi_args_get_function_index, WASI_LOCAL_STATUS);
+
+            // args_get writes argc entries; C main additionally expects argv[argc]
+            // to be null.
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGV);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGC);
+            wasm64_fe_i32_const(&emitter, 4);
+            wasm64_fe_u8(&emitter, 0x6c); // i32.mul
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_i32_const(&emitter, 0);
+            wasm64_fe_i32_store(&emitter, 0);
+        }
+
+        if (context->wasi_main_parameter_count == 3)
+        {
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENVP);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENV_BUFFER);
+            wasm64_fe_emit_wasi_checked_call(&emitter, context->wasi_environ_get_function_index, WASI_LOCAL_STATUS);
+
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENVP);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENVC);
+            wasm64_fe_i32_const(&emitter, 4);
+            wasm64_fe_u8(&emitter, 0x6c); // i32.mul
+            wasm64_fe_u8(&emitter, 0x6a); // i32.add
+            wasm64_fe_i32_const(&emitter, 0);
+            wasm64_fe_i32_store(&emitter, 0);
+        }
+
+        if (context->wasi_main_parameter_count)
+        {
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGC);
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ARGV);
+        }
+        if (context->wasi_main_parameter_count == 3)
+        {
+            wasm64_fe_local_get(&emitter, WASI_LOCAL_ENVP);
+        }
+        wasm64_fe_call_index(&emitter, context->wasi_main_function_index);
+        if (!context->wasi_main_has_result)
+        {
+            wasm64_fe_i32_const(&emitter, 0);
+        }
+        wasm64_fe_call_index(&emitter, context->wasi_proc_exit_function_index);
+        wasm64_fe_u8(&emitter, 0x00); // proc_exit must not return
+        wasm64_fe_u8(&emitter, 0x0b); // end function body
+
+        wasm64_buffer_u32_leb(&context->code_payload, (u32)emitter.body.length);
+        wasm64_buffer_bytes(&context->code_payload, emitter.body.data, emitter.body.length);
+        context->stats.code_bytes += emitter.body.length;
+    }
+    return valid && !wasm64_failed(context);
 }
 
 static bool wasm64_fe_emit_function(Wasm64Context* context, Wasm64FunctionRecord* record)
@@ -2844,7 +4109,7 @@ static bool wasm64_fe_emit_function(Wasm64Context* context, Wasm64FunctionRecord
         {
             if (instruction_id.value >= emitter.function->instruction_count)
             {
-                wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("Wasm64 block instruction out of range"), emitter.function, block, 0,
+                wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("WebAssembly block instruction out of range"), emitter.function, block, 0,
                             IR_SYMBOL_ID_INVALID);
                 break;
             }
@@ -2876,7 +4141,13 @@ static bool wasm64_build_code_payload(Wasm64Context* context)
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         Wasm64FunctionRecord* record = context->functions + index;
-        if (!record->imported && !wasm64_fe_emit_function(context, record))
+        if (record->imported)
+        {
+            continue;
+        }
+        bool emitted = record->synthetic == WASM64_SYNTHETIC_FUNCTION_WASI_START ? wasm64_fe_emit_wasi_start(context, record)
+                                                                                 : wasm64_fe_emit_function(context, record);
+        if (!emitted)
         {
             return false;
         }
@@ -2907,8 +4178,16 @@ static bool wasm64_build_data_payload(Wasm64Context* context)
             continue;
         }
         wasm64_buffer_u32_leb(&context->data_payload, 0); // active, memory 0 implicit
-        wasm64_buffer_u8(&context->data_payload, 0x42);
-        wasm64_buffer_s64_leb(&context->data_payload, (s64)record->offset);
+        if (wasm64_is_memory64(context))
+        {
+            wasm64_buffer_u8(&context->data_payload, 0x42);
+            wasm64_buffer_s64_leb(&context->data_payload, (s64)record->offset);
+        }
+        else
+        {
+            wasm64_buffer_u8(&context->data_payload, 0x41);
+            wasm64_buffer_s32_leb(&context->data_payload, (s32)(u32)record->offset);
+        }
         wasm64_buffer_u8(&context->data_payload, 0x0b);
         wasm64_buffer_u32_leb(&context->data_payload, (u32)record->size);
         wasm64_buffer_bytes(&context->data_payload, record->bytes, record->size);
@@ -2917,14 +4196,64 @@ static bool wasm64_build_data_payload(Wasm64Context* context)
     {
         Wasm64StringRecord* record = context->strings + index;
         wasm64_buffer_u32_leb(&context->data_payload, 0);
-        wasm64_buffer_u8(&context->data_payload, 0x42);
-        wasm64_buffer_s64_leb(&context->data_payload, (s64)record->offset);
+        if (wasm64_is_memory64(context))
+        {
+            wasm64_buffer_u8(&context->data_payload, 0x42);
+            wasm64_buffer_s64_leb(&context->data_payload, (s64)record->offset);
+        }
+        else
+        {
+            wasm64_buffer_u8(&context->data_payload, 0x41);
+            wasm64_buffer_s32_leb(&context->data_payload, (s32)(u32)record->offset);
+        }
         wasm64_buffer_u8(&context->data_payload, 0x0b);
         wasm64_buffer_u32_leb(&context->data_payload, (u32)(record->literal.length + 1));
         wasm64_buffer_bytes(&context->data_payload, (u8*)record->literal.pointer, record->literal.length);
         wasm64_buffer_u8(&context->data_payload, 0);
     }
     context->stats.data_segment_count = segment_count;
+    return true;
+}
+
+// A section attribute on a data definition names its data segment in the
+// name section's data-segment subsection, the placement Clang records for
+// Wasm. Segment indices follow wasm64_build_data_payload's order.
+static bool wasm64_build_name_payload(Wasm64Context* context)
+{
+    u32 named_count = 0;
+    for (u32 index = 0; index < context->data_count; index += 1)
+    {
+        Wasm64DataRecord* record = context->data_records + index;
+        if (record->has_bytes && record->symbol->section_name.length)
+        {
+            named_count += 1;
+        }
+    }
+    if (named_count)
+    {
+        Wasm64Buffer subsection = {0};
+        wasm64_buffer_init(&subsection, context->arena);
+        wasm64_buffer_u32_leb(&subsection, named_count);
+        u32 segment_index = 0;
+        for (u32 index = 0; index < context->data_count; index += 1)
+        {
+            Wasm64DataRecord* record = context->data_records + index;
+            if (!record->has_bytes)
+            {
+                continue;
+            }
+            if (record->symbol->section_name.length)
+            {
+                wasm64_buffer_u32_leb(&subsection, segment_index);
+                wasm64_buffer_string(&subsection, record->symbol->section_name);
+            }
+            segment_index += 1;
+        }
+        wasm64_buffer_string(&context->name_payload, wasm64_s8("name"));
+        wasm64_buffer_u8(&context->name_payload, WASM64_NAME_SUBSECTION_DATA_SEGMENT);
+        wasm64_buffer_u32_leb(&context->name_payload, (u32)subsection.length);
+        wasm64_buffer_bytes(&context->name_payload, subsection.data, subsection.length);
+    }
     return true;
 }
 
@@ -2954,11 +4283,14 @@ static bool wasm64_build_module(Wasm64Context* context, ByteSlice* output)
     wasm64_append_section(&result, 1, &context->type_payload);
     wasm64_append_section(&result, 2, &context->import_payload);
     wasm64_append_section(&result, 3, &context->function_payload);
+    wasm64_append_section(&result, 4, &context->table_payload);
     wasm64_append_section(&result, 5, &context->memory_payload);
     wasm64_append_section(&result, 6, &context->global_payload);
     wasm64_append_section(&result, 7, &context->export_payload);
+    wasm64_append_section(&result, 9, &context->element_payload);
     wasm64_append_section(&result, 10, &context->code_payload);
     wasm64_append_section(&result, 11, &context->data_payload);
+    wasm64_append_section(&result, 0, &context->name_payload);
     *output = (ByteSlice){.pointer = result.data, .length = result.length};
     context->stats.binary_bytes = result.length;
     return true;
@@ -2967,6 +4299,11 @@ static bool wasm64_build_module(Wasm64Context* context, ByteSlice* output)
 static void wasm64_context_initialize(Wasm64Context* context, Arena* arena, IrProgram* program, IrModule* modules, u32 module_count,
                                       Wasm64Options options)
 {
+    if (!options.pointer_size && program &&
+        (program->data_layout.pointer.size == 4 || program->data_layout.pointer.size == 8))
+    {
+        options.pointer_size = (u8)program->data_layout.pointer.size;
+    }
     *context = (Wasm64Context){.arena = arena, .program = program, .modules = modules, .module_count = module_count, .options = options};
     context->error = (Wasm64Error){.code = WASM64_ERROR_NONE,
                                    .function = IR_FUNCTION_ID_INVALID,
@@ -2974,48 +4311,94 @@ static void wasm64_context_initialize(Wasm64Context* context, Arena* arena, IrPr
                                    .instruction = IR_INSTRUCTION_ID_INVALID,
                                    .symbol = IR_SYMBOL_ID_INVALID,
                                    .opcode = IR_OPCODE_COUNT};
-    context->stats = (Wasm64Stats){.memory64 = true, .deterministic = options.deterministic, .module_count = module_count};
+    context->stats = (Wasm64Stats){.memory64 = options.pointer_size == 8,
+                                   .wasi_preview1 = options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1,
+                                   .deterministic = options.deterministic,
+                                   .module_count = module_count};
+    context->wasi_main_function_index = UINT32_MAX;
+    context->wasi_start_function_index = UINT32_MAX;
+    context->wasi_proc_exit_function_index = UINT32_MAX;
+    context->wasi_args_sizes_get_function_index = UINT32_MAX;
+    context->wasi_args_get_function_index = UINT32_MAX;
+    context->wasi_environ_sizes_get_function_index = UINT32_MAX;
+    context->wasi_environ_get_function_index = UINT32_MAX;
+    context->wasi_main_symbol = IR_SYMBOL_ID_INVALID;
     wasm64_buffer_init(&context->type_payload, arena);
     wasm64_buffer_init(&context->import_payload, arena);
     wasm64_buffer_init(&context->function_payload, arena);
+    wasm64_buffer_init(&context->table_payload, arena);
     wasm64_buffer_init(&context->memory_payload, arena);
     wasm64_buffer_init(&context->global_payload, arena);
     wasm64_buffer_init(&context->export_payload, arena);
+    wasm64_buffer_init(&context->element_payload, arena);
     wasm64_buffer_init(&context->code_payload, arena);
     wasm64_buffer_init(&context->data_payload, arena);
+    wasm64_buffer_init(&context->name_payload, arena);
 }
 
 static bool wasm64_validate_inputs(Wasm64Context* context)
 {
     if (!context->arena || !context->program || (!context->modules && context->module_count))
     {
-        wasm64_fail(context, WASM64_ERROR_INVALID_ARGUMENT, wasm64_s8("invalid Wasm64 emitter input"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+        wasm64_fail(context, WASM64_ERROR_INVALID_ARGUMENT, wasm64_s8("invalid WebAssembly emitter input"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
         return false;
     }
-    if (context->program->data_layout.pointer.size && context->program->data_layout.pointer.size != 8)
+    if (context->options.pointer_size != 4 && context->options.pointer_size != 8)
     {
-        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("Wasm64 requires a 64-bit canonical pointer layout"), 0, 0, 0,
+        wasm64_fail(context, WASM64_ERROR_INVALID_ARGUMENT, wasm64_s8("WebAssembly pointer size must be 4 or 8 bytes"), 0, 0, 0,
+                    IR_SYMBOL_ID_INVALID);
+        return false;
+    }
+    if (context->options.environment >= WASM_ENVIRONMENT_COUNT)
+    {
+        wasm64_fail(context, WASM64_ERROR_INVALID_ARGUMENT, wasm64_s8("invalid WebAssembly execution environment"), 0, 0, 0,
+                    IR_SYMBOL_ID_INVALID);
+        return false;
+    }
+    if (context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1)
+    {
+        String8 memory_name = context->options.memory_export_name.length ? context->options.memory_export_name : wasm64_s8("memory");
+        if (context->options.pointer_size != 4)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("WASI Preview 1 currently requires wasm32"), 0, 0, 0,
+                        IR_SYMBOL_ID_INVALID);
+            return false;
+        }
+        if (!context->options.export_memory || !wasm64_string_equal(memory_name, wasm64_s8("memory")))
+        {
+            wasm64_fail(context, WASM64_ERROR_INVALID_ARGUMENT,
+                        wasm64_s8("WASI Preview 1 requires the default exported memory named 'memory'"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+            return false;
+        }
+    }
+    if (context->program->data_layout.pointer.size &&
+        context->program->data_layout.pointer.size != context->options.pointer_size)
+    {
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE,
+                    wasm64_s8("WebAssembly emitter pointer width does not match the canonical IR data layout"), 0, 0, 0,
                     IR_SYMBOL_ID_INVALID);
         return false;
     }
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
         IrModule* module = context->modules + module_index;
-        IrValidationResult validation = ir_prepare_canonical_module(context->program, module, false);
+        IrValidationResult validation = ir_prepare_canonical_module(context->program, module, context->options.assume_validated);
         if (validation.error != IR_VALIDATION_NONE)
         {
             IrFunction* function = validation.function.value < module->function_count ? module->functions + validation.function.value : 0;
             IrBlock* block = function && validation.block.value < function->block_count ? function->blocks + validation.block.value : 0;
-            IrInstruction* instruction = function && validation.instruction.value < function->instruction_count ? function->instructions + validation.instruction.value : 0;
-            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("canonical IR validation failed before Wasm64 emission"), function, block, instruction,
-                        IR_SYMBOL_ID_INVALID);
+            IrInstruction* instruction = function && validation.instruction.value < function->instruction_count
+                                             ? function->instructions + validation.instruction.value
+                                             : 0;
+            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("canonical IR validation failed before WebAssembly emission"), function,
+                        block, instruction, IR_SYMBOL_ID_INVALID);
             return false;
         }
     }
     return true;
 }
 
-Wasm64Artifact wasm64_emit_with_options(Arena* arena, IrProgram* program, IrModule* modules, u32 module_count, Wasm64Options options)
+static WasmArtifact wasm_emit_internal(Arena* arena, IrProgram* program, IrModule* modules, u32 module_count, WasmOptions options)
 {
     Wasm64Context context = {0};
     wasm64_context_initialize(&context, arena, program, modules, module_count, options);
@@ -3024,6 +4407,10 @@ Wasm64Artifact wasm64_emit_with_options(Arena* arena, IrProgram* program, IrModu
     if (valid)
     {
         valid = wasm64_collect_functions(&context);
+    }
+    if (valid)
+    {
+        valid = !wasm64_is_memory64(&context) || wasm64_collect_indirect_signatures(&context);
     }
     if (valid)
     {
@@ -3036,8 +4423,10 @@ Wasm64Artifact wasm64_emit_with_options(Arena* arena, IrProgram* program, IrModu
     if (valid)
     {
         valid = wasm64_build_type_payload(&context) && wasm64_build_import_payload(&context) && wasm64_build_function_payload(&context) &&
-                wasm64_build_memory_payload(&context) && wasm64_build_global_payload(&context) && wasm64_build_export_payload(&context) &&
-                wasm64_build_code_payload(&context) && wasm64_build_data_payload(&context);
+                (!wasm64_is_memory64(&context) || wasm64_build_table_payload(&context)) &&
+                wasm64_build_memory_payload(&context) && wasm64_build_global_payload(&context) &&
+                wasm64_build_export_payload(&context) && (!wasm64_is_memory64(&context) || wasm64_build_element_payload(&context)) &&
+                wasm64_build_code_payload(&context) && wasm64_build_data_payload(&context) && wasm64_build_name_payload(&context);
     }
     if (valid && !wasm64_failed(&context))
     {
@@ -3045,9 +4434,9 @@ Wasm64Artifact wasm64_emit_with_options(Arena* arena, IrProgram* program, IrModu
     }
     if (!valid && context.error.code == WASM64_ERROR_NONE)
     {
-        wasm64_fail(&context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 module encoding failed"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+        wasm64_fail(&context, WASM64_ERROR_ENCODING, wasm64_s8("WebAssembly module encoding failed"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
     }
-    Wasm64Artifact artifact = {
+    WasmArtifact artifact = {
         .bytes = valid && !wasm64_failed(&context) ? bytes : (ByteSlice){0},
         .wasm = valid && !wasm64_failed(&context) ? bytes : (ByteSlice){0},
         .binary = valid && !wasm64_failed(&context) ? bytes : (ByteSlice){0},
@@ -3056,6 +4445,37 @@ Wasm64Artifact wasm64_emit_with_options(Arena* arena, IrProgram* program, IrModu
         .success = valid && !wasm64_failed(&context),
     };
     return artifact;
+}
+
+WasmArtifact wasm_emit(Arena* arena, IrProgram* program, IrModule* modules, u32 module_count, WasmOptions options)
+{
+    return wasm_emit_internal(arena, program, modules, module_count, options);
+}
+
+WasmArtifact wasm_emit_program(Arena* arena, IrProgram* program, WasmOptions options)
+{
+    return program ? wasm_emit_internal(arena, program, program->modules, program->module_count, options)
+                   : wasm_emit_internal(arena, 0, 0, 0, options);
+}
+
+bool wasm_artifact_is_valid(WasmArtifact artifact)
+{
+    return artifact.success && artifact.error.code == WASM64_ERROR_NONE && artifact.bytes.pointer && artifact.bytes.length >= 8;
+}
+
+String8 wasm_error_code_name(WasmErrorCode code)
+{
+    return wasm64_error_code_name(code);
+}
+
+Wasm64Artifact wasm64_emit_with_options(Arena* arena, IrProgram* program, IrModule* modules, u32 module_count, Wasm64Options options)
+{
+    // Preserve the original API contract even for callers that zero-initialize
+    // an options structure compiled against the former Memory64-only header.
+    options.environment = WASM_ENVIRONMENT_FREESTANDING;
+    options.pointer_size = 8;
+    options.synthesize_start = false;
+    return wasm_emit_internal(arena, program, modules, module_count, options);
 }
 
 Wasm64Artifact wasm64_emit(Arena* arena, IrProgram* program, IrModule* modules, u32 module_count)
@@ -3076,7 +4496,7 @@ Wasm64Artifact wasm64_emit_program(Arena* arena, IrProgram* program)
 
 bool wasm64_artifact_is_valid(Wasm64Artifact artifact)
 {
-    return artifact.success && artifact.error.code == WASM64_ERROR_NONE && artifact.bytes.pointer && artifact.bytes.length >= 8;
+    return wasm_artifact_is_valid(artifact);
 }
 
 String8 wasm64_error_code_name(Wasm64ErrorCode code)

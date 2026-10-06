@@ -7,12 +7,35 @@
 // target/format family: static and dynamic ELF64 for x86-64 and AArch64,
 // hosted PE64, imports-free UEFI PE64, Mach-O, and Android ELF. The
 // writers share the helpers above them — AArch64 branch range checks and
-// veneers, ELF .eh_frame table construction, PE export/import plumbing,
+// veneers, ELF .eh_frame table construction (duplicate initial locations are
+// refused by link_elf_eh_frame_header_write), PE export/import plumbing,
 // CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
-// on almost nothing. Before x86-64 Linux writer selection,
+// on almost nothing. A position-independent image (NativeImageKind SHARED
+// for -shared, PIE for -pie) has one writer,
+// link_native_image_elf64_x86_64_position_independent, for x86-64 Linux; the
+// dispatcher refuses the kind on every other target, and its own comment
+// states the relocation and preemption rules. link_elf_version_plan_build and
+// link_elf_copy_plan_build are the symbol-version and copy-slot construction
+// it shares with the x86-64 dynamic writer.
+// link_comdat_associations_resolve follows object-local associative paths in
+// bounded linear work after group arbitration; state marks detect cycles and
+// replay each unresolved path without allocating an auxiliary stack.
+// link_validate_linker_arguments refuses unconsumed options before any writer.
+// Before x86-64 Linux writer selection,
 // link_elf_without_unused_got_marker removes only unreferenced reserved markers
 // from a private symbol/relocation view; the input object is never changed.
+//
+// link_elf_tls_index_build seals exact TLS companion sites in link scratch;
+// executable import classification and patching reuse them without rescans.
+//
+// link_objects places every input section of its own name that is spelled as
+// a C identifier after the ordinary sections of its kind, one name at a time,
+// and defines the `__start_NAME`/`__stop_NAME` references GNU `ld` would
+// (link_section_sets_define, issue 1276); its output is one section per kind.
+// link_section_set_members_sort indexes names with bounded heap work; each
+// group retains input order and first appearance for placement, and its
+// name-sorted range supplies binary bound lookup (issue 2238).
 //
 // One rule crosses every writer that synthesizes an entry point: C 5.1.2.2.3
 // makes a return from `main` equivalent to calling `exit` with that value, so
@@ -30,7 +53,8 @@
 //
 // `__attribute__((constructor))` follows the same split. A writer with an
 // entry stub calls the registered functions from it and takes the two array
-// sections off the object first (link_initializer_plan_build), because every
+// sections off the object first (link_initializer_plan_build). Its collector
+// joins relocations to slots in bounded linear work using output storage; every
 // writer places every non-debug section it is given. Mach-O has no stub and
 // needs none for its constructors: it keeps `__DATA,__mod_init_func`, gives
 // it a section command of the type dyld dispatches on, and lets the loader
@@ -40,10 +64,11 @@
 // it with `atexit`. The UEFI writer has neither a stub nor such a loader and
 // refuses the link; link_initializer_plan_empty is that refusal.
 //
-// A second rule crosses the dynamic ELF writers: imported data reaches a
-// non-PIE executable through a copy relocation, and the slot that relocation
-// fills stands for the shared library's object, not for the name the program
-// referenced. When the driver was able to read the library's symbol table
+// A second rule crosses the dynamic ELF writers: imported data reaches an
+// executable through a copy relocation (every imported object in a
+// fixed-address one, those a rel32 reads in a PIE), and the slot that
+// relocation fills stands for the shared library's object, not for the name
+// the program referenced. When the driver was able to read the library's symbol table
 // (NativeDynamicDataSymbol), the writer defines every name exported at that
 // address on the slot, sizes the slot from the library, and gives two imported
 // names for one object one slot; see link_elf_index_initialize. Defining
@@ -53,7 +78,12 @@
 // describe those final copy-slot definitions too: link_elf_output_symbol uses
 // the writer's import indices and emitted dynamic values without changing the
 // input ObjectFile. The .bss section header includes the slots already covered
-// by the writable segment; no loaded bytes or program headers move.
+// by the writable segment; no loaded bytes or program headers move. Whether an
+// import is data at all is a fact about its definition: GCC, Clang and GNU as
+// leave every undefined symbol STT_NOTYPE, so before writer selection
+// link_elf_classify_untyped_imports imports an untyped reference that a library
+// defines, but publishes as no object, as a function -- a copy slot for a
+// function copies its code into .bss and interposes it (GitHub #1242).
 //
 // A third rule crosses every ELF writer: an undefined weak symbol is worth
 // address zero rather than a dynamic import, which is what a startup object
@@ -68,6 +98,20 @@
 // numbering from it, so the two cannot be allowed to disagree. The dynamic
 // writers ask it once per symbol and then read their own import numbering,
 // using the same link-local export index as version and alias construction.
+// That index also records the names each requested library leaves undefined,
+// and every hosted executable writer exports its own definition of such a
+// name, as ld does, so a library can call back into the program that loads
+// it without -rdynamic (link_elf_symbol_referenced_by_library). ELF executable
+// TLS exports reuse link_elf_thread_local_offset and packed loaded section indices;
+// their dynamic symbols carry STT_TLS offsets rather than image addresses.
+//
+// Linux x86-64 fixed-address imported function pointers use loader-filled
+// GOT address slots and R_X86_64_64 literals. A direct PC32/PC64/ABS32 address
+// instead needs a canonical PLT value in its undefined STT_FUNC .dynsym;
+// only a complete export index proving a strong default-visible STT_FUNC
+// provider permits it. Protected, weak, IFUNC and unknown direct addresses
+// fail by name. Explicit PLT32 references remain call-only. Android and
+// AArch64 layout staging retain their separate address contracts (#1275).
 
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/link/link_internal.h>
@@ -106,11 +150,50 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
     OBJECT_SECTION_UNWIND,
 };
 
+// Membership in the loaded-section family, asked before final layout.
+// Packed output indices depend on nonempty sections and copy-created .bss;
+// link_elf_loaded_section_indices supplies those after placement.
+BUSTER_GLOBAL_LOCAL u16 link_elf_loaded_section_index(u32 section)
+{
+    u16 result = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
+    {
+        result = link_elf_loaded_kinds[index] == (ObjectSectionKind)section ? (u16)(index + 1) : result;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 link_elf_loaded_section_size(ObjectFile* object, ObjectSectionKind kind, u64 copy_zero_size)
+{
+    ObjectSection* section = object->sections + kind;
+    u64 result = BUSTER_MAX(section->data.length, section->virtual_size);
+    if (kind == OBJECT_SECTION_ZERO)
+    {
+        result = BUSTER_MAX(result, copy_zero_size);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void link_elf_loaded_section_indices(ObjectFile* object, u64 copy_zero_size, u16* indices)
+{
+    memset(indices, 0, sizeof(*indices) * OBJECT_SECTION_COUNT);
+    u16 output_index = 1; // The first header is the null section.
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
+    {
+        ObjectSectionKind kind = link_elf_loaded_kinds[index];
+        if (link_elf_loaded_section_size(object, kind, copy_zero_size))
+        {
+            indices[kind] = output_index++;
+        }
+    }
+    return;
+}
+
 #define BUSTER_LINK_ELF_SECTION_HEADER_SIZE 64
 #define BUSTER_LINK_ELF_SYMBOL_SIZE 24
 #define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_NEED 0x6ffffffe
 #define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_SYMBOLS 0x6fffffff
-#define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 10
+#define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 14
 #define BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY                                                                                                          \
     (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + 1 + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds) + 2)
 
@@ -139,6 +222,18 @@ struct LinkElfSectionTableLayout
     u64 got_size;
     u64 dynamic_offset;
     u64 dynamic_size;
+    // Only the position-independent writer places these: the non-PLT half of
+    // the relocation table, the GOT slots that are not lazy PLT targets, and
+    // the initializer arrays a shared object leaves for the loader to walk.
+    // A zero size leaves the section out of the table.
+    u64 data_relocation_offset;
+    u64 data_relocation_size;
+    u64 got_data_offset;
+    u64 got_data_size;
+    u64 init_array_offset;
+    u64 init_array_size;
+    u64 fini_array_offset;
+    u64 fini_array_size;
     u32 const* import_indices;
     String8 const* copy_alias_names;
     u64 copy_alias_symbol_offset;
@@ -390,20 +485,6 @@ enum
     LINK_ELF_FREESTANDING_ENTRY_STUB_SIZE = 35,
 };
 
-// One function an image has to call before or after `main`, as the merged
-// object spells it: the symbol its `.init_array`/`.fini_array` slot is
-// relocated against, plus that relocation's addend.  Buster's own objects
-// name the function itself with a zero addend; Clang's name the section
-// symbol plus the function's offset inside it, which is why the addend is
-// carried rather than assumed away.
-typedef struct LinkInitializerEntry LinkInitializerEntry;
-struct LinkInitializerEntry
-{
-    s64 addend;
-    u32 symbol;
-    u32 reserved;
-};
-
 // Every initializer of an image, in the order it runs.  The linker writes the
 // entry point itself -- there is no libc startup object in an image it
 // produces, so nothing else would walk the arrays -- and it knows every
@@ -423,29 +504,150 @@ struct LinkInitializerPlan
     u32 destructor_count;
 };
 
-// The entries of one array section, ordered by slot.  A slot with no
-// relocation is a null pointer, which every startup implementation skips and
-// which this therefore drops too.
+// Sparse arrays must not turn an otherwise untouched output reservation into
+// resident pages. Sort only a small prefix of matching relocation indices;
+// the dense path below uses the full reservation as its slot table instead.
+// A prefix has at most E/32 entries. With 32-bit slot/relocation identities,
+// its worst-case heap height is at most 32, keeping sorting work bounded by E.
+enum
+{
+    LINK_INITIALIZER_SPARSE_RATIO = 32,
+};
+
+BUSTER_GLOBAL_LOCAL bool link_initializer_slot_above(LinkInitializerEntry left, LinkInitializerEntry right)
+{
+    // During sparse collection, reserved is the slot and symbol the original
+    // relocation index. The tie-break keeps the incumbent's first match.
+    return left.reserved > right.reserved || (left.reserved == right.reserved && left.symbol > right.symbol);
+}
+
+BUSTER_GLOBAL_LOCAL void link_initializer_slot_sift(LinkInitializerEntry* entries, u32 count, u32 root)
+{
+    while (root < count / 2)
+    {
+        u32 child = 2 * root + 1;
+        if (child + 1 < count && link_initializer_slot_above(entries[child + 1], entries[child]))
+        {
+            child += 1;
+        }
+        if (!link_initializer_slot_above(entries[child], entries[root]))
+        {
+            break;
+        }
+        LinkInitializerEntry swapped = entries[root];
+        entries[root] = entries[child];
+        entries[child] = swapped;
+        root = child;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void link_initializer_slots_sort(LinkInitializerEntry* entries, u32 count)
+{
+    for (u32 root = count / 2; root > 0; root -= 1)
+    {
+        link_initializer_slot_sift(entries, count, root - 1);
+    }
+    for (u32 remaining = count; remaining > 1; remaining -= 1)
+    {
+        LinkInitializerEntry swapped = entries[0];
+        entries[0] = entries[remaining - 1];
+        entries[remaining - 1] = swapped;
+        link_initializer_slot_sift(entries, remaining - 1, 0);
+    }
+}
+
+// The entries of one array section, ordered by slot. The caller reserves one
+// output entry per complete slot and bounds that capacity to UINT32_MAX.
+// Missing relocations are omitted and the first matching ABSOLUTE64 wins.
+// All transient keys/occupancy live in that existing output reservation, and
+// reserved is zero in every returned entry. No input metadata is changed.
 BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
 {
     u32 count = 0;
-    u64 length = object->sections[kind].data.length;
-    for (u64 offset = 0; offset + OBJECT_INITIALIZER_ENTRY_SIZE <= length; offset += OBJECT_INITIALIZER_ENTRY_SIZE)
+    u64 slots = object->sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+    if (slots == 1)
     {
-        for (u32 index = 0; index < object->relocation_count; index += 1)
+        // Keep the common one-entry case's early exit and avoid table setup.
+        for (u32 index = 0; index < object->relocation_count && !count; index += 1)
         {
             ObjectRelocation relocation = object->relocations[index];
-            if (relocation.section == (u32)kind && relocation.offset == offset && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
+            if (relocation.section == (u32)kind && relocation.offset == 0 && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
             {
-                entries[count++] = (LinkInitializerEntry){
-                    .addend = relocation.addend,
-                    .symbol = relocation.symbol,
-                };
-                break;
+                entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
             }
         }
     }
-    for (u32 index = 0; reverse && index * 2 + 1 < count; index += 1)
+    else if (slots && object->relocation_count)
+    {
+        u64 sparse_capacity = slots / LINK_INITIALIZER_SPARSE_RATIO;
+        bool dense = sparse_capacity == 0;
+        for (u32 index = 0; !dense && index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+            if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0 && slot < slots)
+            {
+                if (count == sparse_capacity)
+                {
+                    dense = true;
+                }
+                else
+                {
+                    entries[count++] = (LinkInitializerEntry){.symbol = index, .reserved = (u32)slot};
+                }
+            }
+        }
+        if (dense)
+        {
+            count = 0;
+            for (u64 slot = 0; slot < slots; slot += 1)
+            {
+                entries[slot].reserved = 0;
+            }
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = object->relocations[index];
+                if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                    relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0)
+                {
+                    u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+                    if (slot < slots && !entries[slot].reserved)
+                    {
+                        entries[slot] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol, .reserved = 1};
+                    }
+                }
+            }
+            for (u64 slot = 0; slot < slots; slot += 1)
+            {
+                if (entries[slot].reserved)
+                {
+                    LinkInitializerEntry entry = entries[slot];
+                    entry.reserved = 0;
+                    // count <= slot: compaction cannot overwrite an unread entry.
+                    entries[count++] = entry;
+                }
+            }
+        }
+        else
+        {
+            link_initializer_slots_sort(entries, count);
+            u32 prefix_count = count;
+            u32 previous_slot = UINT32_MAX;
+            count = 0;
+            for (u32 index = 0; index < prefix_count; index += 1)
+            {
+                LinkInitializerEntry key = entries[index];
+                if (key.reserved != previous_slot)
+                {
+                    ObjectRelocation relocation = object->relocations[key.symbol];
+                    entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
+                    previous_slot = key.reserved;
+                }
+            }
+        }
+    }
+    for (u32 index = 0; reverse && index < count / 2; index += 1)
     {
         LinkInitializerEntry swapped = entries[index];
         entries[index] = entries[count - 1 - index];
@@ -454,6 +656,13 @@ BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, Obj
 
     return count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 link_initializer_entries_collect_test(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
+{
+    return link_initializer_entries_collect(object, kind, entries, reverse);
+}
+#endif
 
 // Reads the two array sections into a plan and hands back the same object
 // with them, and the relocations that filled them, removed: the writers below
@@ -482,6 +691,63 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
             plan->destructor_count = link_initializer_entries_collect(object, OBJECT_SECTION_FINI_ARRAY, plan->destructors, true);
             ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
             memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+            // An array a symbol is defined inside keeps its bytes, appended to
+            // the writable data, so a read through that symbol sees the entries
+            // GNU ld would have laid out; the stub still makes the calls.
+            bool retained[2] = {0};
+            u64 retained_base[2] = {0};
+            for (u32 index = 0; index < object->symbol_count; index += 1)
+            {
+                u32 section = object->symbols[index].section;
+                if ((section == OBJECT_SECTION_INIT_ARRAY || section == OBJECT_SECTION_FINI_ARRAY) && object->sections[section].data.length)
+                {
+                    retained[section - OBJECT_SECTION_INIT_ARRAY] = true;
+                }
+            }
+            if (retained[0] || retained[1])
+            {
+                ObjectSection* data_section = &sections[OBJECT_SECTION_DATA];
+                u64 data_length = BUSTER_MAX(data_section->data.length, data_section->virtual_size);
+                for (u32 slot = 0; slot < 2; slot += 1)
+                {
+                    if (retained[slot])
+                    {
+                        retained_base[slot] = align_forward(data_length, OBJECT_INITIALIZER_ENTRY_SIZE);
+                        data_length = retained_base[slot] + object->sections[OBJECT_SECTION_INIT_ARRAY + slot].data.length;
+                    }
+                }
+                u8* data = arena_allocate_zeroed(arena, u8, data_length);
+                if (data_section->data.length)
+                {
+                    memcpy(data, data_section->data.pointer, data_section->data.length);
+                }
+                for (u32 slot = 0; slot < 2; slot += 1)
+                {
+                    if (retained[slot])
+                    {
+                        ByteSlice array = object->sections[OBJECT_SECTION_INIT_ARRAY + slot].data;
+                        memcpy(data + retained_base[slot], array.pointer, array.length);
+                    }
+                }
+                data_section->data = (ByteSlice){.pointer = data, .length = data_length};
+                if (data_section->virtual_size)
+                {
+                    data_section->virtual_size = data_length;
+                }
+                data_section->alignment = BUSTER_MAX(data_section->alignment, OBJECT_INITIALIZER_ENTRY_SIZE);
+                ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count);
+                memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
+                for (u32 index = 0; index < object->symbol_count; index += 1)
+                {
+                    u32 section = symbols[index].section;
+                    if ((section == OBJECT_SECTION_INIT_ARRAY || section == OBJECT_SECTION_FINI_ARRAY) && retained[section - OBJECT_SECTION_INIT_ARRAY])
+                    {
+                        symbols[index].section = OBJECT_SECTION_DATA;
+                        symbols[index].value += retained_base[section - OBJECT_SECTION_INIT_ARRAY];
+                    }
+                }
+                stripped->symbols = symbols;
+            }
             sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){0};
             sections[OBJECT_SECTION_INIT_ARRAY].virtual_size = 0;
             sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){0};
@@ -491,10 +757,20 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
             stripped->relocation_count = 0;
             for (u32 index = 0; index < object->relocation_count; index += 1)
             {
-                u32 section = object->relocations[index].section;
-                if (section != OBJECT_SECTION_INIT_ARRAY && section != OBJECT_SECTION_FINI_ARRAY)
+                ObjectRelocation relocation = object->relocations[index];
+                if (relocation.section == OBJECT_SECTION_INIT_ARRAY || relocation.section == OBJECT_SECTION_FINI_ARRAY)
                 {
-                    relocations[stripped->relocation_count++] = object->relocations[index];
+                    u32 slot = relocation.section - OBJECT_SECTION_INIT_ARRAY;
+                    if (retained[slot])
+                    {
+                        relocation.section = OBJECT_SECTION_DATA;
+                        relocation.offset += retained_base[slot];
+                        relocations[stripped->relocation_count++] = relocation;
+                    }
+                }
+                else
+                {
+                    relocations[stripped->relocation_count++] = relocation;
                 }
             }
             stripped->relocations = relocations;
@@ -1319,13 +1595,6 @@ BUSTER_GLOBAL_LOCAL u32 link_pe_export_group_scalar(NativeExecutableLinkOptions 
 }
 
 
-typedef enum LinkComdatState
-{
-    LINK_COMDAT_STATE_UNKNOWN,
-    LINK_COMDAT_STATE_KEEP,
-    LINK_COMDAT_STATE_DISCARD,
-} LinkComdatState;
-
 typedef struct LinkComdatPlan LinkComdatPlan;
 struct LinkComdatPlan
 {
@@ -1594,6 +1863,102 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_record_valid(ObjectFile* object, u32 index)
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+#define BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(field) do { if (counts) counts->field += 1; } while (0)
+#define BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT , 0
+#else
+#define BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(field) ((void)0)
+#define BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT
+#endif
+
+// Group arbitration has settled every non-associative root; record validation
+// has checked parent bounds and excluded self-association. Each unknown row
+// has one immutable object-local parent, so a marked path can be replayed from
+// its start without saving a stack. Every association is read at most twice.
+BUSTER_GLOBAL_LOCAL LinkError link_comdat_associations_resolve(ObjectComdat const* comdats, u32 count, u8* states
+#if BUSTER_INCLUDE_TESTS
+                                                               , LinkComdatAssociationCounts* counts
+#endif
+)
+{
+    LinkError error = LINK_ERROR_NONE;
+    for (u32 start = 0; error == LINK_ERROR_NONE && start < count; start += 1)
+    {
+        BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(row_scans);
+        if (states[start] == LINK_COMDAT_STATE_UNKNOWN)
+        {
+            u32 current = start;
+            while (states[current] == LINK_COMDAT_STATE_UNKNOWN)
+            {
+                u32 parent = comdats[current].associated;
+                BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(parent_reads);
+                u8 decision = states[parent];
+                if (decision == LINK_COMDAT_STATE_KEEP || decision == LINK_COMDAT_STATE_DISCARD)
+                {
+                    // Ordinary forward chains and stars already know their
+                    // parent's answer: one read/write, no mark or replay.
+                    states[current] = decision;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(resolved_writes);
+                }
+                else
+                {
+                    states[current] = LINK_COMDAT_STATE_VISITING;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(path_marks);
+                    current = parent;
+                }
+            }
+            u8 decision = states[current];
+            if (decision == LINK_COMDAT_STATE_VISITING)
+            {
+                error = LINK_ERROR_INVALID_INPUT;
+            }
+            else
+            {
+                current = start;
+                while (states[current] == LINK_COMDAT_STATE_VISITING)
+                {
+                    u32 parent = comdats[current].associated;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(parent_reads);
+                    states[current] = decision;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(resolved_writes);
+                    current = parent;
+                }
+            }
+        }
+    }
+    return error;
+}
+
+#if BUSTER_INCLUDE_TESTS
+LinkError link_comdat_associations_resolve_test(ObjectFile* object, u8* states, LinkComdatAssociationCounts* counts)
+{
+    LinkError error = LINK_ERROR_NONE;
+    if (counts) *counts = (LinkComdatAssociationCounts){0};
+    if (!object || (object->comdat_count && (!object->comdats || !states)) ||
+        (object->section_count && !object->sections) || (object->relocation_count && !object->relocations))
+    {
+        error = LINK_ERROR_INVALID_INPUT;
+    }
+    for (u32 index = 0; error == LINK_ERROR_NONE && index < object->comdat_count; index += 1)
+    {
+        if (!link_comdat_record_valid(object, index) ||
+            (object->comdats[index].selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE
+                 ? states[index] != LINK_COMDAT_STATE_UNKNOWN
+                 : states[index] != LINK_COMDAT_STATE_KEEP && states[index] != LINK_COMDAT_STATE_DISCARD))
+        {
+            error = LINK_ERROR_INVALID_INPUT;
+        }
+    }
+    if (error == LINK_ERROR_NONE)
+    {
+        error = link_comdat_associations_resolve(object->comdats, object->comdat_count, states, counts);
+    }
+    return error;
+}
+#endif
+
+#undef BUSTER_LINK_COMDAT_ASSOCIATION_RECORD
+
 BUSTER_GLOBAL_LOCAL LinkError link_comdat_plan_build(Arena* arena, ObjectFile* objects, u32 object_count,
                                                      LinkComdatPlan* plan, String8* error_symbol)
 {
@@ -1704,41 +2069,17 @@ BUSTER_GLOBAL_LOCAL LinkError link_comdat_plan_build(Arena* arena, ObjectFile* o
                 }
             }
         }
-        bool progress = true;
-        for (u64 pass = 0; error == LINK_ERROR_NONE && progress && pass < plan->count; pass += 1)
+        for (u32 object_index = 0; error == LINK_ERROR_NONE && object_index < object_count; object_index += 1)
         {
-            progress = false;
-            for (u32 object_index = 0; object_index < object_count; object_index += 1)
-            {
-                ObjectFile* object = objects + object_index;
-                u64 base = plan->object_offsets[object_index];
-                for (u32 comdat_index = 0; comdat_index < object->comdat_count; comdat_index += 1)
-                {
-                    ObjectComdat* comdat = object->comdats + comdat_index;
-                    u64 state_index = base + comdat_index;
-                    if (comdat->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
-                        plan->states[state_index] == LINK_COMDAT_STATE_UNKNOWN)
-                    {
-                        u8 parent = plan->states[base + comdat->associated];
-                        if (parent != LINK_COMDAT_STATE_UNKNOWN)
-                        {
-                            plan->states[state_index] = parent;
-                            progress = true;
-                        }
-                    }
-                }
-            }
-        }
-        for (u64 index = 0; error == LINK_ERROR_NONE && index < plan->count; index += 1)
-        {
-            if (plan->states[index] == LINK_COMDAT_STATE_UNKNOWN)
-            {
-                error = LINK_ERROR_INVALID_INPUT;
-            }
+            ObjectFile* object = objects + object_index;
+            error = link_comdat_associations_resolve(object->comdats, object->comdat_count,
+                plan->states + plan->object_offsets[object_index] BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT);
         }
     }
     return error;
 }
+
+#undef BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT
 
 BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 object_index, u32 comdat)
 {
@@ -1750,7 +2091,8 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 obje
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64* section_offsets, Arena* arena)
+BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64 const* section_offsets,
+                                                    ObjectSectionKind const* output_kinds, Arena* arena)
 {
     *destination = *source;
     destination->name = link_string_copy(arena, source->name);
@@ -1761,7 +2103,7 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
         {
             return false;
         }
-        ObjectSectionKind kind = object->sections[source->section].kind;
+        ObjectSectionKind kind = output_kinds[source->section];
         if (kind >= OBJECT_SECTION_COUNT)
         {
             return false;
@@ -1898,7 +2240,164 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
     }
 }
 
-LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options)
+// One linker set of a merge: every input section named `name`, a C
+// identifier, placed together at [start, end) of the merged section of `kind`
+// (link_objects, issue 1276).
+typedef struct LinkSectionSet LinkSectionSet;
+struct LinkSectionSet
+{
+    String8 name;
+    u64 start;
+    u64 end;
+    ObjectSectionKind kind;
+    u32 first_member;
+    u32 member_count;
+};
+
+typedef struct LinkSectionSetMember LinkSectionSetMember;
+struct LinkSectionSetMember
+{
+    ObjectSection* section;
+    u64 slot;
+    u32 ordinal;
+    u32 reserved;
+};
+
+#if BUSTER_INCLUDE_TESTS
+#define BUSTER_LINK_SET_COUNTS_PARAMETER , LinkSectionSetCounts* counts
+#define BUSTER_LINK_SET_COUNTS_ARGUMENT , counts
+#define BUSTER_LINK_SET_COUNTS_NONE , 0
+#define BUSTER_LINK_SET_RECORD(field) do { if (counts) counts->field += 1; } while (0)
+#else
+#define BUSTER_LINK_SET_COUNTS_PARAMETER
+#define BUSTER_LINK_SET_COUNTS_ARGUMENT
+#define BUSTER_LINK_SET_COUNTS_NONE
+#define BUSTER_LINK_SET_RECORD(field) ((void)0)
+#endif
+
+BUSTER_GLOBAL_LOCAL bool link_section_set_member_above(LinkSectionSetMember left, LinkSectionSetMember right BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    BUSTER_LINK_SET_RECORD(name_comparisons);
+    s32 order = link_comdat_string_compare(left.section->name, right.section->name);
+    return order > 0 || (!order && left.ordinal > right.ordinal);
+}
+
+BUSTER_GLOBAL_LOCAL void link_section_set_member_sift(LinkSectionSetMember* members, u32 count, u32 root BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    while (root < count / 2)
+    {
+        u32 child = 2 * root + 1;
+        if (child + 1 < count && link_section_set_member_above(members[child + 1], members[child] BUSTER_LINK_SET_COUNTS_ARGUMENT))
+        {
+            child += 1;
+        }
+        if (!link_section_set_member_above(members[child], members[root] BUSTER_LINK_SET_COUNTS_ARGUMENT))
+        {
+            break;
+        }
+        LinkSectionSetMember swapped = members[root];
+        members[root] = members[child];
+        members[child] = swapped;
+        root = child;
+    }
+}
+
+// The ordinal tie-break makes equal-name contributions stable without an
+// auxiliary merge buffer or hash-dependent/adversarial probe bound.
+BUSTER_GLOBAL_LOCAL void link_section_set_members_sort(LinkSectionSetMember* members, u32 count BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    for (u32 root = count / 2; root > 0; root -= 1)
+    {
+        link_section_set_member_sift(members, count, root - 1 BUSTER_LINK_SET_COUNTS_ARGUMENT);
+    }
+    for (u32 remaining = count; remaining > 1; remaining -= 1)
+    {
+        LinkSectionSetMember swapped = members[0];
+        members[0] = members[remaining - 1];
+        members[remaining - 1] = swapped;
+        link_section_set_member_sift(members, remaining - 1, 0 BUSTER_LINK_SET_COUNTS_ARGUMENT);
+    }
+}
+
+// Whether an input section is a member of a linker set: a section of its own
+// past the kinds, named by a C identifier.
+BUSTER_GLOBAL_LOCAL bool link_section_is_set(ObjectFile* object, u32 section_index)
+{
+    ObjectSection* section = object->sections + section_index;
+    return section_index >= OBJECT_SECTION_COUNT && object_section_kind_can_be_named(section->kind) && object_section_name_is_c_identifier(section->name);
+}
+
+// Appends one input section to the merged section of `kind`, aligned, and
+// hands back where it went.
+BUSTER_GLOBAL_LOCAL bool link_section_place(ObjectSection* section, ObjectSectionKind kind, u64* section_sizes, u32* section_alignments, u64* offset)
+{
+    u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
+    u64 aligned = 0;
+    bool result = align_forward_checked(section_sizes[kind], section->alignment, &aligned) && section_size <= UINT64_MAX - aligned;
+    if (result)
+    {
+        *offset = aligned;
+        section_sizes[kind] = aligned + section_size;
+        section_alignments[kind] = BUSTER_MAX(section_alignments[kind], section->alignment);
+    }
+
+    return result;
+}
+
+// GNU `ld` defines `__start_NAME` and `__stop_NAME` at the two ends of every
+// output section named by a C identifier, for the references that ask and for
+// no others, and so does this merge: an undefined reference, weak or strong,
+// to the bound of a set some input placed becomes a hidden definition there.
+// A name no input placed stays undefined, strong references to it are refused
+// and weak ones resolve to zero, as under `ld`. A program's own definition of
+// the name is left alone.
+BUSTER_GLOBAL_LOCAL void link_section_sets_define(ObjectFile* object, LinkSectionSet const* sets, u32 set_count BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    String8 start_prefix = S8("__start_");
+    String8 stop_prefix = S8("__stop_");
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count && set_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        bool start = string_starts_with_sequence(symbol->name, start_prefix);
+        bool stop = !start && string_starts_with_sequence(symbol->name, stop_prefix);
+        if (symbol->section != OBJECT_SECTION_UNDEFINED || (!start && !stop))
+        {
+            continue;
+        }
+        String8 prefix = start ? start_prefix : stop_prefix;
+        String8 set_name = string_slice(symbol->name, prefix.length, symbol->name.length);
+        BUSTER_LINK_SET_RECORD(bound_queries);
+        u32 first = 0;
+        u32 end = set_count;
+        while (first < end)
+        {
+            u32 set = first + (end - first) / 2;
+            BUSTER_LINK_SET_RECORD(bound_comparisons);
+            s32 order = link_comdat_string_compare(sets[set].name, set_name);
+            if (!order)
+            {
+                symbol->section = (u32)sets[set].kind;
+                symbol->value = start ? sets[set].start : sets[set].end;
+                symbol->size = 0;
+                symbol->kind = OBJECT_SYMBOL_DATA;
+                symbol->weak = false;
+                symbol->hidden = true;
+                symbol->thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO;
+                break;
+            }
+            if (order < 0)
+            {
+                first = set + 1;
+            }
+            else
+            {
+                end = set;
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_arena, ObjectFile* objects, u32 object_count, LinkOptions options BUSTER_LINK_SET_COUNTS_PARAMETER)
 {
     LinkObjectResult result = {0};
     if (!arena || !objects || !object_count)
@@ -1918,12 +2417,18 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     u64 total_symbols = 0;
     u64 total_relocations = 0;
     u64 total_debug_modules = 0;
-    u64 offset_count = (u64)object_count * OBJECT_SECTION_COUNT;
-    u64* section_offsets = arena_allocate(arena, u64, offset_count);
+    // Every input section's slot in `section_offsets` and `output_kinds`. An
+    // object's slots start at `section_slots[object_index]`, and it has at
+    // least OBJECT_SECTION_COUNT of them however few sections it carries, so a
+    // kind-indexed read through its slice stays inside it. The sections past
+    // OBJECT_SECTION_COUNT are the named ones (issue 1276).
+    u64* section_slots = arena_allocate(arena, u64, (u64)object_count + 1);
+    u64 set_section_count = 0;
+    section_slots[0] = 0;
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        if (object->error != OBJECT_ERROR_NONE || !object->sections || object->section_count > OBJECT_SECTION_COUNT ||
+        if (object->error != OBJECT_ERROR_NONE || !object->sections ||
             (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
             (object->comdat_count && !object->comdats) || (object->debug_module_count && !object->debug_modules))
         {
@@ -1952,17 +2457,119 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            u32 alignment = section->alignment;
-            u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
-            u64 aligned = 0;
-            if (!align_forward_checked(section_sizes[section->kind], alignment, &aligned) || section_size > UINT64_MAX - aligned)
+            set_section_count += link_section_is_set(object, section_index);
+            if (set_section_count > UINT32_MAX)
             {
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            section_offsets[(u64)object_index * OBJECT_SECTION_COUNT + section_index] = aligned;
-            section_sizes[section->kind] = aligned + section_size;
-            section_alignments[section->kind] = BUSTER_MAX(section_alignments[section->kind], alignment);
+        }
+        section_slots[object_index + 1] = section_slots[object_index] + BUSTER_MAX(object->section_count, (u32)OBJECT_SECTION_COUNT);
+    }
+    u64* section_offsets = arena_allocate(arena, u64, section_slots[object_count]);
+    memset(section_offsets, 0, sizeof(*section_offsets) * section_slots[object_count]);
+    ObjectSectionKind* output_kinds = arena_allocate(arena, ObjectSectionKind, section_slots[object_count]);
+    // Every ordinary section is laid out first, in input order, and each
+    // linker set after them, whole: `__start_NAME` and `__stop_NAME` bound one
+    // contiguous range, so every input section of one name goes in together,
+    // sets in the order their names first appear. A set's members share one
+    // kind: their own when they agree, and otherwise writable data, which is
+    // where `ld`'s one output section of mixed flags would be writable too;
+    // code cannot share a set with data. link_section_sets_define gives the
+    // bounds to the references that ask for them.
+    LinkSectionSet* sets = arena_allocate(set_arena, LinkSectionSet, set_section_count);
+    LinkSectionSetMember* members = arena_allocate(set_arena, LinkSectionSetMember, set_section_count);
+    u32* first_sets = arena_allocate(set_arena, u32, set_section_count);
+    u32 set_count = 0;
+    u32 member_count = 0;
+    for (u32 object_index = 0; object_index < object_count; object_index += 1)
+    {
+        ObjectFile* object = &objects[object_index];
+        for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
+        {
+            ObjectSection* section = &object->sections[section_index];
+            u64 slot = section_slots[object_index] + section_index;
+            BUSTER_LINK_SET_RECORD(input_rows);
+            output_kinds[slot] = section->kind;
+            if (link_section_is_set(object, section_index))
+            {
+                members[member_count] = (LinkSectionSetMember){.section = section, .slot = slot, .ordinal = member_count};
+                first_sets[member_count] = UINT32_MAX;
+                member_count += 1;
+                BUSTER_LINK_SET_RECORD(members);
+            }
+            else if (!link_section_place(section, section->kind, section_sizes, section_alignments, &section_offsets[slot]))
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+        }
+    }
+    link_section_set_members_sort(members, member_count BUSTER_LINK_SET_COUNTS_ARGUMENT);
+    u32 first_conflict = UINT32_MAX;
+    String8 conflict_name = {0};
+    for (u32 member = 0; member < member_count; member += 1)
+    {
+        LinkSectionSetMember* contribution = members + member;
+        ObjectSection* section = contribution->section;
+        bool same = false;
+        BUSTER_LINK_SET_RECORD(group_rows);
+        if (set_count)
+        {
+            BUSTER_LINK_SET_RECORD(name_comparisons);
+            same = string_equal(sets[set_count - 1].name, section->name);
+        }
+        if (!same)
+        {
+            first_sets[contribution->ordinal] = set_count;
+            sets[set_count++] = (LinkSectionSet){.name = section->name, .kind = section->kind, .first_member = member};
+        }
+        LinkSectionSet* current = sets + set_count - 1;
+        current->member_count += 1;
+        if (current->kind != section->kind)
+        {
+            if (current->kind == OBJECT_SECTION_TEXT || section->kind == OBJECT_SECTION_TEXT)
+            {
+                if (contribution->ordinal < first_conflict)
+                {
+                    first_conflict = contribution->ordinal;
+                    conflict_name = section->name;
+                }
+            }
+            else
+            {
+                current->kind = OBJECT_SECTION_DATA;
+            }
+        }
+    }
+    if (first_conflict != UINT32_MAX)
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = link_string_copy(arena, conflict_name);
+        return result;
+    }
+    // Names are indexed lexically; placement still visits sets by the ordinal
+    // of their first input contribution, and members retain input order.
+    for (u32 ordinal = 0; ordinal < member_count; ordinal += 1)
+    {
+        u32 set = first_sets[ordinal];
+        if (set != UINT32_MAX)
+        {
+            LinkSectionSet* current = sets + set;
+            for (u32 member = 0; member < current->member_count; member += 1)
+            {
+                LinkSectionSetMember* contribution = members + current->first_member + member;
+                u64* offset = section_offsets + contribution->slot;
+                output_kinds[contribution->slot] = current->kind;
+                BUSTER_LINK_SET_RECORD(placements);
+                if (!link_section_place(contribution->section, current->kind, section_sizes, section_alignments, offset))
+                {
+                    result.error = LINK_ERROR_INVALID_INPUT;
+                    return result;
+                }
+                current->start = member ? current->start : *offset;
+                current->end = section_sizes[current->kind];
+            }
         }
     }
     LinkComdatPlan comdat_plan = {0};
@@ -1986,7 +2593,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* section = object->sections + section_index;
-            ObjectSectionKind kind = section->kind;
+            ObjectSectionKind kind = output_kinds[section_index];
             if (!aliased_sections[kind])
             {
                 aliased_sections[kind] = section;
@@ -2062,7 +2669,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = objects + object_index;
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
         for (u32 module_index = 0; module_index < object->debug_module_count; module_index += 1)
         {
             ObjectDebugModule source = object->debug_modules[module_index];
@@ -2077,29 +2684,37 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
+        ObjectSectionKind* kinds = output_kinds + section_slots[object_index];
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* source = &object->sections[section_index];
-            if (source->data.length && !alias_section_data[source->kind])
+            if (source->data.length && !alias_section_data[kinds[section_index]])
             {
-                memcpy(result.object.sections[source->kind].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
+                memcpy(result.object.sections[kinds[section_index]].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
             }
             // The priorities of an initializer array travel with its entries.
             // An offset that is not a whole number of entries cannot name one,
             // and only an input section aligned under
-            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.
+            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.  The kinds'
+            // sections carry them in initializer_priorities; a named one past
+            // OBJECT_SECTION_COUNT -- a section attribute's `.init_array.101`
+            // or `.preinit_array` (issue 1276) -- spells one priority for all
+            // of its entries in its name.
             u32 slot = source->kind == OBJECT_SECTION_FINI_ARRAY;
             u32* merged = source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY
                               ? result.object.initializer_priorities[slot]
                               : 0;
-            u32* priorities = merged ? object->initializer_priorities[slot] : 0;
-            if (priorities && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+            bool kind_section = section_index < OBJECT_SECTION_COUNT;
+            u32* priorities = merged && kind_section ? object->initializer_priorities[slot] : 0;
+            u32 named_priority = merged && !kind_section ? object_elf_initializer_section_priority(source->name, source->kind)
+                                                         : IR_INITIALIZER_PRIORITY_NONE;
+            if (merged && (priorities || !kind_section) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
             {
                 u64 first = offsets[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
                 for (u64 entry = 0; entry < source->data.length / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)
                 {
-                    merged[first + entry] = priorities[entry];
+                    merged[first + entry] = priorities ? priorities[entry] : named_priority;
                 }
             }
         }
@@ -2177,7 +2792,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             {
                 destination_index = result.object.symbol_count++;
                 if (!link_symbol_definition_set(&result.object.symbols[destination_index], source, object,
-                                                section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
+                                                section_offsets + section_slots[object_index], output_kinds + section_slots[object_index], arena))
                 {
                     result.error = LINK_ERROR_INVALID_INPUT;
                     return result;
@@ -2237,9 +2852,20 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 u8 merged_thread_local_state = destination_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN
                                                    ? destination_thread_local_state
                                                    : source_thread_local_state;
+                // An undefined symbol's kind is only what its references
+                // claim. A typed reference -- a C declaration, an ELF STT_FUNC
+                // or STT_OBJECT one -- outranks an untyped one whichever input
+                // arrives first; otherwise another toolchain's STT_NOTYPE
+                // reference, read as data, decides what a declaration knows.
+                if (!destination_defined && !source_defined && destination_thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
+                    source_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+                {
+                    destination->kind = source->kind;
+                }
                 if (source_replaces)
                 {
-                    if (!link_symbol_definition_set(destination, source, object, section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
+                    if (!link_symbol_definition_set(destination, source, object, section_offsets + section_slots[object_index],
+                                                    output_kinds + section_slots[object_index], arena))
                     {
                         result.error = LINK_ERROR_INVALID_INPUT;
                         return result;
@@ -2258,7 +2884,8 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
-        u64* offsets = section_offsets + (u64)object_index * OBJECT_SECTION_COUNT;
+        u64* offsets = section_offsets + section_slots[object_index];
+        ObjectSectionKind* kinds = output_kinds + section_slots[object_index];
         for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
         {
             ObjectRelocation source = object->relocations[relocation_index];
@@ -2276,8 +2903,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            ObjectSectionKind kind = object->sections[source.section].kind;
-            source.section = (u32)kind;
+            source.section = (u32)kinds[source.section];
             source.offset += offsets[object->relocations[relocation_index].section];
             source.symbol = symbol_maps[object_index][source.symbol];
             source.comdat = 0;
@@ -2285,6 +2911,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         }
     }
     link_initializer_arrays_order(arena, &result.object);
+    link_section_sets_define(&result.object, sets, set_count BUSTER_LINK_SET_COUNTS_ARGUMENT);
     if (!options.allow_undefined_symbols)
     {
         for (u32 symbol_index = 0; symbol_index < result.object.symbol_count; symbol_index += 1)
@@ -2300,6 +2927,44 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     }
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_scoped(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    LinkObjectResult result;
+    bool needs_sets = false;
+    for (u32 index = 0; objects && !needs_sets && index < object_count; index += 1)
+    {
+        needs_sets = objects[index].section_count > OBJECT_SECTION_COUNT;
+    }
+    if (arena && needs_sets)
+    {
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        result = link_objects_impl(arena, temporary.arena, objects, object_count, options BUSTER_LINK_SET_COUNTS_ARGUMENT);
+        scratch_end(temporary);
+    }
+    else
+    {
+        result = link_objects_impl(arena, arena, objects, object_count, options BUSTER_LINK_SET_COUNTS_ARGUMENT);
+    }
+    return result;
+}
+
+LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options)
+{
+    return link_objects_scoped(arena, objects, object_count, options BUSTER_LINK_SET_COUNTS_NONE);
+}
+
+#if BUSTER_INCLUDE_TESTS
+LinkObjectResult link_objects_section_sets_test(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options, LinkSectionSetCounts* counts)
+{
+    return link_objects_scoped(arena, objects, object_count, options, counts);
+}
+#endif
+
+#undef BUSTER_LINK_SET_COUNTS_PARAMETER
+#undef BUSTER_LINK_SET_COUNTS_ARGUMENT
+#undef BUSTER_LINK_SET_COUNTS_NONE
+#undef BUSTER_LINK_SET_RECORD
 
 ObjectFile link_windows_runtime_object(Arena* arena, Target target)
 {
@@ -2456,7 +3121,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_forwarding_runtime_object(Arena* arena, Targ
                 .offset = offset + branch.offset,
                 .section = OBJECT_SECTION_TEXT,
                 .symbol = (u32)(index * 2 + 1),
-                .kind = x86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_JUMP26,
+                .kind = x86_64 ? ((target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID)
+                                      ? OBJECT_RELOCATION_X86_64_PLT32 : OBJECT_RELOCATION_X86_64_PC32)
+                              : OBJECT_RELOCATION_AARCH64_JUMP26,
             };
         }
         result.symbol_count = (u32)(stub_count * 2);
@@ -2491,6 +3158,12 @@ ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target)
     else
     {
         result = link_forwarding_runtime_object(arena, target, stub_names, target_names, BUSTER_ARRAY_LENGTH(stub_names), true);
+        // glibc's own copies are hidden, so a shared object that registers a
+        // handler does not also export `atexit` to every module after it.
+        for (u32 index = 0; index < result.symbol_count; index += 1)
+        {
+            result.symbols[index].hidden = result.symbols[index].section != OBJECT_SECTION_UNDEFINED;
+        }
     }
 
     return result;
@@ -2545,11 +3218,17 @@ ObjectFile link_windows_libc_runtime_object(Arena* arena, Target target)
 //     REX.W 03 modrm(00 reg 101) disp32   add reg, [rip + sym@GOTTPOFF]
 //   becomes
 //     REX.W 81 modrm(11 000 reg) imm32    add reg, tpoff
+//   or the foreign compiler's initial-exec load:
+//     REX.W 8b modrm(00 reg 101) disp32   mov reg, [rip + sym@GOTTPOFF]
+//   becomes
+//     REX.W c7 modrm(11 000 reg) imm32    mov reg, tpoff
 //   The GOT operand's register is the modrm reg field and the immediate
 //   form's is the rm field, so REX.R moves to REX.B with it.
 //
 //   general-dynamic, sixteen bytes starting four before the patched field:
 //     66 48 8d 3d <r32>  66 66 48 e8 <r32>
+//   or, from an object compiled with -fno-plt,
+//     66 48 8d 3d <r32>  66 48 ff 15 <r32>   call [rip + __tls_get_addr@GOTPCREL]
 //   becomes
 //     64 48 8b 04 25 00000000    mov rax, fs:0
 //     48 8d 80 <tpoff>           lea rax, [rax + tpoff]
@@ -2573,28 +3252,192 @@ BUSTER_GLOBAL_LOCAL bool link_elf_relax_thread_local(u8* bytes, u64 field_offset
     return result;
 }
 
-// Whether this relocation is the call half of a general-dynamic pair the
-// relaxation above rewrote. Both halves come out of one selected row eight
-// bytes apart, in that order, so the TLSGD site is the whole test; the name
-// check only keeps the scan off every other rel32 in the object.
-BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(ObjectFile* object, ObjectRelocation* relocation, ObjectSymbol* symbol)
+// Local dynamic's module-address sequence relaxed the same way, which is ld's
+// LD->LE transition:
+//     48 8d 3d <r32>  e8 <r32>          lea rdi, [rip + x@tlsld]; call __tls_get_addr
+//     48 8d 3d <r32>  ff 15 <r32>       ... call [rip + __tls_get_addr@GOTPCREL]
+//   becomes, at the same length,
+//     66 66 66 [66] 64 48 8b 04 25 00000000   mov rax, fs:0
+// The call returned the block's address, and in the initial executable that
+// block ends at the thread pointer, so each DTPOFF32 that follows is resolved
+// to the variable's offset from the thread pointer instead of from the block.
+BUSTER_GLOBAL_LOCAL bool link_elf_relax_local_dynamic(u8* bytes, u64 field_offset, u64 section_start, u64 section_end)
 {
-    u32 field_delta = BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET;
-    if ((relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32) || relocation->offset < field_delta ||
-        !string_equal(symbol->name, S8("__tls_get_addr")))
+    u32 prefix_size = BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET;
+    bool result = false;
+    if (bytes && section_start <= field_offset && field_offset <= section_end && prefix_size <= field_offset - section_start &&
+        BUSTER_X86_METADATA_TLS_LD_SIZE - prefix_size <= section_end - field_offset)
     {
-        return false;
+        u64 available = section_end - field_offset + prefix_size;
+        u32 capacity = (u32)BUSTER_MIN(available, (u64)BUSTER_X86_METADATA_TLS_LD_INDIRECT_SIZE);
+        result = buster_x86_metadata_relax_tls_local_dynamic(bytes + field_offset - prefix_size, capacity) != 0;
     }
-    for (u32 index = 0; index < object->relocation_count; index += 1)
+    return result;
+}
+
+// A symbol's offset inside the image's one thread-local block: .tdata, then
+// .tbss at .tdata's size rounded to .tbss's alignment.  This is the DTP
+// offset DTPOFF32/DTPOFF64 name, before any addend.
+BUSTER_GLOBAL_LOCAL u64 link_elf_thread_local_offset(ObjectFile* object, ObjectSymbol const* symbol)
+{
+    u64 initialized_size = align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length,
+                                         BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment, 1u));
+    return symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
+}
+
+// Sparse exact TLSGD/TLSLD site identities, shared by import planning and
+// relocation application after initializer stripping. Scratch belongs to the
+// link's export-index arena; no table is allocated without a helper and sites.
+typedef struct LinkElfTlsSite LinkElfTlsSite;
+struct LinkElfTlsSite
+{
+    u64 offset;
+    u32 section;
+    u8 kinds;
+    u8 reserved[3];
+};
+typedef struct LinkElfTlsIndex LinkElfTlsIndex;
+struct LinkElfTlsIndex
+{
+    LinkElfTlsSite* sites;
+    u64 capacity;
+#if BUSTER_INCLUDE_TESTS
+    u64 build_rows;
+    u64 queries;
+    u64 probes;
+#endif
+};
+enum
+{
+    LINK_ELF_TLS_SITE_GENERAL = 1,
+    LINK_ELF_TLS_SITE_LOCAL = 2,
+};
+
+BUSTER_GLOBAL_LOCAL LinkElfTlsSite* link_elf_tls_site(LinkElfTlsIndex* index, u32 section, u64 offset, bool insert)
+{
+    LinkElfTlsSite* result = 0;
+    if (index->capacity)
     {
-        ObjectRelocation* candidate = object->relocations + index;
-        if (candidate->kind == OBJECT_RELOCATION_X86_64_TLSGD && candidate->section == relocation->section &&
-            candidate->offset == relocation->offset - field_delta)
+        u64 key[] = {section, offset};
+        u64 mask = index->capacity - 1;
+        u64 bucket = buster_hash_64((u8*)key, sizeof(key)) & mask;
+        for (u64 probe = 0; !result && probe < index->capacity; probe += 1)
         {
-            return true;
+            LinkElfTlsSite* site = index->sites + bucket;
+#if BUSTER_INCLUDE_TESTS
+            index->probes += 1;
+#endif
+            if (!site->kinds)
+            {
+                result = insert ? site : 0;
+                break;
+            }
+            else if (site->section == section && site->offset == offset)
+            {
+                result = site;
+            }
+            bucket = (bucket + 1) & mask;
         }
     }
-    return false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_elf_tls_index_build(Arena* temporary, ObjectFile* object, LinkElfTlsIndex* index)
+{
+    *index = (LinkElfTlsIndex){0};
+    bool has_helper = false;
+    for (u32 symbol = 0; !has_helper && symbol < object->symbol_count; symbol += 1)
+    {
+        has_helper = string_equal(object->symbols[symbol].name, S8("__tls_get_addr"));
+    }
+    u64 count = 0;
+    for (u32 row = 0; has_helper && row < object->relocation_count; row += 1)
+    {
+        ObjectRelocationKind kind = object->relocations[row].kind;
+        count += kind == OBJECT_RELOCATION_X86_64_TLSGD || kind == OBJECT_RELOCATION_X86_64_TLSLD;
+#if BUSTER_INCLUDE_TESTS
+        index->build_rows += 1;
+#endif
+    }
+    bool valid = true;
+    if (count)
+    {
+        // u32 relocation_count bounds capacity at 2^33 slots. Each slot is
+        // 16 bytes, so rounding and the arena's u64 byte size cannot overflow.
+        u64 capacity = 1;
+        while (capacity < count * 2) capacity *= 2;
+        u64 bytes = capacity * sizeof(*index->sites) + BUSTER_ALIGN_OF(LinkElfTlsSite);
+        valid = temporary->position <= temporary->reserved_size && bytes <= temporary->reserved_size - temporary->position;
+        if (valid)
+        {
+            index->sites = arena_allocate_zeroed(temporary, LinkElfTlsSite, capacity);
+            index->capacity = capacity;
+            for (u32 row = 0; valid && row < object->relocation_count; row += 1)
+            {
+                ObjectRelocation* relocation = object->relocations + row;
+                u8 kinds = relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ? LINK_ELF_TLS_SITE_GENERAL
+                           : relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ? LINK_ELF_TLS_SITE_LOCAL : 0;
+#if BUSTER_INCLUDE_TESTS
+                index->build_rows += 1;
+#endif
+                if (kinds)
+                {
+                    LinkElfTlsSite* site = link_elf_tls_site(index, relocation->section, relocation->offset, true);
+                    valid = site != 0;
+                    if (valid)
+                    {
+                        site->section = relocation->section;
+                        site->offset = relocation->offset;
+                        site->kinds |= kinds;
+                    }
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+// Subtract only after checking the helper offset. This is equivalent to the
+// old checked candidate-offset addition, even near UINT64_MAX. Row ordering,
+// duplicate sites and the candidate symbol do not change boolean membership.
+BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectRelocation* relocation, ObjectSymbol* symbol)
+{
+    bool direct = relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
+    bool indirect = object_relocation_kind_is_x86_got(relocation->kind);
+    bool result = false;
+    if (index->capacity && (direct || indirect) && string_equal(symbol->name, S8("__tls_get_addr")))
+    {
+        u32 deltas[] = {BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET,
+                        direct ? BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET
+                               : BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET};
+        u8 kinds[] = {LINK_ELF_TLS_SITE_GENERAL, LINK_ELF_TLS_SITE_LOCAL};
+        for (u32 kind = 0; !result && kind < BUSTER_ARRAY_LENGTH(deltas); kind += 1)
+        {
+            if (relocation->offset >= deltas[kind])
+            {
+#if BUSTER_INCLUDE_TESTS
+                index->queries += 1;
+#endif
+                LinkElfTlsSite* site = link_elf_tls_site(index, relocation->section, relocation->offset - deltas[kind], false);
+                result = site && (site->kinds & kinds[kind]);
+            }
+        }
+    }
+    return result;
+}
+
+// Every reference must be a relaxed call. A genuine call, address or debug
+// reference retains the import; no references remains vacuously true.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_only_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectFile* object, u32 symbol_index)
+{
+    ObjectSymbol* symbol = object->symbols + symbol_index;
+    bool result = string_equal(symbol->name, S8("__tls_get_addr"));
+    for (u32 row = 0; result && row < object->relocation_count; row += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + row;
+        result = relocation->symbol != symbol_index || link_elf_relocation_is_relaxed_tls_get_addr(index, relocation, symbol);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_branch_encode(A64Opcode opcode, s64 displacement, u32* word)
@@ -2807,112 +3650,24 @@ BUSTER_GLOBAL_LOCAL void link_write_u32_be(u8* bytes, u64 offset, u32 value)
     bytes[offset + 3] = (u8)value;
 }
 
-BUSTER_GLOBAL_LOCAL u32 link_rotate_right_u32(u32 value, u32 amount)
-{
-    return (value >> amount) | (value << (32 - amount));
-}
-
 void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
 {
-    static u32 const constants[64] = {
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be,
-        0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa,
-        0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85,
-        0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
-        0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    };
-    u32* state = arena_allocate(arena, u32, 8);
-    state[0] = 0x6a09e667;
-    state[1] = 0xbb67ae85;
-    state[2] = 0x3c6ef372;
-    state[3] = 0xa54ff53a;
-    state[4] = 0x510e527f;
-    state[5] = 0x9b05688c;
-    state[6] = 0x1f83d9ab;
-    state[7] = 0x5be0cd19;
-    u8* block = arena_allocate(arena, u8, 64);
-    u32* words = arena_allocate(arena, u32, 64);
-    u64 block_count = (length + 9 + 63) / 64;
-    for (u64 block_index = 0; block_index < block_count; block_index += 1)
-    {
-        memset(block, 0, 64);
-        u64 block_offset = block_index * 64;
-        for (u64 byte_index = 0; byte_index < 64; byte_index += 1)
-        {
-            u64 source_offset = block_offset + byte_index;
-            if (source_offset < length)
-            {
-                block[byte_index] = input[source_offset];
-            }
-            else if (source_offset == length)
-            {
-                block[byte_index] = 0x80;
-            }
-        }
-        if (block_index + 1 == block_count)
-        {
-            u64 bit_length = length * 8;
-            for (u32 index = 0; index < 8; index += 1)
-            {
-                block[63 - index] = (u8)(bit_length >> (index * 8));
-            }
-        }
-        memset(words, 0, 64 * sizeof(*words));
-        for (u32 index = 0; index < 16; index += 1)
-        {
-            u32 offset = index * 4;
-            words[index] = ((u32)block[offset] << 24) | ((u32)block[offset + 1] << 16) | ((u32)block[offset + 2] << 8) | block[offset + 3];
-        }
-        for (u32 index = 16; index < 64; index += 1)
-        {
-            u32 first = link_rotate_right_u32(words[index - 15], 7) ^ link_rotate_right_u32(words[index - 15], 18) ^ (words[index - 15] >> 3);
-            u32 second = link_rotate_right_u32(words[index - 2], 17) ^ link_rotate_right_u32(words[index - 2], 19) ^ (words[index - 2] >> 10);
-            words[index] = words[index - 16] + first + words[index - 7] + second;
-        }
-        u32 a = state[0];
-        u32 b = state[1];
-        u32 c = state[2];
-        u32 d = state[3];
-        u32 e = state[4];
-        u32 f = state[5];
-        u32 g = state[6];
-        u32 h = state[7];
-        for (u32 index = 0; index < 64; index += 1)
-        {
-            u32 sigma1 = link_rotate_right_u32(e, 6) ^ link_rotate_right_u32(e, 11) ^ link_rotate_right_u32(e, 25);
-            u32 choice = (e & f) ^ (~e & g);
-            u32 temporary1 = h + sigma1 + choice + constants[index] + words[index];
-            u32 sigma0 = link_rotate_right_u32(a, 2) ^ link_rotate_right_u32(a, 13) ^ link_rotate_right_u32(a, 22);
-            u32 majority = (a & b) ^ (a & c) ^ (b & c);
-            u32 temporary2 = sigma0 + majority;
-            h = g;
-            g = f;
-            f = e;
-            e = d + temporary1;
-            d = c;
-            c = b;
-            b = a;
-            a = temporary1 + temporary2;
-        }
-        state[0] += a;
-        state[1] += b;
-        state[2] += c;
-        state[3] += d;
-        state[4] += e;
-        state[5] += f;
-        state[6] += g;
-        state[7] += h;
-    }
-    for (u32 index = 0; index < 8; index += 1)
-    {
-        link_write_u32_be(output, (u64)index * 4, state[index]);
-    }
+    // The arena parameter is retained for existing callers; the shared hash
+    // keeps its state on the stack and allocates nothing.
+    BUSTER_UNUSED(arena);
+    sha256_bytes(input, length, output);
 }
 
-BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes)
+BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, NativeExecutableLinkResult* result)
 {
-    return file_publish_executable(path, bytes);
+    FilePublishResult published = file_publish_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+    bool success = published.status == FILE_PUBLISH_PUBLISHED;
+    if (!success)
+    {
+        result->write_error = published.error;
+        result->write_unsupported_destination = published.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION;
+    }
+    return success;
 }
 
 BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)
@@ -3167,7 +3922,10 @@ BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_coun
         LinkElfEhFrameEntry* entry = table->entries + entry_index;
         u64 output = header_offset + 12 + (u64)entry_index * 8;
         u64 fde_address = unwind_address + entry->fde_offset;
-        if (!link_elf_signed_difference(entry->function_address, header_address, &relative))
+        // A duplicate key makes the selected CFA program depend on unwinder
+        // search order. Refuse legacy or foreign ambiguous FDEs (issue 1233).
+        if ((entry_index && entry->function_address == table->entries[entry_index - 1].function_address) ||
+            !link_elf_signed_difference(entry->function_address, header_address, &relative))
         {
             return false;
         }
@@ -3326,10 +4084,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
         {
             ObjectSectionKind kind = link_elf_loaded_kinds[index];
             ObjectSection* section = &object->sections[kind];
-            u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
-            if (kind == OBJECT_SECTION_ZERO)
+            u64 size = link_elf_loaded_section_size(object, kind, layout.copy_zero_size);
+            if (!size)
             {
-                size = BUSTER_MAX(size, layout.copy_zero_size);
+                continue;
             }
             u64 offset = section_offsets[kind];
             bool thread_local_section = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
@@ -3339,8 +4097,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 .name = object_section_name_for_kind(kind),
                 .flags = (kind == OBJECT_SECTION_TEXT ? UINT64_C(0x6) : writable ? UINT64_C(0x3) : UINT64_C(0x2)) |
                          (thread_local_section ? UINT64_C(0x400) : 0),
-                .address = size ? image_base + offset : 0,
-                .offset = size ? offset : 0,
+                .address = image_base + offset,
+                .offset = offset,
                 .size = size,
                 .alignment = section->alignment,
                 .type = object_section_kind_is_zero_fill(kind) ? 8 : 1,
@@ -3361,22 +4119,28 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
         if (layout.dynamic)
         {
             u32 dynamic_base = 1 + descriptor_count;
-            u32 dynamic_string_index = dynamic_base + 2;
-            u32 dynamic_symbol_index = dynamic_base + 3;
+            // A shared object names no interpreter, and every index after
+            // .interp's slot is numbered from whether it is there.
+            u32 interpreter_count = layout.interpreter_size != 0;
+            u32 dynamic_string_index = dynamic_base + interpreter_count + 1;
+            u32 dynamic_symbol_index = dynamic_base + interpreter_count + 2;
             // The two version sections sit between .hash and .rela.plt, and
             // only when the image needs them, so everything after them is
             // numbered from how many of them there are.
             u32 version_section_count = (u32)(layout.version_symbol_size != 0) + (u32)(layout.version_need_size != 0);
-            u32 got_index = dynamic_base + 6 + version_section_count;
-            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-                .name = S8(".interp"),
-                .flags = 0x2,
-                .address = image_base + layout.interpreter_offset,
-                .offset = layout.interpreter_offset,
-                .size = layout.interpreter_size,
-                .alignment = 1,
-                .type = 1,
-            };
+            u32 got_index = dynamic_base + interpreter_count + 5 + version_section_count;
+            if (interpreter_count)
+            {
+                descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                    .name = S8(".interp"),
+                    .flags = 0x2,
+                    .address = image_base + layout.interpreter_offset,
+                    .offset = layout.interpreter_offset,
+                    .size = layout.interpreter_size,
+                    .alignment = 1,
+                    .type = 1,
+                };
+            }
             descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
                 .name = S8(".plt"),
                 .flags = 0x6,
@@ -3406,6 +4170,9 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 .entry_size = 24,
                 .type = 11,
                 .link = dynamic_string_index,
+                // One past the last local entry, the null symbol: GNU ld
+                // refuses to link against a library that says otherwise.
+                .info = 1,
             };
             descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
                 .name = S8(".hash"),
@@ -3479,6 +4246,59 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 .type = 6,
                 .link = dynamic_string_index,
             };
+            if (layout.data_relocation_size)
+            {
+                descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                    .name = S8(".rela.dyn"),
+                    .flags = 0x2,
+                    .address = image_base + layout.data_relocation_offset,
+                    .offset = layout.data_relocation_offset,
+                    .size = layout.data_relocation_size,
+                    .alignment = 8,
+                    .entry_size = 24,
+                    .type = 4,
+                    .link = dynamic_symbol_index,
+                };
+            }
+            if (layout.got_data_size)
+            {
+                descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                    .name = S8(".got"),
+                    .flags = 0x3,
+                    .address = image_base + layout.got_data_offset,
+                    .offset = layout.got_data_offset,
+                    .size = layout.got_data_size,
+                    .alignment = 8,
+                    .entry_size = 8,
+                    .type = 1,
+                };
+            }
+            if (layout.init_array_size)
+            {
+                descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                    .name = S8(".init_array"),
+                    .flags = 0x3,
+                    .address = image_base + layout.init_array_offset,
+                    .offset = layout.init_array_offset,
+                    .size = layout.init_array_size,
+                    .alignment = 8,
+                    .entry_size = 8,
+                    .type = 14,
+                };
+            }
+            if (layout.fini_array_size)
+            {
+                descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                    .name = S8(".fini_array"),
+                    .flags = 0x3,
+                    .address = image_base + layout.fini_array_offset,
+                    .offset = layout.fini_array_offset,
+                    .size = layout.fini_array_size,
+                    .alignment = 8,
+                    .entry_size = 8,
+                    .type = 15,
+                };
+            }
         }
         u64 debug_offsets[BUSTER_ARRAY_LENGTH(link_elf_debug_kinds)];
         u64 cursor = result->executable.length;
@@ -3621,7 +4441,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             }
             ObjectSection* section = &object->sections[relocation->section];
             ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-            u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+            u64 width = object_relocation_kind_width(relocation->kind);
             if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
             {
                 result->error = LINK_ERROR_RELOCATION;
@@ -3674,6 +4494,28 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                     return;
                 }
                 link_write_u32(bytes, slot, (u32)value);
+            }
+            // A thread-local variable's DWARF location is its offset in the
+            // module's block, which DW_OP_form_tls_address turns into an
+            // address: GCC writes it with DTPOFF32, Clang with DTPOFF64.
+            else if ((relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64) &&
+                     (symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO))
+            {
+                u64 value = 0;
+                if (!link_address_addend(link_elf_thread_local_offset(object, symbol), relocation->addend, &value) ||
+                    (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 && value > UINT32_MAX))
+                {
+                    result->error = LINK_ERROR_RELOCATION;
+                    return;
+                }
+                if (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64)
+                {
+                    link_write_u64(bytes, slot, value);
+                }
+                else
+                {
+                    link_write_u32(bytes, slot, (u32)value);
+                }
             }
             else
             {
@@ -3794,6 +4636,9 @@ enum
     ELF_DYNAMIC_SIZE = 16,
     ELF_PLT_ENTRY_SIZE = 16,
     ELF_GOT_RESERVED_COUNT = 3,
+    ELF_SYMBOL_TYPE_FUNCTION = 2,
+    ELF_SYMBOL_VISIBILITY_DEFAULT = 0,
+    ELF_DYNAMIC_TAG_TEXTREL = 22,
     ELF_VERSION_NEED_SIZE = 16,
     ELF_VERSION_AUXILIARY_SIZE = 16,
     // 0 is VER_NDX_LOCAL and 1 VER_NDX_GLOBAL, so the versions an image needs
@@ -3828,7 +4673,9 @@ BUSTER_GLOBAL_LOCAL bool link_elf_virtual_align(u64 start, u64 alignment, u64* o
 // rule, which on AArch64 turns a copy relocation into a 16-bit absolute move.
 enum
 {
+    ELF_RELOCATION_TYPE_X86_64_64 = 1,
     ELF_RELOCATION_TYPE_X86_64_COPY = 5,
+    ELF_RELOCATION_TYPE_X86_64_GLOB_DAT = 6,
     ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT = 7,
     ELF_RELOCATION_TYPE_AARCH64_COPY = 1024,
     ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT = 1026,
@@ -3845,6 +4692,9 @@ struct LinkElfName
     u32 library;
     u32 data;
     u32 alias_owner;
+    // Some requested library leaves this name undefined.
+    bool referenced;
+    u8 reserved[3];
 };
 
 typedef struct LinkElfDataEntry LinkElfDataEntry;
@@ -3958,9 +4808,10 @@ BUSTER_GLOBAL_LOCAL bool link_elf_index_initialize(Arena* arena, NativeExecutabl
     {
         NativeDynamicLibrary* source = options.dynamic_libraries + library;
         valid = (!source->exported_data_symbol_count || source->exported_data_symbols) &&
-                (!source->versioned_symbol_count || source->versioned_symbols);
+                (!source->versioned_symbol_count || source->versioned_symbols) &&
+                (!source->referenced_symbol_count || source->referenced_symbols);
         data_count += source->exported_data_symbol_count;
-        name_count += (u64)source->exported_data_symbol_count + source->versioned_symbol_count;
+        name_count += (u64)source->exported_data_symbol_count + source->versioned_symbol_count + source->referenced_symbol_count;
         valid = valid && name_count < UINT32_MAX;
         index->exports_complete = index->exports_complete && source->exports_known;
     }
@@ -4023,8 +4874,26 @@ BUSTER_GLOBAL_LOCAL bool link_elf_index_initialize(Arena* arena, NativeExecutabl
                 }
             }
         }
+        String8* references = library ? options.dynamic_libraries[library - 1].referenced_symbols : 0;
+        count = library ? options.dynamic_libraries[library - 1].referenced_symbol_count : 0;
+        for (u32 entry = 0; valid && entry < count; entry += 1)
+        {
+            valid = !references[entry].length || references[entry].pointer;
+            if (valid)
+            {
+                link_elf_name(index, references[entry], true)->referenced = true;
+            }
+        }
     }
     return valid;
+}
+
+// Whether a requested library leaves this name undefined, which is what
+// makes an executable's definition of it one the loader must see.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_referenced_by_library(LinkElfIndex* index, String8 name)
+{
+    LinkElfName* found = link_elf_name(index, name, false);
+    return found && found->referenced;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_elf_symbol_version(LinkElfIndex* index, String8 name, u32* library_index, String8* version, bool* no_default)
@@ -4326,7 +5195,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 width = object_relocation_kind_width(relocation->kind);
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -4369,7 +5238,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // definition of every name in it. A conversion that answers with the
         // address as an immediate patches the same field with the address
         // itself, and the GOT load's -4 has no part in that value.
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64)
+        {
+            s64 value = 0;
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u64(bytes, output_offset, (u64)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
             got_patch == BUSTER_X86_METADATA_GOT_PATCH_PC32)
         {
             s64 value = 0;
@@ -4491,9 +5370,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -4608,13 +5488,400 @@ BUSTER_GLOBAL_LOCAL u32 link_elf_hash(String8 name)
     return result;
 }
 
+// Symbol versions.  A reference GNU ld resolves records the version it bound
+// to, so the image keeps that one answer for its whole life instead of taking
+// whatever the running library happens to call default; that is the
+// versioning mechanism's entire purpose.  Every name an image spells is
+// versioned here: the imports first (`import_name_count` of them), then any
+// further names it defines on a library's behalf, such as the alias names a
+// copy slot carries, because each of those is a name the library publishes.
+//
+// The result is a set of distinct (library, version) pairs numbered from
+// ELF_VERSION_FIRST_INDEX, which is what .gnu.version records per dynamic
+// symbol and what .gnu.version_r's auxiliary entries name.  `name_versions`
+// holds each name's index, or zero where it binds without a version.  The
+// hash slots and per-library chains live on the export index's arena, which
+// the caller rewinds after the link.
+typedef struct LinkElfVersionPlan LinkElfVersionPlan;
+struct LinkElfVersionPlan
+{
+    u32* version_libraries;
+    String8* version_names;
+    u32* version_name_offsets;
+    u16* name_versions;
+    u32* version_next;
+    u32* library_version_first;
+    u32* library_version_counts;
+    String8 symbol;
+    u64 version_name_size;
+    u64 version_need_size;
+    u32 version_count;
+    u32 version_need_count;
+    LinkError error;
+};
+
+BUSTER_GLOBAL_LOCAL LinkElfVersionPlan link_elf_version_plan_build(Arena* arena, LinkElfIndex* exports, String8 const* names, u64 name_count,
+                                                                   u64 import_name_count, u32 needed_library_count)
+{
+    LinkElfVersionPlan plan = {0};
+    plan.version_libraries = arena_allocate(arena, u32, name_count + 1);
+    plan.version_names = arena_allocate(arena, String8, name_count + 1);
+    plan.version_name_offsets = arena_allocate(arena, u32, name_count + 1);
+    plan.name_versions = arena_allocate(arena, u16, name_count + 1);
+    u64 maximum_versions = BUSTER_MIN(name_count, (u64)ELF_VERSION_INDEX_MAX - ELF_VERSION_FIRST_INDEX + 1);
+    u64 version_capacity = link_elf_index_capacity(maximum_versions);
+    u64 version_index_bytes = (version_capacity + maximum_versions + (u64)needed_library_count * 3) * sizeof(u32) + 5 * BUSTER_ALIGN_OF(u32);
+    u32* version_slots = 0;
+    u32* library_version_last = 0;
+    if (version_index_bytes > exports->arena->reserved_size - exports->arena->position)
+    {
+        plan.error = LINK_ERROR_INVALID_INPUT;
+    }
+    else
+    {
+        version_slots = arena_allocate(exports->arena, u32, version_capacity);
+        plan.version_next = arena_allocate(exports->arena, u32, maximum_versions);
+        plan.library_version_first = arena_allocate(exports->arena, u32, needed_library_count);
+        library_version_last = arena_allocate(exports->arena, u32, needed_library_count);
+        plan.library_version_counts = arena_allocate_zeroed(exports->arena, u32, needed_library_count);
+        memset(version_slots, 0xff, version_capacity * sizeof(u32));
+        memset(plan.library_version_first, 0xff, (u64)needed_library_count * sizeof(u32));
+        memset(library_version_last, 0xff, (u64)needed_library_count * sizeof(u32));
+    }
+    for (u64 entry = 0; plan.error == LINK_ERROR_NONE && entry < name_count; entry += 1)
+    {
+        String8 name = names[entry];
+        u32 library_index = 0;
+        String8 version = {0};
+        bool no_default = false;
+        u16 version_index = 0;
+        if (link_elf_symbol_version(exports, name, &library_index, &version, &no_default))
+        {
+            u64 bucket = 0;
+            if (version.length)
+            {
+                bucket = (buster_hash_64((u8*)version.pointer, version.length) ^ library_index) & (version_capacity - 1);
+                while (version_slots[bucket] != UINT32_MAX)
+                {
+                    u32 existing = version_slots[bucket];
+                    if (plan.version_libraries[existing] == library_index && string_equal(plan.version_names[existing], version))
+                    {
+                        version_index = (u16)(ELF_VERSION_FIRST_INDEX + existing);
+                        break;
+                    }
+                    bucket = (bucket + 1) & (version_capacity - 1);
+                }
+            }
+            if (!version_index && version.length)
+            {
+                if (plan.version_count > ELF_VERSION_INDEX_MAX - ELF_VERSION_FIRST_INDEX || version.length >= UINT32_MAX ||
+                    plan.version_name_size > UINT32_MAX - version.length - 1)
+                {
+                    plan.error = LINK_ERROR_INVALID_INPUT;
+                    plan.symbol = name;
+                }
+                else
+                {
+                    u32 index = plan.version_count;
+                    plan.version_libraries[index] = library_index;
+                    plan.version_names[index] = version;
+                    version_slots[bucket] = index;
+                    plan.version_next[index] = UINT32_MAX;
+                    if (library_version_last[library_index] != UINT32_MAX) plan.version_next[library_version_last[library_index]] = index;
+                    else plan.library_version_first[library_index] = index;
+                    library_version_last[library_index] = index;
+                    plan.library_version_counts[library_index] += 1;
+                    version_index = (u16)(ELF_VERSION_FIRST_INDEX + index);
+                    plan.version_count += 1;
+                    plan.version_name_size += version.length + 1;
+                }
+            }
+        }
+        else if (no_default && entry < import_name_count)
+        {
+            // Every definition this library has for the name is a non-default
+            // `name@VER`.  An unversioned reference has nothing to bind to, so
+            // GNU ld reports it undefined; linking it anyway leaves the answer
+            // to whichever version the running loader picks.
+            plan.error = LINK_ERROR_SYMBOL_VERSION;
+            plan.symbol = name;
+        }
+        plan.name_versions[entry] = version_index;
+    }
+    // One .gnu.version_r entry per library that contributes a version, each
+    // followed by its own auxiliary list.
+    for (u32 library_index = 0; plan.error == LINK_ERROR_NONE && plan.version_count && library_index < needed_library_count; library_index += 1)
+    {
+        u32 library_version_count = plan.library_version_counts[library_index];
+        plan.version_need_size += library_version_count ? ELF_VERSION_NEED_SIZE + (u64)library_version_count * ELF_VERSION_AUXILIARY_SIZE : 0;
+        plan.version_need_count += library_version_count != 0;
+    }
+    return plan;
+}
+
+// Writes the version names at `*dynamic_name_cursor` and advances it, then
+// .gnu.version_r at `version_need_offset`: per library, the versions the
+// image's .gnu.version indexes stand for.  .gnu.version itself is parallel to
+// .dynsym, whose order is each writer's own, so the caller fills it from
+// `name_versions`.
+BUSTER_GLOBAL_LOCAL void link_elf_version_plan_write(LinkElfVersionPlan* plan, u8* bytes, u64 dynamic_string_offset, u64* dynamic_name_cursor,
+                                                     u64 version_need_offset, u32 const* library_name_offsets, u32 needed_library_count)
+{
+    for (u32 index = 0; index < plan->version_count; index += 1)
+    {
+        plan->version_name_offsets[index] = (u32)(*dynamic_name_cursor - dynamic_string_offset);
+        memcpy(bytes + *dynamic_name_cursor, plan->version_names[index].pointer, plan->version_names[index].length);
+        *dynamic_name_cursor += plan->version_names[index].length + 1;
+    }
+    u64 need_cursor = version_need_offset;
+    u64 previous_need = 0;
+    for (u32 library_index = 0; plan->version_count && library_index < needed_library_count; library_index += 1)
+    {
+        u32 library_version_count = plan->library_version_counts[library_index];
+        if (library_version_count)
+        {
+            link_write_u16(bytes, need_cursor, 1);
+            link_write_u16(bytes, need_cursor + 2, (u16)library_version_count);
+            link_write_u32(bytes, need_cursor + 4, library_name_offsets[library_index]);
+            link_write_u32(bytes, need_cursor + 8, ELF_VERSION_NEED_SIZE);
+            if (previous_need)
+            {
+                link_write_u32(bytes, previous_need + 12, (u32)(need_cursor - previous_need));
+            }
+            previous_need = need_cursor;
+            u64 auxiliary = need_cursor + ELF_VERSION_NEED_SIZE;
+            u32 written = 0;
+            for (u32 index = plan->library_version_first[library_index]; index != UINT32_MAX; index = plan->version_next[index])
+            {
+                written += 1;
+                link_write_u32(bytes, auxiliary, link_elf_hash(plan->version_names[index]));
+                link_write_u16(bytes, auxiliary + 6, (u16)(ELF_VERSION_FIRST_INDEX + index));
+                link_write_u32(bytes, auxiliary + 8, plan->version_name_offsets[index]);
+                link_write_u32(bytes, auxiliary + 12, written == library_version_count ? 0 : ELF_VERSION_AUXILIARY_SIZE);
+                auxiliary += ELF_VERSION_AUXILIARY_SIZE;
+            }
+            need_cursor = auxiliary;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void link_elf_write_relocation(u8* bytes, u64* cursor, u64 offset, u32 symbol, u32 type, u64 addend)
+{
+    link_write_u64(bytes, *cursor, offset);
+    link_write_u64(bytes, *cursor + 8, ((u64)symbol << 32) | type);
+    link_write_u64(bytes, *cursor + 16, addend);
+    *cursor += ELF_RELOCATION_SIZE;
+}
+
+// Copy relocations, shared by the fixed-address and PIE executable writers:
+// imported data an object reaches with a rel32 gets local storage the loader
+// fills from the shared library (R_X86_64_COPY).
+//
+// What is reserved is the library's object, not the one name this program
+// spelled.  A shared library exports one object under every name it was
+// aliased to — glibc publishes `environ`, `_environ` and `__environ` at
+// one address — and a definition in the executable takes precedence over
+// the library's own for all of them.  An executable that defines only the
+// referenced name therefore leaves libc writing `__environ` into libc's
+// storage while the program reads a copy taken before startup ran, which
+// is how `extern char **environ` came to read null.  So each slot carries
+// every exported name at its address, takes the library's own size, and is
+// shared by two imports that name one object.  When the library's symbol
+// table was not read, the slot keeps the pointer-sized shape it had.
+//
+// Imports are numbered by the writer; `copied[import]` selects the ones that
+// take a slot.  Alias names are listed per owning import in import order, and
+// the writer gives them consecutive .dynsym entries in that order.
+typedef struct LinkElfCopyPlan LinkElfCopyPlan;
+struct LinkElfCopyPlan
+{
+    String8* alias_names;
+    u32* alias_first;
+    u32* alias_counts;
+    u32* owners;
+    u64* sizes;
+    String8 symbol;
+    // The .dynstr bytes the alias names add, NUL terminators included.
+    u64 alias_name_size;
+    u32 alias_count;
+    u32 slot_count;
+    LinkError error;
+};
+
+BUSTER_GLOBAL_LOCAL LinkElfCopyPlan link_elf_copy_plan_build(Arena* arena, LinkElfIndex* exports, ObjectFile* object, String8 const* import_names,
+                                                             bool const* copied, u32 import_count, u64 name_size)
+{
+    LinkElfCopyPlan plan = {0};
+    plan.alias_names = arena_allocate(arena, String8, (u64)exports->data_count + 1);
+    plan.alias_first = arena_allocate(arena, u32, (u64)import_count + 1);
+    plan.alias_counts = arena_allocate(arena, u32, (u64)import_count + 1);
+    plan.owners = arena_allocate(arena, u32, (u64)import_count + 1);
+    plan.sizes = arena_allocate(arena, u64, (u64)import_count + 1);
+    LinkGlobalSymbolTable globals = {0};
+    bool globals_valid = true;
+    if (exports->data_count)
+    {
+        u64 capacity = link_elf_index_capacity(object->symbol_count);
+        globals_valid = object->symbol_count < UINT32_MAX &&
+                        capacity * sizeof(u32) + BUSTER_ALIGN_OF(u32) <= exports->arena->reserved_size - exports->arena->position;
+        if (globals_valid) globals_valid = link_global_symbol_table_initialize(exports->arena, object->symbols, object->symbol_count, &globals);
+        for (u32 symbol = 0; globals_valid && symbol < object->symbol_count; symbol += 1)
+        {
+            if (object->symbols[symbol].global)
+            {
+                u32* slot = link_global_symbol_table_slot(&globals, object->symbols[symbol].name);
+                if (slot) *slot = symbol;
+                else globals_valid = false;
+            }
+        }
+    }
+    if (!globals_valid)
+    {
+        plan.error = LINK_ERROR_INVALID_INPUT;
+    }
+    for (u32 import_index = 0; plan.error == LINK_ERROR_NONE && import_index < import_count; import_index += 1)
+    {
+        plan.alias_first[import_index] = plan.alias_count;
+        plan.alias_counts[import_index] = 0;
+        plan.owners[import_index] = UINT32_MAX;
+        plan.sizes[import_index] = 0;
+        if (!copied[import_index]) continue;
+        LinkElfName* name = link_elf_name(exports, import_names[import_index], false);
+        LinkElfDataEntry* definition = name && name->data != UINT32_MAX ? exports->data + name->data : 0;
+        LinkElfDataGroup* group = definition ? exports->groups + definition->group : 0;
+        u64 slot_size = definition && definition->symbol->size ? definition->symbol->size : sizeof(u64);
+        if (group && group->owner != UINT32_MAX)
+        {
+            plan.owners[import_index] = group->owner;
+            continue;
+        }
+        plan.owners[import_index] = import_index;
+        plan.slot_count += 1;
+        if (group) group->owner = import_index;
+        // Walk only this object's exports, in their original table order.
+        // Table identity (not virtual address alone) distinguishes libraries.
+        // A caller may expose the same table through different-length views;
+        // only the selected definition's view contributes aliases.
+        for (u32 entry = group ? group->first : UINT32_MAX; entry != UINT32_MAX; entry = exports->data[entry].next)
+        {
+            LinkElfDataEntry* data = exports->data + entry;
+            NativeDynamicDataSymbol* exported = data->symbol;
+            if ((u64)(exported - group->table) >= definition->table_count ||
+                string_equal(exported->name, import_names[import_index]) || !exported->name.length ||
+                exported->name.length >= UINT32_MAX || name_size + plan.alias_name_size > UINT32_MAX - exported->name.length - 1)
+            {
+                continue;
+            }
+            u32* global = link_global_symbol_table_slot(&globals, exported->name);
+            LinkElfName* alias = exports->names + data->name;
+            if ((global && *global != UINT32_MAX) || alias->alias_owner == import_index) continue;
+            // Preserve the old sizing rule: an existing global/import or a
+            // duplicate version-name does not enlarge the owner's slot.
+            alias->alias_owner = import_index;
+            slot_size = BUSTER_MAX(slot_size, exported->size);
+            plan.alias_names[plan.alias_count++] = exported->name;
+            plan.alias_name_size += exported->name.length + 1;
+        }
+        if (slot_size > UINT32_MAX)
+        {
+            plan.error = LINK_ERROR_INVALID_INPUT;
+            plan.symbol = import_names[import_index];
+        }
+        plan.alias_counts[import_index] = plan.alias_count - plan.alias_first[import_index];
+        plan.sizes[import_index] = slot_size;
+    }
+    return plan;
+}
+
+// Places each owner's slot from `start`, aligned as its size asks, and gives
+// an import that shares an owner the owner's address.  Returns the end.
+BUSTER_GLOBAL_LOCAL u64 link_elf_copy_plan_place(LinkElfCopyPlan const* plan, bool const* copied, u32 import_count, u64 start, u64 image_base,
+                                                 u64* addresses)
+{
+    u64 cursor = start;
+    for (u32 import_index = 0; import_index < import_count; import_index += 1)
+    {
+        u32 owner = plan->owners[import_index];
+        if (!copied[import_index])
+        {
+            continue;
+        }
+        if (owner != import_index)
+        {
+            addresses[import_index] = addresses[owner];
+            continue;
+        }
+        cursor = align_forward(cursor, plan->sizes[import_index] >= 16 ? 16 : 8);
+        addresses[import_index] = image_base + cursor;
+        cursor += plan->sizes[import_index];
+    }
+    return cursor;
+}
+
+// The library's other names for each copy-relocated object, defined at the
+// same slot so the library's own post-startup stores through them land in
+// the executable's copy: consecutive .dynsym entries from
+// `first_alias_symbol`, their names appended at `*name_cursor`.
+BUSTER_GLOBAL_LOCAL void link_elf_copy_aliases_write(LinkElfCopyPlan const* plan, u32 import_count, u64 const* addresses, u8* bytes,
+                                                    u64 dynamic_symbol_offset, u64 first_alias_symbol, u64 dynamic_string_offset, u64* name_cursor,
+                                                    u16 section_index)
+{
+    u64 alias_symbol_index = first_alias_symbol;
+    for (u32 import_index = 0; import_index < import_count; import_index += 1)
+    {
+        for (u32 alias_index = 0; alias_index < plan->alias_counts[import_index]; alias_index += 1)
+        {
+            String8 alias = plan->alias_names[plan->alias_first[import_index] + alias_index];
+            u64 symbol_offset = dynamic_symbol_offset + alias_symbol_index * ELF_SYMBOL_SIZE;
+            link_write_u32(bytes, symbol_offset, (u32)(*name_cursor - dynamic_string_offset));
+            memcpy(bytes + *name_cursor, alias.pointer, alias.length);
+            *name_cursor += alias.length + 1;
+            bytes[symbol_offset + 4] = 0x11;
+            link_write_u16(bytes, symbol_offset + 6, section_index);
+            link_write_u64(bytes, symbol_offset + 8, addresses[import_index]);
+            link_write_u64(bytes, symbol_offset + 16, plan->sizes[import_index]);
+            alias_symbol_index += 1;
+        }
+    }
+}
+
+// One R_X86_64_COPY per slot, naming the owning import's .dynsym entry,
+// which each writer numbers `import + 1`.
+BUSTER_GLOBAL_LOCAL void link_elf_copy_relocations_write(LinkElfCopyPlan const* plan, bool const* copied, u32 import_count, u64 const* addresses,
+                                                        u8* bytes, u64* relocation_cursor)
+{
+    for (u32 import_index = 0; import_index < import_count; import_index += 1)
+    {
+        if (copied[import_index] && plan->owners[import_index] == import_index)
+        {
+            link_elf_write_relocation(bytes, relocation_cursor, addresses[import_index], import_index + 1, ELF_RELOCATION_TYPE_X86_64_COPY, 0);
+        }
+    }
+}
+
+// `layout_section_offsets`, when given, receives the image offset of every
+// object section, so the AArch64 writer that overlays this layout can place
+// its own relocations against the same addresses.
+BUSTER_GLOBAL_LOCAL bool link_elf_x86_function_plt_reference(ObjectFile* object, ObjectRelocation const* relocation)
+{
+    BUSTER_UNUSED(object);
+    // The ELF producer's PLT32 contract, not bytes preceding a field,
+    // states a PLT reference. A PC32 site may be inline address data even
+    // when its preceding byte happens to spell CALL or JMP.
+    bool result = relocation->section == OBJECT_SECTION_TEXT && relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
+    return result;
+}
+
+// `function_address_identity` is enabled only for Linux x86-64 final
+// executables, never the AArch64 or Android layout staging calls.
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
-                                                                                           NativeExecutableLinkOptions options, LinkElfIndex* exports)
+                                                                                           NativeExecutableLinkOptions options, LinkElfIndex* exports,
+                                                                                           u64* layout_section_offsets, bool export_thread_local, bool function_address_identity)
 {
     NativeExecutableLinkResult result = {0};
     enum
     {
-        ELF_BASE_PROGRAM_HEADER_COUNT = 7,
+        ELF_BASE_PROGRAM_HEADER_COUNT = 6,
     };
     u32 entry_stub_size = 0;
     u32 entry_call_displacement_offset = 0;
@@ -4659,7 +5926,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     object = &hosted_object;
     ObjectFile stripped_object = {0};
     LinkInitializerPlan plan = {0};
-    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    LinkElfTlsIndex tls_index = {0};
+    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan) ||
+        !link_elf_tls_index_build(exports->arena, &stripped_object, &tls_index))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
@@ -4684,7 +5953,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         import_indices[symbol_index] = UINT32_MAX;
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (!link_elf_symbol_needs_dynamic_import(exports, symbol))
+        if (!link_elf_symbol_needs_dynamic_import(exports, symbol) || link_elf_symbol_only_relaxed_tls_get_addr(&tls_index, object, symbol_index))
         {
             continue;
         }
@@ -4712,102 +5981,28 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // stderr variables) use copy relocations.  Reserve local storage for each
     // imported object so the PC-relative references in non-PIC upstream
     // objects remain within the executable's image; the dynamic loader fills
-    // those slots from the shared library.
-    //
-    // What is reserved is the library's object, not the one name this program
-    // spelled.  A shared library exports one object under every name it was
-    // aliased to — glibc publishes `environ`, `_environ` and `__environ` at
-    // one address — and a definition in the executable takes precedence over
-    // the library's own for all of them.  An executable that defines only the
-    // referenced name therefore leaves libc writing `__environ` into libc's
-    // storage while the program reads a copy taken before startup ran, which
-    // is how `extern char **environ` came to read null.  So each slot carries
-    // every exported name at its address, takes the library's own size, and is
-    // shared by two imports that name one object.  When the library's symbol
-    // table was not read, the slot keeps the pointer-sized shape it had.
-    String8* alias_names = arena_allocate(arena, String8, (u64)exports->data_count + 1);
-    u32* import_alias_first = arena_allocate(arena, u32, import_count);
-    u32* import_alias_counts = arena_allocate(arena, u32, import_count);
-    u32* import_copy_owners = arena_allocate(arena, u32, import_count);
-    u64* import_copy_sizes = arena_allocate(arena, u64, import_count);
-    LinkGlobalSymbolTable globals = {0};
-    bool globals_valid = true;
-    if (exports->data_count)
-    {
-        u64 capacity = link_elf_index_capacity(object->symbol_count);
-        globals_valid = object->symbol_count < UINT32_MAX &&
-                        capacity * sizeof(u32) + BUSTER_ALIGN_OF(u32) <= exports->arena->reserved_size - exports->arena->position;
-        if (globals_valid) globals_valid = link_global_symbol_table_initialize(exports->arena, object->symbols, object->symbol_count, &globals);
-        for (u32 symbol = 0; globals_valid && symbol < object->symbol_count; symbol += 1)
-        {
-            if (object->symbols[symbol].global)
-            {
-                u32* slot = link_global_symbol_table_slot(&globals, object->symbols[symbol].name);
-                if (slot) *slot = symbol;
-                else globals_valid = false;
-            }
-        }
-    }
-    if (!globals_valid)
-    {
-        result.error = LINK_ERROR_INVALID_INPUT;
-        return result;
-    }
-    u32 alias_count = 0;
-    u32 copy_slot_count = 0;
+    // those slots from the shared library (link_elf_copy_plan_build).
+    bool* import_copied = arena_allocate(arena, bool, (u64)import_count + 1);
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
     {
-        import_alias_first[import_index] = alias_count;
-        import_alias_counts[import_index] = 0;
-        import_copy_owners[import_index] = UINT32_MAX;
-        import_copy_sizes[import_index] = 0;
-        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA) continue;
-        LinkElfName* name = link_elf_name(exports, import_names[import_index], false);
-        LinkElfDataEntry* definition = name && name->data != UINT32_MAX ? exports->data + name->data : 0;
-        LinkElfDataGroup* group = definition ? exports->groups + definition->group : 0;
-        u64 slot_size = definition && definition->symbol->size ? definition->symbol->size : sizeof(u64);
-        if (group && group->owner != UINT32_MAX)
-        {
-            import_copy_owners[import_index] = group->owner;
-            continue;
-        }
-        import_copy_owners[import_index] = import_index;
-        copy_slot_count += 1;
-        if (group) group->owner = import_index;
-        // Walk only this object's exports, in their original table order.
-        // Table identity (not virtual address alone) distinguishes libraries.
-        // A caller may expose the same table through different-length views;
-        // only the selected definition's view contributes aliases.
-        for (u32 entry = group ? group->first : UINT32_MAX; entry != UINT32_MAX; entry = exports->data[entry].next)
-        {
-            LinkElfDataEntry* data = exports->data + entry;
-            NativeDynamicDataSymbol* exported = data->symbol;
-            if ((u64)(exported - group->table) >= definition->table_count ||
-                string_equal(exported->name, import_names[import_index]) || !exported->name.length ||
-                exported->name.length >= UINT32_MAX || imported_name_size > UINT32_MAX - exported->name.length - 1)
-            {
-                continue;
-            }
-            u32* global = link_global_symbol_table_slot(&globals, exported->name);
-            LinkElfName* alias = exports->names + data->name;
-            if ((global && *global != UINT32_MAX) || alias->alias_owner == import_index) continue;
-            // Preserve the old sizing rule: an existing global/import or a
-            // duplicate version-name does not enlarge the owner's slot.
-            alias->alias_owner = import_index;
-            slot_size = BUSTER_MAX(slot_size, exported->size);
-            alias_names[alias_count++] = exported->name;
-            imported_name_size += exported->name.length + 1;
-        }
-        if (slot_size > UINT32_MAX)
-        {
-            result.error = LINK_ERROR_INVALID_INPUT;
-            result.symbol = import_names[import_index];
-            return result;
-        }
-        import_alias_counts[import_index] = alias_count - import_alias_first[import_index];
-        import_copy_sizes[import_index] = slot_size;
+        import_copied[import_index] = import_kinds[import_index] == OBJECT_SYMBOL_DATA;
     }
-    u32 dynamic_data_relocation_count = copy_slot_count;
+    LinkElfCopyPlan copies = link_elf_copy_plan_build(arena, exports, object, import_names, import_copied, import_count, imported_name_size);
+    if (copies.error != LINK_ERROR_NONE)
+    {
+        result.error = copies.error;
+        result.symbol = copies.symbol;
+        return result;
+    }
+    imported_name_size += copies.alias_name_size;
+    u32 alias_count = copies.alias_count;
+    u32 copy_slot_count = copies.slot_count;
+    u64 dynamic_data_relocation_count = copy_slot_count;
+    u32 function_got_count = 0;
+    u32* function_got_indices = arena_allocate(arena, u32, object->symbol_count);
+    bool* canonical_functions = arena_allocate_zeroed(arena, bool, import_count);
+    for (u32 index = 0; index < object->symbol_count; index += 1) function_got_indices[index] = UINT32_MAX;
+    bool text_relocations = false;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -4821,12 +6016,49 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
+        if (function_address_identity && symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_FUNCTION)
+        {
+            u32 import_index = import_indices[relocation->symbol];
+            if (object_relocation_kind_is_x86_got(relocation->kind))
+            {
+                // Address slots are separate from lazy .got.plt slots: the
+                // latter contain a resolver address until the first call.
+                if (function_got_indices[relocation->symbol] == UINT32_MAX)
+                {
+                    function_got_indices[relocation->symbol] = function_got_count++;
+                    dynamic_data_relocation_count += import_index != UINT32_MAX;
+                }
+            }
+            else if (import_index != UINT32_MAX && relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
+            {
+                dynamic_data_relocation_count += 1;
+                text_relocations |= relocation->section != OBJECT_SECTION_DATA && relocation->section != OBJECT_SECTION_THREAD_LOCAL_DATA;
+            }
+            else if (import_index != UINT32_MAX)
+            {
+                if (!link_elf_x86_function_plt_reference(object, relocation))
+                {
+                    LinkElfName* provider = link_elf_name(exports, symbol->name, false);
+                    if (symbol->weak || !exports->exports_complete || !provider || !provider->version || !provider->version->has_default ||
+                        provider->version->elf_type != ELF_SYMBOL_TYPE_FUNCTION || provider->version->elf_visibility != ELF_SYMBOL_VISIBILITY_DEFAULT)
+                    {
+                        // Direct addresses cannot use a loader-filled slot.
+                        // Refuse rather than silently break provider identity;
+                        // GOT references and pointer-wide literals stay legal.
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                        return result;
+                    }
+                    canonical_functions[import_index] = true;
+                }
+            }
+        }
         // Asked of the numbering above rather than of the symbol again: an
         // undefined symbol that was not numbered is one that resolves to
         // zero, and re-deriving that per relocation would rescan every
         // library's exports for every reference to an absent weak name.
         if (import_indices[relocation->symbol] != UINT32_MAX && symbol->kind == OBJECT_SYMBOL_DATA &&
-            relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && !object_relocation_kind_is_x86_got(relocation->kind) &&
+            relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PC64 && !object_relocation_kind_is_x86_got(relocation->kind) &&
             relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -4850,7 +6082,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     u64 eh_frame_header_size = eh_frame_table.count ? 12 + (u64)eh_frame_table.count * 8 : 0;
-    u32 program_header_count = ELF_BASE_PROGRAM_HEADER_COUNT + (eh_frame_header_size != 0);
+    has_thread_local_data =
+        object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length != 0 || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size != 0;
+    u32 program_header_count = (u32)ELF_BASE_PROGRAM_HEADER_COUNT + (u32)has_thread_local_data + (u32)(eh_frame_header_size != 0);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 image_base = ELF_IMAGE_BASE;
@@ -4890,9 +6124,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // dlopen(NULL)/dlsym can find the program's own definitions.  CPython's
     // ctypes.pythonapi is exactly that call, and every
     // `pythonapi.PyBytes_FromFormat` lookup died with "undefined symbol"
-    // while the flag was ignored.  Thread-local symbols are excluded: their
-    // st_value speaks TLS-offset, not address, and nothing dlsym-shaped asks
-    // for them.
+    // while the flag was ignored. Thread-local definitions are exported too:
+    // their STT_TLS value is a module-block offset, which a library's dynamic
+    // TLS relocations need even when the executable relaxes its own accesses.
+    // Android staging retains its prior export scope through export_thread_local.
     bool export_dynamic = false;
     for (u32 argument_index = 0; argument_index < options.linker_argument_count; argument_index += 1)
     {
@@ -4900,15 +6135,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         export_dynamic |= string_equal(linker_argument, S8("-export-dynamic")) || string_equal(linker_argument, S8("--export-dynamic")) ||
                           string_equal(linker_argument, S8("-E"));
     }
+    // Without the flag, the definitions a requested library names are
+    // exported all the same, as ld exports them: the library's reference is
+    // otherwise left for the loader to fail.
     u32 export_count = 0;
     u32* export_symbols = arena_allocate(arena, u32, object->symbol_count ? object->symbol_count : 1);
     u64 exported_name_size = 0;
-    for (u32 symbol_index = 0; export_dynamic && symbol_index < object->symbol_count; symbol_index += 1)
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         ObjectSymbol* export_symbol = object->symbols + symbol_index;
         if ((!export_symbol->global && !export_symbol->weak) || export_symbol->hidden || export_symbol->section >= OBJECT_SECTION_COUNT ||
-            object_section_kind_is_debug((ObjectSectionKind)export_symbol->section) || export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-            export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO || !export_symbol->name.length ||
+            (!export_dynamic && !link_elf_symbol_referenced_by_library(exports, export_symbol->name)) ||
+            object_section_kind_is_debug((ObjectSectionKind)export_symbol->section) ||
+            (!export_thread_local && (export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO)) ||
+            !export_symbol->name.length ||
             (export_symbol->kind != OBJECT_SYMBOL_FUNCTION && export_symbol->kind != OBJECT_SYMBOL_DATA))
         {
             continue;
@@ -4922,115 +6162,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         export_symbols[export_count++] = symbol_index;
         exported_name_size += export_symbol->name.length + 1;
     }
-    // Symbol versions.  A reference GNU ld resolves records the version it
-    // bound to, so the image keeps that one answer for its whole life instead
-    // of taking whatever the running library happens to call default; that is
-    // the versioning mechanism's entire purpose.  Every name the image spells
-    // is versioned here, the imports and the alias names each copy slot
-    // defines alike, because each of them is a name the library publishes.
-    //
-    // The result is a set of distinct (library, version) pairs numbered from
-    // ELF_VERSION_FIRST_INDEX, which is what .gnu.version records per dynamic
-    // symbol and what .gnu.version_r's auxiliary entries name.
+    // Every name the image spells is versioned: the imports, then the alias
+    // names each copy slot defines (link_elf_version_plan_build).
     u64 versioned_name_count = (u64)import_count + alias_count;
-    u32* version_libraries = arena_allocate(arena, u32, versioned_name_count + 1);
-    String8* version_names = arena_allocate(arena, String8, versioned_name_count + 1);
-    u32* version_name_offsets = arena_allocate(arena, u32, versioned_name_count + 1);
-    u16* import_versions = arena_allocate(arena, u16, (u64)import_count + 1);
-    u16* alias_versions = arena_allocate(arena, u16, (u64)alias_count + 1);
-    u64 maximum_versions = BUSTER_MIN(versioned_name_count, (u64)ELF_VERSION_INDEX_MAX - ELF_VERSION_FIRST_INDEX + 1);
-    u64 version_capacity = link_elf_index_capacity(maximum_versions);
-    u64 version_index_bytes = (version_capacity + maximum_versions + (u64)needed_library_count * 3) * sizeof(u32) + 5 * BUSTER_ALIGN_OF(u32);
-    if (version_index_bytes > exports->arena->reserved_size - exports->arena->position)
+    String8* versioned_names = arena_allocate(arena, String8, versioned_name_count + 1);
+    memcpy(versioned_names, import_names, (u64)import_count * sizeof(*versioned_names));
+    memcpy(versioned_names + import_count, copies.alias_names, (u64)alias_count * sizeof(*versioned_names));
+    LinkElfVersionPlan versions = link_elf_version_plan_build(arena, exports, versioned_names, versioned_name_count, import_count, needed_library_count);
+    if (versions.error != LINK_ERROR_NONE)
     {
-        result.error = LINK_ERROR_INVALID_INPUT;
+        result.error = versions.error;
+        result.symbol = versions.symbol;
         return result;
     }
-    u32* version_slots = arena_allocate(exports->arena, u32, version_capacity);
-    u32* version_next = arena_allocate(exports->arena, u32, maximum_versions);
-    u32* library_version_first = arena_allocate(exports->arena, u32, needed_library_count);
-    u32* library_version_last = arena_allocate(exports->arena, u32, needed_library_count);
-    u32* library_version_counts = arena_allocate_zeroed(exports->arena, u32, needed_library_count);
-    memset(version_slots, 0xff, version_capacity * sizeof(u32));
-    memset(library_version_first, 0xff, (u64)needed_library_count * sizeof(u32));
-    memset(library_version_last, 0xff, (u64)needed_library_count * sizeof(u32));
-    u32 version_count = 0;
-    u64 version_name_size = 0;
-    for (u64 entry = 0; entry < versioned_name_count; entry += 1)
-    {
-        String8 name = entry < import_count ? import_names[entry] : alias_names[entry - import_count];
-        u32 library_index = 0;
-        String8 version = {0};
-        bool no_default = false;
-        u16 version_index = 0;
-        if (link_elf_symbol_version(exports, name, &library_index, &version, &no_default))
-        {
-            u64 bucket = 0;
-            if (version.length)
-            {
-                bucket = (buster_hash_64((u8*)version.pointer, version.length) ^ library_index) & (version_capacity - 1);
-                while (version_slots[bucket] != UINT32_MAX)
-                {
-                    u32 existing = version_slots[bucket];
-                    if (version_libraries[existing] == library_index && string_equal(version_names[existing], version))
-                    {
-                        version_index = (u16)(ELF_VERSION_FIRST_INDEX + existing);
-                        break;
-                    }
-                    bucket = (bucket + 1) & (version_capacity - 1);
-                }
-            }
-            if (!version_index && version.length)
-            {
-                if (version_count > ELF_VERSION_INDEX_MAX - ELF_VERSION_FIRST_INDEX || version.length >= UINT32_MAX ||
-                    version_name_size > UINT32_MAX - version.length - 1)
-                {
-                    result.error = LINK_ERROR_INVALID_INPUT;
-                    result.symbol = name;
-                    return result;
-                }
-                version_libraries[version_count] = library_index;
-                version_names[version_count] = version;
-                version_slots[bucket] = version_count;
-                version_next[version_count] = UINT32_MAX;
-                if (library_version_last[library_index] != UINT32_MAX) version_next[library_version_last[library_index]] = version_count;
-                else library_version_first[library_index] = version_count;
-                library_version_last[library_index] = version_count;
-                library_version_counts[library_index] += 1;
-                version_index = (u16)(ELF_VERSION_FIRST_INDEX + version_count);
-                version_count += 1;
-                version_name_size += version.length + 1;
-            }
-        }
-        else if (no_default && entry < import_count)
-        {
-            // Every definition this library has for the name is a non-default
-            // `name@VER`.  An unversioned reference has nothing to bind to, so
-            // GNU ld reports it undefined; linking it anyway leaves the answer
-            // to whichever version the running loader picks.
-            result.error = LINK_ERROR_SYMBOL_VERSION;
-            result.symbol = name;
-            return result;
-        }
-        if (entry < import_count)
-        {
-            import_versions[entry] = version_index;
-        }
-        else
-        {
-            alias_versions[entry - import_count] = version_index;
-        }
-    }
-    // One .gnu.version_r entry per library that contributes a version, each
-    // followed by its own auxiliary list.
-    u64 version_need_size = 0;
-    u32 version_need_count = 0;
-    for (u32 library_index = 0; version_count && library_index < needed_library_count; library_index += 1)
-    {
-        u32 library_version_count = library_version_counts[library_index];
-        version_need_size += library_version_count ? ELF_VERSION_NEED_SIZE + (u64)library_version_count * ELF_VERSION_AUXILIARY_SIZE : 0;
-        version_need_count += library_version_count != 0;
-    }
+    u32 version_count = versions.version_count;
+    u64 version_name_size = versions.version_name_size;
+    u64 version_need_size = versions.version_need_size;
+    u32 version_need_count = versions.version_need_count;
     u64 dynamic_string_offset = interpreter_offset + interpreter_size;
     u32 first_symbol_name_offset = 1 + (u32)library_name_size;
     u64 dynamic_string_size = 1 + library_name_size + imported_name_size + version_name_size + exported_name_size;
@@ -5053,7 +6201,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 version_need_offset = align_forward(version_symbol_offset + version_symbol_size, 8);
     u64 relocation_offset = align_forward(version_need_offset + version_need_size, 8);
     u64 plt_relocation_size = (u64)import_count * ELF_RELOCATION_SIZE;
-    u64 relocation_size = (u64)(import_count + dynamic_data_relocation_count) * ELF_RELOCATION_SIZE;
+    u64 relocation_size = ((u64)import_count + dynamic_data_relocation_count) * ELF_RELOCATION_SIZE;
     u64 read_only_end = relocation_offset + relocation_size;
     if (!link_elf_virtual_align(read_only_end, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_DATA].alignment),
                                 &section_offsets[OBJECT_SECTION_DATA]))
@@ -5062,13 +6210,29 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     u64 got_offset = align_forward(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length, 8);
-    u64 got_size = (u64)(ELF_GOT_RESERVED_COUNT + import_count) * sizeof(u64);
+    u64 function_got_offset = got_offset + ((u64)ELF_GOT_RESERVED_COUNT + import_count) * sizeof(u64);
+    u64 got_size = ((u64)ELF_GOT_RESERVED_COUNT + import_count + function_got_count) * sizeof(u64);
     u64 dynamic_offset = align_forward(got_offset + got_size, 8);
-    u32 dynamic_count = needed_library_count + 11 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0);
+    // 12 fixed tags: DT_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, PLTGOT, PLTRELSZ,
+    // PLTREL, JMPREL, RELAENT, DT_DEBUG and the DT_NULL terminator.
+    u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations;
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
-    section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] = align_forward(dynamic_offset + dynamic_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
+    // Both class addresses must agree with their block-relative TLS offsets.
+    // Align final virtual addresses: the requested alignment may exceed the
+    // fixed image base and leave file-offset alignment at a nonzero residue.
+    u64 thread_local_alignment =
+        BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+    if (!link_elf_virtual_align(dynamic_offset + dynamic_size, thread_local_alignment, &section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
     u64 file_size = section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
-    section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] = align_forward(file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
+    if (!link_elf_virtual_align(file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment, &section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO]))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
     u64 thread_local_memory_end = section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
     if (!link_elf_virtual_align(thread_local_memory_end, object->sections[OBJECT_SECTION_ZERO].alignment, &section_offsets[OBJECT_SECTION_ZERO]))
     {
@@ -5076,23 +6240,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     u64 copy_data_offset = align_forward(section_offsets[OBJECT_SECTION_ZERO] + object->sections[OBJECT_SECTION_ZERO].virtual_size, 16);
-    u64 copy_slot_cursor = copy_data_offset;
-    for (u32 import_index = 0; import_index < import_count; import_index += 1)
-    {
-        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA)
-        {
-            continue;
-        }
-        u32 owner = import_copy_owners[import_index];
-        if (owner != import_index)
-        {
-            copy_slot_addresses[import_index] = copy_slot_addresses[owner];
-            continue;
-        }
-        copy_slot_cursor = align_forward(copy_slot_cursor, import_copy_sizes[import_index] >= 16 ? 16 : 8);
-        copy_slot_addresses[import_index] = image_base + copy_slot_cursor;
-        copy_slot_cursor += import_copy_sizes[import_index];
-    }
+    u64 copy_slot_cursor = link_elf_copy_plan_place(&copies, import_copied, import_count, copy_data_offset, image_base, copy_slot_addresses);
     u64 writable_memory_end = copy_slot_cursor;
     if (file_size > UINT32_MAX)
     {
@@ -5154,29 +6302,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             // retaining the imported name used by the R_X86_64_COPY entry.
             link_write_u16(bytes, symbol_offset + 6, 0xfff1);
             link_write_u64(bytes, symbol_offset + 8, copy_slot_addresses[import_index]);
-            link_write_u64(bytes, symbol_offset + 16, import_copy_sizes[import_copy_owners[import_index]]);
+            link_write_u64(bytes, symbol_offset + 16, copies.sizes[copies.owners[import_index]]);
         }
-    }
-    // The library's other names for each copy-relocated object, defined at the
-    // same slot so the library's own post-startup stores through them land in
-    // the executable's copy.
-    u64 alias_symbol_index = (u64)import_count + 1;
-    for (u32 import_index = 0; import_index < import_count; import_index += 1)
-    {
-        for (u32 alias_index = 0; alias_index < import_alias_counts[import_index]; alias_index += 1)
+        else if (canonical_functions[import_index])
         {
-            String8 alias = alias_names[import_alias_first[import_index] + alias_index];
-            u64 symbol_offset = dynamic_symbol_offset + alias_symbol_index * ELF_SYMBOL_SIZE;
-            link_write_u32(bytes, symbol_offset, (u32)(dynamic_name_cursor - dynamic_string_offset));
-            memcpy(bytes + dynamic_name_cursor, alias.pointer, alias.length);
-            dynamic_name_cursor += alias.length + 1;
-            bytes[symbol_offset + 4] = 0x11;
-            link_write_u16(bytes, symbol_offset + 6, 0xfff1);
-            link_write_u64(bytes, symbol_offset + 8, copy_slot_addresses[import_index]);
-            link_write_u64(bytes, symbol_offset + 16, import_copy_sizes[import_index]);
-            alias_symbol_index += 1;
+            // SHN_UNDEF with nonzero STT_FUNC value is the psABI's canonical
+            // PLT contract. JUMP_SLOT still binds the provider, preventing
+            // recursion through this thunk. The relocation addend is separate.
+            link_write_u64(bytes, symbol_offset + 8, image_base + plt_offset + ((u64)import_index + 1) * ELF_PLT_ENTRY_SIZE);
         }
     }
+    link_elf_copy_aliases_write(&copies, import_count, copy_slot_addresses, bytes, dynamic_symbol_offset, (u64)import_count + 1, dynamic_string_offset,
+                                &dynamic_name_cursor, 0xfff1);
+    u16 loaded_section_indices[OBJECT_SECTION_COUNT];
+    link_elf_loaded_section_indices(object, copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0, loaded_section_indices);
     u64 export_symbol_slot = (u64)import_count + 1 + alias_count;
     for (u32 export_index = 0; export_index < export_count; export_index += 1)
     {
@@ -5185,12 +6324,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         link_write_u32(bytes, symbol_offset, (u32)(dynamic_name_cursor - dynamic_string_offset));
         memcpy(bytes + dynamic_name_cursor, export_symbol->name.pointer, export_symbol->name.length);
         dynamic_name_cursor += export_symbol->name.length + 1;
-        // Binding and type in st_info; SHN_ABS in st_shndx, the shape the
-        // copy-slot aliases above already use -- the loader reads only the
-        // value, and the value is the final image address.
-        bytes[symbol_offset + 4] = (u8)(((export_symbol->weak ? 2u : 1u) << 4) | (export_symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2u : 1u));
-        link_write_u16(bytes, symbol_offset + 6, 0xfff1);
-        link_write_u64(bytes, symbol_offset + 8, image_base + section_offsets[export_symbol->section] + export_symbol->value);
+        // Ordinary exports retain the absolute-address shape used by copy
+        // aliases. TLS definitions name their loaded section and module-block
+        // offset; an image address would address the wrong per-thread slot.
+        bool thread_local_symbol = export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        u32 symbol_type = thread_local_symbol ? 6u : export_symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2u : 1u;
+        bytes[symbol_offset + 4] = (u8)(((export_symbol->weak ? 2u : 1u) << 4) | symbol_type);
+        link_write_u16(bytes, symbol_offset + 6, thread_local_symbol ? loaded_section_indices[export_symbol->section] : 0xfff1);
+        u64 symbol_value = thread_local_symbol ? link_elf_thread_local_offset(object, export_symbol)
+                                              : image_base + section_offsets[export_symbol->section] + export_symbol->value;
+        link_write_u64(bytes, symbol_offset + 8, symbol_value);
         link_write_u64(bytes, symbol_offset + 16, export_symbol->size);
         export_symbol_slot += 1;
     }
@@ -5203,23 +6346,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     }
     if (version_count)
     {
-        // The version names, then .gnu.version -- one index per dynamic
-        // symbol, parallel to .dynsym, and 0 for both the null entry and every
-        // name that binds without a version -- and .gnu.version_r, which names
-        // per library the versions those indexes stand for.
-        for (u32 index = 0; index < version_count; index += 1)
-        {
-            version_name_offsets[index] = (u32)(dynamic_name_cursor - dynamic_string_offset);
-            memcpy(bytes + dynamic_name_cursor, version_names[index].pointer, version_names[index].length);
-            dynamic_name_cursor += version_names[index].length + 1;
-        }
+        // The version names and .gnu.version_r, then .gnu.version -- one
+        // index per dynamic symbol, parallel to .dynsym, and 0 for both the
+        // null entry and every name that binds without a version.
+        link_elf_version_plan_write(&versions, bytes, dynamic_string_offset, &dynamic_name_cursor, version_need_offset, library_name_offsets,
+                                    needed_library_count);
         for (u32 import_index = 0; import_index < import_count; import_index += 1)
         {
-            link_write_u16(bytes, version_symbol_offset + ((u64)import_index + 1) * sizeof(u16), import_versions[import_index]);
+            link_write_u16(bytes, version_symbol_offset + ((u64)import_index + 1) * sizeof(u16), versions.name_versions[import_index]);
         }
         for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
         {
-            link_write_u16(bytes, version_symbol_offset + ((u64)import_count + 1 + alias_index) * sizeof(u16), alias_versions[alias_index]);
+            link_write_u16(bytes, version_symbol_offset + ((u64)import_count + 1 + alias_index) * sizeof(u16),
+                           versions.name_versions[(u64)import_count + alias_index]);
         }
         // An exported definition is VER_NDX_GLOBAL: the zero the buffer
         // holds means "local", which the lookup skips, and dlsym would once
@@ -5227,37 +6366,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         for (u32 export_index = 0; export_index < export_count; export_index += 1)
         {
             link_write_u16(bytes, version_symbol_offset + ((u64)import_count + 1 + alias_count + export_index) * sizeof(u16), 1);
-        }
-        u64 need_cursor = version_need_offset;
-        u64 previous_need = 0;
-        for (u32 library_index = 0; library_index < needed_library_count; library_index += 1)
-        {
-            u32 library_version_count = library_version_counts[library_index];
-            if (!library_version_count)
-            {
-                continue;
-            }
-            link_write_u16(bytes, need_cursor, 1);
-            link_write_u16(bytes, need_cursor + 2, (u16)library_version_count);
-            link_write_u32(bytes, need_cursor + 4, library_name_offsets[library_index]);
-            link_write_u32(bytes, need_cursor + 8, ELF_VERSION_NEED_SIZE);
-            if (previous_need)
-            {
-                link_write_u32(bytes, previous_need + 12, (u32)(need_cursor - previous_need));
-            }
-            previous_need = need_cursor;
-            u64 auxiliary = need_cursor + ELF_VERSION_NEED_SIZE;
-            u32 written = 0;
-            for (u32 index = library_version_first[library_index]; index != UINT32_MAX; index = version_next[index])
-            {
-                written += 1;
-                link_write_u32(bytes, auxiliary, link_elf_hash(version_names[index]));
-                link_write_u16(bytes, auxiliary + 6, (u16)(ELF_VERSION_FIRST_INDEX + index));
-                link_write_u32(bytes, auxiliary + 8, version_name_offsets[index]);
-                link_write_u32(bytes, auxiliary + 12, written == library_version_count ? 0 : ELF_VERSION_AUXILIARY_SIZE);
-                auxiliary += ELF_VERSION_AUXILIARY_SIZE;
-            }
-            need_cursor = auxiliary;
         }
     }
     u64 got_address = image_base + got_offset;
@@ -5370,6 +6478,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         result.error = LINK_ERROR_RELOCATION;
         return result;
     }
+    u64 dynamic_relocation_cursor = relocation_offset + plt_relocation_size;
+    link_elf_copy_relocations_write(&copies, import_copied, import_count, copy_slot_addresses, bytes, &dynamic_relocation_cursor);
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        if (function_got_indices[index] != UINT32_MAX && import_indices[index] != UINT32_MAX)
+        {
+            u64 slot_address = image_base + function_got_offset + (u64)function_got_indices[index] * sizeof(u64);
+            link_elf_write_relocation(bytes, &dynamic_relocation_cursor, slot_address, import_indices[index] + 1,
+                                       ELF_RELOCATION_TYPE_X86_64_GLOB_DAT, 0);
+        }
+    }
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -5383,19 +6502,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 width = object_relocation_kind_width(relocation->kind);
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-        // The call in a general-dynamic pair is gone once the pair is relaxed
-        // into local-exec, and __tls_get_addr with it: the sequence eight
-        // bytes back is what makes this call that call rather than a written
-        // one, and an image this linker produces has no dynamic thread-local
-        // storage for a real call to reach.
-        if (link_elf_relocation_is_relaxed_tls_get_addr(object, relocation, symbol))
+        // The call in a general- or local-dynamic sequence is gone once the
+        // sequence is relaxed into local-exec, and __tls_get_addr with it:
+        // the TLSGD or TLSLD field just before is what makes this call that
+        // call rather than a written one, and an image this linker produces
+        // has no dynamic thread-local storage for a real call to reach.
+        if (link_elf_relocation_is_relaxed_tls_get_addr(&tls_index, relocation, symbol))
         {
             continue;
         }
@@ -5424,15 +6543,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         else if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
             u32 import_index = import_indices[relocation->symbol];
-            // Function-pointer initializers (for example cJSON's allocator
-            // hooks) use an absolute 64-bit relocation for the imported
-            // function.  Point those at the generated PLT entry just like a
-            // direct PC-relative call; the dynamic loader then resolves the
-            // entry on first use.  Reject every other undefined relocation so
-            // data imports cannot be mistaken for callable symbols.
+            // Calls and direct addresses bind to the PLT entry. Linux x86-64
+            // patches imported GOT slots and pointer-wide literals separately
+            // below, using loader relocations; staging retains its old rule.
             if (import_index == UINT32_MAX ||
-                (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32 &&
-                 !object_relocation_kind_is_x86_got(relocation->kind) && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
+                (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PC64 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32 &&
+                 !object_relocation_kind_is_x86_got(relocation->kind) && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64 &&
+                 !(function_address_identity && (relocation->kind == OBJECT_RELOCATION_ABSOLUTE32 ||
+                                                  relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S))))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -5465,6 +6583,29 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
+        if (function_address_identity && symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_FUNCTION)
+        {
+            if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 && import_indices[relocation->symbol] != UINT32_MAX)
+            {
+                link_write_u64(bytes, output_offset, 0);
+                link_elf_write_relocation(bytes, &dynamic_relocation_cursor, place_address, import_indices[relocation->symbol] + 1,
+                                           ELF_RELOCATION_TYPE_X86_64_64, (u64)relocation->addend);
+                continue;
+            }
+            if (object_relocation_kind_is_x86_got(relocation->kind))
+            {
+                u64 slot_address = image_base + function_got_offset + (u64)function_got_indices[relocation->symbol] * sizeof(u64);
+                s64 value = 0;
+                if (!link_address_difference(slot_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
+                link_write_u32(bytes, output_offset, (u32)(s32)value);
+                continue;
+            }
+        }
         BusterX86MetadataGotPatch got_patch = BUSTER_X86_METADATA_GOT_PATCH_NONE;
         if (object_relocation_kind_is_x86_got(relocation->kind))
         {
@@ -5482,7 +6623,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // definition of every name in it. A conversion that answers with the
         // address as an immediate patches the same field with the address
         // itself, and the GOT load's -4 has no part in that value.
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64)
+        {
+            s64 value = 0;
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u64(bytes, output_offset, (u64)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
             got_patch == BUSTER_X86_METADATA_GOT_PATCH_PC32)
         {
             s64 value = 0;
@@ -5538,8 +6689,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             }
             link_write_u64(bytes, output_offset, value);
         }
-        else if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD)
         {
             if (symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO)
             {
@@ -5547,23 +6697,46 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 result.symbol = symbol->name;
                 return result;
             }
+            if (!link_elf_relax_local_dynamic(bytes, output_offset, section_offsets[relocation->section],
+                                              section_offsets[relocation->section] + section->data.length))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32)
+        {
+            // A DTPOFF32 outside code is not one a relaxed local-dynamic
+            // sequence reads, so its block-relative meaning would be needed.
+            if ((symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO) ||
+                (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 && relocation->section != OBJECT_SECTION_TEXT))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
             u64 initialized_size =
                 align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
-            u64 thread_local_size = align_forward(initialized_size + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size,
-                                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
+            // Local-exec offsets use the same PT_TLS alignment as the loader,
+            // including a zero-fill section with a stricter requirement.
+            u64 thread_local_size = align_forward(initialized_size + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size, thread_local_alignment);
             u64 symbol_offset = symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
-            // Local-exec patches a field the addend belongs to. The other two
-            // name a rip-relative operand whose -4 is about the instruction,
-            // not about the offset from the thread pointer, and relaxing them
-            // replaces that operand outright.
-            s64 thread_local_addend = relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ? relocation->addend : 0;
+            // Local-exec patches a field the addend belongs to, and so does a
+            // DTPOFF32 once its local-dynamic sequence reads the thread
+            // pointer. The other two name a rip-relative operand whose -4 is
+            // about the instruction, not about the offset from the thread
+            // pointer, and relaxing them replaces that operand outright.
+            bool field = relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32;
+            s64 thread_local_addend = field ? relocation->addend : 0;
             s64 value = 0;
             if (!link_address_difference(symbol_offset, thread_local_size, thread_local_addend, &value) || value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
             }
-            if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32)
+            if (field)
             {
                 link_write_u32(bytes, output_offset, (u32)(s32)value);
             }
@@ -5587,18 +6760,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         result.error = LINK_ERROR_RELOCATION;
         return result;
     }
-    u32 copy_relocation_cursor = 0;
-    for (u32 import_index = 0; import_index < import_count; import_index += 1)
+    if (dynamic_relocation_cursor != relocation_offset + relocation_size)
     {
-        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA || import_copy_owners[import_index] != import_index)
-        {
-            continue;
-        }
-        u64 relocation_entry = relocation_offset + plt_relocation_size + (u64)copy_relocation_cursor * ELF_RELOCATION_SIZE;
-        link_write_u64(bytes, relocation_entry, copy_slot_addresses[import_index]);
-        link_write_u64(bytes, relocation_entry + 8, ((u64)(import_index + 1) << 32) | ELF_RELOCATION_TYPE_X86_64_COPY);
-        link_write_u64(bytes, relocation_entry + 16, 0);
-        copy_relocation_cursor += 1;
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
     }
     u64 dynamic_cursor = dynamic_offset;
 #define BUSTER_LINK_DYNAMIC(tag, value)                                                                                                                        \
@@ -5622,6 +6787,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     BUSTER_LINK_DYNAMIC(20, 7);
     BUSTER_LINK_DYNAMIC(23, image_base + relocation_offset);
     BUSTER_LINK_DYNAMIC(9, ELF_RELOCATION_SIZE);
+    // The loader stores its r_debug address into this slot, which is how a
+    // debugger finds the shared-library list. .dynamic sits in the writable
+    // PT_LOAD (after .got), so the store is legal.
+    BUSTER_LINK_DYNAMIC(21, 0);
     if (dynamic_data_relocation_count)
     {
         BUSTER_LINK_DYNAMIC(7, image_base + relocation_offset + plt_relocation_size);
@@ -5633,6 +6802,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED, image_base + version_need_offset);
         BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED_COUNT, version_need_count);
     }
+    if (text_relocations) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_TEXTREL, 0);
     BUSTER_LINK_DYNAMIC(0, 0);
 #undef BUSTER_LINK_DYNAMIC
     bytes[0] = 0x7f;
@@ -5671,19 +6841,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     BUSTER_LINK_PROGRAM_HEADER(1, 6, section_offsets[OBJECT_SECTION_DATA], image_base + section_offsets[OBJECT_SECTION_DATA],
                                file_size - section_offsets[OBJECT_SECTION_DATA], writable_memory_end - section_offsets[OBJECT_SECTION_DATA], ELF_PAGE_SIZE);
     BUSTER_LINK_PROGRAM_HEADER(2, 6, dynamic_offset, dynamic_address, dynamic_size, dynamic_size, 8);
-    u64 thread_local_file_size = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
-    u64 thread_local_memory_size = align_forward(thread_local_file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment) +
-                                   object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
-    link_write_u32(bytes, program_header, 7);
-    link_write_u32(bytes, program_header + 4, 4);
-    link_write_u64(bytes, program_header + 8, section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 16, image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 24, image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 32, thread_local_file_size);
-    link_write_u64(bytes, program_header + 40, thread_local_memory_size);
-    link_write_u64(bytes, program_header + 48,
-                   BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment));
-    program_header += ELF_PROGRAM_HEADER_SIZE;
+    if (has_thread_local_data)
+    {
+        u64 thread_local_file_size = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
+        u64 thread_local_memory_size = align_forward(thread_local_file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment) +
+                                       object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+        BUSTER_LINK_PROGRAM_HEADER(7, 4, section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA],
+                                   thread_local_file_size, thread_local_memory_size,
+                                   BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment,
+                                              object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment));
+    }
     if (eh_frame_header_size)
     {
         BUSTER_LINK_PROGRAM_HEADER(0x6474e550, 4, eh_frame_header_offset, image_base + eh_frame_header_offset, eh_frame_header_size, eh_frame_header_size, 4);
@@ -5716,15 +6883,1313 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .dynamic_offset = dynamic_offset,
                                       .dynamic_size = dynamic_size,
                                       .import_indices = import_indices,
-                                      .copy_alias_names = alias_names,
+                                      .copy_alias_names = copies.alias_names,
                                       .copy_alias_symbol_offset = dynamic_symbol_offset + ((u64)import_count + 1) * ELF_SYMBOL_SIZE,
                                       .copy_alias_count = alias_count,
                                       .copy_zero_size = copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0,
                                       .dynamic = true,
                                   });
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (layout_section_offsets)
+    {
+        memcpy(layout_section_offsets, section_offsets, sizeof(section_offsets));
+    }
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
+    }
+    return result;
+}
+
+// Position-independent images: an x86-64 ELF ET_DYN laid out at address
+// zero, which the loader places anywhere.  One writer serves both kinds.
+// NATIVE_IMAGE_SHARED is a `-shared` object: no entry point and no
+// interpreter, every defined default-visibility symbol exported, undefined
+// symbols left for the loader, and the initializer arrays kept for the loader
+// to walk (DT_INIT_ARRAY/DT_FINI_ARRAY).  NATIVE_IMAGE_PIE is a `-pie`
+// executable: the hosted entry stub and import rules of
+// link_native_executable_elf64_x86_64_dynamic, at a base the loader chooses.
+//
+// Nothing in the image may hold a link-time address the loader does not
+// correct, so every absolute address becomes a dynamic relocation:
+// R_X86_64_RELATIVE for a definition bound here, R_X86_64_64 or GLOB_DAT for
+// an import and -- in a shared object -- for an exported definition another
+// module can preempt; the executable that copy-relocates a library's data is
+// what makes the data half of that rule necessary.  A direct call or rel32
+// binds to this image's own definition (a direct reference cannot be
+// preempted, which is ld's -Bsymbolic-functions answer), and a rel32 to
+// preemptible data, a 32-bit absolute address or any address relocation in
+// code is refused: those need an object compiled with -fPIC.  A rel32 to
+// imported data is refused in a shared object too; a PIE gives the object a
+// copy slot after .bss instead (link_elf_pic_copy_mark), as ld and lld do for
+// GCC's -fPIE code, and binds every reference to it there.  A GOT load of a definition bound here is relaxed into
+// a direct LEA where the psABI allows it and gets a RELATIVE slot otherwise.
+//
+// Thread-local storage follows the image kind.  A PIE is the initial
+// executable, so its block sits at a link-time offset from the thread pointer
+// and every model is relaxed to local-exec exactly as the fixed-address
+// writer does.  A shared object's block does not, so general-dynamic keeps its
+// __tls_get_addr call and gets a DTPMOD64/DTPOFF64 slot pair, initial-exec a
+// TPOFF64 slot and DF_STATIC_TLS, and local-exec is refused.  Local dynamic
+// keeps its call too and shares one pair for the whole image -- DTPMOD64 and
+// a zero offset, so the call answers with the block's address -- to which each
+// DTPOFF32 adds its variable's offset in the block.  Thread-local definitions
+// bind here too.
+//
+// Layout, file offsets equal to addresses:
+//   R+X: headers, [PIE entry stub], .text, .plt, .eh_frame_hdr, .eh_frame,
+//        [.interp], .dynstr, .dynsym, .hash, .gnu.version(_r), .rela.dyn,
+//        .rela.plt
+//   RW, read-only after relocation (PT_GNU_RELRO): .rodata, [.init_array,
+//        .fini_array], .dynamic, .got
+//   RW: .got.plt (lazy PLT slots), .data, .tdata, .tbss, .bss, [PIE copy slots]
+// .rodata moves behind the relocation boundary because a C constant may hold
+// an address, and the one page of alignment is what avoids text relocations.
+
+enum
+{
+    ELF_RELOCATION_TYPE_X86_64_RELATIVE = 8,
+    ELF_RELOCATION_TYPE_X86_64_DTPMOD64 = 16,
+    ELF_RELOCATION_TYPE_X86_64_DTPOFF64 = 17,
+    ELF_RELOCATION_TYPE_X86_64_TPOFF64 = 18,
+    ELF_DYNAMIC_TAG_FLAGS = 30,
+    ELF_DYNAMIC_TAG_FLAGS_1 = 0x6ffffffb,
+    ELF_DYNAMIC_FLAG_STATIC_TLS = 0x10,
+    ELF_DYNAMIC_FLAG_1_PIE = 0x08000000,
+};
+
+// What one symbol is to a position-independent image.  IMPORTED and ZERO are
+// the two fates of an undefined symbol; EXPORTED marks a .dynsym definition,
+// and PREEMPTIBLE the exported definitions another module may replace.
+// COPIED marks an IMPORTED data symbol a PIE holds in a copy slot, which
+// every reference then binds to as it would to a definition here.
+enum
+{
+    LINK_ELF_PIC_SYMBOL_IMPORTED = 1,
+    LINK_ELF_PIC_SYMBOL_EXPORTED = 2,
+    LINK_ELF_PIC_SYMBOL_PREEMPTIBLE = 4,
+    LINK_ELF_PIC_SYMBOL_ZERO = 8,
+    LINK_ELF_PIC_SYMBOL_COPIED = 16,
+};
+
+// What one .got slot holds, and so which dynamic relocation fills it.
+typedef enum LinkElfPicGotKind
+{
+    LINK_ELF_PIC_GOT_ADDRESS_RELATIVE,
+    LINK_ELF_PIC_GOT_ADDRESS_SYMBOLIC,
+    LINK_ELF_PIC_GOT_ADDRESS_ZERO,
+    LINK_ELF_PIC_GOT_TLS_MODULE,
+    LINK_ELF_PIC_GOT_TLS_DTP_OFFSET,
+    LINK_ELF_PIC_GOT_TLS_TP_OFFSET,
+} LinkElfPicGotKind;
+
+// The decision the planning pass takes for one relocation and the applying
+// pass carries out, so the two cannot disagree about the dynamic relocation
+// count the layout reserved.
+typedef enum LinkElfPicAction
+{
+    LINK_ELF_PIC_ACTION_SKIP,
+    LINK_ELF_PIC_ACTION_PC32,
+    LINK_ELF_PIC_ACTION_GOT_RELAX,
+    LINK_ELF_PIC_ACTION_GOT_SLOT,
+    LINK_ELF_PIC_ACTION_ABSOLUTE64,
+    LINK_ELF_PIC_ACTION_ABSOLUTE32_ZERO,
+    LINK_ELF_PIC_ACTION_LOCAL_EXEC,
+    LINK_ELF_PIC_ACTION_TLS_RELAX,
+    LINK_ELF_PIC_ACTION_TLS_SLOT,
+    LINK_ELF_PIC_ACTION_DTP_OFFSET,
+} LinkElfPicAction;
+
+typedef struct LinkElfPicImage LinkElfPicImage;
+struct LinkElfPicImage
+{
+    ObjectFile* object;
+    LinkElfIndex* exports;
+    LinkElfTlsIndex tls_index;
+    // Per symbol.
+    u8* classes;
+    u32* dynamic_indices;
+    u32* plt_indices;
+    u32* got_indices;
+    u32* dynamic_tls_indices;
+    u32* static_tls_indices;
+    // Per import (.dynsym index - 1): whether it takes a copy slot, and the
+    // slot's address once the layout places it.
+    bool* copied;
+    u64* copy_addresses;
+    // Per relocation.
+    u8* actions;
+    // Per PLT entry, .dynsym entry and .got slot: the symbol it stands for.
+    u32* plt_symbols;
+    u32* dynamic_symbols;
+    u32* got_symbols;
+    u8* got_kinds;
+    String8 symbol;
+    u64 dynamic_name_size;
+    u32 plt_count;
+    u32 got_count;
+    u32 import_count;
+    u32 export_count;
+    u32 dynamic_relocation_count;
+    // The local-dynamic module pair's first slot, or UINT32_MAX.
+    u32 local_dynamic_slot;
+    LinkError error;
+    bool shared;
+    bool static_tls;
+    bool requires_position_independent_objects;
+    u8 reserved[1];
+};
+
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_is_thread_local(ObjectSymbol const* symbol)
+{
+    return symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+}
+
+// Whether the psABI lets this GOT load become a direct LEA whose rel32 names
+// the symbol itself, asked of a copy of the site so the input is untouched:
+// the planning pass needs the answer before the image exists, and the other
+// answer -- an immediate absolute address -- has no place in an image the
+// loader moves.
+BUSTER_GLOBAL_LOCAL bool link_x86_got_reference_relaxes_to_pc32(ObjectRelocation const* relocation, ByteSlice data)
+{
+    u8 window[8] = {0};
+    u64 prefix = BUSTER_MIN(relocation->offset, (u64)4);
+    bool result = relocation->offset <= data.length && data.length - relocation->offset >= 4;
+    if (result)
+    {
+        memcpy(window, data.pointer + relocation->offset - prefix, prefix + 4);
+        result = link_x86_relax_got_reference(relocation->kind, relocation->addend, window, prefix, 0, prefix + 4) ==
+                 BUSTER_X86_METADATA_GOT_PATCH_PC32;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void link_elf_pic_fail(LinkElfPicImage* image, LinkError error, String8 symbol)
+{
+    if (image->error == LINK_ERROR_NONE)
+    {
+        image->error = error;
+        image->symbol = symbol;
+    }
+}
+
+// Whether a reference to this symbol is resolved by the loader rather than
+// bound here: an import without a copy slot, or a preemptible definition.
+BUSTER_GLOBAL_LOCAL bool link_elf_pic_bound_elsewhere(u8 symbol_class)
+{
+    return (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_COPIED)) == LINK_ELF_PIC_SYMBOL_IMPORTED ||
+           (symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE) != 0;
+}
+
+// The address a symbol bound here has in the image: its copy slot or its
+// definition; zero for anything else.
+BUSTER_GLOBAL_LOCAL u64 link_elf_pic_symbol_address(LinkElfPicImage* image, u64 const* section_offsets, u32 symbol_index)
+{
+    ObjectSymbol* symbol = image->object->symbols + symbol_index;
+    u64 result = 0;
+    if (image->classes[symbol_index] & LINK_ELF_PIC_SYMBOL_COPIED)
+    {
+        result = image->copy_addresses[image->dynamic_indices[symbol_index] - 1];
+    }
+    else if (symbol->section < OBJECT_SECTION_COUNT)
+    {
+        result = section_offsets[symbol->section] + symbol->value;
+    }
+    return result;
+}
+
+// Decides every symbol's fate and numbers .dynsym: the null entry, the
+// imports in symbol order, then the exports.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_classify(LinkElfPicImage* image, bool export_dynamic, bool no_undefined)
+{
+    ObjectFile* object = image->object;
+    for (u32 index = 0; image->error == LINK_ERROR_NONE && index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        u8 symbol_class = 0;
+        if (symbol->section == OBJECT_SECTION_UNDEFINED)
+        {
+            // A shared object leaves every default-visibility reference to the
+            // loader, as ld -shared does: the executable or another library
+            // may define it.  An executable keeps the fixed-address writers'
+            // rules, including a weak reference nothing defines being zero.
+            bool imported = image->shared ? !symbol->hidden : link_elf_symbol_needs_dynamic_import(image->exports, symbol);
+            // A hidden reference can only bind inside this image, and
+            // --no-undefined asks a library for the executable's rule.
+            bool unresolved = image->shared ? (symbol->hidden ? !symbol->weak : no_undefined && link_elf_strong_import_unresolved(image->exports, symbol))
+                                            : imported && link_elf_strong_import_unresolved(image->exports, symbol);
+            if (unresolved)
+            {
+                link_elf_pic_fail(image, LINK_ERROR_UNRESOLVED_SYMBOL, symbol->name);
+            }
+            else if (imported && (!symbol->name.length || symbol->name.length >= UINT32_MAX ||
+                                  (symbol->kind != OBJECT_SYMBOL_FUNCTION && symbol->kind != OBJECT_SYMBOL_DATA)))
+            {
+                link_elf_pic_fail(image, LINK_ERROR_UNRESOLVED_SYMBOL, symbol->name);
+            }
+            symbol_class = imported ? LINK_ELF_PIC_SYMBOL_IMPORTED : LINK_ELF_PIC_SYMBOL_ZERO;
+        }
+        else if (symbol->section < OBJECT_SECTION_COUNT && !object_section_kind_is_debug((ObjectSectionKind)symbol->section) &&
+                 link_elf_loaded_section_index(symbol->section))
+        {
+            bool is_thread_local = link_elf_symbol_is_thread_local(symbol);
+            bool exportable = (symbol->global || symbol->weak) && !symbol->hidden && symbol->name.length && symbol->name.length < UINT32_MAX &&
+                              (symbol->kind == OBJECT_SYMBOL_FUNCTION || symbol->kind == OBJECT_SYMBOL_DATA);
+            // Executables export public definitions requested by a library or
+            // --export-dynamic, including TLS. The existing symbol emitter
+            // already gives TLS definitions their type and module-block offset.
+            bool exported = exportable && (image->shared || export_dynamic || link_elf_symbol_referenced_by_library(image->exports, symbol->name));
+            symbol_class = (u8)((exported ? LINK_ELF_PIC_SYMBOL_EXPORTED : 0) |
+                                (exported && image->shared && !is_thread_local ? LINK_ELF_PIC_SYMBOL_PREEMPTIBLE : 0));
+        }
+        image->classes[index] = symbol_class;
+        image->dynamic_indices[index] = UINT32_MAX;
+    }
+    u32 dynamic_count = 1;
+    for (u32 pass = 0; image->error == LINK_ERROR_NONE && pass < 2; pass += 1)
+    {
+        u8 wanted = pass ? LINK_ELF_PIC_SYMBOL_EXPORTED : LINK_ELF_PIC_SYMBOL_IMPORTED;
+        for (u32 index = 0; image->error == LINK_ERROR_NONE && index < object->symbol_count; index += 1)
+        {
+            String8 name = object->symbols[index].name;
+            if (image->classes[index] & wanted)
+            {
+                if (image->dynamic_name_size > UINT32_MAX - name.length - 1)
+                {
+                    link_elf_pic_fail(image, LINK_ERROR_INVALID_INPUT, name);
+                }
+                image->dynamic_indices[index] = dynamic_count;
+                image->dynamic_symbols[dynamic_count] = index;
+                image->dynamic_name_size += name.length + 1;
+                dynamic_count += 1;
+                image->import_count += pass == 0;
+                image->export_count += pass != 0;
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_elf_pic_got_slot(LinkElfPicImage* image, u32 symbol, LinkElfPicGotKind kind)
+{
+    u32 slot = image->got_count;
+    image->got_symbols[slot] = symbol;
+    image->got_kinds[slot] = (u8)kind;
+    image->got_count += 1;
+    image->dynamic_relocation_count += kind != LINK_ELF_PIC_GOT_ADDRESS_ZERO;
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL void link_elf_pic_plt_entry(LinkElfPicImage* image, u32 symbol)
+{
+    if (image->plt_indices[symbol] == UINT32_MAX)
+    {
+        image->plt_indices[symbol] = image->plt_count;
+        image->plt_symbols[image->plt_count] = symbol;
+        image->plt_count += 1;
+    }
+}
+
+// A PIE's copy relocations.  GCC compiles -fPIE code on the assumption that
+// the executable holds the data it reads directly, so a rel32 to imported
+// data asks for a copy slot, as ld and lld make one in a PIE; the slot then
+// binds every other reference to the symbol here too.  A shared object has
+// no such slot and keeps refusing the reference in link_elf_pic_plan.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_copy_mark(LinkElfPicImage* image)
+{
+    ObjectFile* object = image->object;
+    for (u32 index = 0; !image->shared && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + index;
+        u32 symbol_index = relocation->symbol;
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 && relocation->section < OBJECT_SECTION_COUNT &&
+            !object_section_kind_is_debug((ObjectSectionKind)relocation->section) && symbol_index < object->symbol_count &&
+            (image->classes[symbol_index] & LINK_ELF_PIC_SYMBOL_IMPORTED) && object->symbols[symbol_index].kind == OBJECT_SYMBOL_DATA &&
+            object->symbols[symbol_index].thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_YES)
+        {
+            image->classes[symbol_index] |= LINK_ELF_PIC_SYMBOL_COPIED;
+            image->copied[image->dynamic_indices[symbol_index] - 1] = true;
+        }
+    }
+}
+
+// The planning pass: one action per relocation, and the PLT entries, .got
+// slots and dynamic relocations those actions need.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
+{
+    ObjectFile* object = image->object;
+    for (u32 index = 0; image->error == LINK_ERROR_NONE && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + index;
+        LinkElfPicAction action = LINK_ELF_PIC_ACTION_SKIP;
+        bool valid = relocation->section < OBJECT_SECTION_COUNT && relocation->symbol < object->symbol_count;
+        bool debug = valid && object_section_kind_is_debug((ObjectSectionKind)relocation->section);
+        ObjectSymbol* symbol = valid ? object->symbols + relocation->symbol : 0;
+        u8 symbol_class = valid ? image->classes[relocation->symbol] : 0;
+        bool is_thread_local = valid && link_elf_symbol_is_thread_local(symbol);
+        bool imported = (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_COPIED)) == LINK_ELF_PIC_SYMBOL_IMPORTED;
+        bool bound_elsewhere = link_elf_pic_bound_elsewhere(symbol_class);
+        bool requires_position_independent_objects = false;
+        if (!valid)
+        {
+            link_elf_pic_fail(image, LINK_ERROR_RELOCATION, (String8){0});
+        }
+        else if (debug || (!image->shared && link_elf_relocation_is_relaxed_tls_get_addr(&image->tls_index, relocation, symbol)))
+        {
+            action = LINK_ELF_PIC_ACTION_SKIP;
+        }
+        else
+        {
+            switch (relocation->kind)
+            {
+            case OBJECT_RELOCATION_X86_64_PC64:
+            case OBJECT_RELOCATION_X86_64_PC32:
+            case OBJECT_RELOCATION_X86_64_PLT32:
+                if (imported)
+                {
+                    valid = relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 || symbol->kind == OBJECT_SYMBOL_FUNCTION;
+                    // A PIE or shared object cannot publish a fixed-address
+                    // canonical PLT value. Non-PIC address references must
+                    // use GOT/literal relocations or be refused explicitly.
+                    valid = valid && link_elf_x86_function_plt_reference(object, relocation);
+                    if (valid) link_elf_pic_plt_entry(image, relocation->symbol);
+                }
+                else
+                {
+                    valid = !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !is_thread_local &&
+                            !((symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE) && symbol->kind == OBJECT_SYMBOL_DATA &&
+                              (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64));
+                }
+                if (bound_elsewhere && symbol->kind == OBJECT_SYMBOL_FUNCTION && !link_elf_x86_function_plt_reference(object, relocation)) valid = false;
+                requires_position_independent_objects = !is_thread_local && bound_elsewhere && symbol->kind == OBJECT_SYMBOL_DATA;
+                action = LINK_ELF_PIC_ACTION_PC32;
+                break;
+            case OBJECT_RELOCATION_X86_64_GOTPCREL:
+            case OBJECT_RELOCATION_X86_64_GOTPCRELX:
+            case OBJECT_RELOCATION_X86_64_REX_GOTPCRELX:
+            case OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX:
+                valid = !is_thread_local;
+                if (valid && !bound_elsewhere && !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) &&
+                    link_x86_got_reference_relaxes_to_pc32(relocation, object->sections[relocation->section].data))
+                {
+                    action = LINK_ELF_PIC_ACTION_GOT_RELAX;
+                }
+                else if (valid)
+                {
+                    action = LINK_ELF_PIC_ACTION_GOT_SLOT;
+                    if (image->got_indices[relocation->symbol] == UINT32_MAX)
+                    {
+                        LinkElfPicGotKind kind = bound_elsewhere                                  ? LINK_ELF_PIC_GOT_ADDRESS_SYMBOLIC
+                                                 : (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) ? LINK_ELF_PIC_GOT_ADDRESS_ZERO
+                                                                                              : LINK_ELF_PIC_GOT_ADDRESS_RELATIVE;
+                        image->got_indices[relocation->symbol] = link_elf_pic_got_slot(image, relocation->symbol, kind);
+                    }
+                }
+                break;
+            case OBJECT_RELOCATION_ABSOLUTE64:
+                // Only storage the loader may write before RELRO seals it.
+                valid = !is_thread_local && (relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_READ_ONLY_DATA ||
+                                          relocation->section == OBJECT_SECTION_INIT_ARRAY || relocation->section == OBJECT_SECTION_FINI_ARRAY ||
+                                          relocation->section == OBJECT_SECTION_THREAD_LOCAL_DATA);
+                image->dynamic_relocation_count += valid && (bound_elsewhere || !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO));
+                requires_position_independent_objects = !is_thread_local && relocation->section == OBJECT_SECTION_TEXT;
+                action = LINK_ELF_PIC_ACTION_ABSOLUTE64;
+                break;
+            case OBJECT_RELOCATION_ABSOLUTE32:
+            case OBJECT_RELOCATION_X86_64_ABSOLUTE32S:
+                valid = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) != 0;
+                requires_position_independent_objects = !is_thread_local;
+                action = LINK_ELF_PIC_ACTION_ABSOLUTE32_ZERO;
+                break;
+            case OBJECT_RELOCATION_X86_64_TPOFF32:
+                valid = !image->shared && is_thread_local;
+                action = LINK_ELF_PIC_ACTION_LOCAL_EXEC;
+                break;
+            // In an executable a DTPOFF32 in code follows a relaxed
+            // local-dynamic sequence and is local exec's offset; in a shared
+            // object it stays the offset in the block.
+            case OBJECT_RELOCATION_X86_64_DTPOFF32:
+                valid = is_thread_local && (image->shared || relocation->section == OBJECT_SECTION_TEXT);
+                action = image->shared ? LINK_ELF_PIC_ACTION_DTP_OFFSET : LINK_ELF_PIC_ACTION_LOCAL_EXEC;
+                break;
+            case OBJECT_RELOCATION_X86_64_TLSLD:
+                valid = is_thread_local;
+                action = image->shared ? LINK_ELF_PIC_ACTION_TLS_SLOT : LINK_ELF_PIC_ACTION_TLS_RELAX;
+                if (valid && image->shared && image->local_dynamic_slot == UINT32_MAX)
+                {
+                    image->local_dynamic_slot = link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_TLS_MODULE);
+                    link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_ADDRESS_ZERO);
+                }
+                break;
+            case OBJECT_RELOCATION_X86_64_GOTTPOFF:
+            case OBJECT_RELOCATION_X86_64_TLSGD:
+            {
+                bool general_dynamic = relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD;
+                u32* slots = general_dynamic ? image->dynamic_tls_indices : image->static_tls_indices;
+                valid = is_thread_local;
+                action = image->shared ? LINK_ELF_PIC_ACTION_TLS_SLOT : LINK_ELF_PIC_ACTION_TLS_RELAX;
+                if (valid && image->shared && slots[relocation->symbol] == UINT32_MAX)
+                {
+                    slots[relocation->symbol] = link_elf_pic_got_slot(image, relocation->symbol,
+                                                                      general_dynamic ? LINK_ELF_PIC_GOT_TLS_MODULE : LINK_ELF_PIC_GOT_TLS_TP_OFFSET);
+                    if (general_dynamic)
+                    {
+                        link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_TLS_DTP_OFFSET);
+                    }
+                }
+                image->static_tls |= valid && image->shared && !general_dynamic;
+            }
+            break;
+            default:
+                valid = false;
+                break;
+            }
+            if (!valid)
+            {
+                link_elf_pic_fail(image, LINK_ERROR_RELOCATION, symbol->name);
+                image->requires_position_independent_objects = requires_position_independent_objects;
+            }
+        }
+        image->actions[index] = (u8)action;
+    }
+}
+
+// -Wl has already been split; a separated SONAME operand is consumed once,
+// even when its bytes look like another option.
+BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_soname_option(String8 argument)
+{
+    return string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) || string_equal(argument, S8("-h"));
+}
+
+BUSTER_GLOBAL_LOCAL String8 link_elf_linker_argument_soname(NativeExecutableLinkOptions options)
+{
+    String8 result = {0};
+    static String8 const prefixes[] = {S8_INITIALIZER("-soname="), S8_INITIALIZER("--soname=")};
+    for (u32 index = 0; index < options.linker_argument_count; index += 1)
+    {
+        String8 argument = options.linker_arguments[index];
+        for (u32 prefix = 0; prefix < BUSTER_ARRAY_LENGTH(prefixes); prefix += 1)
+        {
+            if (argument.length > prefixes[prefix].length && string_starts_with_sequence(argument, prefixes[prefix]))
+            {
+                result = string_slice(argument, prefixes[prefix].length, argument.length);
+            }
+        }
+        if (index + 1 < options.linker_argument_count && link_elf_linker_argument_soname_option(argument))
+        {
+            result = options.linker_arguments[++index];
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_present(NativeExecutableLinkOptions options, String8 const* spellings, u32 spelling_count)
+{
+    bool result = false;
+    for (u32 index = 0; index < options.linker_argument_count; index += 1)
+    {
+        if (index + 1 < options.linker_argument_count && link_elf_linker_argument_soname_option(options.linker_arguments[index]))
+        {
+            index += 1;
+            continue;
+        }
+        for (u32 spelling = 0; spelling < spelling_count; spelling += 1)
+        {
+            result |= string_equal(options.linker_arguments[index], spellings[spelling]);
+        }
+    }
+    return result;
+}
+
+// Writes PLT0 and one lazy entry per imported function, with the .got.plt
+// slot each entry's first jump reads holding the address of its own push, and
+// the JUMP_SLOT relocation that slot takes.  The encodings are the fixed-
+// address writer's; only their addresses differ.
+BUSTER_GLOBAL_LOCAL bool link_elf_pic_plt_write(LinkElfPicImage* image, u8* bytes, u64 plt_offset, u64 got_plt_offset, u64 relocation_offset)
+{
+    bool valid = true;
+    LinkX86InstructionBuilder plt0 = {.bytes = bytes + plt_offset, .capacity = ELF_PLT_ENTRY_SIZE};
+    BusterX86MetadataPhysicalOperand plt_memory = link_x86_memory_rip(64, 0);
+    BusterX86MetadataPhysicalOperand nop_memory = link_x86_memory_base(0, 8, 0);
+    nop_memory.memory.has_displacement = true;
+    valid = link_x86_emit(&plt0, S8("PUSH"), &plt_memory, 1) && link_x86_emit(&plt0, S8("JMP"), &plt_memory, 1) &&
+            link_x86_emit(&plt0, S8("NOP"), &nop_memory, 1) && plt0.count == ELF_PLT_ENTRY_SIZE;
+    if (valid)
+    {
+        link_write_u32(bytes, plt_offset + 2, (u32)(s32)((s64)(got_plt_offset + 8) - (s64)(plt_offset + 6)));
+        link_write_u32(bytes, plt_offset + 8, (u32)(s32)((s64)(got_plt_offset + 16) - (s64)(plt_offset + 12)));
+    }
+    u64 relocation_cursor = relocation_offset;
+    for (u32 entry = 0; valid && entry < image->plt_count; entry += 1)
+    {
+        u64 entry_offset = plt_offset + (u64)(entry + 1) * ELF_PLT_ENTRY_SIZE;
+        u64 slot_offset = got_plt_offset + (u64)(ELF_GOT_RESERVED_COUNT + entry) * sizeof(u64);
+        LinkX86InstructionBuilder plt_entry = {.bytes = bytes + entry_offset, .capacity = ELF_PLT_ENTRY_SIZE};
+        BusterX86MetadataPhysicalOperand slot_memory = link_x86_memory_rip(64, 0);
+        BusterX86MetadataPhysicalOperand entry_immediate = link_x86_immediate(entry, 32);
+        BusterX86MetadataPhysicalOperand plt_relative = link_x86_relative(0, 32);
+        valid = link_x86_emit(&plt_entry, S8("JMP"), &slot_memory, 1) && link_x86_emit_push_imm32(&plt_entry, &entry_immediate) &&
+                link_x86_emit(&plt_entry, S8("JMP"), &plt_relative, 1) && plt_entry.count == ELF_PLT_ENTRY_SIZE;
+        if (valid)
+        {
+            link_write_u32(bytes, entry_offset + 2, (u32)(s32)((s64)slot_offset - (s64)(entry_offset + 6)));
+            link_write_u32(bytes, entry_offset + 12, (u32)(s32)((s64)plt_offset - (s64)(entry_offset + 16)));
+            link_write_u64(bytes, slot_offset, entry_offset + 6);
+            link_elf_write_relocation(bytes, &relocation_cursor, slot_offset, image->dynamic_indices[image->plt_symbols[entry]],
+                                      ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT, 0);
+        }
+    }
+    return valid;
+}
+
+// Fills every .got slot and writes the dynamic relocation each one takes,
+// in slot order, from `*relocation_cursor`.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_got_write(LinkElfPicImage* image, u8* bytes, u64 got_offset, u64 const* section_offsets, u64* relocation_cursor)
+{
+    ObjectFile* object = image->object;
+    for (u32 slot = 0; slot < image->got_count; slot += 1)
+    {
+        u32 symbol_index = image->got_symbols[slot];
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        u64 slot_offset = got_offset + (u64)slot * sizeof(u64);
+        bool defined = symbol->section < OBJECT_SECTION_COUNT;
+        u64 address = link_elf_pic_symbol_address(image, section_offsets, symbol_index);
+        u64 thread_local_offset = defined ? link_elf_thread_local_offset(object, symbol) : 0;
+        switch ((LinkElfPicGotKind)image->got_kinds[slot])
+        {
+        case LINK_ELF_PIC_GOT_ADDRESS_RELATIVE:
+            link_write_u64(bytes, slot_offset, address);
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0, ELF_RELOCATION_TYPE_X86_64_RELATIVE, address);
+            break;
+        case LINK_ELF_PIC_GOT_ADDRESS_SYMBOLIC:
+            link_write_u64(bytes, slot_offset, address);
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, image->dynamic_indices[symbol_index], ELF_RELOCATION_TYPE_X86_64_GLOB_DAT, 0);
+            break;
+        case LINK_ELF_PIC_GOT_ADDRESS_ZERO:
+            break;
+        case LINK_ELF_PIC_GOT_TLS_MODULE:
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0, ELF_RELOCATION_TYPE_X86_64_DTPMOD64, 0);
+            break;
+        case LINK_ELF_PIC_GOT_TLS_DTP_OFFSET:
+            link_write_u64(bytes, slot_offset, thread_local_offset);
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0, ELF_RELOCATION_TYPE_X86_64_DTPOFF64, thread_local_offset);
+            break;
+        case LINK_ELF_PIC_GOT_TLS_TP_OFFSET:
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0, ELF_RELOCATION_TYPE_X86_64_TPOFF64, thread_local_offset);
+            break;
+        }
+    }
+}
+
+// The applying pass: carries out each planned action against the laid-out
+// image, and writes the dynamic relocation an ABSOLUTE64 takes from
+// `*relocation_cursor`.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes, u64 const* section_offsets, u64 plt_offset, u64 got_offset,
+                                               u64 thread_local_size, u64* relocation_cursor)
+{
+    ObjectFile* object = image->object;
+    for (u32 index = 0; image->error == LINK_ERROR_NONE && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + index;
+        LinkElfPicAction action = (LinkElfPicAction)image->actions[index];
+        ObjectSection* section = object->sections + relocation->section;
+        ObjectSymbol* symbol = object->symbols + relocation->symbol;
+        u8 symbol_class = image->classes[relocation->symbol];
+        u64 width = object_relocation_kind_width(relocation->kind);
+        bool valid = action == LINK_ELF_PIC_ACTION_SKIP ||
+                     (relocation->offset <= section->data.length && width <= section->data.length - relocation->offset);
+        u64 section_start = section_offsets[relocation->section];
+        u64 section_end = section_start + section->data.length;
+        u64 place = section_start + relocation->offset;
+        bool imported = (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_COPIED)) == LINK_ELF_PIC_SYMBOL_IMPORTED;
+        u64 target = 0;
+        if (imported)
+        {
+            target = image->plt_indices[relocation->symbol] == UINT32_MAX
+                         ? 0
+                         : plt_offset + ((u64)image->plt_indices[relocation->symbol] + 1) * ELF_PLT_ENTRY_SIZE;
+        }
+        else
+        {
+            target = link_elf_pic_symbol_address(image, section_offsets, relocation->symbol);
+        }
+        s64 displacement = 0;
+        switch (action)
+        {
+        case LINK_ELF_PIC_ACTION_SKIP:
+            break;
+        case LINK_ELF_PIC_ACTION_GOT_RELAX:
+        case LINK_ELF_PIC_ACTION_PC32:
+            // A relaxed GOT load is now a LEA of the symbol itself, whose
+            // rel32 is patched exactly as a direct reference's is.
+            if (action == LINK_ELF_PIC_ACTION_GOT_RELAX)
+            {
+                valid = valid && link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, place, section_start, section_end) ==
+                                     BUSTER_X86_METADATA_GOT_PATCH_PC32;
+            }
+            valid = valid && link_address_difference(target, place, relocation->addend, &displacement) &&
+                    (relocation->kind == OBJECT_RELOCATION_X86_64_PC64 || (displacement >= INT32_MIN && displacement <= INT32_MAX));
+            if (valid)
+            {
+                if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64) link_write_u64(bytes, place, (u64)displacement);
+                else link_write_u32(bytes, place, (u32)(s32)displacement);
+            }
+            break;
+        case LINK_ELF_PIC_ACTION_GOT_SLOT:
+        case LINK_ELF_PIC_ACTION_TLS_SLOT:
+        {
+            u32 slot = action == LINK_ELF_PIC_ACTION_GOT_SLOT                      ? image->got_indices[relocation->symbol]
+                       : relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ? image->dynamic_tls_indices[relocation->symbol]
+                       : relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ? image->local_dynamic_slot
+                                                                             : image->static_tls_indices[relocation->symbol];
+            valid = valid && slot < image->got_count &&
+                    link_address_difference(got_offset + (u64)slot * sizeof(u64), place, relocation->addend, &displacement) &&
+                    displacement >= INT32_MIN && displacement <= INT32_MAX;
+            if (valid) link_write_u32(bytes, place, (u32)(s32)displacement);
+        }
+        break;
+        case LINK_ELF_PIC_ACTION_ABSOLUTE64:
+        {
+            u64 value = 0;
+            bool zero = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) != 0;
+            valid = valid && link_address_addend(zero || imported ? 0 : target, relocation->addend, &value);
+            if (valid)
+            {
+                link_write_u64(bytes, place, value);
+                if (link_elf_pic_bound_elsewhere(symbol_class))
+                {
+                    link_elf_write_relocation(bytes, relocation_cursor, place, image->dynamic_indices[relocation->symbol], ELF_RELOCATION_TYPE_X86_64_64,
+                                              (u64)relocation->addend);
+                }
+                else if (!zero)
+                {
+                    link_elf_write_relocation(bytes, relocation_cursor, place, 0, ELF_RELOCATION_TYPE_X86_64_RELATIVE, value);
+                }
+            }
+        }
+        break;
+        case LINK_ELF_PIC_ACTION_ABSOLUTE32_ZERO:
+        {
+            s32 signed_value = 0;
+            bool fits = relocation->kind == OBJECT_RELOCATION_ABSOLUTE32 ? relocation->addend >= 0 && relocation->addend <= (s64)UINT32_MAX
+                                                                         : link_absolute32s_value(0, relocation->addend, &signed_value);
+            valid = valid && fits;
+            if (valid) link_write_u32(bytes, place, (u32)relocation->addend);
+        }
+        break;
+        case LINK_ELF_PIC_ACTION_LOCAL_EXEC:
+        case LINK_ELF_PIC_ACTION_TLS_RELAX:
+        {
+            // Local-exec patches a field the addend belongs to; the relaxed
+            // models name a rip-relative operand whose -4 is about the
+            // instruction, and relaxing replaces that operand outright.
+            s64 thread_local_addend = action == LINK_ELF_PIC_ACTION_LOCAL_EXEC ? relocation->addend : 0;
+            valid = valid && link_address_difference(link_elf_thread_local_offset(object, symbol), thread_local_size, thread_local_addend, &displacement) &&
+                    displacement >= INT32_MIN && displacement <= INT32_MAX;
+            if (valid && action == LINK_ELF_PIC_ACTION_LOCAL_EXEC)
+            {
+                link_write_u32(bytes, place, (u32)(s32)displacement);
+            }
+            else if (valid && relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD)
+            {
+                valid = link_elf_relax_local_dynamic(bytes, place, section_start, section_end);
+            }
+            else if (valid)
+            {
+                valid = link_elf_relax_thread_local(bytes, place, section_start, section_end, relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD,
+                                                    (s32)displacement);
+            }
+        }
+        break;
+        case LINK_ELF_PIC_ACTION_DTP_OFFSET:
+        {
+            u64 value = 0;
+            valid = valid && link_address_addend(link_elf_thread_local_offset(object, symbol), relocation->addend, &value) && value <= INT32_MAX;
+            if (valid) link_write_u32(bytes, place, (u32)value);
+        }
+        break;
+        }
+        if (!valid)
+        {
+            link_elf_pic_fail(image, LINK_ERROR_RELOCATION, symbol->name);
+        }
+    }
+}
+
+// A System V .hash with a real bucket array: a library is searched by every
+// lookup the loader makes, so one chain through every symbol would make each
+// of them linear in the library's size.
+// The copy-slot aliases follow every symbol-backed entry, from `first_alias`.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_hash_write(LinkElfPicImage* image, u8* bytes, u64 hash_offset, u32 bucket_count, u32 dynamic_symbol_count,
+                                                 u32 first_alias, String8 const* alias_names)
+{
+    link_write_u32(bytes, hash_offset, bucket_count);
+    link_write_u32(bytes, hash_offset + 4, dynamic_symbol_count);
+    u64 buckets = hash_offset + 8;
+    u64 chains = buckets + (u64)bucket_count * sizeof(u32);
+    for (u32 dynamic = 1; dynamic < dynamic_symbol_count; dynamic += 1)
+    {
+        String8 name = dynamic < first_alias ? image->object->symbols[image->dynamic_symbols[dynamic]].name : alias_names[dynamic - first_alias];
+        u64 bucket = buckets + (u64)(link_elf_hash(name) % bucket_count) * sizeof(u32);
+        link_write_u32(bytes, chains + (u64)dynamic * sizeof(u32), link_read_u32(bytes, bucket));
+        link_write_u32(bytes, bucket, dynamic);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_position_independent(Arena* arena, ObjectFile* object,
+                                                                                                    NativeExecutableLinkOptions options,
+                                                                                                    LinkElfIndex* exports)
+{
+    NativeExecutableLinkResult result = {0};
+    static char8 const interpreter[] = "/lib64/ld-linux-x86-64.so.2";
+    static char8 const runtime_library[] = "libc.so.6";
+    static String8 const export_dynamic_spellings[] = {S8_INITIALIZER("-export-dynamic"), S8_INITIALIZER("--export-dynamic"), S8_INITIALIZER("-E")};
+    static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined")};
+    bool no_undefined = link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings));
+    for (u32 index = 0; index + 1 < options.linker_argument_count; index += 1)
+    {
+        if (link_elf_linker_argument_soname_option(options.linker_arguments[index]))
+        {
+            index += 1;
+        }
+        else
+        {
+            no_undefined |= string_equal(options.linker_arguments[index], S8("-z")) && string_equal(options.linker_arguments[index + 1], S8("defs"));
+        }
+    }
+    bool shared = options.image_kind == NATIVE_IMAGE_SHARED;
+    LinkElfPicImage image = {.object = object, .exports = exports, .local_dynamic_slot = UINT32_MAX, .shared = shared};
+    if ((options.dynamic_library_count && !options.dynamic_libraries) || options.dynamic_library_count == UINT32_MAX ||
+        object->section_count < OBJECT_SECTION_COUNT || !object->sections || (object->symbol_count && !object->symbols) ||
+        (object->relocation_count && !object->relocations) || object->symbol_count >= UINT32_MAX - 3 ||
+        object->sections[OBJECT_SECTION_WINDOWS_PDATA].data.length || object->sections[OBJECT_SECTION_WINDOWS_XDATA].data.length)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    buster_x86_metadata_prewarm();
+    // An executable gets the hosted entry stub the fixed-address writer
+    // builds, which calls its initializers itself; a library leaves its
+    // arrays in place for the loader.
+    ObjectFile hosted_object = {0};
+    LinkInitializerPlan plan = {0};
+    u32 exit_symbol_index = 0;
+    u32 atexit_symbol_index = 0;
+    u32 entry_symbol_index = UINT32_MAX;
+    u32 entry_stub_size = 0;
+    u32 entry_call_displacement_offset = 0;
+    u32 entry_exit_displacement_offset = 0;
+    u32 entry_atexit_displacement_offset = 0;
+    u32 loader_atexit_displacement_offset = 0;
+    u8* entry_stub = 0;
+    u32* initializer_displacement_offsets = 0;
+    u32* copy_import_indices = 0;
+    if (result.error == LINK_ERROR_NONE && !shared)
+    {
+        ObjectFile stripped_object = {0};
+        if (!link_elf_hosted_exit_symbol(arena, object, &hosted_object, &exit_symbol_index, &atexit_symbol_index) ||
+            !link_initializer_plan_build(arena, &hosted_object, &stripped_object, &plan))
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+        }
+        else
+        {
+            hosted_object = stripped_object;
+            object = &hosted_object;
+            image.object = object;
+            u32 capacity = link_x86_elf_entry_stub_capacity(&plan);
+            entry_stub = arena_allocate(arena, u8, capacity);
+            initializer_displacement_offsets = arena_allocate(arena, u32, (u64)plan.constructor_count + plan.destructor_count + 1);
+            if (!link_x86_build_elf_entry_stub(entry_stub, capacity, &entry_stub_size, &entry_call_displacement_offset, true, &entry_exit_displacement_offset,
+                                               &entry_atexit_displacement_offset, &loader_atexit_displacement_offset, &plan,
+                                               initializer_displacement_offsets))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+            }
+            String8 entry_name = options.entry_symbol.length ? options.entry_symbol : S8("main");
+            entry_symbol_index = link_symbol_find(object, entry_name);
+            if (result.error == LINK_ERROR_NONE &&
+                (entry_symbol_index == UINT32_MAX || object->symbols[entry_symbol_index].section == OBJECT_SECTION_UNDEFINED ||
+                 object->symbols[entry_symbol_index].kind != OBJECT_SYMBOL_FUNCTION))
+            {
+                result.error = LINK_ERROR_ENTRY_SYMBOL;
+                result.symbol = entry_name;
+            }
+        }
+    }
+    if (result.error == LINK_ERROR_NONE && !shared && !link_elf_tls_index_build(exports->arena, object, &image.tls_index))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    if (result.error == LINK_ERROR_NONE)
+    {
+        u64 symbol_count = (u64)object->symbol_count + 1;
+        u64 got_capacity = (u64)object->relocation_count * 2 + 1;
+        image.classes = arena_allocate_zeroed(arena, u8, symbol_count);
+        image.dynamic_indices = arena_allocate(arena, u32, symbol_count);
+        image.plt_indices = arena_allocate(arena, u32, symbol_count);
+        image.got_indices = arena_allocate(arena, u32, symbol_count);
+        image.dynamic_tls_indices = arena_allocate(arena, u32, symbol_count);
+        image.static_tls_indices = arena_allocate(arena, u32, symbol_count);
+        image.actions = arena_allocate(arena, u8, (u64)object->relocation_count + 1);
+        image.plt_symbols = arena_allocate(arena, u32, symbol_count);
+        image.dynamic_symbols = arena_allocate(arena, u32, symbol_count + 1);
+        image.got_symbols = arena_allocate(arena, u32, got_capacity);
+        image.got_kinds = arena_allocate(arena, u8, got_capacity);
+        memset(image.plt_indices, 0xff, symbol_count * sizeof(u32));
+        memset(image.got_indices, 0xff, symbol_count * sizeof(u32));
+        memset(image.dynamic_tls_indices, 0xff, symbol_count * sizeof(u32));
+        memset(image.static_tls_indices, 0xff, symbol_count * sizeof(u32));
+        image.copied = arena_allocate_zeroed(arena, bool, symbol_count);
+        image.copy_addresses = arena_allocate_zeroed(arena, u64, symbol_count);
+        link_elf_pic_classify(&image, link_elf_linker_argument_present(options, export_dynamic_spellings, BUSTER_ARRAY_LENGTH(export_dynamic_spellings)),
+                              no_undefined);
+        if (image.error == LINK_ERROR_NONE) link_elf_pic_copy_mark(&image);
+        // .symtab describes a copied import as the slot .dynsym defines.
+        copy_import_indices = arena_allocate(arena, u32, symbol_count);
+        for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
+        {
+            copy_import_indices[symbol] = image.classes[symbol] & LINK_ELF_PIC_SYMBOL_COPIED ? image.dynamic_indices[symbol] - 1 : UINT32_MAX;
+        }
+        // The entry stub calls `exit` and `__cxa_atexit` through the PLT
+        // when the program does not define them itself.
+        for (u32 hosted = 0; !shared && hosted < 2; hosted += 1)
+        {
+            u32 symbol = hosted ? atexit_symbol_index : exit_symbol_index;
+            if (image.classes[symbol] & LINK_ELF_PIC_SYMBOL_IMPORTED) link_elf_pic_plt_entry(&image, symbol);
+        }
+        link_elf_pic_plan(&image);
+        result.error = image.error;
+        result.symbol = image.symbol;
+        result.requires_position_independent_objects = image.requires_position_independent_objects;
+    }
+    String8 soname = shared ? link_elf_linker_argument_soname(options) : (String8){0};
+    u32 needed_library_count = options.dynamic_library_count + 1;
+    u32* library_name_offsets = arena_allocate(arena, u32, (u64)needed_library_count + 1);
+    u64 dynamic_string_size = 1 + sizeof(runtime_library);
+    library_name_offsets[0] = 1;
+    for (u32 library = 0; result.error == LINK_ERROR_NONE && library < options.dynamic_library_count; library += 1)
+    {
+        String8 name = options.dynamic_libraries[library].name;
+        if (!name.length || name.length >= UINT32_MAX || dynamic_string_size > UINT32_MAX - name.length - 1)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+        }
+        else
+        {
+            library_name_offsets[library + 1] = (u32)dynamic_string_size;
+            dynamic_string_size += name.length + 1;
+        }
+    }
+    u64 soname_offset = dynamic_string_size;
+    dynamic_string_size += soname.length ? soname.length + 1 : 0;
+    u64 symbol_name_offset = dynamic_string_size;
+    dynamic_string_size += image.dynamic_name_size;
+    LinkElfVersionPlan versions = {0};
+    // The copy slots' alias names follow the imports and exports in .dynsym.
+    LinkElfCopyPlan copies = {0};
+    u32 first_alias = 1 + image.import_count + image.export_count;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        String8* import_names = arena_allocate(arena, String8, (u64)image.import_count + 1);
+        for (u32 import = 0; import < image.import_count; import += 1)
+        {
+            import_names[import] = object->symbols[image.dynamic_symbols[import + 1]].name;
+        }
+        copies = link_elf_copy_plan_build(arena, exports, object, import_names, image.copied, image.import_count, dynamic_string_size);
+        result.error = copies.error;
+        result.symbol = copies.symbol;
+        image.dynamic_relocation_count += copies.slot_count;
+        dynamic_string_size += copies.alias_name_size;
+    }
+    u32 dynamic_symbol_count = first_alias + copies.alias_count;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        u64 versioned_name_count = (u64)image.import_count + copies.alias_count;
+        String8* versioned_names = arena_allocate(arena, String8, versioned_name_count + 1);
+        for (u32 import = 0; import < image.import_count; import += 1)
+        {
+            versioned_names[import] = object->symbols[image.dynamic_symbols[import + 1]].name;
+        }
+        memcpy(versioned_names + image.import_count, copies.alias_names, (u64)copies.alias_count * sizeof(*versioned_names));
+        versions = link_elf_version_plan_build(arena, exports, versioned_names, versioned_name_count, image.import_count, needed_library_count);
+        result.error = versions.error;
+        result.symbol = versions.symbol;
+        dynamic_string_size += versions.version_name_size;
+        if (dynamic_string_size > UINT32_MAX) result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    // Layout.  Every offset is also the address.
+    // The input checks above leave `sections` unproven on the error path.
+    bool has_thread_local = result.error == LINK_ERROR_NONE && (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+                                                                object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size);
+    LinkElfEhFrameTable eh_frame_table = {0};
+    if (result.error == LINK_ERROR_NONE)
+    {
+        eh_frame_table = link_elf_eh_frame_table_build(arena, object);
+        result.error = eh_frame_table.valid ? LINK_ERROR_NONE : LINK_ERROR_RELOCATION;
+    }
+    u64 eh_frame_header_size = eh_frame_table.count ? 12 + (u64)eh_frame_table.count * 8 : 0;
+    u32 program_header_count = 5 + (shared ? 0u : 2u) + (u32)has_thread_local + (u32)(eh_frame_header_size != 0);
+    u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
+    u64 segment_alignment = ELF_PAGE_SIZE;
+    for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+    {
+        if (!object_section_kind_is_debug((ObjectSectionKind)section))
+        {
+            segment_alignment = BUSTER_MAX(segment_alignment, (u64)object->sections[section].alignment);
+        }
+    }
+    u64 cursor = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
+    u64 entry_stub_offset = align_forward(cursor, 16);
+    cursor = entry_stub_offset + entry_stub_size;
+    section_offsets[OBJECT_SECTION_TEXT] = align_forward(cursor, BUSTER_MAX(object->sections[OBJECT_SECTION_TEXT].alignment, 1u));
+    cursor = section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length;
+    u64 plt_offset = align_forward(cursor, 16);
+    u64 plt_size = image.plt_count ? ((u64)image.plt_count + 1) * ELF_PLT_ENTRY_SIZE : 0;
+    u64 eh_frame_header_offset = align_forward(plt_offset + plt_size, 4);
+    section_offsets[OBJECT_SECTION_UNWIND] =
+        align_forward(eh_frame_header_offset + eh_frame_header_size, BUSTER_MAX(object->sections[OBJECT_SECTION_UNWIND].alignment, 1u));
+    u64 interpreter_offset = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
+    u64 interpreter_size = shared ? 0 : sizeof(interpreter);
+    u64 dynamic_string_offset = interpreter_offset + interpreter_size;
+    u64 dynamic_symbol_offset = align_forward(dynamic_string_offset + dynamic_string_size, 8);
+    u64 dynamic_symbol_size = (u64)dynamic_symbol_count * ELF_SYMBOL_SIZE;
+    u32 hash_bucket_count = BUSTER_MAX(dynamic_symbol_count / 2, 1u);
+    u64 hash_offset = align_forward(dynamic_symbol_offset + dynamic_symbol_size, 4);
+    u64 hash_size = (2 + (u64)hash_bucket_count + dynamic_symbol_count) * sizeof(u32);
+    u64 version_symbol_offset = align_forward(hash_offset + hash_size, 2);
+    u64 version_symbol_size = versions.version_count ? (u64)dynamic_symbol_count * sizeof(u16) : 0;
+    u64 version_need_offset = align_forward(version_symbol_offset + version_symbol_size, 8);
+    u64 data_relocation_offset = align_forward(version_need_offset + versions.version_need_size, 8);
+    u64 data_relocation_size = (u64)image.dynamic_relocation_count * ELF_RELOCATION_SIZE;
+    u64 plt_relocation_offset = data_relocation_offset + data_relocation_size;
+    u64 plt_relocation_size = (u64)image.plt_count * ELF_RELOCATION_SIZE;
+    u64 read_only_end = plt_relocation_offset + plt_relocation_size;
+    u64 writable_start = align_forward(read_only_end, segment_alignment);
+    section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = writable_start;
+    cursor = writable_start + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length;
+    section_offsets[OBJECT_SECTION_INIT_ARRAY] = align_forward(cursor, 8);
+    cursor = section_offsets[OBJECT_SECTION_INIT_ARRAY] + object->sections[OBJECT_SECTION_INIT_ARRAY].data.length;
+    section_offsets[OBJECT_SECTION_FINI_ARRAY] = align_forward(cursor, 8);
+    cursor = section_offsets[OBJECT_SECTION_FINI_ARRAY] + object->sections[OBJECT_SECTION_FINI_ARRAY].data.length;
+    u32 dynamic_count = needed_library_count + (soname.length ? 1u : 0u) + 5 + (image.plt_count ? 4u : 0u) + (image.dynamic_relocation_count ? 3u : 0u) +
+                        (object->sections[OBJECT_SECTION_INIT_ARRAY].data.length ? 2u : 0u) +
+                        (object->sections[OBJECT_SECTION_FINI_ARRAY].data.length ? 2u : 0u) + (versions.version_count ? 3u : 0u) +
+                        (image.static_tls ? 1u : 0u) + (shared ? 0u : 2u) + 1;
+    u64 dynamic_offset = align_forward(cursor, 8);
+    u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
+    u64 got_offset = dynamic_offset + dynamic_size;
+    u64 got_size = (u64)image.got_count * sizeof(u64);
+    u64 relro_end = align_forward(got_offset + got_size, ELF_PAGE_SIZE);
+    u64 got_plt_offset = relro_end;
+    u64 got_plt_size = image.plt_count ? ((u64)ELF_GOT_RESERVED_COUNT + image.plt_count) * sizeof(u64) : 0;
+    section_offsets[OBJECT_SECTION_DATA] = align_forward(got_plt_offset + got_plt_size, BUSTER_MAX(object->sections[OBJECT_SECTION_DATA].alignment, 1u));
+    cursor = section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length;
+    u64 thread_local_alignment =
+        BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+    section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] = align_forward(cursor, thread_local_alignment);
+    u64 file_size = section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
+    u64 thread_local_initialized = align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length,
+                                                 BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment, 1u));
+    section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] = section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + thread_local_initialized;
+    u64 thread_local_memory_size = thread_local_initialized + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+    // glibc places an executable's block at PT_TLS's p_memsz rounded to its
+    // p_align below the thread pointer; local-exec offsets are taken from there.
+    u64 thread_local_size = align_forward(thread_local_memory_size, thread_local_alignment);
+    section_offsets[OBJECT_SECTION_ZERO] = align_forward(section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + thread_local_memory_size,
+                                                         BUSTER_MAX(object->sections[OBJECT_SECTION_ZERO].alignment, 1u));
+    u64 zero_end = section_offsets[OBJECT_SECTION_ZERO] + object->sections[OBJECT_SECTION_ZERO].virtual_size;
+    // The copy slots follow .bss; at base zero their offsets are already the
+    // load-relative addresses the COPY relocations name.
+    u64 writable_end = copies.slot_count ? link_elf_copy_plan_place(&copies, image.copied, image.import_count, align_forward(zero_end, 16), 0,
+                                                                    image.copy_addresses)
+                                         : zero_end;
+    if (result.error == LINK_ERROR_NONE && file_size > UINT32_MAX)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    u8* bytes = 0;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        result.executable = (ByteSlice){.pointer = arena_allocate_zeroed(arena, u8, file_size), .length = file_size};
+        bytes = result.executable.pointer;
+        if (entry_stub_size) memcpy(bytes + entry_stub_offset, entry_stub, entry_stub_size);
+        for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+        {
+            ByteSlice data = object->sections[section].data;
+            if (data.length && !object_section_kind_is_debug((ObjectSectionKind)section))
+            {
+                memcpy(bytes + section_offsets[section], data.pointer, data.length);
+            }
+        }
+        if (interpreter_size) memcpy(bytes + interpreter_offset, interpreter, interpreter_size);
+        // .dynstr: the libraries, the soname, the symbol names, the versions.
+        memcpy(bytes + dynamic_string_offset + library_name_offsets[0], runtime_library, sizeof(runtime_library));
+        for (u32 library = 0; library < options.dynamic_library_count; library += 1)
+        {
+            String8 name = options.dynamic_libraries[library].name;
+            memcpy(bytes + dynamic_string_offset + library_name_offsets[library + 1], name.pointer, name.length);
+        }
+        if (soname.length) memcpy(bytes + dynamic_string_offset + soname_offset, soname.pointer, soname.length);
+        u16 loaded_section_indices[OBJECT_SECTION_COUNT];
+        link_elf_loaded_section_indices(object, copies.slot_count ? writable_end - section_offsets[OBJECT_SECTION_ZERO] : 0, loaded_section_indices);
+        u64 dynamic_name_cursor = dynamic_string_offset + symbol_name_offset;
+        for (u32 dynamic = 1; dynamic < first_alias; dynamic += 1)
+        {
+            u32 symbol_index = image.dynamic_symbols[dynamic];
+            ObjectSymbol* symbol = object->symbols + symbol_index;
+            u64 entry = dynamic_symbol_offset + (u64)dynamic * ELF_SYMBOL_SIZE;
+            bool is_thread_local = link_elf_symbol_is_thread_local(symbol) || symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
+            u8 type = is_thread_local ? 6 : symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1;
+            link_write_u32(bytes, entry, (u32)(dynamic_name_cursor - dynamic_string_offset));
+            memcpy(bytes + dynamic_name_cursor, symbol->name.pointer, symbol->name.length);
+            dynamic_name_cursor += symbol->name.length + 1;
+            bytes[entry + 4] = (u8)((symbol->weak ? 0x20 : 0x10) | type);
+            if (symbol->section != OBJECT_SECTION_UNDEFINED)
+            {
+                link_write_u16(bytes, entry + 6, loaded_section_indices[symbol->section]);
+                link_write_u64(bytes, entry + 8, link_elf_symbol_is_thread_local(symbol) ? link_elf_thread_local_offset(object, symbol)
+                                                                                          : section_offsets[symbol->section] + symbol->value);
+                link_write_u64(bytes, entry + 16, symbol->size);
+            }
+            else if (image.classes[symbol_index] & LINK_ELF_PIC_SYMBOL_COPIED)
+            {
+                // A real section index, not SHN_ABS: the loader adds the
+                // load base only to a section-relative value.
+                link_write_u16(bytes, entry + 6, loaded_section_indices[OBJECT_SECTION_ZERO]);
+                link_write_u64(bytes, entry + 8, image.copy_addresses[dynamic - 1]);
+                link_write_u64(bytes, entry + 16, copies.sizes[copies.owners[dynamic - 1]]);
+            }
+        }
+        link_elf_copy_aliases_write(&copies, image.import_count, image.copy_addresses, bytes, dynamic_symbol_offset, first_alias, dynamic_string_offset,
+                                    &dynamic_name_cursor, loaded_section_indices[OBJECT_SECTION_ZERO]);
+        if (versions.version_count)
+        {
+            // Imports carry the version they bound to and definitions
+            // VER_NDX_GLOBAL; a zero would read as local and hide them.
+            link_elf_version_plan_write(&versions, bytes, dynamic_string_offset, &dynamic_name_cursor, version_need_offset, library_name_offsets,
+                                        needed_library_count);
+            for (u32 dynamic = 1; dynamic < dynamic_symbol_count; dynamic += 1)
+            {
+                u16 version = dynamic <= image.import_count ? versions.name_versions[dynamic - 1]
+                              : dynamic < first_alias       ? 1
+                                                            : versions.name_versions[image.import_count + (dynamic - first_alias)];
+                link_write_u16(bytes, version_symbol_offset + (u64)dynamic * sizeof(u16), version);
+            }
+        }
+        link_elf_pic_hash_write(&image, bytes, hash_offset, hash_bucket_count, dynamic_symbol_count, first_alias, copies.alias_names);
+        u64 relocation_cursor = data_relocation_offset;
+        link_elf_copy_relocations_write(&copies, image.copied, image.import_count, image.copy_addresses, bytes, &relocation_cursor);
+        if (image.plt_count && !link_elf_pic_plt_write(&image, bytes, plt_offset, got_plt_offset, plt_relocation_offset))
+        {
+            result.error = LINK_ERROR_RELOCATION;
+        }
+        if (got_plt_size) link_write_u64(bytes, got_plt_offset, dynamic_offset);
+        link_elf_pic_got_write(&image, bytes, got_offset, section_offsets, &relocation_cursor);
+        if (result.error == LINK_ERROR_NONE)
+        {
+            link_elf_pic_relocate(&image, bytes, section_offsets, plt_offset, got_offset, thread_local_size, &relocation_cursor);
+            result.error = image.error;
+            result.symbol = image.symbol;
+        }
+        if (result.error == LINK_ERROR_NONE && relocation_cursor != plt_relocation_offset)
+        {
+            result.error = LINK_ERROR_RELOCATION;
+        }
+    }
+    if (result.error == LINK_ERROR_NONE && !shared)
+    {
+        // The entry stub's calls: `main`, the initializers, `exit` and the
+        // two `__cxa_atexit` registrations, each a rel32 from the stub.
+        u32 targets[] = {entry_symbol_index, exit_symbol_index, atexit_symbol_index, atexit_symbol_index};
+        u32 fields[] = {entry_call_displacement_offset, entry_exit_displacement_offset, loader_atexit_displacement_offset,
+                        entry_atexit_displacement_offset};
+        u32 call_count = plan.destructor_count ? 4u : 3u;
+        for (u32 call = 0; result.error == LINK_ERROR_NONE && call < call_count; call += 1)
+        {
+            u64 address = 0;
+            u64 field = entry_stub_offset + fields[call];
+            s64 displacement = 0;
+            if (!link_elf_hosted_call_address(object, targets[call], image.plt_indices, section_offsets, 0, plt_offset, &address))
+            {
+                result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+                result.symbol = object->symbols[targets[call]].name;
+            }
+            else if (!link_address_difference(address, field + 4, 0, &displacement) || displacement < INT32_MIN || displacement > INT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+            }
+            else
+            {
+                link_write_u32(bytes, field, (u32)(s32)displacement);
+            }
+        }
+        if (result.error == LINK_ERROR_NONE &&
+            !link_x86_patch_initializer_calls(bytes, object, &plan, section_offsets, 0, entry_stub_offset, initializer_displacement_offsets))
+        {
+            result.error = LINK_ERROR_RELOCATION;
+        }
+    }
+    if (result.error == LINK_ERROR_NONE &&
+        !link_elf_eh_frame_header_write(bytes, file_size, &eh_frame_table, object, 0, section_offsets, eh_frame_header_offset))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+    }
+    if (result.error == LINK_ERROR_NONE)
+    {
+        u64 dynamic_cursor = dynamic_offset;
+        u64 init_array_size = object->sections[OBJECT_SECTION_INIT_ARRAY].data.length;
+        u64 fini_array_size = object->sections[OBJECT_SECTION_FINI_ARRAY].data.length;
+#define BUSTER_LINK_DYNAMIC(tag, value)                                                                                                                        \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        link_write_u64(bytes, dynamic_cursor, (u64)(tag));                                                                                                     \
+        link_write_u64(bytes, dynamic_cursor + 8, (u64)(value));                                                                                               \
+        dynamic_cursor += ELF_DYNAMIC_SIZE;                                                                                                                    \
+    } while (0)
+        for (u32 library = 0; library < needed_library_count; library += 1)
+        {
+            BUSTER_LINK_DYNAMIC(1, library_name_offsets[library]);
+        }
+        if (soname.length) BUSTER_LINK_DYNAMIC(14, soname_offset);
+        BUSTER_LINK_DYNAMIC(4, hash_offset);
+        BUSTER_LINK_DYNAMIC(5, dynamic_string_offset);
+        BUSTER_LINK_DYNAMIC(6, dynamic_symbol_offset);
+        BUSTER_LINK_DYNAMIC(10, dynamic_string_size);
+        BUSTER_LINK_DYNAMIC(11, ELF_SYMBOL_SIZE);
+        if (image.plt_count)
+        {
+            BUSTER_LINK_DYNAMIC(3, got_plt_offset);
+            BUSTER_LINK_DYNAMIC(2, plt_relocation_size);
+            BUSTER_LINK_DYNAMIC(20, 7);
+            BUSTER_LINK_DYNAMIC(23, plt_relocation_offset);
+        }
+        if (image.dynamic_relocation_count)
+        {
+            BUSTER_LINK_DYNAMIC(7, data_relocation_offset);
+            BUSTER_LINK_DYNAMIC(8, data_relocation_size);
+            BUSTER_LINK_DYNAMIC(9, ELF_RELOCATION_SIZE);
+        }
+        if (init_array_size)
+        {
+            BUSTER_LINK_DYNAMIC(25, section_offsets[OBJECT_SECTION_INIT_ARRAY]);
+            BUSTER_LINK_DYNAMIC(27, init_array_size);
+        }
+        if (fini_array_size)
+        {
+            BUSTER_LINK_DYNAMIC(26, section_offsets[OBJECT_SECTION_FINI_ARRAY]);
+            BUSTER_LINK_DYNAMIC(28, fini_array_size);
+        }
+        if (versions.version_count)
+        {
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_SYMBOLS, version_symbol_offset);
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED, version_need_offset);
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED_COUNT, versions.version_need_count);
+        }
+        if (image.static_tls) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS, ELF_DYNAMIC_FLAG_STATIC_TLS);
+        if (!shared)
+        {
+            BUSTER_LINK_DYNAMIC(21, 0);
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS_1, ELF_DYNAMIC_FLAG_1_PIE);
+        }
+        BUSTER_LINK_DYNAMIC(0, 0);
+#undef BUSTER_LINK_DYNAMIC
+        BUSTER_CHECK(dynamic_cursor == dynamic_offset + dynamic_size);
+        bytes[0] = 0x7f;
+        bytes[1] = 'E';
+        bytes[2] = 'L';
+        bytes[3] = 'F';
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        link_write_u16(bytes, 16, 3);
+        link_write_u16(bytes, 18, ELF_MACHINE_X86_64);
+        link_write_u32(bytes, 20, 1);
+        link_write_u64(bytes, 24, shared ? 0 : entry_stub_offset);
+        link_write_u64(bytes, 32, ELF_HEADER_SIZE);
+        link_write_u16(bytes, 52, ELF_HEADER_SIZE);
+        link_write_u16(bytes, 54, ELF_PROGRAM_HEADER_SIZE);
+        link_write_u16(bytes, 56, (u16)program_header_count);
+        u64 program_header = ELF_HEADER_SIZE;
+#define BUSTER_LINK_PROGRAM_HEADER(type, flags, offset, file_bytes, memory_bytes, alignment)                                                                  \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        link_write_u32(bytes, program_header, (type));                                                                                                         \
+        link_write_u32(bytes, program_header + 4, (flags));                                                                                                    \
+        link_write_u64(bytes, program_header + 8, (offset));                                                                                                   \
+        link_write_u64(bytes, program_header + 16, (offset));                                                                                                  \
+        link_write_u64(bytes, program_header + 24, (offset));                                                                                                  \
+        link_write_u64(bytes, program_header + 32, (file_bytes));                                                                                              \
+        link_write_u64(bytes, program_header + 40, (memory_bytes));                                                                                            \
+        link_write_u64(bytes, program_header + 48, (alignment));                                                                                               \
+        program_header += ELF_PROGRAM_HEADER_SIZE;                                                                                                             \
+    } while (0)
+        u64 program_header_size = (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
+        if (!shared)
+        {
+            BUSTER_LINK_PROGRAM_HEADER(6, 4, ELF_HEADER_SIZE, program_header_size, program_header_size, 8);
+            BUSTER_LINK_PROGRAM_HEADER(3, 4, interpreter_offset, interpreter_size, interpreter_size, 1);
+        }
+        BUSTER_LINK_PROGRAM_HEADER(1, 5, 0, read_only_end, read_only_end, segment_alignment);
+        BUSTER_LINK_PROGRAM_HEADER(1, 6, writable_start, file_size - writable_start, writable_end - writable_start, segment_alignment);
+        BUSTER_LINK_PROGRAM_HEADER(2, 6, dynamic_offset, dynamic_size, dynamic_size, 8);
+        if (has_thread_local)
+        {
+            BUSTER_LINK_PROGRAM_HEADER(7, 4, section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length,
+                                       thread_local_memory_size, thread_local_alignment);
+        }
+        if (eh_frame_header_size)
+        {
+            BUSTER_LINK_PROGRAM_HEADER(0x6474e550, 4, eh_frame_header_offset, eh_frame_header_size, eh_frame_header_size, 4);
+        }
+        // PT_GNU_STACK without PF_X: the stack is not executable.
+        BUSTER_LINK_PROGRAM_HEADER(0x6474e551, 6, 0, 0, 0, 16);
+        BUSTER_LINK_PROGRAM_HEADER(0x6474e552, 4, writable_start, relro_end - writable_start, relro_end - writable_start, 1);
+#undef BUSTER_LINK_PROGRAM_HEADER
+        BUSTER_CHECK(program_header == ELF_HEADER_SIZE + program_header_size);
+        link_elf_section_table_append(arena, &result, object, 0, section_offsets,
+                                      (LinkElfSectionTableLayout){
+                                          .eh_frame_header_offset = eh_frame_header_offset,
+                                          .eh_frame_header_size = eh_frame_header_size,
+                                          .interpreter_offset = interpreter_offset,
+                                          .interpreter_size = interpreter_size,
+                                          .plt_offset = plt_offset,
+                                          .plt_size = plt_size,
+                                          .dynamic_string_offset = dynamic_string_offset,
+                                          .dynamic_string_size = dynamic_string_size,
+                                          .dynamic_symbol_offset = dynamic_symbol_offset,
+                                          .dynamic_symbol_size = dynamic_symbol_size,
+                                          .hash_offset = hash_offset,
+                                          .hash_size = hash_size,
+                                          .version_symbol_offset = version_symbol_offset,
+                                          .version_symbol_size = version_symbol_size,
+                                          .version_need_offset = version_need_offset,
+                                          .version_need_size = versions.version_need_size,
+                                          .version_need_count = versions.version_need_count,
+                                          .relocation_offset = plt_relocation_offset,
+                                          .relocation_size = plt_relocation_size,
+                                          .got_offset = got_plt_offset,
+                                          .got_size = got_plt_size,
+                                          .dynamic_offset = dynamic_offset,
+                                          .dynamic_size = dynamic_size,
+                                          .data_relocation_offset = data_relocation_offset,
+                                          .data_relocation_size = data_relocation_size,
+                                          .got_data_offset = got_offset,
+                                          .got_data_size = got_size,
+                                          .init_array_offset = section_offsets[OBJECT_SECTION_INIT_ARRAY],
+                                          .init_array_size = init_array_size,
+                                          .fini_array_offset = section_offsets[OBJECT_SECTION_FINI_ARRAY],
+                                          .fini_array_size = fini_array_size,
+                                          .import_indices = copy_import_indices,
+                                          .copy_alias_names = copies.alias_names,
+                                          .copy_alias_symbol_offset = dynamic_symbol_offset + (u64)first_alias * ELF_SYMBOL_SIZE,
+                                          .copy_alias_count = copies.alias_count,
+                                          .copy_zero_size = copies.slot_count ? writable_end - section_offsets[OBJECT_SECTION_ZERO] : 0,
+                                          .dynamic = true,
+                                      });
+    }
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
+    {
+        result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -5910,7 +8375,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             return result;
         }
         ObjectSection* section = &object->sections[relocation->section];
-        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 width = object_relocation_kind_width(relocation->kind);
         if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -5949,7 +8414,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             }
             link_write_u32(bytes, output_offset, patched);
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        else if (object_relocation_kind_is_aarch64_elf_page(relocation->kind))
         {
             u32 patched = 0;
             if (section->alignment < 4 ||
@@ -5961,11 +8426,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             }
             link_write_u32(bytes, output_offset, patched);
         }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64)
+        {
+            s64 value = 0;
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u64(bytes, output_offset, (u64)value);
+        }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
             s64 value = 0;
-            if (section->alignment < 4 || (place_address & 3) ||
-                !link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -6047,9 +8521,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -6069,7 +8544,7 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_addre
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64_dynamic(Arena* arena, ObjectFile* object,
-                                                                                            NativeExecutableLinkOptions options, LinkElfIndex* exports)
+                                                                                            NativeExecutableLinkOptions options, LinkElfIndex* exports, bool export_thread_local)
 {
     // argc, argv and envp off the stack, the initializers, `bl main`,
     // `bl exit` and a trap — link_aarch64_build_elf_entry_stub emits the
@@ -6121,7 +8596,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation relocation = object->relocations[index];
-        if (relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind))
         {
             // The layout staging writer cannot patch an A64 page field. Do
             // not impose an unrelated x86 rel32/absolute32 range on it; the
@@ -6164,7 +8639,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     // stub slot this overlay has to reproduce.  Everything below reads the
     // stripped copy, whose relocations no longer name sections the image does
     // not carry.
-    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports);
+    u64 staged_section_offsets[OBJECT_SECTION_COUNT] = {0};
+    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports, staged_section_offsets, export_thread_local, false);
     if (result.error != LINK_ERROR_NONE)
     {
         return result;
@@ -6175,11 +8651,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u32 program_header_count = bytes[56] | ((u32)bytes[57] << 8);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 entry_stub_offset = align_forward(header_end, 16);
+    // Data sections sit where the staging writer placed them.
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
+    memcpy(section_offsets, staged_section_offsets, sizeof(section_offsets));
     // The layout below has to be the one the x86-64 dynamic writer produced,
     // so the stub slot is that writer's hosted stub size, not this stub's.
     section_offsets[OBJECT_SECTION_TEXT] =
         align_forward(entry_stub_offset + link_elf_entry_stub_slot(x86_stub_size, &plan), object->sections[OBJECT_SECTION_TEXT].alignment);
+    if (section_offsets[OBJECT_SECTION_TEXT] != staged_section_offsets[OBJECT_SECTION_TEXT])
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u32 import_count = 0;
     u32* import_indices = arena_allocate(arena, u32, object->symbol_count);
@@ -6351,12 +8834,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         if (relocation->kind != OBJECT_RELOCATION_AARCH64_CALL26 && relocation->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 &&
-            relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_PAGE21 && relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+            !object_relocation_kind_is_aarch64_elf_page(relocation->kind))
         {
             continue;
         }
-        bool page_relocation = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ||
-                               relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12;
+        bool page_relocation = object_relocation_kind_is_aarch64_elf_page(relocation->kind);
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
@@ -6367,13 +8849,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                 result.symbol = symbol->name;
                 return result;
             }
-            u64 initialized_size =
-                align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
-            u64 symbol_offset = symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
-            u64 thread_pointer_offset = 16 + symbol_offset + (u64)relocation->addend;
-            if (thread_pointer_offset > 0xffffff)
+            // Variant I places the executable's block after the 16-byte TCB,
+            // rounded to PT_TLS alignment before adding module-relative offsets.
+            u64 thread_local_alignment =
+                BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+            u64 thread_local_start = align_forward(16, thread_local_alignment);
+            u64 symbol_offset = link_elf_thread_local_offset(object, symbol);
+            u64 thread_pointer_offset = 0;
+            if (!link_u64_add(thread_local_start, symbol_offset, &thread_pointer_offset) ||
+                !link_address_addend(thread_pointer_offset, relocation->addend, &thread_pointer_offset) || thread_pointer_offset > 0xffffff)
             {
                 result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
                 return result;
             }
             u32 instruction = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
@@ -6455,9 +8942,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         }
         link_write_u32(bytes, output_offset, patched);
     }
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
@@ -7922,7 +10410,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             u64 width = 0;
             if (result.error == LINK_ERROR_NONE)
             {
-                width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                width = object_relocation_kind_width(relocation->kind);
                 if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
                 {
                     result.error = LINK_ERROR_RELOCATION;
@@ -8127,7 +10615,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                         link_write_u32(bytes, output_offset, encoded);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
                 {
                     if (symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO)
                     {
@@ -8143,8 +10632,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     {
                         u32 instruction = link_read_u32(bytes, output_offset);
                         u32 encoded = 0;
-                        if (!object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, instruction, output_offset, tls_offset,
-                                                              relocation->addend, &encoded))
+                        if (!object_aarch64_pe_tls_offset_relocate(relocation->kind, instruction, tls_offset, relocation->addend, &encoded))
                         {
                             result.error = LINK_ERROR_RELOCATION;
                         }
@@ -8592,13 +11080,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     }
     if (result.error == LINK_ERROR_NONE)
     {
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
-        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
+        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = result.pdb_path;
         }
     }
     if (result.error != LINK_ERROR_NONE)
@@ -8628,9 +11118,11 @@ struct LinkUefiPeSection
 BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
 {
     return kind == OBJECT_RELOCATION_X86_64_TPOFF32 || kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+           kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
            kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
            kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
            kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ||
            kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12;
 }
 
@@ -9787,13 +12279,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
     }
     if (result.error == LINK_ERROR_NONE)
     {
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
-        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
+        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = result.pdb_path;
         }
     }
     if (result.error != LINK_ERROR_NONE)
@@ -10987,7 +13481,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             }
             ObjectSection* section = &object->sections[relocation->section];
             ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-            u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+            u64 width = object_relocation_kind_width(relocation->kind);
             if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
             {
                 result.error = LINK_ERROR_RELOCATION;
@@ -11055,7 +13549,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             u64 width = 0;
             if (result.error == LINK_ERROR_NONE)
             {
-                width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                width = object_relocation_kind_width(relocation->kind);
                 if (relocation->offset > section->data.length || width > section->data.length - relocation->offset)
                 {
                     result.error = LINK_ERROR_RELOCATION;
@@ -11642,9 +14136,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             u64 page_size = BUSTER_MIN((u64)MACH_CODE_PAGE_SIZE, signature_offset - page_offset);
             link_sha256(arena, bytes + page_offset, page_size, bytes + hash_offset + slot * 32);
         }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
     }
     return result;
@@ -11668,14 +14163,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
         }
     }
     NativeExecutableLinkResult result = {0};
-    if (object->target.cpu_arch == CPU_ARCH_X86_64)
+    if (!link_validate_linker_arguments(object->target, options, has_import, &result.symbol))
     {
-        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports)
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+    }
+    else if (object->target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0, false, false)
                             : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
     }
     else if (object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
-        result = has_import ? link_native_executable_elf64_aarch64_dynamic(arena, &staging_object, staging_options, exports)
+        result = has_import ? link_native_executable_elf64_aarch64_dynamic(arena, &staging_object, staging_options, exports, false)
                             : link_native_executable_elf64_aarch64(arena, &staging_object, staging_options);
     }
     else
@@ -11723,9 +14222,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
             memset(bytes + string_table_offset + 1, 0, sizeof("libc.so.6"));
             memcpy(bytes + string_table_offset + 1, library, sizeof(library));
         }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
+            result.symbol = options.output_path;
         }
     }
 
@@ -11827,17 +14327,101 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* a
     return result;
 }
 
+// GCC, Clang and GNU as leave every undefined symbol STT_NOTYPE, so an
+// external reference states nothing about what it names. object_read_elf64
+// records such a reference as data unless a PLT or branch relocation proves a
+// call, and marks it untyped by leaving its thread-local state unknown, which
+// Buster's own objects never do. A reference that only takes an address -- a
+// table of `malloc` and `free` hooks, `strlen` handed to another unit --
+// therefore arrives here as a data import, and the writers would reserve a
+// copy slot for a library function: the loader copies code bytes into .bss and
+// the executable exports the copy under the function's name, interposing the
+// library's own definition for every caller, libc's included.
+//
+// A reference resolves to its definition, and the export index holds every
+// definition: an untyped import that some library defines, but that no library
+// publishes as an object with storage, is not data. Only a complete index is
+// evidence -- a library that was not read defines whatever it defines -- so an
+// incomplete link keeps the classification it had.
+BUSTER_GLOBAL_LOCAL ObjectFile link_elf_classify_untyped_imports(Arena* arena, LinkElfIndex* exports, ObjectFile* object)
+{
+    ObjectFile result = *object;
+    bool copied = false;
+    for (u32 index = 0; exports->exports_complete && index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global && symbol->kind == OBJECT_SYMBOL_DATA &&
+            symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+        {
+            LinkElfName* name = link_elf_name(exports, symbol->name, false);
+            if (name && name->version && name->data == UINT32_MAX)
+            {
+                if (!copied)
+                {
+                    result.symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count);
+                    memcpy(result.symbols, object->symbols, sizeof(*object->symbols) * object->symbol_count);
+                    copied = true;
+                }
+                result.symbols[index].kind = OBJECT_SYMBOL_FUNCTION;
+            }
+        }
+    }
+    return result;
+}
+
+bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions options, bool dynamic_image, String8* unsupported)
+{
+    bool valid = !options.linker_argument_count || options.linker_arguments != 0;
+    bool elf = (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID) &&
+               (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
+    for (u32 index = 0; valid && index < options.linker_argument_count; index += 1)
+    {
+        String8 argument = options.linker_arguments[index];
+        bool export_dynamic = string_equal(argument, S8("-E")) || string_equal(argument, S8("-export-dynamic")) ||
+                              string_equal(argument, S8("--export-dynamic"));
+        bool no_undefined = string_equal(argument, S8("--no-undefined")) || string_equal(argument, S8("-no-undefined"));
+        bool soname_pair = link_elf_linker_argument_soname_option(argument);
+        bool soname_joined = string_starts_with_sequence(argument, S8("-soname=")) || string_starts_with_sequence(argument, S8("--soname="));
+        valid = elf && (no_undefined || (export_dynamic && dynamic_image));
+        if (elf && string_equal(argument, S8("-z")))
+        {
+            valid = index + 1 < options.linker_argument_count && string_equal(options.linker_arguments[index + 1], S8("defs"));
+            if (valid) index += 1;
+        }
+        else if (elf && (soname_pair || soname_joined))
+        {
+            valid = target.os == OPERATING_SYSTEM_LINUX && target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind == NATIVE_IMAGE_SHARED;
+            if (soname_pair)
+            {
+                valid = valid && index + 1 < options.linker_argument_count && options.linker_arguments[index + 1].length;
+                if (valid) index += 1;
+            }
+            else
+            {
+                valid = valid && argument.pointer[argument.length - 1] != '=';
+            }
+        }
+        if (!valid && unsupported) *unsupported = argument.length ? argument : S8("(empty argument)");
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
     LinkElfIndex elf_index = {0};
     LinkElfIndex* exports = &elf_index;
     if (!arena || !object || object->error != OBJECT_ERROR_NONE || object->section_count != OBJECT_SECTION_COUNT || !object->sections ||
+        options.image_kind >= NATIVE_IMAGE_COUNT ||
         (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
         (options.library_path_count && !options.library_paths) || (options.framework_path_count && !options.framework_paths) ||
         (options.framework_count && !options.frameworks) || (options.linker_argument_count && !options.linker_arguments))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    else if (!link_validate_linker_arguments(object->target, options, true, &result.symbol))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
     }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))
@@ -11855,6 +14439,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         result.error = normalized.error;
         if (result.error == LINK_ERROR_NONE)
         {
+            normalized.object = link_elf_classify_untyped_imports(arena, exports, &normalized.object);
             object = &normalized.object;
             bool dynamic_image = options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
@@ -11862,17 +14447,35 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             {
                 dynamic_image = link_elf_symbol_needs_dynamic_import(exports, object->symbols + index);
             }
-            if (object->target.cpu_arch == CPU_ARCH_X86_64)
+            if (!link_validate_linker_arguments(object->target, options, dynamic_image || options.image_kind != NATIVE_IMAGE_EXECUTABLE, &result.symbol))
             {
-                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports)
+                result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+            }
+            else if (object->target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind != NATIVE_IMAGE_EXECUTABLE)
+            {
+                result = link_native_image_elf64_x86_64_position_independent(arena, object, options, exports);
+            }
+            else if (options.image_kind != NATIVE_IMAGE_EXECUTABLE)
+            {
+                result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+            }
+            else if (object->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports, 0, true, true)
                                        : link_native_executable_elf64_x86_64(arena, object, options);
             }
             else
             {
-                result = dynamic_image ? link_native_executable_elf64_aarch64_dynamic(arena, object, options, exports)
+                result = dynamic_image ? link_native_executable_elf64_aarch64_dynamic(arena, object, options, exports, true)
                                        : link_native_executable_elf64_aarch64(arena, object, options);
             }
         }
+    }
+    else if (options.image_kind != NATIVE_IMAGE_EXECUTABLE)
+    {
+        // Only the x86-64 Linux writer above places a position-independent
+        // image; every other writer produces fixed-address executables.
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
     }
     else if (object->target.os == OPERATING_SYSTEM_WINDOWS && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
@@ -11908,6 +14511,27 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool link_elf_test_tls_membership(Arena* temporary, ObjectFile* object, bool* matches,
+                                  u64* build_rows, u64* queries, u64* probes)
+{
+    LinkElfTlsIndex index = {0};
+    bool valid = object && (!object->symbol_count || object->symbols) && (!object->relocation_count || (object->relocations && matches));
+    if (valid)
+    {
+        valid = link_elf_tls_index_build(temporary, object, &index);
+        for (u32 row = 0; valid && row < object->relocation_count; row += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + row;
+            matches[row] = relocation->symbol < object->symbol_count &&
+                           link_elf_relocation_is_relaxed_tls_get_addr(&index, relocation, object->symbols + relocation->symbol);
+        }
+    }
+    *build_rows = index.build_rows;
+    *queries = index.queries;
+    *probes = index.probes;
+    return valid;
+}
+
 NativeExecutableLinkResult link_elf_test_executable(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     TemporalArena scope = arena_begin_temporal(temporary);

@@ -11,7 +11,10 @@ step, or turn a correctness failure into a success.
 Each native job initializes one immutable observation root at
 `$RUNNER_TEMP/buster-ci/native-observation`.  The pre-pack records are included
 in the existing `native-ci-logs.tar.gz` archive.  After the archive attempt,
-`tools/ci_native_observation.py finalize` writes the authoritative
+`tools/ci_native_observation.py package` (the workflow's `Pack native logs`
+step) records the `evidence_packing` phase and then runs `finalize` with the
+lane's `PACKAGE_REQUIRED_PHASES` entry; a packing failure finalizes an
+incomplete observation and still fails the step.  `finalize` writes the authoritative
 `native-observation.json` both into that root and beside the archive,
 `result.json`, and `summary.md` in the directory passed to
 `actions/upload-artifact`.  A packing failure therefore leaves the final
@@ -25,6 +28,9 @@ The versioned records are:
   counts, and the effective configuration and worker budget;
 - `buster.native-observation.toolchain.v1`: resolved compiler, CMake, and Ninja
   paths plus the SHA-256 of each complete version response;
+- `buster.native-observation.toolchain-degraded.v1`: every identity-probe
+  attempt that failed or exceeded `IDENTITY_PROBE_TIMEOUT_SECONDS`, with each
+  failed tool's error and the attempt's UTC time;
 - `buster.native-observation.phase.v1`: one monotonic interval, status, exit
   code, command digest, UTC endpoints, and measured durable-record write cost;
 - `buster.native-observation.v1`: ordered phase records, completeness and
@@ -87,6 +93,17 @@ the original exit status.  The canonical record is also printed as a
 `NATIVE_PHASE_RECORD` line, so an immutable job log still contains the
 observation when the repository's existing policy suppresses new artifact
 uploads after cancellation.
+
+A toolchain identity probe runs before any observed phase, so its failure
+degrades evidence rather than correctness.  A probe that times out or fails
+(for example a cold macOS `xcrun` shim on a loaded runner) writes no
+`toolchain.json`, appends the attempt to `toolchain-degraded.json`, emits a
+workflow warning and a `NATIVE_TOOLCHAIN_DEGRADED` log line, and exits zero.
+The differential step probes again when `toolchain.json` is still absent.  If
+identity never becomes available, finalization still succeeds for a correct
+payload but publishes `toolchain: null` with the degraded attempts and a
+comparison-ineligible reason.  An absent toolchain record without a degraded
+record, or a malformed record, still fails closed.
 
 A successful native payload fails closed when required timing evidence is
 missing, duplicated, malformed, identity-mismatched, non-monotonic, or

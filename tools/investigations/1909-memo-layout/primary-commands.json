@@ -1,0 +1,677 @@
+[
+  {
+    "name": "host",
+    "argv": [
+      "bash",
+      "-c",
+      "uname -a; lscpu; clang --version"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "driver-build",
+    "argv": [
+      "clang",
+      "-Isrc",
+      "-Wall",
+      "-Werror",
+      "-Wno-unused-function",
+      "-Wno-unused-variable",
+      "-g",
+      "build.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/build-driver"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "configure",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/build-driver",
+      "generate",
+      "--cc",
+      "clang",
+      "--ci",
+      "--linker",
+      "DEFAULT"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "baseline-build",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/build-driver",
+      "build",
+      "--config",
+      "Release",
+      "-t",
+      "ide"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "baseline-fixedpoint",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/build-driver",
+      "test_self_host",
+      "--config",
+      "Release"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "baseline-focused",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/baseline-ide",
+      "test",
+      "--module=c_frontend_tests,compiler_driver_tests",
+      "--ci=1",
+      "--verbose=0"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "observer-overlay",
+    "argv": [
+      "python3",
+      "/home/runner/work/buster/buster/tools/investigations/1909-memo-layout/observe.py",
+      "/home/runner/work/buster/buster/memo-subject/src/buster/lib/compiler/frontend/c/c_parse.c"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "observer-build",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/build-driver",
+      "build",
+      "--config",
+      "Release",
+      "-t",
+      "ide"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "unity-baseline",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/baseline-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "src/buster/apps/ide/ide.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "unity-observer",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/observer-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "src/buster/apps/ide/ide.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {
+      "BUSTER_MEMO_TRACE": "/home/runner/work/buster/buster/memo-evidence/unity.trace"
+    }
+  },
+  {
+    "name": "operations-baseline",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/baseline-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "tests/basic_c_operations.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "operations-observer",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/observer-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "tests/basic_c_operations.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {
+      "BUSTER_MEMO_TRACE": "/home/runner/work/buster/buster/memo-evidence/operations.trace"
+    }
+  },
+  {
+    "name": "invalid-baseline",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/baseline-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/invalid.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 1,
+    "env": {}
+  },
+  {
+    "name": "invalid-observer",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/observer-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/invalid.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 1,
+    "env": {
+      "BUSTER_MEMO_TRACE": "/home/runner/work/buster/buster/memo-evidence/invalid.trace"
+    }
+  },
+  {
+    "name": "large-body-baseline",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/baseline-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/large-body.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "large-body-observer",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/observer-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/large-body.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {
+      "BUSTER_MEMO_TRACE": "/home/runner/work/buster/buster/memo-evidence/large-body.trace"
+    }
+  },
+  {
+    "name": "mixed-baseline",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/baseline-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/mixed.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "mixed-observer",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/observer-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/mixed.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {
+      "BUSTER_MEMO_TRACE": "/home/runner/work/buster/buster/memo-evidence/mixed.trace"
+    }
+  },
+  {
+    "name": "small-populations-baseline",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/baseline-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/small-populations.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "small-populations-observer",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/observer-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/small-populations.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {
+      "BUSTER_MEMO_TRACE": "/home/runner/work/buster/buster/memo-evidence/small-populations.trace"
+    }
+  },
+  {
+    "name": "tiny-baseline",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/baseline-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/tiny.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "tiny-observer",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/observer-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/tiny.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {
+      "BUSTER_MEMO_TRACE": "/home/runner/work/buster/buster/memo-evidence/tiny.trace"
+    }
+  },
+  {
+    "name": "replay-build",
+    "argv": [
+      "clang",
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "/home/runner/work/buster/buster/tools/investigations/1909-memo-layout/replay.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/replay"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "replay-selftest",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay",
+      "--self-test"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "replay-sanitized-build",
+    "argv": [
+      "clang",
+      "-std=c11",
+      "-O1",
+      "-g",
+      "-fsanitize=address,undefined",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "/home/runner/work/buster/buster/tools/investigations/1909-memo-layout/replay.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/replay-sanitized"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "replay-sanitized-selftest",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay-sanitized",
+      "--self-test"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "unity-replay",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay",
+      "/home/runner/work/buster/buster/memo-evidence/unity.trace"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "operations-replay",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay",
+      "/home/runner/work/buster/buster/memo-evidence/operations.trace"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "invalid-replay",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay",
+      "/home/runner/work/buster/buster/memo-evidence/invalid.trace"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "large-body-replay",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay",
+      "/home/runner/work/buster/buster/memo-evidence/large-body.trace"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "mixed-replay",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay",
+      "/home/runner/work/buster/buster/memo-evidence/mixed.trace"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "small-populations-replay",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay",
+      "/home/runner/work/buster/buster/memo-evidence/small-populations.trace"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "tiny-replay",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/replay",
+      "/home/runner/work/buster/buster/memo-evidence/tiny.trace"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "candidate-overlay",
+    "argv": [
+      "python3",
+      "/home/runner/work/buster/buster/tools/investigations/1909-memo-layout/hotcold.py",
+      "/home/runner/work/buster/buster/memo-subject",
+      "--poison"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "candidate-build",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/build-driver",
+      "build",
+      "--config",
+      "Release",
+      "-t",
+      "ide"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "candidate-focused",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/candidate-ide",
+      "test",
+      "--module=c_frontend_tests,compiler_driver_tests",
+      "--ci=1",
+      "--verbose=0"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "candidate-fixedpoint",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/build-driver",
+      "test_self_host",
+      "--config",
+      "Release"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "unity-candidate",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/candidate-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "src/buster/apps/ide/ide.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "operations-candidate",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/candidate-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "tests/basic_c_operations.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "invalid-candidate",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/candidate-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/invalid.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 1,
+    "env": {}
+  },
+  {
+    "name": "large-body-candidate",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/candidate-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/large-body.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "mixed-candidate",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/candidate-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/mixed.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "small-populations-candidate",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/candidate-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/small-populations.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  },
+  {
+    "name": "tiny-candidate",
+    "argv": [
+      "/home/runner/work/buster/buster/memo-evidence/candidate-ide",
+      "cc",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-O0",
+      "-c",
+      "/home/runner/work/buster/buster/memo-evidence/inputs/tiny.c",
+      "-o",
+      "/home/runner/work/buster/buster/memo-evidence/output.o"
+    ],
+    "status": 0,
+    "env": {}
+  }
+]

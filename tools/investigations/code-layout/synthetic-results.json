@@ -1,0 +1,408 @@
+{
+  "model": "fixed stream, rel8/rel32 end-PC, boundary labels, no addends",
+  "no_alignment": {
+    "layouts": 117648,
+    "encoding_assignments": 912960,
+    "illegal_widen": 0,
+    "nonoptimal_widen": 0,
+    "max_widen_rounds": 4,
+    "illegal_single_pass": 0,
+    "nonoptimal_single_pass": 12872,
+    "summed_oracle_savings_bytes": 714007,
+    "summed_single_pass_savings_bytes": 664580,
+    "first_single_pass_nonoptimal": {
+      "items": [
+        [
+          "label",
+          0
+        ],
+        [
+          "bytes",
+          0
+        ],
+        [
+          "branch",
+          [
+            0,
+            6
+          ]
+        ],
+        [
+          "label",
+          1
+        ],
+        [
+          "bytes",
+          121
+        ],
+        [
+          "branch",
+          [
+            0,
+            5
+          ]
+        ],
+        [
+          "label",
+          2
+        ]
+      ],
+      "all_long": [
+        3,
+        132,
+        true,
+        [
+          -6,
+          -132
+        ]
+      ],
+      "oracle": [
+        125,
+        0
+      ],
+      "widen": [
+        125,
+        0,
+        true,
+        1
+      ],
+      "single_pass": [
+        128,
+        2,
+        true
+      ],
+      "greedy": [
+        125,
+        0,
+        true
+      ]
+    }
+  },
+  "single_branch_alignment_hazard": {
+    "items": [
+      [
+        "label",
+        0
+      ],
+      [
+        "bytes",
+        123
+      ],
+      [
+        "branch",
+        [
+          1,
+          6
+        ]
+      ],
+      [
+        "bytes",
+        4
+      ],
+      [
+        "align",
+        128
+      ],
+      [
+        "label",
+        1
+      ]
+    ],
+    "all_long": [
+      1,
+      256,
+      true,
+      [
+        127
+      ]
+    ],
+    "oracle": [
+      256,
+      1
+    ],
+    "widen": [
+      256,
+      1,
+      true,
+      2
+    ],
+    "single_pass": [
+      256,
+      0,
+      false
+    ],
+    "greedy": [
+      256,
+      1,
+      true
+    ]
+  },
+  "widen_alignment_nonoptimal": {
+    "items": [
+      [
+        "label",
+        0
+      ],
+      [
+        "branch",
+        [
+          2,
+          5
+        ]
+      ],
+      [
+        "bytes",
+        127
+      ],
+      [
+        "label",
+        1
+      ],
+      [
+        "align",
+        256
+      ],
+      [
+        "branch",
+        [
+          1,
+          5
+        ]
+      ],
+      [
+        "label",
+        2
+      ]
+    ],
+    "all_long": [
+      3,
+      261,
+      true,
+      [
+        256,
+        -129
+      ]
+    ],
+    "oracle": [
+      258,
+      1
+    ],
+    "widen": [
+      261,
+      3,
+      true,
+      2
+    ],
+    "single_pass": [
+      258,
+      1,
+      true
+    ],
+    "greedy": [
+      258,
+      1,
+      true
+    ]
+  },
+  "no_supported_encoding": {
+    "items": [
+      [
+        "label",
+        0
+      ],
+      [
+        "branch",
+        [
+          1,
+          5
+        ]
+      ],
+      [
+        "bytes",
+        2147483648
+      ],
+      [
+        "label",
+        1
+      ]
+    ],
+    "all_long": [
+      1,
+      2147483653,
+      false,
+      [
+        2147483648
+      ]
+    ],
+    "oracle": null,
+    "widen": [
+      2147483653,
+      1,
+      false,
+      2
+    ],
+    "single_pass": [
+      2147483653,
+      1,
+      false
+    ],
+    "greedy": [
+      2147483653,
+      1,
+      false
+    ]
+  },
+  "alignment": {
+    "layouts": 129960,
+    "encoding_assignments": 519840,
+    "illegal_single_pass": 2161,
+    "illegal_widen": 0,
+    "nonoptimal_widen": 0,
+    "max_widen_rounds": 3,
+    "illegal_greedy": 0,
+    "nonoptimal_greedy": 1972,
+    "first_illegal_single_pass": {
+      "items": [
+        [
+          "label",
+          0
+        ],
+        [
+          "bytes",
+          0
+        ],
+        [
+          "branch",
+          [
+            2,
+            6
+          ]
+        ],
+        [
+          "align",
+          8
+        ],
+        [
+          "label",
+          1
+        ],
+        [
+          "bytes",
+          120
+        ],
+        [
+          "branch",
+          [
+            0,
+            5
+          ]
+        ],
+        [
+          "label",
+          2
+        ]
+      ],
+      "all_long": [
+        3,
+        133,
+        true,
+        [
+          127,
+          -133
+        ]
+      ],
+      "oracle": [
+        133,
+        3
+      ],
+      "widen": [
+        133,
+        3,
+        true,
+        2
+      ],
+      "single_pass": [
+        133,
+        2,
+        false
+      ],
+      "greedy": [
+        133,
+        3,
+        true
+      ]
+    },
+    "first_widen_nonoptimal": null,
+    "first_greedy_nonoptimal": {
+      "items": [
+        [
+          "label",
+          0
+        ],
+        [
+          "bytes",
+          3
+        ],
+        [
+          "branch",
+          [
+            2,
+            6
+          ]
+        ],
+        [
+          "align",
+          8
+        ],
+        [
+          "label",
+          1
+        ],
+        [
+          "bytes",
+          120
+        ],
+        [
+          "branch",
+          [
+            1,
+            5
+          ]
+        ],
+        [
+          "label",
+          2
+        ]
+      ],
+      "all_long": [
+        3,
+        141,
+        true,
+        [
+          132,
+          -125
+        ]
+      ],
+      "oracle": [
+        130,
+        0
+      ],
+      "widen": [
+        130,
+        0,
+        true,
+        1
+      ],
+      "single_pass": [
+        138,
+        1,
+        true
+      ],
+      "greedy": [
+        138,
+        1,
+        true
+      ]
+    }
+  }
+}

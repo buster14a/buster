@@ -76,7 +76,8 @@ uninitialized values, shifts or division.
 | 1024 | Outline products into a helper | A nonrecursive, pure, same-translation-unit call computes the same unsigned product. Argument evaluation order is unobservable. |
 
 Each enabled transformation runs separately and, when more than one is enabled,
-as one combined mask. The default is twelve pairs per seed and target/mode (eleven for eBPF). This is not an
+as one combined mask. The default is twelve pairs per seed and target/mode
+(eleven for eBPF when the kernel oracle is unavailable). This is not an
 arbitrary-source C transformer and makes no equivalence claim for unsafe
 floating-point reassociation, side-effecting operand swaps or scope-changing
 rewrites.
@@ -116,7 +117,7 @@ accepted option settings are exercised.
 | `macos-x64`, `macos-arm64` | Native when host-compatible. |
 | `llvm-native` | Buster emits bitcode; host Clang consumes it and the resulting executable runs. |
 | `wasm64` | Node's WebAssembly engine with Memory64 enabled. |
-| `ebpf` | The existing bounded test-only eBPF interpreter, not the kernel verifier/JIT. |
+| `ebpf` | The bounded test-only eBPF interpreter, plus the Linux verifier/JIT when this host may load BPF programs. |
 
 Foreign native rows still compile and link when execution is unavailable. They
 are reported as `unexecuted`; no disassembly check is called a behavior check.
@@ -129,19 +130,33 @@ generation or reduction. This supports both engines where Memory64 is enabled
 by default and older engines that require the flag.
 
 The eBPF interpreter supports the generated subset and has bounded instruction
-execution and checked stack accesses. It does not implement local calls: only
-mask 1024 is excluded for that row, with an explicit
-`METAMORPHIC_TRANSFORMS_UNAVAILABLE` record. All previously supported relations
-and aggregate materialization still run. This is a coverage exclusion, not an
-execution pass for the call relation. This change adds multiplication to that
-existing interpreter, with separate 32- and 64-bit multiplication cases in its
-existing compiler tests. An interpreter refusal is reported as a runner failure,
+execution and checked stack accesses. It applies the verifier's structural
+rules (every instruction reachable, in-range jumps) and width-aligned stack
+accesses, and it refuses relocations, objects with more than one function and
+encodings it does not model. It does not implement local calls. When the kernel
+oracle is unavailable, only mask 1024 is excluded for that row, with an explicit
+`METAMORPHIC_TRANSFORMS_UNAVAILABLE` record. When a `BPF_PROG_LOAD`/test-run
+probe succeeds, every eBPF input is also loaded into the Linux verifier and
+executed through its JIT, and mask 1024 and its compositions run through that
+kernel oracle. Local-call objects use the whole `.text` section and the named
+`metamorphic` entry, so a helper preceding that entry cannot be mistaken for it.
+The loader resolves only `R_BPF_64_32` calls to defined `STT_FUNC` symbols in
+the same section, with zero addends and valid call encodings. Missing or undefined
+targets, malformed ELF ranges, unrelocated calls and every other code relocation
+fail the runner. Globals and maps remain unsupported by this test-only loader.
+`METAMORPHIC_EBPF_KERNEL available=0|1` records actual kernel availability; VM
+execution alone does not certify kernel acceptance. All previously supported
+relations and aggregate materialization still run. An unavailable kernel is a
+coverage exclusion, never an execution pass for the call relation. An interpreter
+refusal is reported as a runner failure,
 not incorrectly classified as a successful guest result or a proven compiler bug.
 
 The local aggregate-copy relation is lowered by both nonnative backends.
 Wasm64 uses private shadow-stack snapshots and bulk memory operations; eBPF
 allocates each snapshot within its existing 512-byte frame and copies exact
-bytes without over-reading packed objects. Neither representation aliases a
+bytes without over-reading packed objects. Scalar packed-member loads and
+stores use the widest pieces that the member's frame offset aligns, because
+the verifier rejects misaligned stack accesses. Neither representation aliases a
 mutable source object. The canonical IR and aggregate function ABI contracts
 are unchanged. Aggregate block parameters and bit-field aggregate construction
 remain explicit unsupported cases; eBPF snapshot alignment is at most eight
@@ -151,8 +166,10 @@ The same five repository-relative C cases cover plain, packed, nested and union
 copies plus independent mutations. The ordinary driver suite checks both
 frontend forms through Node for Wasm64; the existing codegen test module checks
 eBPF output in its bounded VM, including all input pairs at the signed boundary
-and wraparound. Negative cases retain eBPF aggregate ABI, alignment and frame
-limits. VM execution does not certify kernel verifier/JIT acceptance.
+and wraparound, and in the kernel verifier/JIT when available. Each eBPF test
+reports whether the kernel took part. Negative cases retain eBPF aggregate ABI,
+alignment and frame limits. VM execution does not certify kernel verifier/JIT
+acceptance.
 
 Wasm32 is not supported by the current driver. The external SPIR-V, NVPTX,
 AMDGCN, Metal and DXIL pipelines accept different source-language/toolchain
@@ -201,12 +218,22 @@ allowed; timeout failures are saved without attempting expensive reduction.
 This is bounded grammar-aware reduction, not a claim of global minimality for
 arbitrary C. `signature_preserved` records the final replay result.
 
-A five-minute campaign budget (one minute for ordinary smoke; five minutes when
-the compiler itself is sanitized), checked between work
-units, turns incomplete campaigns into failures. The current bounded pair or
+A five-minute campaign budget applies to `ide metamorphic`, including Release.
+Ordinary unsanitized smoke has one minute; sanitized smoke has five minutes.
+These fixed budgets are checked between work units. Budget exhaustion records
+an incomplete campaign and preserves a nonzero process result, separately from
+an observed pair failure. It never counts an unstarted pair as a comparison
+failure or an execution pass. The current bounded pair or
 reduction can finish after that budget; it is not a hard wall-clock supervisor
 for the entire process. Pair scratch storage is rewound, while only the capped
 set of unique failure signatures remains retained.
+
+The 256-case limit bounds generator work and counts; it does not promise that
+every accepted request fits the campaign budget on every host. A larger request
+may stop during reference qualification before any target pair runs. Preserve
+that incomplete receipt and split a seed sweep into smaller bounded campaigns
+rather than treating the receipt as a compiler miscompile or increasing the
+budget to hide it.
 
 Reduced cases are artifacts, not automatically accepted compiler fixes. Check
 that the reference compiler accepts the pair, reproduce the failure on unchanged
@@ -224,11 +251,39 @@ binary; `OUTPUT` selects the artifact directory. `TARGET` restricts the named
 matrix row, with unknown names rejected. `REQUIRE_EXECUTION=1` makes any
 compile-only pair fatal. `FRONTEND_SSA` accepts 0 or 1 and defaults to 1.
 All these names have the `BUSTER_METAMORPHIC_` prefix.
+Missing values retain their defaults; malformed or out-of-range values produce
+one diagnostic naming the actual range. For example, `CASES=400` reports
+`METAMORPHIC invalid BUSTER_METAMORPHIC_CASES: 400 (expected 1..256)`.
+`CASES=3` is valid; four is the default, not a minimum.
 
 `METAMORPHIC_REFERENCE` reports the actual reference command, optimization level
 and pair count; `METAMORPHIC_REFERENCE_UNAVAILABLE` reports missing commands. Each `METAMORPHIC`
 row reports target, allocator, pairs, executed, unexecuted and failed counts.
 `METAMORPHIC_SUMMARY` reports total counts, unique failure bundles, reducer
-replays and the resolved output directory. Save stdout with the bundles for a
-complete campaign record. A zero exit without strict mode means no observed
-failure in the reported coverage, not execution of unavailable targets.
+replays and the resolved output directory. It also records actual reference
+pairs, planned reference/target pairs, their separate incomplete counts,
+`budget_exhausted`, the budget in nanoseconds and `status=passed|failed|incomplete`.
+Planned reference work includes only available commands; planned target work
+includes selected rows, every requested allocator and the effective supported
+transformation mask. Explicit unavailable references and transformations remain
+coverage exclusions. Compile-only pairs count as completed and unexecuted,
+while unstarted pairs count as incomplete. An observed pair failure keeps
+`status=failed` even when work remains incomplete or a later budget check expires.
+
+The identical terminal summary line is written to `campaign.txt`, replacing its
+initial in-progress placeholder. If the terminal report cannot be saved, the
+invocation reports that failure and exits nonzero. An interrupted or refused
+setup may leave only the placeholder; it is not a completed campaign receipt.
+Save stdout with the bundles for per-row and reference provenance. Incomplete
+coverage, budget exhaustion, an empty target campaign and strict-mode unavailable
+execution all remain nonzero. A zero exit without strict mode means no observed
+failure in completed reported coverage, not execution of unavailable targets.
+
+The registered `meta_campaign_contract_tests` fixture checks the exact budget
+boundary and preserved budget defaults, planned transformation/reference/target
+counts, completion/strict-execution decisions and range diagnostics. A private
+zero budget drives both real campaign stop loops without launching a compiler
+child or relying on a sleep. Literal controls keep budget exhaustion separate
+from pair failures and ensure incomplete work cannot succeed. The native smoke
+also overwrites and reads back its terminal report. These harness controls do
+not claim execution of a 256-case campaign or external oracle qualification.

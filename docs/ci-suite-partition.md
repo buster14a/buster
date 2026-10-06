@@ -1,7 +1,7 @@
 # Independent Unix CI suites
 
 > Historical suite-level design/evidence. The subsequent internal desktop
-> partition and current 23-job completion contract are documented in
+> partition and current 25-job completion contract are documented in
 > [Desktop combination shards](ci-combination-shards.md). Historical timings
 > below are not matched before/after evidence for #333.
 
@@ -10,6 +10,10 @@ Related work: [#333](https://github.com/buster14a/buster/issues/333),
 [#92](https://github.com/buster14a/buster/issues/92).
 This is a suite-level first slice, not completion of deterministic partitioning
 inside the compiler/configuration matrix or the Clang analyzer.
+
+The inventories and measurements below describe their recorded revisions.
+Current CI retains five desktop architectures, five native jobs and two mobile
+lanes; [Apple CI policy](apple-ci-policy.md) records the Intel Apple removal.
 
 ## Evidence and rationale
 
@@ -91,7 +95,6 @@ From a fresh checkout with the hosted prerequisites, run the native slice:
 
 ```sh
 export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
-export CFLAGS=-Wno-invalid-feature-combination
 driver="${RUNNER_TEMP:-/tmp}/buster-build"
 out="$(mktemp -d)/differential"
 clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
@@ -129,7 +132,7 @@ and replace `--jobs 4` with explicit `--jobs 1`.
 
 ## Validation and acceptance
 
-`python3 tests/ci_tools_test.py -v` checks suite ownership, exact runner sets,
+`python3 tools/ci_workflow_policy_test.py -v` checks suite ownership, exact runner sets,
 independence, command retention, summaries and timing layouts. It executes the
 actual aggregate Bash body for all 625 combinations of four dependency groups
 across success, failure, cancellation, skipped and missing results. Timing tests
@@ -168,7 +171,9 @@ every test had finished. On this layout's first hosted run,
 still spent 123 s in `Retain native logs` at the end of the longest lane
 (25-34 s on the other three native lanes).
 
-After the native summary, `Pack native logs` runs `tools/ci_pack_evidence.py`,
+After the native summary, `Pack native logs` runs
+`tools/ci_native_observation.py package`, which invokes `tools/ci_pack_evidence.py`
+and then finalizes the lane's observation with its platform's required phases,
 also after failed tests but never after cancellation. The `native-*` artifact
 then holds `native-ci-logs.tar.gz` plus copies of `result.json` and
 `summary.md`, so the verdict is readable without unpacking. It is uploaded

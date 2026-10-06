@@ -940,11 +940,14 @@ struct FileTestPublishFault
     bool any_error;
     bool staging_left;
     bool posix_replacement;
+    // The steps target an operation publication must not perform.
+    bool unconsumed;
 };
 
 // Every fallible staging boundary leaves an old destination byte-identical or
 // a new destination absent. A successful interrupted write publishes only the
-// complete bytes, and cleanup failures stay secondary.
+// complete bytes, and cleanup failures stay secondary. An armed flush refusal
+// is never reached: publication closes and renames without flushing.
 BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_faults(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -961,13 +964,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_faults(UnitTestArguments* a
                    {OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 3}},
          .step_count = 4,
          .status = FILE_PUBLISH_PUBLISHED},
-        {.steps = {{OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
+        {.unconsumed = true, .steps = {{OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .status = FILE_PUBLISH_PUBLISHED},
         {.steps = {{OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}}, .step_count = 1, .error = 23456},
         {.steps = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
-         .step_count = 2,
-         .error = 12345,
-         .cleanup_error = 23456},
-        {.steps = {{OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
          .step_count = 2,
          .error = 12345,
          .cleanup_error = 23456},
@@ -1018,7 +1017,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_faults(UnitTestArguments* a
                     u32 consumed = os_file_test_end();
                     bool succeeded = fault->status == FILE_PUBLISH_PUBLISHED;
                     bool error_matches = fault->any_error ? published.error.v != 0 : published.error.v == fault->error;
-                    bool matches = consumed == fault->step_count && published.status == fault->status && error_matches &&
+                    u32 expected_consumed = fault->unconsumed ? 0 : fault->step_count;
+                    bool matches = consumed == expected_consumed && published.status == fault->status && error_matches &&
                                    published.cleanup_error.v == fault->cleanup_error;
                     if (!matches)
                     {
@@ -1305,6 +1305,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_copy_faults(UnitTestArguments* argu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_stream_destination(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_WINDOWS
+    // A character device is the requested sink: it is written in place,
+    // never refused or replaced by a staged file.
+    String8 sink = S8("/dev/null");
+    FileStats target = os_file_replacement_target_stats(sink);
+    BUSTER_TEST(arguments, target.valid && target.kind == OS_FILE_KIND_STREAM);
+    u8 bytes[] = {'s', 'i', 'n', 'k', 0, 0xff};
+    ByteSlice content = {bytes, sizeof(bytes)};
+    FilePublishResult published = file_publish_checked(sink, content, (OpenPermissions){.read = 1, .write = 1});
+    BUSTER_TEST(arguments, published.status == FILE_PUBLISH_PUBLISHED && !published.error.v && !published.cleanup_error.v);
+    BUSTER_TEST(arguments, file_publish_executable(sink, content));
+    BUSTER_TEST(arguments, file_publish(sink, (ByteSlice){0}));
+    // The sliced publisher (the -c object path) writes every slice in place.
+    ByteSlice slices[] = {{bytes, 2}, {bytes, 0}, {bytes + 2, sizeof(bytes) - 2}};
+    FilePublishResult sliced = file_publish_slices_checked(sink, slices, BUSTER_ARRAY_LENGTH(slices), (OpenPermissions){.read = 1, .write = 1});
+    BUSTER_TEST(arguments, sliced.status == FILE_PUBLISH_PUBLISHED && !sliced.error.v && !sliced.cleanup_error.v);
+    struct stat stats;
+    BUSTER_TEST(arguments, stat((const char*)sink.pointer, &stats) == 0 && S_ISCHR(stats.st_mode));
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 UnitTestResult file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1314,6 +1341,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, file_test_publish_contents);
     BUSTER_TEST_FIXTURE(arguments, file_test_publish_faults);
     BUSTER_TEST_FIXTURE(arguments, file_test_publish_concurrent_reader);
+    BUSTER_TEST_FIXTURE(arguments, file_test_publish_stream_destination);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_contents);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_aliases);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_faults);

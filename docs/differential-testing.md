@@ -13,7 +13,8 @@ From the repository root, build `ide` normally and use a **new** output director
 ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-release --sanitize-oracle
 ```
 
-The defaults use thirteen permanent cases and four generated cases, seed 1, a
+On desktop SysV x86-64, the defaults use fourteen successful permanent cases,
+two rejection controls, and four generated cases, seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts one executable, not a shell
@@ -60,6 +61,16 @@ checks; writing a Darwin or Windows object on another host is not native
 execution evidence. The former direct emitter has independently reproduced
 public-list and Darwin named-stack ABI defects, so agreement with it does not
 serve as the oracle for these new public-ABI cases.
+
+The `x64-i128-float` case crosses the compiler boundary in both directions:
+an independently compiled Clang or GCC caller supplies signed/unsigned 128-bit
+integers and f32/f64/f80 values to the Buster subject, checks every conversion
+against its own casts, and checks wide arguments and return values through the
+native ABI. Inputs include the signed minimum, both sides of 2^64, and the
+largest f80 value below 2^128. The three MIR allocators require zero fallback;
+NONE remains the direct reference before its separate cutover. The registered
+driver fixture covers Windows x86-64; this independent native comparison runs
+where System V x87 long double is available.
 
 On ELF AArch64, twenty-two additional relations exchange actual public `va_list`
 objects, rather than only calling variadic functions compiled by the other
@@ -166,25 +177,43 @@ a Release `ide.exe` built for that target, run:
 
 The runner checks the resolved compiler with the existing `/Bv /EP /TC`
 identity and native-target probe. `VSCMD_ARG_TGT_ARCH` and a working Visual
-Studio toolchain environment (`INCLUDE`, `LIB`, `PATH`) are required. The
-preflight rejects a missing compiler, a non-MSVC executable, a wrong target,
+Studio toolchain environment (`INCLUDE`, `LIB`, `PATH`) are required. Each
+attempt emits a structured `MSVC_REFERENCE_PREFLIGHT` record with the resolved
+executable, exact argv, elapsed time, spawn and wait outcomes, native status,
+target, parsed version, and bounded stdout/stderr blocks. The shared compiler
+query owns a bounded process group, drains all child output while retaining at
+most 4 KiB per stream, and records observed, captured, and dropped byte counts.
+Capture or process-tree cleanup failures are classified as wait failures.
+
+Failures are classified as executable missing, spawn failure, timeout, wait
+failure, signal, nonzero exit, missing or mismatched identity, or missing or
+mismatched target. Only a timeout or spawn failure receives at most one bounded
+retry before any differential output is claimed. Wait, capture, process-tree
+cleanup, compiler, identity, and target failures are never retried. The 30-second identity
+preflight is independent of `--reference-timeout`, which governs later
+reference compilation, linking, and execution. A final
+`MSVC_REFERENCE_PREFLIGHT_RESULT` records whether a second attempt recovered.
+
+The preflight rejects a missing compiler, a non-MSVC executable, a wrong target,
 built-in or generated suites, `--sanitize-oracle`, and any nonzero reduction
-budget **before** creating the output directory. The default reduction budget
-is 64, so pass `--minimize 0` explicitly. MSVC offers no ASan+UBSan equivalent
-to the runner's sanitized reduction contract. Required Clang/GCC corpus and
-sanitizer runs remain separate, unchanged obligations.
+budget **before** creating the output directory. Output-directory refusal is
+reported separately and only after both compiler executables pass preflight, so
+a tool failure cannot be mislabeled as stale evidence. A structured
+`DIFFERENTIAL_OUTPUT_CLAIM` record distinguishes created, already-existing,
+create-error, and not-attempted outcomes. The default reduction budget is 64,
+so pass `--minimize 0` explicitly. MSVC offers no ASan+UBSan
+equivalent to the runner's sanitized reduction contract. Required Clang/GCC
+corpus and sanitizer runs remain separate, unchanged obligations.
 
 Supply a reviewed, standard-C11 source using the native Windows ABI. GNU
 extensions, compiler builtins, signed-overflow-dependent behavior and
-incompatible aliasing semantics are outside this subset. Use explicit
-`unsigned char` for high-bit byte values: Buster currently accepts
-`-funsigned-char` without promoting plain `char` as unsigned on Windows
-([#1000](https://github.com/buster14a/buster/issues/1000)). `/J` sets the
-reference's intended plain-`char` policy, but such dependent sources are not
-admitted until that compiler defect is repaired. `/Od` and `/O2` are separate
-reference controls. The optional fixed `--host` translation unit is compiled
-independently for each reference and once for all Buster configurations. A
-successful custom reference must exit zero in both optimization variants.
+incompatible aliasing semantics are outside this subset. The mixed-object
+fixture checks high-bit plain `char` under Buster's `-funsigned-char` and
+MSVC's `/J`, plus explicit signed- and unsigned-char controls. `/Od` and `/O2`
+are separate reference controls. The optional fixed `--host` translation unit
+is compiled independently for each reference and once for all Buster
+configurations. A successful custom reference must exit zero in both
+optimization variants.
 The included fixture checks scalar and aggregate values and calls in both
 compiler directions, including an aggregate returned through the Windows ABI.
 
@@ -502,3 +531,40 @@ These controls are not a full-corpus one/two/four-worker timing cohort. Hosted
 policy requests four workers only after the separate #408 full-corpus
 qualification. Complete native-job, workflow latency, aggregate runner work and
 concurrent peak-memory acceptance remain separate measurements.
+
+## Seeded Python oracle controls
+
+The existing seeded Python corpus and line reducer use the same reference
+`-fwrapv -fno-strict-aliasing -funsigned-char` profile as the native runner.
+A valid reference must complete normally at both O0 and O2, with matching
+exit status and stdout. Matching crashes, missing statuses, deadlines or an
+unavailable optimized reference cannot establish equivalence. Normal nonzero
+exits remain valid because generated programs encode their hash in the exit
+status. Reference agreement screens disagreements; it does not certify that
+C execution is defined.
+
+The reducer applies that reference gate before retaining every divergence,
+including candidate rejection and compiler crash. Rejection details retain the
+candidate mode so further trials stay on the initially divergent mode. A
+reducer `ok` trial is uninteresting and deliberately leaves O2 unevaluated;
+it is not a four-way equivalence certificate. Candidate compilation
+timeout is inconclusive rather than a source rejection. Review the minimized
+source and original failure independently before making a compiler-defect claim.
+
+Original controlled observations and subprocess results exercise these
+predicates through the existing hosted differential policy suite:
+
+```sh
+python3 tools/differential_ci_policy_test.py -v
+```
+
+These controls cover comparator and reducer sensitivity without executing a
+compiler. Actual generated-program, sanitizer, mode and platform execution
+remains separate evidence.
+
+Seeded campaigns require positive `--count`, `--units` and `--jobs` plus a
+nonempty selected family list. Invalid zero-work selections fail before output
+creation or case submission. `--isolate` returns failure for any whole-case or
+isolated-unit divergence; a successful isolated check retains exit zero.
+The same registered policy suite verifies actual CLI parsing/status propagation
+with controlled case-execution boundaries, without launching a compiler.

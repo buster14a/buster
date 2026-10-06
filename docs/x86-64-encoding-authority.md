@@ -29,10 +29,10 @@ Paths below are relative to `src/buster/lib/` unless stated otherwise.
 | Consumer | Route and independent decisions still present |
 |---|---|
 | `compiler/assembly/assembly.c` | Intel/AT&T parsing and inline/global assembly become physical operands, then `assembly_x86_metadata_select_source_form` / `assembly_x86_metadata_emit`. Final ordinary bytes use metadata. |
-| The same assembler's size/legality paths | Source `LEA` and `MOVZX`/`MOVSX`/`MOVSXD` now bypass the handwritten size functions: checked metadata selection supplies length, displacement width and form for both layout and emission. [LEA Intel and AT&T oracle](x86-64-source-layout-oracle.s); [move-extension oracle](x86-64-source-move-extend-oracle.s). The other families still call `assembly_x86_memory_displacement_size`, `memory_encoding_size`, `instruction_size`, `general_instruction_size`, `size_*`, `evex_*`, `apx_*`, `amd_*`, `amx_*`, or `mask_instruction_size`, duplicating size, immediate, address, suffix, feature and operand decisions. AMD/vector form tables are not another final byte packer, but they remain independent encoding-decision authorities to migrate separately. |
+| The same assembler's size/legality paths | Source `LEA`, `MOVZX`/`MOVSX`/`MOVSXD`, rotates, shifts, double shifts and the scalar integer/control, x87, MMX, SSE, VEX, EVEX and APX families now bypass the handwritten size functions: checked metadata selection supplies length, displacement width and form for both layout and emission. [LEA Intel and AT&T oracle](x86-64-source-layout-oracle.s); [move-extension oracle](x86-64-source-move-extend-oracle.s); [shift oracle](x86-64-source-shift-oracle.s); [scalar/control oracle](x86-64-source-scalar-oracle.s); [legacy vector/x87 oracle](x86-64-source-legacy-oracle.s); [EVEX oracle](x86-64-source-evex-oracle.s); [APX oracle](x86-64-source-apx-oracle.s). Their obsolete handwritten size functions are removed. The selected form ID is retained through checked emission rather than selecting an alternative again. The other families still call `assembly_x86_memory_displacement_size`, `memory_encoding_size`, `instruction_size`, `general_instruction_size`, `size_*`, `evex_*`, `apx_*`, `amd_*`, `amx_*`, or `mask_instruction_size`, duplicating size, immediate, address, suffix, feature and operand decisions. AMD/vector form tables are not another final byte packer, but they remain independent encoding-decision authorities to migrate separately. |
 | `compiler/codegen/codegen.c` | `codegen_canonical_x64_metadata_emit*` and relocation helpers adapt canonical lowering to metadata. Query, immediate/displacement, and byte-template caches are derived emission routes. Scalar/SIMD/x87/EVEX helpers and ABI expansion choose operations; they must not invent fields. Inline/global assembly rejoins the source assembler. |
-| `compiler/codegen/machine.c`, `machine_x86_64.c` | Exact DIRECT/FAMILY recipes, shape caches, prevalidated register/memory/immediate templates, and EXPANSION switch. `machine_x86_64_exact_prewarm` prepares exact shapes. The registry has 126 rows: 47 DIRECT, 50 FAMILY, 29 EXPANSION, plus documented LEA_BLOCK, INDIRECT_BRANCH and LOAD_SYMBOL_GOT surfaces. These are dispatch/expansion paths, not 126 encoders. |
-| `x86_64.c` | `x86_64_encode_register_operation` already sends ordinary register operations through metadata, including extended-register variants. CPU-identification constants are not instruction emission. |
+| `compiler/codegen/machine.c`, `machine_x86_64.c` | Exact DIRECT/FAMILY recipes, shape caches, prevalidated register/memory/immediate templates, and EXPANSION switch. `machine_x86_64_exact_prewarm` prepares exact shapes; it registers the closed expansion-shape set and resolves each shape on its first serial lookup, and `machine_x86_64_exact_prewarm_all_shapes` resolves every shape before a gang. The registry has 126 rows: 47 DIRECT, 50 FAMILY, 29 EXPANSION, plus documented LEA_BLOCK, INDIRECT_BRANCH and LOAD_SYMBOL_GOT surfaces. These are dispatch/expansion paths, not 126 encoders. |
+| `compiler/assembly/x86_64_metadata.c` | `x86_64_encode_register_operation` sends ordinary register operations through metadata, including extended-register variants. Its existing declaration/types remain in `x86_64.h`; the host-probe implementation in `x86_64.c` has no compiler dependency. CPU-identification constants are not instruction emission. |
 | `compiler/jit/jit.c` | `jit_emit_thunks` encodes the indirect JMP through metadata; its embedded target address is data. |
 | `compiler/link/link.c` | `link_x86_emit`, `link_x86_emit_push_imm32`, ELF/PE startup, import/PLT stubs, and Mach-O destructor runners generally use metadata. Object-format and ABI policy remain here. Exceptions are enumerated below. |
 | Field writers in assembler/codegen/object/link/JIT | Bounds-checked little-endian immediate/displacement/relocation writes are legitimate consumers of field descriptors. A writer that changes opcodes or reinterprets register bits is an encoder/relaxer, not a neutral patcher. |
@@ -44,7 +44,7 @@ not just function names containing `encode`.
 
 | Site at the audit base | Disposition in this change |
 |---|---|
-| `codegen.c:codegen_canonical_x64_thread_local_general_dynamic` | Migrated: raw 16-byte TLSGD sequence becomes a metadata-owned recipe. |
+| `machine_x86_64.c:machine_encode_x86_64` | TLSGD uses a metadata-owned recipe. The direct-emitter consumer was removed at the MIR-only cutover; the machine TLS tests retain its relocation and encoding coverage. |
 | `machine_x86_64.c:MACHINE_X64_TLS_GENERAL_DYNAMIC`, via `machine_x64_emit_literal_bytes` | Migrated: same recipe; literal helper removed. |
 | `link.c:link_elf_relax_thread_local`, general-dynamic arm | Migrated: metadata-derived FS MOV + fixed-displacement LEA replacement. |
 | The same function, initial-exec arm | Migrated: metadata-derived ADD input/output forms, not manual REX/ModRM surgery. |
@@ -59,6 +59,15 @@ Its zero forbidden-writer result was not proof of universal unification. The
 registry now classifies the two TLS APIs as metadata authorities and removes
 the old canonical TLS “neutral fixed sequence” exception. The remaining raw
 sites are explicit migration work, not hidden behind that counter.
+
+`machine_test_source_scan_writers` walks each sanitized body once, carrying
+the existing 256-entry architecture brace stack and recognizing all writer
+spellings at identifier boundaries. Unknown brace contexts retain the lexical
+statement/ternary look-back; this is not a C control-flow analysis. The
+`machine_test_source_writer_guards` fixture pins comments, strings, token
+boundaries, nested/else/ternary guards, unknown/default architecture and the
+stack limit. The [#1887 audit](performance-audits/2026-09-29T184335Z.md)
+records the reference differential, work census and scoped timing comparison.
 
 Mach-O dyld bind opcodes, unwind records, hashes, AArch64 words, target-address
 payloads and source `.byte` directives are not x86 instruction authorities.
@@ -170,6 +179,50 @@ trailing letter must not turn `bts` into `bt`. Typed aliases such as scalar
 `movq` still select their base family when the distinct metadata `MOVQ` family
 does not match. These are syntax projections, not another byte authority.
 
+Migrated source-layout families preserve the source diagnostic policy: malformed
+operands, illegal prefixes and immediate limits are invalid operands. If a
+disabled metadata alternative hides such a rejection, the adapter performs a
+diagnostic-only structural query; it publishes no bytes and cannot enable the
+missing feature. Valid forms on unsupported targets retain the feature diagnostic.
+
+Scalar/control syntax policy also retains full-width byte immediates, typed
+conditional-move aliases, the metadata-owned EMMS form, and the existing limits
+on symbolic arithmetic immediates and reserved control/debug register spellings.
+These projections do not create another encoding or relocation authority.
+Ordinary Jcc/SETcc/CMOVcc now share their condition identities and spelling
+projection in `x86_64_conditions.inc`; see the
+[closed condition-family contract](x86-64-condition-projection.md) for its
+consumers, retained exact-binding checks, independent witnesses and exceptions.
+
+Legacy XMM, MMX and x87 source memory qualifiers are checked against the generated
+operand schema. Candidate-local normalization keeps public vector source widths
+separate from encoded element widths; invalid qualifiers cannot choose another
+form or publish symbols/relocations. Unsized x87 data/arithmetic source is rejected
+instead of picking a type by encoded size. The source census uses the same schema
+projection, including the accepted unsized x87 environment-image spelling.
+
+The legacy migration characterizes all 11,013 stable census records and pins the
+175 changed outcomes, byte counts and relocation counts. Intel exact witnesses
+increase by 105 and AT&T exact witnesses by 54, with no previously exact witness
+losing its complete outcome. Twelve x87 state-image operand-size variants and one
+alternate MOVQ encoding remain strict byte mismatches; equivalent operations are
+not counted as identical bytes.
+
+APX source shifts retain their unsigned byte count pattern, including NF counts
+of 255. POP2 source destinations must be distinct registers. Explicit target
+fixtures enable APX_NCI_NDD_NF independently from the APX register-extension
+feature when requesting NDD/NF forms.
+
+The EVEX migration and VEX schema source-width correction pin 33 additional
+complete census outcomes relative to the repaired legacy parent: Intel exact
+witnesses increase by 23 and AT&T by 17. All previously exact complete tuples
+are preserved. The 11,013 metadata form IDs and stable form hashes stay fixed;
+synthesized source spellings are corrected separately. Four VCMP memory witnesses
+use their published 128/256-bit source widths, and four register witnesses stay
+unchanged. Sixteen independent byte/rejected-source controls cover 64/32-bit
+addresses, including AVX512-enabled targets. Remaining VEX/EVEX encoding variants
+stay strict byte mismatches. The APX descendant retains these census outcomes.
+
 ### Throughput and publication
 
 Keep compact contiguous records, integer IDs, immutable normalized plans and
@@ -206,7 +259,16 @@ by a fixed-disp32 LEA; its final four bytes contain the thread-pointer offset.
 The IE envelope stays seven bytes, and all 16 GPR destinations are derived from
 metadata. Small and zero values do not shrink these ABI-sized envelopes.
 
-The implementation prepares GD, local-exec and IE templates independently.
+`buster_x86_metadata_relax_tls_local_dynamic` owns the local-dynamic envelope
+foreign `-fPIC` objects carry (this compiler never emits it): a seven-byte
+`lea rdi, [rip + x@tlsld]` then a five-byte direct `call` or, under
+`-fno-plt`, a six-byte `call [rip + helper]`. Both calls and the LEA are
+derived from metadata like the GD templates; the call opcode bytes select the
+12- or 13-byte envelope. The replacement is the local-exec FS MOV to RAX behind
+three or four data16 prefixes, with no offset field: each variable's DTPOFF32
+supplies its own offset.
+
+The implementation prepares GD, local-exec, IE and LD templates independently.
 An object-only GD compile derives only its LEA and CALL, not all 36 forms used
 across every recipe. Ordinary non-TLS compiles never initialize this cache.
 `prewarm_all_forms` prepares every group for parallel test consumers.

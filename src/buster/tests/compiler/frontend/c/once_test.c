@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/frontend/c/once_test.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/file.h>
@@ -230,7 +231,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_import_growth(UnitTestArguments* 
         c_once_test_numbers(arguments, &result, preprocess, C_ONCE_TEST_IMPORT_COUNT);
         c_once_test_single_lexed_rows(arguments, &result, preprocess, C_ONCE_TEST_IMPORT_COUNT + 2);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -256,7 +257,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_pragma_growth(UnitTestArguments* 
         c_once_test_numbers(arguments, &result, preprocess, C_ONCE_TEST_PRAGMA_COUNT);
         c_once_test_single_lexed_rows(arguments, &result, preprocess, C_ONCE_TEST_PRAGMA_COUNT + 2);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -284,7 +285,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_duplicate_imports(UnitTestArgumen
         c_once_test_numbers(arguments, &result, preprocess, C_ONCE_TEST_LOOKUP_COUNT);
         c_once_test_single_lexed_rows(arguments, &result, preprocess, C_ONCE_TEST_LOOKUP_COUNT + 2);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -350,7 +351,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_failures(UnitTestArguments* argum
         }
         BUSTER_TEST(arguments, depth.token_count == 1);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -378,7 +379,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_table_hashes(UnitTestArguments* a
     }
     BUSTER_TEST(arguments, even_hashes != 0);
     BUSTER_TEST(arguments, table.count == 128);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -433,7 +434,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_table_probe_scaling(UnitTestArgum
         }
         arguments->show(arguments, S8("C_ONCE_PROBES_V1 entries={u32} operations={u64} probes={u64}\n"), count, operations, table.probe_count);
         previous_probes = table.probe_count;
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -553,7 +554,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_table_identity(UnitTestArguments*
     BUSTER_TEST(arguments, status == C_INCLUDE_FILE_OK && table.count == 3);
     status = c_test_include_file_entry(&table, (CIncludeFileIdentity){.physical = true, .device = 3, .index = 8}, S8("other-index.h"), &entry);
     BUSTER_TEST(arguments, status == C_INCLUDE_FILE_OK && table.count == 4);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -705,7 +706,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_filesystem_aliases(UnitTestArgume
         BUSTER_TEST(arguments, lexed_once == 4);
         BUSTER_TEST(arguments, detail->include_file_probe_count != 0);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// The driver's root descriptor and include descriptors must share one key.
+// In-memory source with the same path deliberately stays in its own namespace.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_root_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 root_path = buster_test_temporary_path(temporary.arena, S8("buster-issue1850-root"), S8(".c"));
+    String8 directory = c_once_test_directory(root_path);
+    String8 root_name = string_slice(root_path, directory.length + 1, root_path.length);
+    String8 aliases[] = {root_name, S8("buster-issue1850-root-hard.c"), S8("buster-issue1850-root-symbolic.c")};
+    String8 definition = S8("int root_once_function(void) { return 1850; }\n");
+    for (u32 import = 0; import < 2; import += 1)
+    {
+        for (u32 alias = 0; alias < BUSTER_ARRAY_LENGTH(aliases); alias += 1)
+        {
+            String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8} \"./{S8}\"\n"),
+                                           import ? S8("") : S8("#pragma once\n"), definition,
+                                           import ? S8("#import") : S8("#include"), aliases[alias]);
+            bool written = c_once_test_write(root_path, source);
+            BUSTER_TEST(arguments, written);
+            COnceTestLink link = C_ONCE_TEST_LINK_CREATED;
+            if (written && alias)
+            {
+                link = c_once_test_link(arguments, temporary.arena, alias == 2, directory, root_name, aliases[alias]);
+                BUSTER_TEST(arguments, link != C_ONCE_TEST_LINK_FAILED);
+            }
+            if (link == C_ONCE_TEST_LINK_CREATED && BUSTER_REQUIRE(arguments, written))
+            {
+                FileMapRead root = file_map_read(temporary.arena, root_path, (FileReadOptions){0});
+                if (BUSTER_REQUIRE(arguments, root.bytes.pointer != 0 && root.identity.valid))
+                {
+                    CPreprocessResult actual = c_preprocess(temporary.arena, BYTE_SLICE_TO_STRING(8, root.bytes),
+                                                              (CPreprocessOptions){.source_path = root_path, .source_identity = root.identity});
+                    CLexResult expected = c_lex(temporary.arena, definition);
+                    BUSTER_TEST(arguments, actual.error_count == 0);
+                    BUSTER_TEST(arguments, actual.token_count == expected.token_count - 1);
+                    for (u64 index = 0; index + 1 < actual.token_count && index < expected.token_count; index += 1)
+                    {
+                        BUSTER_TEST(arguments, actual.tokens[index].kind == expected.tokens[index].kind);
+                        BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[index]),
+                                           c_token_spelling(expected.spelling_base, expected.tokens[index]));
+                    }
+                    BUSTER_TEST(arguments, c_preprocess_detail(actual)->source_lexed.files == 1);
+                    BUSTER_TEST(arguments, c_parse(temporary.arena, actual).diagnostic_count == 0);
+                    String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fsyntax-only"), root_path};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                }
+                file_map_unmap(root);
+            }
+        }
+    }
+
+    String8 recursive = string_format(temporary.arena, S8("1851\n#include \"{S8}\"\n"), root_name);
+    if (BUSTER_REQUIRE(arguments, c_once_test_write(root_path, recursive)))
+    {
+        FileMapRead root = file_map_read(temporary.arena, root_path, (FileReadOptions){0});
+        if (BUSTER_REQUIRE(arguments, root.bytes.pointer != 0 && root.identity.valid))
+        {
+            CPreprocessResult actual = c_preprocess(temporary.arena, BYTE_SLICE_TO_STRING(8, root.bytes),
+                                                      (CPreprocessOptions){.source_path = root_path, .source_identity = root.identity, .include_depth_limit = 4});
+            BUSTER_TEST(arguments, actual.error_count == 1 && actual.diagnostic_count == 1);
+            if (BUSTER_REQUIRE(arguments, actual.diagnostic_count == 1 && actual.diagnostics != 0))
+            {
+                BUSTER_TEST(arguments, actual.diagnostics[0].kind == C_DIAGNOSTIC_INCLUDE_DEPTH);
+            }
+        }
+        file_map_unmap(root);
+    }
+    if (BUSTER_REQUIRE(arguments, c_once_test_write(root_path, S8("1852\n"))))
+    {
+        String8 memory_source = string_format(temporary.arena, S8("#pragma once\n1851\n#include \"{S8}\"\n"), root_name);
+        CPreprocessResult actual = c_preprocess(temporary.arena, memory_source, (CPreprocessOptions){.source_path = root_path});
+        BUSTER_TEST(arguments, actual.error_count == 0 && actual.token_count == 3);
+        if (BUSTER_REQUIRE(arguments, actual.token_count == 3 && actual.tokens != 0))
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[0]), S8("1851"));
+            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[1]), S8("1852"));
+        }
+        // #import sees prior ordinary inclusion; ordinary #include still
+        // repeats an unguarded file until an import marks the identity once.
+        String8 prior_include = string_format(temporary.arena, S8("#include \"{S8}\"\n#include \"{S8}\"\n#import \"{S8}\"\n#include \"{S8}\"\n"),
+                                             root_name, root_name, root_name, root_name);
+        actual = c_preprocess(temporary.arena, prior_include, (CPreprocessOptions){.source_path = S8("in-memory-root.c"), .include_paths = &directory, .include_path_count = 1});
+        BUSTER_TEST(arguments, actual.error_count == 0 && actual.token_count == 3);
+        if (BUSTER_REQUIRE(arguments, actual.token_count == 3 && actual.tokens != 0))
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[0]), S8("1852"));
+            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[1]), S8("1852"));
+        }
+    }
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -780,7 +877,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_preprocess_probe_scaling(UnitTest
             arguments->show(arguments, S8("C_ONCE_PREPROCESS_PROBES_V1 entries={u32} operations={u64} probes={u64}\n"),
                             count + C_ONCE_TEST_SCALE_DEPTH + 1, operations, probes);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -788,16 +885,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_preprocess_probe_scaling(UnitTest
 UnitTestResult c_once_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_import_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_pragma_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_duplicate_imports);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_failures);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_table_hashes);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_table_probe_scaling);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_table_allocation_failure);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_table_identity);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_filesystem_aliases);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_preprocess_probe_scaling);
+    C_TEST_FIXTURE(arguments, c_once_test_import_growth);
+    C_TEST_FIXTURE(arguments, c_once_test_pragma_growth);
+    C_TEST_FIXTURE(arguments, c_once_test_duplicate_imports);
+    C_TEST_FIXTURE(arguments, c_once_test_failures);
+    C_TEST_FIXTURE(arguments, c_once_test_table_hashes);
+    C_TEST_FIXTURE(arguments, c_once_test_table_probe_scaling);
+    C_TEST_FIXTURE(arguments, c_once_test_table_allocation_failure);
+    C_TEST_FIXTURE(arguments, c_once_test_table_identity);
+    C_TEST_FIXTURE(arguments, c_once_test_filesystem_aliases);
+    C_TEST_FIXTURE(arguments, c_once_test_root_identity);
+    C_TEST_FIXTURE(arguments, c_once_test_preprocess_probe_scaling);
     return result;
 }
 

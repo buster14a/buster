@@ -7,9 +7,12 @@ On 2026-09-22, after #945 landed, ruleset `22537199` was updated and read back:
 eight required GitHub Actions checks, non-strict branch freshness, no bypass,
 and an initial build limit of one with a merge limit of one, ALLGREEN, and
 merge commits. The saved response passed `check-ruleset` at main
-`6929d847fbab0014284f698cd235ddb570d60e9d`. The checked-in ruleset now
-describes the desired build limit of 20; verify live settings before relying
-on it. The checker has no write API.
+`6929d847fbab0014284f698cd235ddb570d60e9d`. The live limit was later raised to
+20. On 2026-09-29, #1805 measured that limit exhausting the 50-job macOS runner
+ceiling ([ci-runner-queue.md](ci-runner-queue.md)) and the policy was cut to 4.
+After #1986 halved `ci.yml`'s macOS jobs, the checked-in ruleset now describes
+a build limit of 6. Verify live settings before relying on it. The checker has
+no write API.
 
 On 2026-09-24, the administrator intentionally added Repository admin (role 5)
 and `davidgmbb` (user 39247043) as `always` bypass actors. The repository
@@ -28,15 +31,20 @@ fixtures do not establish GitHub's live synthetic-commit shape or queue behavior
 ## One admission owner, no branch-freshness requirement
 
 GitHub's native merge queue owns order, synthetic heads and rebuilding. Configure
-`max_entries_to_build: 20`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`max_entries_to_build: 6`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
 `min_entries_to_merge_wait_minutes: 0`, `check_response_timeout_minutes: 360`,
 `grouping_strategy: ALLGREEN`, and `merge_method: MERGE`. Retain
 `strict_required_status_checks_policy: false`. A clean feature branch does not
 need to be manually updated merely because main advanced. The queue, not the
 feature author, constructs and validates the combined candidate.
 
-Build concurrency permits up to 20 queued candidates to run speculative
-combined-head validation concurrently; it does not authorize 20 merges. A
+Build concurrency permits up to 6 queued candidates to run speculative
+combined-head validation concurrently; it does not authorize 6 merges. Since
+#2657 each `ci.yml` group needs five macOS jobs (four after #1986, six after
+#2659), so six groups hold at most 30 of the 50 observed macOS runners,
+leaving 20 for pull-request and main validation. That headroom is not measured; the
+[runner-queue guidance](ci-runner-queue.md) still says to lower build
+concurrency if macOS starvation or cancellation waste grows. A
 later candidate may have the preceding unmerged synthetic commit as its base.
 Both admission jobs keep that exact group pending until the base lands on main;
 they never grant success while the predecessor is speculative. The merge limit
@@ -63,8 +71,10 @@ wait policy from independently checked-out main, checks that the predecessor
 did not change admission or rebinding policy, and requires the queue ref to
 retain the same group identity at admission. Its bounded 310-minute job accommodates the
 five-hour wait.
-The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
-not a `merge_group` workflow, so the queue does not schedule it.
+The self-hosted 9700X direct workload workflow is not a `merge_group` workflow.
+Its standalone workload path runs only for the owner's pull requests, and its
+compiler comparison runs after a commit lands on main (see
+[9700X compiler comparison](#9700x-compiler-comparison-2752)).
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed
@@ -82,12 +92,12 @@ only as part of the reviewed queue rollout; never remove an existing requirement
 | --- | --- | --- | --- |
 | CI complete | ci.yml | GitHub PR merge revision | Exact synthetic group |
 | Linux x86-64 bootstrap evidence | self-host-audit.yml | GitHub PR merge revision | Exact synthetic group |
-| Canonical TCC bootstrap | tcc-bootstrap.yml | Explicit PR head (existing #245 policy) | Exact synthetic group |
+| Canonical TCC bootstrap | tcc-bootstrap.yml | Explicit PR head (existing #245 policy); its [source-size](source-size.md) step measures the GitHub PR merge revision | Exact synthetic group |
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
-| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
-| Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
+| Native retirement merge admission | native-retirement-admission.yml (PR/main); trusted reconciler (merge group) | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
+| Main integration admission | merge-queue-admission.yml (PR/main); trusted reconciler (merge group) | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
 
 `CI complete` also runs the [merge-parent preservation guard](merge-parent-preservation.md) over merges introduced by each PR candidate, merge-group candidate, and main push. It uses the event's exact base commit and does not require a feature branch to be updated when `main` advances.
 
@@ -105,7 +115,161 @@ YAML/expression validation. This does not broaden #245 fork semantics. Fork PR
 readiness uses hosted runners, read-only permissions, no secrets, and no
 persisted checkout credentials. GitHub's normal fork approval rules still apply.
 
+## Event-driven reconciliation (#1807)
+
+The same trusted reconciler is the merge-group producer for
+`Native retirement merge admission` (#1811). The PR/main job lives in
+`native-retirement-admission.yml`, which has no `merge_group` trigger. While a
+group's own `api-migration-policy.yml` still defines the native-admission job
+(`native_owner`), the reconciler only shadow-evaluates the native gate and
+publishes nothing. Otherwise it publishes an exact-head check with the marker
+`buster-native-retirement-admission-v1:<head>`. It requires the queued base to
+be live main and the trusted checkout to be that base, then validates the
+native gate and policy twice with intervening identity checks. Pending never
+becomes success; denied or changed publication is terminal failure. The native
+check can finish before the six other workflows because it validates its own
+exact-tree publication contract independently. Activation requires shadow
+validation and a live queue trace before relying on the new producer.
+
+The retired legacy `merge_group` job held a hosted Ubuntu runner for up to 310
+minutes. It spent most of that time in `run_gate`'s 30-second sleep loop waiting
+for the predecessor and the six gates, and did almost no verification. The
+`merge-queue-reconcile.yml` workflow replaces that wait with short passes:
+
+- **Triggers.** A completed `merge_group` run of any of the six required
+  workflows or of the rebinding workflow (whose reconstruction job
+  `required_checks` adds for unattested retirement groups, #1893), a `push` to main (predecessor landing), a 15-minute scheduled sweep
+  (bounded recovery for missed or coalesced deliveries) and `workflow_dispatch`.
+  Every pass enumerates the live `gh-readonly-queue/main/*` refs itself and never
+  trusts a delivery payload. Duplicate, out-of-order, missed and coalesced events
+  therefore converge to the same result. One global concurrency group
+  serializes passes; each job has a 10-minute limit and never waits on prerequisites.
+  Only transient GET recovery uses bounded backoff, as described below.
+- **Trust.** The job checks out live `main` and runs only that code. It fetches
+  group commits as data and never checks out or executes them. The job has read
+  scopes plus `checks: write`, and `CheckWriter` can only create or update a
+  check run named `Main integration admission`.
+- **Classification (`reconcile_group`).** A head already contained in main is
+  `landed`. A group whose first parent is a descendant of main is waiting for
+  its predecessor and costs no API request. The front group (first parent ==
+  main) and divergent groups run `identity` and `evaluate`. The front group is
+  the only one that pays for evidence collection.
+- **Admission (`evaluate`).** The group gets the same identity, six-gate
+  collection, retirement gate and ruleset validation as `run_gate`. Evidence is
+  still collected twice and the retirement gate is still rerun. Admission also
+  requires the trusted checkout to **be** the landed base. A pass whose
+  checkout predates the base stays pending, and that base's main push
+  reconciles again. So older authority never judges a tree under a predecessor's
+  newer policy, which is stronger than the predecessor-diff rejection. A workflow
+  attempt that changes between the two collections leaves the group pending.
+  The rerun's own completion reconciles it again.
+- **Publication.** A pending group gets one `in_progress` check run carrying the
+  exact-head external ID `buster-merge-queue-admission-v1:<head>`. The check run
+  is updated only when the pending reasons change. `AdmissionError` completes it
+  as `failure` and success completes it with the JSON report. Completed runs are
+  terminal: failures are not retried to green, and cancelled work is not
+  resurrected. Transport or response errors publish nothing and fail the pass
+  so the next event or sweep can retry. A pending check run is never success, so
+  exiting while prerequisites are pending cannot satisfy the queue. The queue's
+  360-minute timeout remains the bound for groups that never complete.
+- **Producer identity.** The check run is created with `GITHUB_TOKEN`, so its app
+  is GitHub Actions (15368). The required-check inventory and ruleset are
+  unchanged. On a reconciler-owned group, a same-name check run without the
+  exact-head external ID gets a published failure; it is never treated as
+  authority. The CI fail-fast watcher (`recover-ci.py`) accepts only a run that
+  carries this exact-head marker, because the run has no workflow check suite.
+- **One producer per group (`group_owner`).** The group's own
+  `merge-queue-admission.yml` decides the producer. A group that still declares
+  `merge_group` there (queued before activation) keeps the legacy job; the
+  reconciler then only shadow-evaluates it and writes nothing, recording the
+  decision in its `merge-queue-reconcile-*` artifact and job log. This
+  deterministic split lets both versions coexist during rollout without racing.
+  `run_gate` (`check-group`) remains in the tool only for such groups.
+
+### Activation and measurement
+
+Activation removes `merge_group` and the group-only steps from
+`merge-queue-admission.yml` and moves the native PR/main job out of
+`api-migration-policy.yml` into `native-retirement-admission.yml`. Readiness
+checks on pull requests and main pushes keep the same job names, so the
+required-check inventory (eight checks, app 15368) is unchanged. Both files are
+trust-implementation paths, so the change is a `bootstrap` transition that
+needs a maintainer dispatch of `native-retirement-integration.yml`. The first
+group containing it is reconciled by the older trusted main, which already
+publishes for groups whose own workflows lack the legacy producers.
+
+Land activation only after the shadow decisions match the legacy verdicts for
+the same heads (recorded on #1807). After landing, record a live two-entry
+M → G1 → G2 trace: revisions, run and attempt IDs, reconciler passes per group,
+API reads, admission latency after the last gate completes, and the runner
+minutes that are no longer held. The offline fixtures do not substitute for
+that trace.
+
+Report admission time in three separate parts:
+
+- **Verification work:** a reconciler pass, measured in seconds.
+- **Orchestration wait:** time for a predecessor or gate. After activation, no
+  admission runner is held during this wait.
+- **Build/test queue delay:** runner assignment for the six gates themselves.
+
+This change does not explain or fix host-specific assignment delay (#1805).
+The rebinding workflow keeps #1907's in-job predecessor wait (`wait-base`) in
+`Reconstruct candidate closure ephemerally`; that remaining runner-held wait is
+tracked on #1807.
+
+## 9700X compiler comparison (#2752)
+
+The 9700X compiler comparison is not part of queue admission. It measures each
+commit after it lands on main, against its first parent (or, after a merge
+burst, the nearest earlier measured main commit), and publishes the
+report-only `9700X compiler benchmark` check on that main commit; see the
+[9700X admission guide](../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
+A brief queue-gated rollout (#2754) made every merge wait about 13 minutes for
+the single host and could not admit bot-authored catch-up pull requests; it was
+replaced by the post-merge comparison, and the reconciler no longer reads any
+benchmark setting.
+
 ## Exact identities and fail-closed evidence
+
+### API read recovery and retired groups (#1983)
+
+Both admission clients use `github_read_json` from the already trusted
+`native_retirement_integration.py`. A GET has at most four attempts within a
+30-second elapsed recovery budget, with 1/2/4-second backoff. The helper retries
+500/502/503/504, 429, connection failures and timeouts. A 403 retries only with
+rate-limit evidence. `Retry-After` (seconds or HTTP date) and rate-limit reset
+timing are respected; a delay outside the remaining budget leaves the read
+unresolved instead of retrying early. Other 4xx and malformed JSON fail closed.
+POST/PATCH publication remains single-attempt. Diagnostics name the operation,
+repository-relative API path, status and attempt count without response bodies
+or credentials.
+
+A queue-ref GET additionally retries a 404 within that budget. Persistent 404
+does not itself prove retirement: a successful `git/matching-refs` read must
+prove that the exact ref is absent or names a different head. A failed,
+malformed or ambiguous confirmation remains unresolved. A successful exact-ref
+read showing replacement also retires only the old head. GitHub owns rebuilding;
+no result is carried into a replacement group.
+
+The reconciler records confirmed retirement as `retired`, publishes no admission
+check for that observation, and continues the sweep. Retired groups alone do
+not fail the maintenance run. An evidence/checks GET returning 404 is likewise
+classified as retired only after a fresh exact-ref confirmation; otherwise it
+remains `retry`. Exhausted native-gate API recovery remains `retry`, rather than
+being converted into a terminal policy rejection by the subprocess caller.
+Actual policy or required-check failures retain their terminal denial.
+
+Legacy `check-group` and `wait-base` terminate a retired group's wait with a
+structured `status=retry`, `reason=group-retired` and exit 75. Exhausted API
+reads use the same non-success exit with `reason=api-read`. An obsolete required
+job is never turned green, and downstream native validation cannot proceed
+from that wait. These old jobs can therefore still appear failed for a group
+GitHub has already removed; the distinction is explicit in the report. The
+reconciler maintenance pass is the route that can finish successfully without
+authorizing the obsolete group.
+
+This is a source-only backwards-compatible authority bootstrap: it changes no
+generated state, support manifest, ruleset, required checks or writer grant.
 
 For a group, both admission workflows check out live `main` as independently
 trusted policy, never the speculative `merge_group.base_sha` or candidate-modified
@@ -160,7 +324,7 @@ group base still equals live main and the queue ref still names this head, and v
 the active ruleset again. The ruleset validator retains the six original checks,
 preserves independent retirement admission, adds the exact-group gate, rejects
 visible bypass inventories other than the two reviewed actors and strict branch updates, and
-requires the exact 20-build/one-merge policy. The success artifact records each
+requires the exact 6-build/one-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
 
@@ -178,9 +342,20 @@ verified actor inventory.
 The exact two-actor bypass configuration is an administrator-audited deployment
 invariant, not something the read-only workflow can independently prove.
 `check-ruleset` remains strict: a saved administrator response must explicitly
-contain both actors with `always` mode and no others. Audit that response at activation, after every
-ruleset change, and after any emergency recovery. Do not give the admission
-workflow ruleset-write credentials to expose this field.
+contain both actors with `always` mode and no others. When present,
+`current_user_can_bypass` may be `never`, `always` or `pull_requests_only` in
+this offline administrator audit; unknown values fail. The administrator
+must read back the response using an account covered by the reviewed actors
+(Repository admin role 5 or `davidgmbb`). The saved JSON reports the reader's
+capability but does not identify or authenticate the reader; `check-ruleset`
+validates its policy fields, not the provenance of a local file. Record the
+reader account alongside the deployment audit. The read-only admission path
+still rejects every returned caller capability other than `never`, even if
+the full reviewed actor inventory is visible.
+
+Audit that response at activation, after every ruleset change, and after any
+emergency recovery. Do not give the admission workflow ruleset-write credentials
+to expose this field.
 
 The first live group for #956 exposed the former bug: treating a hidden list as
 a standing bypass. The repair preserves trusted-base execution. Consequently,
@@ -192,7 +367,48 @@ A PR readiness success is not combined-head authorization. Neither a reused
 artifact nor a manually posted status may authorize another SHA/tree. A newer
 main/group invalidates the current attempt. GitHub must build a fresh group and
 rerun required workflows. Content conflicts use #869's exact-path explanation;
-the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge.
+nothing chooses `ours`, `theirs` or a union merge. GitHub does not build a
+group for a conflicting entry, but it does not remove one either: see
+[queued PRs that start conflicting](#queued-prs-that-start-conflicting).
+
+## Queued PRs that start conflicting
+
+When `main` moves under a queued PR and the PR starts to conflict, GitHub skips
+the entry while it builds groups and later entries still get groups, but the
+entry stays queued. Every push to a queued PR's branch is refused with `GH006`
+("Branches that are queued for merging cannot be updated"), so the author
+cannot push the resolving merge until the PR is dequeued. This was observed
+live on 2026-09-29 for #1521 and #1523 (#1865; acceptance item 5). Neither
+entry was removed during the roughly 40 minutes observed. It is unverified
+whether GitHub removes such an entry later, for example on a timeout or once
+the entries ahead of it drain, and whether the build limit affects the skip.
+
+The trusted `merge-conflict-preflight` job reports this state. The
+default-branch sweep reads merge-queue membership once through GraphQL
+`isInMergeQueue` with its existing `pull-requests: read` token; the
+PR-regression route reads only its own PR. Membership binds the exact head
+the preflight analyzed. For a queued head the status description gains a
+trailing token, `v1 m=<main> h=<head> o=<n> c=<state> q=queued`. When that
+head also conflicts, the report's `merge_queue` record sets
+`dequeue_required_before_push` and carries the dequeue instruction. The job
+summary lists every such PR. A failed read, or a PR the read did not cover at
+its analyzed head, is reported as `unknown` membership with a conditional
+instruction. Membership never changes the outcome, the status state or the
+sweep's coverage result. The token is omitted unless the read found the head
+queued.
+
+To recover a queued PR that conflicts:
+
+1. Dequeue it with **Remove from queue** on the PR or the GraphQL
+   `dequeuePullRequest` mutation.
+2. Resolve the named paths as the preflight classification prescribes
+   ([workflow guide](agents/workflow.md#merge-conflict-preflight)) and
+   validate the result.
+3. Push the resolution. Enqueue the new head again after its PR checks pass.
+
+Nothing dequeues such a PR automatically. That needs write authority the
+read-only preflight does not hold, and it must keep the admission and
+authorization policy above, so it is a separate policy decision.
 
 ## Build-limit rollout and acceptance
 
@@ -201,14 +417,16 @@ the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge
 The merge-group workflow runs admission code from the main revision checked out
 as trusted policy, so a PR
 changing the repository queue contract must first pass the policy already on
-`main`. If live build concurrency has been raised ahead of the repository
-contract, temporarily restore the live `Build concurrency` field in ruleset
-`22537199` to `1` and read back all queue parameters. Merge the policy PR
-through the existing queue with all required checks; do not bypass admission.
-Resolve the exact resulting `main` commit before changing the live setting to
-`20`. Read the ruleset back and observe `Main integration admission` accept a
-new exact merge group. Between the PR merge and the live edit, the trusted
-policy expects `20` while GitHub still reports `1`, so new groups fail closed.
+`main`. Keep the live `Build concurrency` field in ruleset `22537199` at the
+value the trusted policy accepts (20 before #1805, 4 before the raise to 6)
+while the policy PR passes and merges through the existing queue with all
+required checks; do not bypass admission or edit the live value first. Resolve
+the exact resulting `main` commit before changing the live setting to the new
+value (`6`). Read the ruleset back, run `check-ruleset` on the saved response
+and observe `Main integration admission` accept a new exact merge group.
+Between the PR merge and the live edit, the trusted policy expects the new
+value while GitHub still reports the old one, so new groups fail closed; groups already dispatched keep their actual outcomes. Do not bulk-cancel
+or reorder the queue.
 Only the build limit changes; leave the merge limit, grouping strategy, merge
 method, timeout, checks, non-strict freshness and bypass settings untouched.
 The read-only collector cannot update rulesets; a repository administrator
@@ -246,6 +464,16 @@ do not close #867 based on settings or offline fixtures alone:
 5. Inject a controlled combined-candidate check failure despite green PR heads;
    prove no merge. Exercise cancellation/rerun, main advance during preparation,
    fork approval, and genuine conflict removal with exact path diagnostics.
+   Live case, 2026-09-29 (#1865): `main` advanced under queued #1521
+   (`68e7655` from #1703 on `c_internal.h`, then `9d96fb9` from #1538 on
+   `c_parse.c`) and queued #1523 (`f75c091` from #1587 on
+   `c_parse_internal.h`). The preflight posted `c=conflicted` on #1521's head
+   for each new main. PRs enqueued after both received groups. GitHub
+   recorded no `removed_from_merge_queue` event for either in about 40
+   minutes and refused both validated resolution pushes with `GH006`. The
+   path diagnostics held, but GitHub did not remove the entries; recovery is
+   the manual dequeue above. Still to retain: the first live sweep report
+   that shows `q=queued` on a conflicted head.
 6. Verify UI merge, API merge, squash/rebase and every automation are subject to
    the effective queue/retirement controls. No live production rejection or
    queue experiment is claimed by the offline fixtures.
@@ -267,6 +495,9 @@ python3 -B tools/merge_queue_admission_test.py -v
 python3 -B tools/merge_queue_admission.py audit-workflows .
 python3 -B tools/merge_queue_admission.py check-ruleset .github/main-merge-queue.ruleset.json
 python3 -B tools/merge_queue_admission.py check-ruleset /tmp/live-main-ruleset.json
+# One bounded pass; publishes only for reconciler-owned groups (needs checks: write).
+GH_TOKEN=... python3 -B tools/merge_queue_admission.py reconcile --repo-root . \
+  --repository buster14a/buster --details-url URL --output /tmp/reconcile.json
 ```
 
 ## Emergency policy

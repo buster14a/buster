@@ -25,6 +25,9 @@ jobs:
     timeout-minutes: 10
     env:
       LC_ALL: C
+      # Hosted Ubuntu supplies a supplementary group; the SGID regression
+      # must cover inheritance from a group other than the primary group.
+      BQ_REQUIRE_DISTINCT_GROUP: '1'
     steps:
       - name: Require CI admission to be enabled
         shell: bash
@@ -69,22 +72,58 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
 
-      - name: Native service tests through the canonical driver
+      - name: Reject deleted cached dependencies without a fatal diagnostic
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh bench_service capabilities
-          ./build.sh bench_service self-test
+          markers=(.cache/bootstrap-driver/posix/*/*.complete)
+          test "${#markers[@]}" = 1
+          missing=bootstrap-deleted-cache-fixture.h
+          test ! -e "$missing"
+          digest=$(printf '%064d' 0)
+          # Model a tracked input deleted since this immutable driver was built.
+          awk -v path="$missing" -v digest="$digest" '
+            $0 == "END" { printf "dependency\t%s\t%s\n", path, digest }
+            { print }
+          ' "${markers[0]}" > "$RUNNER_TEMP/bootstrap-stale-marker"
+          mv "$RUNNER_TEMP/bootstrap-stale-marker" "${markers[0]}"
+          for expected_entries in 2 2; do
+            if ! ./build.sh time_trace_summary_self_test > "$RUNNER_TEMP/bootstrap-cache.stdout" 2> "$RUNNER_TEMP/bootstrap-cache.stderr"; then
+              cat "$RUNNER_TEMP/bootstrap-cache.stdout" "$RUNNER_TEMP/bootstrap-cache.stderr"
+              exit 1
+            fi
+            cat "$RUNNER_TEMP/bootstrap-cache.stdout" "$RUNNER_TEMP/bootstrap-cache.stderr"
+            test ! -s "$RUNNER_TEMP/bootstrap-cache.stderr"
+            markers=(.cache/bootstrap-driver/posix/*/*.complete)
+            test "${#markers[@]}" = "$expected_entries"
+          done
+          # The same absent dependency remains an error for a fresh closure.
+          printf '%s\n' "$missing" > "$RUNNER_TEMP/bootstrap-missing.list"
+          source tools/bootstrap_driver.sh
+          if buster_bootstrap_snapshot "$PWD" "$RUNNER_TEMP/bootstrap-missing.list" "$RUNNER_TEMP/bootstrap-missing.snapshot" 2> "$RUNNER_TEMP/bootstrap-missing.stderr"; then
+            echo '::error::A fresh missing dependency was accepted.'
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/bootstrap-missing.stderr"
+          grep -Fxq "error: missing bootstrap dependency: $missing" "$RUNNER_TEMP/bootstrap-missing.stderr"
 
-      - name: Service ASan and UBSan
+      # Measures the revision GitHub validates (PR merge, merge-group or pushed
+      # commit) against its first parent; see docs/source-size.md. The public
+      # repository serves those two commits without credentials.
+      - name: Source-size report and change ratchet
         if: ${{ !cancelled() }}
         shell: bash
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ./build.sh bench_service self-test --sanitize
-
-      - name: Fixed smoke recipe self-test
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: ./build.sh bench_service_recipe_self_test
+        run: |
+          set -euo pipefail
+          ./build.sh source_size --self-test
+          git fetch --no-tags --no-recurse-submodules --depth=2 origin "$GITHUB_SHA"
+          report="$RUNNER_TEMP/source-size.txt"
+          status=0
+          ./build.sh source_size --rev "$GITHUB_SHA" --base "$GITHUB_SHA^1" >"$report" 2>&1 || status=$?
+          cat "$report"
+          {
+            printf '### Source size\n\n```text\n'
+            cat "$report"
+            printf '```\n'
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$status"

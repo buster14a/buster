@@ -49,6 +49,18 @@
 #define BUSTER_NATIVE_FILE_DROP_MAX_PATH_COUNT ((u64)65536)
 #define BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES ((u64)16 * 1024 * 1024)
 
+// XCB replies, total atom work, staging reservation and XIM publication have
+// separate bounds. The staging allowance includes its arena header/pages.
+#define BUSTER_X11_XDND_TYPE_REPLY_ATOMS ((u32)256)
+#define BUSTER_X11_XDND_MAX_TYPE_ATOMS ((u32)1024)
+#define BUSTER_X11_XDND_MAX_RETAINED_BYTES (BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES + BUSTER_KB(64))
+// Core X11 EventMask defines bits 0..24; high bits are reserved.
+#define BUSTER_X11_CORE_EVENT_MASK ((u32)0x01ffffff)
+#define BUSTER_X11_XIM_MAX_INPUT_BYTES ((u64)4096)
+#define BUSTER_X11_XIM_MAX_OUTPUT_BYTES ((u64)16384)
+#define BUSTER_X11_XIM_MAX_POLL_BYTES BUSTER_KB(64)
+#define BUSTER_X11_XIM_MAX_POLL_COMMITS ((u32)32)
+
 #if defined(_WIN32)
 #include <buster/lib/system_headers.h>
 #include <dwmapi.h>
@@ -95,9 +107,20 @@ struct WmHandle
     u64 xdnd_transfer_expected;
     u64 xdnd_transfer_capacity;
     String8 xdnd_transfer_data;
+#if BUSTER_INCLUDE_TESTS
+    u32 xdnd_type_test_reply_count;
+    u32 xdnd_type_test_max_reply_atoms;
+    u32 xdnd_type_test_scanned_atoms;
+    u32 native_error_count;
+    u32 native_event_mask_sequence;
+#endif
     Arena* poll_arena;
     WmEventList* poll_event_list;
+    u64 poll_commit_bytes;
+    u32 poll_commit_count;
     WmWindowHandle* focused_window;
+    u32 native_poll_limit;
+    u32 native_poll_count;
 #elif defined(_WIN32)
     HINSTANCE instance;
 #elif defined(__APPLE__)
@@ -128,6 +151,7 @@ struct WmWindowHandle
     u32 xim_input_style_attempt_index;
     bool focused;
     bool xim_create_ic_pending;
+    bool disable_file_drop;
 #elif defined(_WIN32)
     HWND handle;
     char16 pending_high_surrogate;
@@ -154,9 +178,19 @@ struct WmWindowHandle
 
 BUSTER_WINDOW_INTERNAL_LINKAGE WmHandle windowing_handle;
 BUSTER_WINDOW_INTERNAL_LINKAGE WmEvent* wm_event_push(WmHandle* windowing, WmEvent event);
+BUSTER_WINDOW_INTERNAL_LINKAGE BUSTER_UNUSED_DECL bool wm_bounded_poll_has_headroom(Arena* arena);
+BUSTER_WINDOW_INTERNAL_LINKAGE bool wm_utf8_string_is_valid(String8 string);
 BUSTER_WINDOW_INTERNAL_LINKAGE SliceWmWindowHandle get_windows(WmHandle* handle);
 
 #undef BUSTER_WINDOW_INTERNAL_LINKAGE
 
 BUSTER_F_DECL SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPath values);
 BUSTER_F_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f64 height);
+
+#if BUSTER_LINUX && BUSTER_INCLUDE_TESTS
+// Synthetic callback reducer controls do not establish a live XIM provider.
+BUSTER_F_DECL bool wm_x11_xim_commit_for_test(WmHandle* handle, WmWindowHandle* window, u64 input_length, String8 text);
+BUSTER_F_DECL bool wm_x11_xdnd_append_for_test(WmHandle* handle, String8 bytes);
+BUSTER_F_DECL bool wm_xim_create_ic_publication_for_test(WmWindowHandle* window, bool queued, bool synchronous_completion, xcb_xic_t synchronous_ic);
+BUSTER_F_DECL void wm_xim_disconnect_for_test(WmHandle* handle);
+#endif

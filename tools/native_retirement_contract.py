@@ -35,6 +35,23 @@ FULL_SUPPORTED_GAP_COUNT = 192
 FULL_SUPPORTED_GAP_SHA256 = "0f531b1cf7c7922ea891e15703971bcb2ddf95f398f628e0b2681831d7cbf81e"
 FULL_SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
 NEXT_SUPPORT_CONTRACT_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+# #1986 scheduling-test bytes only; corpus and target axes are unchanged.
+APPLE_CI_SUPPORT_CONTRACT_SHA256 = "50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210"
+# #1007 successor: current declaration with only the tests/basic_c_f80_machine.c
+# byte/hash row updated; corpus and target axes are unchanged.
+PROPOSED_SUPPORT_CONTRACT_SHA256 = "a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932"
+# #1808 successor: the #1007 declaration with only the tests/ci_tools_test.py
+# byte/hash row updated; corpus and target axes are unchanged.
+MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256 = "434ef9a356cd11e7af0b37907172becf173a6855c98a6168f640ce769f0bcf61"
+# #1835 successor: only the dependency-only bootstrap wrapper test row changes.
+BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256 = "6d975980cc6df4945334fc2846dac8e03a1480a6c65e516db37be8adbccf1106"
+# #1836 successor: #1835 plus archiving the retired bridge under tests/retired/.
+RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256 = "5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115"
+# #2203 successor: #1836 with only the aligned-typedef validation fixture row updated.
+ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256 = "7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51"
+# #2428 successors: the exact mobile dependency row, alone or with #2203.
+MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "f17dbde795c3afc99f4b3cfd59087d4a63721218dab5018e7e77e090228b3741"
+ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -50,6 +67,11 @@ FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add270575
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 374
 FULL_APPLICABILITY_LEDGER_SHA256 = "934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa"
+# #1007 successor: the same 374 identities with only the four
+# tests/basic_c_f80_machine.c fixture_sha256 cells updated to its 7,233-byte successor.
+PROPOSED_APPLICABILITY_LEDGER_SHA256 = "31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9"
+ACCEPTED_APPLICABILITY_LEDGER_SHA256 = (FULL_APPLICABILITY_LEDGER_SHA256,
+                                        PROPOSED_APPLICABILITY_LEDGER_SHA256)
 LEGACY_DEPENDENCY_DESCRIPTOR_SHA256 = "33be3c1582858afb570298ae49db193293e7ec2008d3a6b85f03df3485dea803"
 LEGACY_DEPENDENCY_RECEIPT_SHA256 = "dc14e25a42f9000071d46c776f43282852bcebbf392a91089afe6b7e46aed55d"
 LEGACY_DEPENDENCY_PROJECT_SHA256 = "542c978ad5f8252917fb0fd93cdd318ac8fcca9db14ffa1093edb606a8d637a2"
@@ -291,7 +313,7 @@ def validate_dependencies(directory, manifest):
 def validate_dependency_binding(directory, manifest, profile, inputs):
     required = profile == FULL_CENSUS_PROFILE or bool(manifest.get("project_include_sha256", ""))
     if not required:
-        return
+        return frozenset()
     assert manifest.get("dependency_manifest") == dependency_authority.POLICY_PATH
     assert manifest.get("dependency_receipt") == "dependency-receipt.json"
     receipt_path = directory / "dependency-receipt.json"
@@ -396,6 +418,23 @@ def validate_dependency_binding(directory, manifest, profile, inputs):
     for row in rows:
         expected_headers = fixture_map[row["fixture"]]["project_headers"] if row["disposition"] == "repo-owned-project-header" else []
         assert row["project_headers"] == expected_headers
+    # Select compatibility argv only after the descriptor, source snapshot,
+    # receipt, ledger and project closure have all matched trusted bindings.
+    # Old live and immutable legacy declarations do not contain this record.
+    adapter_source = "tools/native-retirement-darwin/Availability.h"
+    adapter_destination = "dependencies/project-include/sdk/darwin-adapter/Availability.h"
+    adapters = [item for item in descriptor_value.get("projects", [])
+                if item.get("source") == adapter_source or item.get("destination") == adapter_destination]
+    selected_adapters = frozenset()
+    if adapters:
+        assert len(adapters) == 1, "ambiguous Darwin availability adapter"
+        adapter = adapters[0]
+        assert adapter.get("source") == adapter_source
+        assert adapter.get("provenance") == "repo:" + adapter_source
+        assert adapter.get("destination") == adapter_destination
+        assert "sdk/darwin-adapter/Availability.h" in project_destinations
+        selected_adapters = frozenset((adapter_destination,))
+    return selected_adapters
 
 
 def validate_inputs(directory, manifest):
@@ -487,7 +526,7 @@ def validate_applicability_ledger(directory, manifest, rows, inputs, profile, ga
     fields, records = table_with_fields(path)
     assert fields == APPLICABILITY_LEDGER_FIELDS
     if profile == FULL_CENSUS_PROFILE:
-        assert ledger_sha256 == FULL_APPLICABILITY_LEDGER_SHA256
+        assert ledger_sha256 in ACCEPTED_APPLICABILITY_LEDGER_SHA256
         assert len(records) == FULL_APPLICABILITY_LEDGER_COUNT
     if "applicability_ledger_entries" in manifest:
         assert manifest["applicability_ledger_entries"] == str(len(records))
@@ -571,7 +610,14 @@ def validate_profile(manifest, inputs, row_count):
     if profile == FULL_CENSUS_PROFILE:
         assert manifest.get("support_contract") == "docs/native-retirement-support-v1.tsv"
         assert manifest.get("support_contract_sha256") in (
-            FULL_SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256)
+            FULL_SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256,
+            APPLE_CI_SUPPORT_CONTRACT_SHA256, PROPOSED_SUPPORT_CONTRACT_SHA256,
+            MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
+            BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
+            RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
+            ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
+            MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+            ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256)
         assert manifest.get("inputs") == "559"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""
@@ -591,7 +637,7 @@ def read_argv(path):
     return [item.decode("utf-8") for item in raw[:-1].split(b"\0")]
 
 
-def validate_argv(directory, manifest, row, recipes):
+def validate_argv(directory, manifest, row, recipes, dependency_adapters):
     argv_path = directory / relative_path(row["argv_evidence"])
     argv = read_argv(argv_path)
     baseline = row["allocator"] == "none"
@@ -621,6 +667,9 @@ def validate_argv(directory, manifest, row, recipes):
                 expected.extend(["-isystem", str(sdk_root / "mingw-adapter"),
                                  "-isystem", str(sdk_root / "windows")])
             elif "apple" in target:
+                if (target.endswith("-ios") and
+                        "dependencies/project-include/sdk/darwin-adapter/Availability.h" in dependency_adapters):
+                    expected.extend(["-isystem", str(sdk_root / "darwin-adapter")])
                 expected.extend(["-isystem", str(sdk_root / "darwin")])
             elif "android" in target:
                 arch = target.split("-", 1)[0]
@@ -1073,7 +1122,7 @@ def validate(directory):
     assert row_fields == ROW_FIELDS
     assert result_fields == RESULT_FIELDS
     profile, subject_count = validate_profile(manifest, inputs, len(rows))
-    validate_dependency_binding(directory, manifest, profile, inputs)
+    dependency_adapters = validate_dependency_binding(directory, manifest, profile, inputs)
     gap_ledger_identities, declared_gap_rows, gap_ledger_sha256 = validate_supported_gap_ledger(
         directory, manifest, rows, profile)
     applicability_ledger, applicability_ledger_sha256 = validate_applicability_ledger(
@@ -1150,7 +1199,7 @@ def validate(directory):
     for key, result in by_result.items():
         row = by_row[key]
         assert int(row["group"]) % int(manifest["shard_count"]) == int(manifest["shard_index"])
-        validate_argv(directory, manifest, row, recipes)
+        validate_argv(directory, manifest, row, recipes, dependency_adapters)
         assert result["group"] == row["group"]
         assert result["cpu"] in {"", row["cpu"]}
         assert result["cpu_features"] in {"", row["cpu_features"]}

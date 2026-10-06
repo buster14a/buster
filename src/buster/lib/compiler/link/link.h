@@ -3,7 +3,8 @@
 // The linker's public API: link_objects merges ObjectFiles into one, and
 // link_native_executable lays the merged file out as a runnable image —
 // static/dynamic ELF64 (x86-64, AArch64, Android), hosted PE64,
-// imports-free UEFI PE64, and Mach-O.
+// imports-free UEFI PE64, and Mach-O — or, on x86-64 Linux, as a shared
+// object or position-independent executable (NativeImageKind).
 
 #include <buster/lib/compiler/object/object.h>
 
@@ -50,6 +51,20 @@ struct LinkObjectResult
     LinkError error;
 };
 
+// What link_native_executable produces.  EXECUTABLE is the fixed-address
+// image every writer has always made.  The two position-independent kinds are
+// ELF ET_DYN images at base zero, written only for x86-64 Linux today:
+// SHARED is a shared object with no entry point, whose defined default-
+// visibility symbols are exported (`-shared`), and PIE is an executable the
+// loader may place anywhere (`-pie`).
+typedef enum NativeImageKind
+{
+    NATIVE_IMAGE_EXECUTABLE,
+    NATIVE_IMAGE_SHARED,
+    NATIVE_IMAGE_PIE,
+    NATIVE_IMAGE_COUNT,
+} NativeImageKind;
+
 typedef struct NativeExecutableLinkOptions NativeExecutableLinkOptions;
 typedef struct NativeDynamicDataSymbol NativeDynamicDataSymbol;
 // One data object a shared library exports, as its own dynamic symbol table
@@ -68,8 +83,9 @@ struct NativeDynamicDataSymbol
 typedef struct NativeDynamicVersionedSymbol NativeDynamicVersionedSymbol;
 // One name a shared library defines, with the symbol version it publishes that
 // definition under.  `version` is empty when the library exports the name
-// without a version; `has_default` is false for a `name@VER` definition, which
-// an unversioned reference cannot bind to.  One record per dynamic symbol, so
+// without a version; `has_default` is false for a `name@VER` definition or a
+// hidden/internal entry, which an external unversioned reference cannot bind
+// to. One record per dynamic symbol, so
 // a name published under several versions -- glibc has four of `sys_errlist`,
 // all of them non-default -- appears once per version.
 struct NativeDynamicVersionedSymbol
@@ -77,7 +93,12 @@ struct NativeDynamicVersionedSymbol
     String8 name;
     String8 version;
     bool has_default;
-    u8 reserved[7];
+    // Raw ELF facts retain the distinction between callable/data definitions
+    // and default/protected visibility. Zero type is unknown, including older
+    // API-created metadata. The record's size and alignment are unchanged.
+    u8 elf_type;
+    u8 elf_visibility;
+    u8 reserved[5];
 };
 
 typedef struct NativeDynamicLibrary NativeDynamicLibrary;
@@ -97,15 +118,21 @@ struct NativeDynamicLibrary
     // to record the version of every reference that does bind, and a weak
     // reference to a name no library defines resolves to zero.
     NativeDynamicVersionedSymbol* versioned_symbols;
+    // ELF only: the names this library leaves undefined.  An executable
+    // exports each of its own definitions a library on its link line names,
+    // as ld does, so a library that calls back into the program or reads its
+    // data finds the definition without -rdynamic.
+    String8* referenced_symbols;
     u32 exported_symbol_count;
     u32 exported_data_symbol_count;
     u32 versioned_symbol_count;
+    u32 referenced_symbol_count;
     // Whether the driver read this library at all.  An empty export list is
     // not evidence that the library defines nothing: a library that was never
     // found on disk exports whatever it happens to export, so only a link
     // whose libraries were all read may read an absent name as absent.
     bool exports_known;
-    u8 reserved[3];
+    u8 reserved[7];
 };
 
 struct NativeExecutableLinkOptions
@@ -134,7 +161,9 @@ struct NativeExecutableLinkOptions
     u32 runtime_versioned_symbol_count;
     bool runtime_exports_known;
     bool debug_info;
-    u8 reserved[6];
+    // A NativeImageKind; zero is the fixed-address executable.
+    u8 image_kind;
+    u8 reserved[5];
 };
 
 typedef struct NativeExecutableLinkResult NativeExecutableLinkResult;
@@ -144,12 +173,26 @@ struct NativeExecutableLinkResult
     ByteSlice pdb;
     String8 pdb_path;
     String8 symbol;
+    // The operating-system error behind LINK_ERROR_FILE_WRITE, so a refused
+    // publication (for example a Windows image still held after it ran) is
+    // named instead of reported only as a failed write. Zero when the writer
+    // refused the destination without a system error.
+    OsError write_error;
+    // Distinguish policy refusals (links, directories, special files) from an
+    // incomplete transfer when no native OS error was supplied.
+    bool write_unsupported_destination;
+    // Set only for a relocation refused because its address model requires
+    // PIC objects. Malformed sites and TLS relaxation failures do not imply it.
+    bool requires_position_independent_objects;
     LinkError error;
 };
 
 // The enumerator's own spelling, so a failed link names its reason rather than
 // only its number.
 BUSTER_F_DECL String8 link_error_name(LinkError error);
+// Validate individual linker arguments for the selected target/image. The
+// dispatcher checks the actual dynamic/static shape again before writing.
+BUSTER_F_DECL bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions options, bool dynamic_image, String8* unsupported);
 BUSTER_F_DECL LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options);
 // Synthetic compiler-runtime input for hosted Windows executable links only;
 // object and relocatable output paths, UEFI, and non-Windows targets do not use it.

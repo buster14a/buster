@@ -46,7 +46,7 @@ BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER(
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
-BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa");
+BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9");
 BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 374;
 
 typedef struct NrcInput NrcInput;
@@ -1213,6 +1213,13 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
                 command[command_count++] = S8("-isystem");
                 command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/android/{S8}-linux-android"),
                     settings->project_snapshot, target == 6 ? S8("x86_64") : S8("aarch64"));
+            }
+            else if (target == 8 || target == 9)
+            {
+                // Use the same authenticated compatibility input for both
+                // subjects, before the unchanged pinned Darwin headers.
+                command[command_count++] = S8("-isystem");
+                command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/darwin-adapter"), settings->project_snapshot);
             }
             command[command_count++] = S8("-isystem");
             command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/{S8}"), settings->project_snapshot, sdk);

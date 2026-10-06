@@ -76,10 +76,34 @@ struct TTF_Bitmap
 #define BUSTER_TTF_MAX_RASTER_POINTS 1048576u
 #define BUSTER_TTF_MAX_RASTER_EDGE_STEPS 67108864u
 
+// Glyph atlas policy: the atlas is a square of 16 * text_height pixels per
+// side, so text_height is limited to keep it at or below 4096 by 4096 pixels.
+#define BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT 256u
+
+typedef enum TTF_AtlasStatus
+{
+    TTF_ATLAS_SUCCESS,
+    TTF_ATLAS_INVALID_TEXT_HEIGHT,
+    TTF_ATLAS_INVALID_FONT,
+    TTF_ATLAS_GLYPH_DOES_NOT_FIT,
+    TTF_ATLAS_COUNT,
+} TTF_AtlasStatus;
+
+typedef struct TTF_AtlasBuild TTF_AtlasBuild;
+struct TTF_AtlasBuild
+{
+    FontTextureAtlasDescription description;
+    TTF_AtlasStatus status;
+    TTF_FontInitializationResult initialization;
+};
+
 BUSTER_F_DECL TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index);
 BUSTER_F_DECL f32 truetype_scale_for_pixel_height(const TTF_FontInformation* information, f32 height);
 BUSTER_F_DECL TTF_VerticalMetrics truetype_get_font_vertical_metrics(const TTF_FontInformation* information);
 BUSTER_F_DECL TTF_HorizontalMetrics truetype_get_codepoint_horizontal_metrics(const TTF_FontInformation* information, u32 codepoint);
+// Horizontal advance delta in font units from version-0, format-0 kern
+// subtables. Matching values add in table order; override replaces the sum.
+// Minimum, cross-stream, vertical and other-format subtables are ignored.
 BUSTER_F_DECL s32 truetype_get_codepoint_kern_advance(const TTF_FontInformation* information, u32 codepoint_left, u32 codepoint_right);
 // Scales must be finite and in [0, BUSTER_TTF_MAX_SCALE]. A zero scale on
 // either axis, an empty glyph, invalid bounds/scales, or an exceeded bitmap
@@ -88,7 +112,43 @@ BUSTER_F_DECL s32 truetype_get_codepoint_kern_advance(const TTF_FontInformation*
 // a 0.25px device-space tolerance and bounded subdivision; count-then-emit
 // extraction enforces the point and edge-search work budgets before allocating
 // the exact raster path, and checks the edge budget again before rasterization.
+// Compounds align original outline points with unsigned indices after matrix
+// transformation, with eight levels and bounded outline/attachment work. Hinting
+// and phantom-point anchors are unsupported; invalid/out-of-outline anchors
+// return the same all-zero bitmap and roll back extraction allocations.
 BUSTER_F_DECL TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint);
+
+// Rasterizes ' '..'~' of the font in memory into a text_height-scaled atlas.
+// text_height must be in [1, BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT]. Glyph sizes come
+// from the font file, so every glyph is checked against the atlas bounds in
+// every build: a glyph that does not fit (or an unusable font) returns a status
+// other than TTF_ATLAS_SUCCESS with an all-zero description and writes nothing
+// outside the atlas pixels. Arena allocations made before the failure are not
+// released.
+BUSTER_F_DECL TTF_AtlasBuild truetype_font_atlas_build(Arena* arena, ByteSlice font_file, u32 text_height);
+
+// Why a candidate font file was or was not selected by
+// truetype_font_select_first_usable. NOT_TRIED is zero so a zeroed status
+// array reads as "no attempt was made".
+typedef enum TTF_FontCandidateStatus
+{
+    TTF_FONT_CANDIDATE_NOT_TRIED,
+    TTF_FONT_CANDIDATE_USABLE,
+    TTF_FONT_CANDIDATE_UNREADABLE,
+    TTF_FONT_CANDIDATE_MALFORMED,
+    TTF_FONT_CANDIDATE_UNSUPPORTED,
+    TTF_FONT_CANDIDATE_COUNT,
+} TTF_FontCandidateStatus;
+
+// Reads each path in order (file_read, so bundled iOS and APK paths resolve)
+// and runs truetype_font_initialize on the first face, exactly the check
+// truetype_font_atlas_build applies later. Returns the index of the first
+// candidate that initializes, or count when none does. statuses (count
+// entries, may be null) receives the outcome of every candidate that was
+// tried; entries after the returned index are left untouched. Each file is read
+// into scratch memory that is released before the next candidate.
+BUSTER_F_DECL u64 truetype_font_select_first_usable(const String8* paths, u64 count, TTF_FontCandidateStatus* statuses);
+BUSTER_F_DECL String8 truetype_font_candidate_status_description(TTF_FontCandidateStatus status);
 
 #if BUSTER_INCLUDE_TESTS
 typedef struct TTF_RasterTestPoint TTF_RasterTestPoint;

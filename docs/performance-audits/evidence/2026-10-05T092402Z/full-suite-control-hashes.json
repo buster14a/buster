@@ -1,0 +1,16 @@
+{
+  "baseline": {
+    "full_log_sha256": "f17ebae69edcd67b31c9f8615d7fb59d78c5c4399d3d377b7c75f9fa9d1ed34a",
+    "passed": 5670947,
+    "total": 5670951,
+    "failure_count": 4,
+    "full_log_retention": "session-owned local raw capture; complete failure and census lines published"
+  },
+  "candidate": {
+    "full_log_sha256": "99cb434ce166daa4be2d6fd72ee2d282620e3d9450ebb3290928ad25461f4ee3",
+    "passed": 5670947,
+    "total": 5670951,
+    "failure_count": 4,
+    "full_log_retention": "session-owned local raw capture; complete failure and census lines published"
+  }
+}

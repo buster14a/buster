@@ -23,7 +23,15 @@ struct CodeviewRelocation
     u64 offset;
     u32 function;
     CodeviewRelocationKind kind;
+    // Function-relative byte offset a SECREL32 slot adds to its symbol. The
+    // same value is stored in the slot (COFF in-place addend); consumers that
+    // overwrite the slot must take it from here.
+    u32 addend;
     String8 symbol_name;
+    // The program symbol a named relocation refers to; meaningful only with
+    // `symbol_name`, which remains the spelling-based fallback.
+    IrSymbolId symbol;
+    u32 reserved;
 };
 
 typedef struct CodeviewInput CodeviewInput;

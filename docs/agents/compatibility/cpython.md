@@ -14,6 +14,37 @@ tools/fetch_cpython.sh /path/to/cpython-v3.13.9
 ./build.sh test_cpython --config Release /path/to/cpython-v3.13.9
 ```
 
+For a bounded harness-plumbing check, use
+`./build.sh compatibility_spawn_self_test`. On Linux/macOS it checks the real
+CPython command helper with conflicting captured variables, a preserved PATH,
+an unrelated variable, an empty value and a newly added override. Mismatched
+environment slices, embedded NUL bytes and simultaneous inherited/explicit OS
+environment policies remain rejected. It also checks the actual zlib configure
+helper's relative script `$0`; Linux separately reproduces the old absolute
+shebang spelling with a successful child. Other platforms report unsupported
+and return failure rather than claiming those shell checks ran.
+
+The independent reference stage can run without a built Buster compiler:
+
+```sh
+./build.sh test_cpython --reference-only /path/to/cpython-v3.13.9
+```
+
+This still verifies the pristine pin, establishes the exact 8 MiB stack limit,
+uses the existing Clang configure/build and deterministic workload, and retains
+`workload.py` plus `reference-workload.stdout` below
+`build/cpython-reference-self-test-*/`. It prints `CPYTHON_REFERENCE_ONLY` and
+explicitly leaves Buster compilation, its workload comparison and both full
+suites unrun. A reference-only pass is harness evidence, not CPython support or
+compiler acceptance. Compare the retained workload with an independently
+invoked host Python when replaying this stage.
+
+Command calls with no overrides keep the captured full-inheritance policy.
+Calls requesting `PYTHONHASHSEED=0` and `TZ=UTC` build a complete explicit
+environment from the captured key/value snapshot, replacing inherited
+occurrences of those keys while retaining all other variables. They do not
+combine explicit keys with OS inheritance or modify the parent environment.
+
 The checkout must be tag `v3.13.9` at commit
 `8183fa5e3f78ca6ab862de7fb8b14f3d929421e0` with no tracked or untracked
 changes. The harness configures and builds the tree with CPython's own

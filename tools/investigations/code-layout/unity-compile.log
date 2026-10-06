@@ -1,0 +1,56 @@
+CODEGEN_VERIFY version=1 ir=1 mir=5341 scheduled=0 allocator=fast
+TARGET cpu=native features=adx,aes,avx,avx2,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,invpcid,lzcnt,movbe,pclmul,popcnt,rdrand,rdseed,sha,shstk,smap,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,svm,vaes,vpclmulqdq,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                355                      391
+bytes on disk                 32.800.363               32.838.303
+physical lines                   423.486                  424.738
+
+bytes scanned                 32.797.911               32.835.843
+  code                        25.628.360   78.1 %      25.648.302   78.1 %
+  comment                      1.991.527    6.1 %       2.006.963    6.1 %
+  whitespace                   5.178.024   15.8 %       5.180.578   15.8 %
+  literals, within code       13.209.164   40.3 %      13.209.437   40.2 %
+
+lines scanned                    422.260                  423.508
+  code, the sLOC                 378.169   89.6 %         379.031   89.5 %
+  comment                         33.357    7.9 %          33.673    8.0 %
+  blank                           12.739    3.0 %          12.824    3.0 %
+  both, counted twice              2.005    0.5 %           2.020    0.5 %
+
+comments                          28.165                   28.240
+tokens                         3.274.318                3.277.658
+spliced-away lines                 1.226    0.3 %           1.230    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.646.366  111.2 %
+  their spelling bytes        26.030.438  101.5 %
+  bytes retained              35.961.548  109.5 %
+  macro expansions               136.599
+  #define directives               3.884
+
+files lexed more than once
+         lexes re-read bytes  path
+             5        17.136  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            14         5.174  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+             2            32  /usr/include/x86_64-linux-gnu/asm/ioctls.h
+                      37.932  re-read in total
+IR_FRONTEND_SSA functions=5048 locals=47228 reads=173001 writes=76562 parameters_created=469028 parameters_removed=437268 temporaries=12732 fallback_locals=2360
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1555073 changes=132063
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1555073 changes=11026
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=3132444 changes=182006
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=98119 changes=0
+IR_FAST functions=5341 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2717584 retained_bound=18385216 compact_ns=0 instructions_before=1555073 instructions_after=1361840
+IR_LOCAL_PROMOTION candidates=32711 promoted=193 loads_removed=592 stores_removed=350 parameters_inserted=1374 parameters_removed=1236 uninitialized=0 barriers=8 instructions_before=1556208 instructions_after=1555073 values_before=1339705 values_after=1339058
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3824 parameter_visits=2538 incoming_visits=5795
+CODEGEN cpu=native vector_bits=256 functions=5341 instructions=1361840 values=1145825 stack_value_bytes=6159384 stack_frame_bytes=6159384 max_stack_frame_bytes=905304 code_bytes=21638362 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1790001 exact_successes=1790001 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=85213
+CODEGEN_EMIT machine_code_in_place=21598568 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=126 symbol_visits=62748 relocation_visits=191721 image_reserved=38327624 image_stored=38327624 image_zeroed=114 image_patched=0 payload_copied=35814508 scratch=85352 retained=38327624 output=38327624
+CODEGEN_ALLOCATOR reloads=201435 spills=248181 boundary_spills=101617 boundary_reloads=22854 boundary_copies=84 copies=186143 rematerializations=43282 pins=0 splits=0 scheduled=0 schedule_kept=0

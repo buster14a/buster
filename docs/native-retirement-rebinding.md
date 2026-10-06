@@ -71,9 +71,12 @@ artifact when it appears in the PR. It then:
    branch.
 
 Two sibling feature PRs therefore share no generated-file diff merely because
-their admitted source bytes differ. Both can validate independently; the
-single writer regenerates the second from the tree containing the first after
-the first lands.
+their admitted source bytes differ. Both can validate independently. An
+ordinary PR that changes admitted sources ("ordinary-bound") needs no writer
+step: it lands through the native merge queue, whose admission requires the
+same ephemeral reconstruction on the exact group tree. An automatic catch-up
+then publishes the regenerated pair for `main` (see
+[Committed generated state and queue throughput](#committed-generated-state-and-queue-throughput-1893)).
 
 ## Trusted integration writer
 
@@ -84,6 +87,12 @@ non-cancelling concurrency group. Protect the
 Dispatch it with an open non-draft PR number. The default `auto` class and
 `configured` authorization mode resolve the immutable request from trusted main.
 Optional SHA and class overrides remain strict assertions.
+Resolution refuses a candidate before authorization or any branch update when
+it is non-empty and changes no admitted repository source, trusted
+implementation, or policy/schema path. It shares the merge gate's
+`classification_is_bound` predicate over the current-main source snapshot,
+because admission would reject such an integration head. Catch-ups (empty
+candidates) and bound candidates remain eligible.
 
 For a previously attested head, preparation first verifies its original trusted
 publication and recovers the original source candidate. It requires the recorded
@@ -97,20 +106,43 @@ Manual generated edits, edits stacked on unrecognized integration output and
 genuine conflicts remain blocked. A fresh dispatch is still required after main
 advances; this recovery does not grant automated dispatcher authority.
 
+Pull-request admission (the `Native retirement merge admission` check and the
+rebind job's policy step) evaluates against the trusted main checkout. If main
+advances after that checkout, the step re-fetches the new main into the trusted
+checkout and re-evaluates, up to three attempts in total, rather than failing
+the candidate. It fails only if main keeps advancing throughout. The candidate
+checkout is fetched first, so a push landing between the two checkouts leaves
+the admitted main missing from it; the step then fetches that exact main commit
+into the candidate before running the gate (#2010). Policy still comes only
+from the trusted checkout.
+
 Merge-group admission is read-only: a speculative base waits until it has landed
 as current main, using the independently trusted main policy checked out at
 workflow start. A queued predecessor that changes that policy requires a fresh
-group. The synthetic commit must then have current main first, the attested
-integration head second, and exactly the attested final tree. A stale writer
-head still needs a fresh authorized dispatch and replacement group. The gate
-resolves live publication evidence for that PR head,
-including the successful latest writer attempt. Combined-head CI remains required
-on the synthetic SHA. Rebinding checks that existing generated pair in place;
-it does not refresh it into a different, untested group tree.
-The read-only rebinding workflow likewise waits for a later group's predecessor
-under independently checked-out main policy. It verifies the exact queue ref
-and admission/rebinding policy identity before reconstruction. The repository
-job has a 310-minute limit for the bounded five-hour wait.
+group. For a writer-published head, the synthetic commit must then have current
+main first and the attested integration head second. Its tree must be exactly
+the attested final tree, except for a catch-up (below). A stale non-catch-up
+writer head still needs a fresh authorized dispatch and a replacement group.
+The gate resolves live publication evidence for that PR head, including the
+successful latest writer attempt. Combined-head CI remains required on the
+synthetic SHA.
+
+The read-only rebinding workflow reconstructs every group on its speculative
+tree as soon as the group exists. It never writes the refreshed pair into the
+group. Only then does it wait for the predecessor under independently
+checked-out main policy and run the trusted gate. The wait (`wait-base`) proves
+that no predecessor changed the admission or rebinding policy that the
+reconstruction trusted. So only cheap checks follow a predecessor's landing.
+Because the pinned closures already occupy `candidate/external` by then, the
+job rejects candidate-controlled reserved roots on the pristine checkout for
+every event, and the late group classification runs on a pristine worktree of
+the exact head. The contract, rebind and integration jobs cache the pinned SDK
+archives by manifest hash; each archive is still verified against its pinned
+sha256 before any member is read, so the cache only skips the download.
+An attested non-catch-up head must carry exactly current generated state. The
+repository job has a 310-minute limit for the bounded five-hour wait.
+`Main integration admission` requires that job's success on the exact group
+SHA for ordinary-bound and writer-published groups.
 
 The workflow has three separately permissioned jobs:
 
@@ -129,21 +161,36 @@ The workflow has three separately permissioned jobs:
   Publication leaves main unchanged; normal merge admission follows.
 
 The required `Native retirement merge admission` check refuses ordinary merge
-for a candidate that changes an admitted repository source, trusted implementation,
-or reviewed policy/schema. It admits the writer-produced head only after
-checking the exact parents, evidence trailers, generated-only post-candidate
-delta, current-main identity, and GitHub Actions attestation. A main-push run
+for a candidate that changes trusted implementation or reviewed policy/schema.
+It admits a candidate that changes only admitted repository sources as
+`ordinary-bound`. It admits a writer-produced head only after checking the
+exact parents, evidence trailers, generated-only post-candidate delta,
+current-main identity and GitHub Actions attestation. A main-push run
 invalidates every open integration head whose recorded base no longer equals
-current `main`; dispatching the writer again reconstructs it without requiring
-a manual feature-branch rebase. The independent `API migration policy` check
-continues to enforce bounded API compatibility. Configure admission as a
+current `main`, except a catch-up that is still admissible. Dispatching the
+writer again reconstructs it without requiring a manual feature-branch rebase. The independent `API migration policy` check
+continues to enforce bounded API compatibility. The PR/main admission job lives
+in `native-retirement-admission.yml`, which has no merge-group trigger; for a
+merge-group head the trusted-main reconciler (`merge_queue_admission.py
+reconcile`) publishes the same required check only after the exact base lands
+and the native gate passes twice, so no runner waits for the predecessor.
+Configure admission as a
 required GitHub Actions check (integration ID `15368`) without enabling strict
 required-status-check policy or removing any existing required check.
 On PR events, both read-only admission jobs check out independent live `main`
 and require that checkout to match the remote `main` before checking the writer's
 recorded base. The PR event's base SHA may still name the commit that was main
-when the PR opened. Merge groups keep their exact queued base SHA and wait for
-the predecessor to land before final admission.
+when the PR opened. Merge groups keep their exact queued base SHA; native
+admission stays pending in the reconciler, and the rebinding job still waits
+in-job, until the predecessor lands before final admission.
+
+Merge-conflict preflight also waits for the exact queued predecessor with the
+trusted `merge_queue_admission.py wait-base` helper (bounded to 18,000 seconds
+within its 310-minute merge-group job, matching the other admission callers). It compares the candidate against the event's exact
+`base_sha` after that base becomes live main. This keeps a predecessor's
+generated catch-up delta out of an ordinary successor's ownership diff. A
+replaced group, timeout, or main movement fails without publishing a clean
+status; generated-state attestation and conflict rules remain unchanged.
 
 Evidence records base/head commits and trees, the pre-generation combined tree,
 the final tree, the old trusted rebinder revision/tree and file digests, the
@@ -166,8 +213,9 @@ on the PR head. A failure after staging can leave a temporary
 Configure `NATIVE_RETIREMENT_PUBLICATION_TOKEN` as an Actions secret in the
 protected `native-retirement-integration` environment to trigger PR CI from
 the publication push automatically. Use a fine-grained personal access token
-restricted to this repository with Contents read/write and Workflows read/write
-(for candidates changing workflow files). Give it an expiry and rotate it.
+restricted to this repository with Contents read/write, Workflows read/write
+(for candidates changing workflow files) and Pull requests read/write (to queue
+a published catch-up). Give it an expiry and rotate it.
 Never paste the token into a PR, workflow input, log, or chat.
 
 The secret is exposed only to the final publication step, after independent
@@ -214,7 +262,79 @@ its exact byte/hash ledger row, and the benchmark-service profile pins. Old
 census/performance evidence remains bound to its original declaration digest;
 the matching manifest and exact declaration bytes are checked together.
 
+For #1007, the current support declaration digest
+`50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210` and both
+earlier declaration digests remain accepted for historical evidence. The
+trusted-reader bootstrap admits the exact proposed successor digest
+`a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932`
+(`PROPOSED_SUPPORT_*`): the current declaration with only the
+`tests/basic_c_f80_machine.c` row changed to 7,233 bytes and SHA-256
+`3f5b829b9afa84528debbd00d726644834ff66e9885cac8207bdd5bd8e54d142`; the
+declaration stays 79,744 bytes. The same bootstrap admits the successor
+applicability ledger digest
+`31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9` (65,467
+bytes) next to the current
+`934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa` in the
+full-census validator: the same 374 identities with only the four
+`tests/basic_c_f80_machine.c` `fixture_sha256` cells updated. After that
+bootstrap is trusted, a separate policy transition may update only that
+fixture, its support byte/hash row, those four applicability cells, the
+census producer's applicability-ledger pin, and the benchmark-service support
+pins; all 559 inputs, 411 subjects, and 78,912 row identities remain fixed.
+
 ### Solo-maintainer authorization
+
+For #1835, the trusted-reader bootstrap admits the exact successor support
+declaration digest
+`6d975980cc6df4945334fc2846dac8e03a1480a6c65e516db37be8adbccf1106` alongside
+the #1808 predecessor. Only `tests/bootstrap_wrapper_test.py` changes: its
+dependency-only row becomes 19,588 bytes with SHA-256
+`e03036ea0a44e47f62bb743abaa7c5e381c6f76df3dfc75ba349da1a15506862`.
+All 559 inputs, 411 subjects, roles, compilation obligations and 78,912 row
+identities stay fixed. The bootstrap leaves the reviewed ledger and frozen
+module intact; after it lands, a separate policy transition removes duplicate
+workflow assertions, repairs the immutable-driver graph assertion, updates
+this row and the blocked benchmark-service profile pins. It changes no
+benchmark thresholds or production wrapper behavior.
+
+The same bootstrap admits the exact #1836 successor digest
+`5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115`.
+It is the #1835 declaration with only the historical bridge path changed from
+`tests/github_runner_bridge_test.py` to
+`tests/retired/github_runner_bridge_test.py.txt`. The bridge bytes, role and
+obligation remain intact, and the census inventory keeps the same cardinality.
+That path move is a later policy transition; this reader bootstrap leaves both
+the bridge and the reviewed ledger at their existing paths.
+
+For #2203, the next trusted-reader bootstrap admits exact successor digest
+`7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51`.
+It is the #1836 declaration with only `tests/basic_c_ir_validation_values.c`
+changed from 3,124 bytes and SHA-256
+`9ed89c0ff3750cb6c9bc66a894fc617c15cde5732c857e5b9cccf55ddf233080` to
+3,241 bytes and SHA-256
+`8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65`;
+all 559 inputs, 411 subjects, roles, compilation obligations and 78,912 row
+identities remain fixed. The bootstrap leaves the reviewed ledger, fixture, support-declaration pin
+and blocked recipe policy unchanged; only the duplicated validator byte pin
+advances to the modified reader. After it lands, a separate policy transition may
+update that fixture row and the matching blocked-profile pins.
+
+For #2428, the next reader bootstrap admits exactly two successors while
+retaining every historical declaration digest. The #1836 declaration with only
+the dependency-only `tests/mobile_ci_scripts_test.sh` row changed from 40,218
+bytes / `7286628dfcbf37b6e34a6fbbd421af961ab93e6137dfc187a3ed14d4e37693a6`
+to 41,250 bytes / `0745356ff1ef84e3af0d09a851bf0af09647cd9961579e7a4420ae515f6b973c`
+is `f17dbde795c3afc99f4b3cfd59087d4a63721218dab5018e7e77e090228b3741`. Including the separately reviewed #2203 aligned-typedef row
+produces `8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2`. Both declarations remain 79,756 bytes with the same
+559 inputs, 411 subjects, roles, obligations and row identities. This bootstrap
+changes neither reviewed declaration nor fixture bytes, support pins, blocked
+recipe policy, applicability, schema or thresholds. Its only recipe pin update
+is the modified validator's exact byte digest. Private test projections accept
+only the known old/new mobile and aligned-fixture rows to replay historical
+declarations; unknown, missing and duplicate row versions reject. A separate
+protected policy transition may update the mobile fixture, its exact ledger
+row and support pins after this reader lands, preserving the recorded #2203
+integration order and source ownership.
 
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
 bootstrap or policy transition. It is recorded separately from independent
@@ -281,6 +401,122 @@ does not alter either generated artifact or an admitted source identity, so
 normal PR admission can land the complete cutover without an interval in which
 feature branches relinquish ownership before the writer exists. Every later
 publication uses the trusted default-branch path above.
+
+## Committed generated state and queue throughput (#1893)
+
+Requiring pre-integration for every bound PR admitted at most one such PR per
+writer run plus one CI cycle. A speculative merge group waits for its
+predecessor, and by then its attestation names an older `main`. This section
+records why the generated pair stays committed and the post-merge catch-up
+design that restores native queue throughput. It is the current contract once
+installed on `main`.
+
+### Why the pair stays committed
+
+Each consumer reads the committed bytes for a specific reason:
+
+| Consumer | Reads | Committed bytes needed because |
+|---|---|---|
+| `tools/native_retirement_census.c` (`nrc_dependency_binding`) | header macros at compile time | `build.c` includes the census, so the expected quartet is compiled into the build driver. Deriving it at build time would put a Python materializer run over the pinned external/SDK closure on every driver build. |
+| `native-retirement-evidence.yml` and the `native_retirement_materializer.py` CLI | committed snapshot | Acceptance evidence is bound to the pair at its exact revision. The materializer fails with `authenticated source identity mismatch` when a source differs from its snapshot record. |
+| `native_retirement_contract.py` (`load_authority` at import, `validate_dependency_binding`) | both | Live evidence must equal the validator revision's snapshot and quartet. Replay needs a git checkout, not a network rematerialization. |
+| `native_retirement_merge_gate.py` (`bound_sources`) | trusted base snapshot | Only the admitted source set. That set is policy-derived and does not need the hashes. |
+| `native-retirement-rebind.yml` freshness step, `native_retirement_controller.py` `snapshot_stale` | both (step), snapshot (controller) | Freshness of the committed pair: attested non-catch-up heads must be current; on `main` a behind pair means a catch-up is pending. |
+| `native-retirement-contract.yml`, `native-retirement-rebind.yml` reconstruction | ephemeral refresh | Uses a trusted ephemeral reconstruction, not the committed bytes. |
+
+Deriving the pair ephemerally (not committing it) is rejected. It would
+not remove the trusted reconstruction step; it would move that step onto
+every consumer path, including the build driver and every
+`native_retirement_contract.py` import. It would also remove the single
+tracked quartet authority that #863 and #877 established, and make evidence
+replay depend on rematerializing external inputs.
+
+Archived replay identities and the legacy #508/#510 path do not depend on the
+pair. Archived replay lives in reviewed policy. Legacy evidence validates
+against the frozen `LEGACY_DEPENDENCY_*` constants in
+`native_retirement_contract.py` and the immutable legacy descriptor.
+
+### Design: post-merge catch-up
+
+Two requirements are part of the decision:
+
+- **No serialization for ordinary PRs.** A bound PR queues and lands like any
+  other PR, pipelined with its neighbours.
+- **Fully automatic.** No human dispatch is needed for ordinary PRs or
+  catch-ups.
+
+1. An `ordinary` candidate that changes only admitted repository sources lands
+   through the native merge queue with no writer step. The existing read-only
+   `Reconstruct candidate closure ephemerally` job validates its exact group
+   tree. That job refreshes with the rebinder from trusted `main`, runs the
+   candidate check and the contract suite, and allows no other diff.
+   Admission accepts that ephemeral proof in place of a writer attestation.
+   Expected values come from the trusted rebinder over source bytes, never
+   from census or other candidate output.
+   - The reconstruction runs on the speculative group tree as soon as the
+     group is created. It does not first wait for the predecessor to land
+     (`merge_queue_admission.py wait-base`).
+   - After the predecessor lands, admission repeats only the cheap checks:
+     live identity, and `verify_trusted_policy`, whose `POLICY_PATHS` already
+     cover the rebinder/authority tools. These prove that no predecessor
+     changed the policy or tools that the reconstruction trusted.
+   - A predecessor that did change them forces a group rebuild, as a
+     policy-changing predecessor does today.
+   - `Main integration admission` collects that job's success on the exact
+     group SHA (`required_checks`). It is not ruleset-required, because the
+     rebind workflow is path-filtered on pull requests.
+2. `bootstrap` and `policy` transitions keep the existing pre-integration
+   writer path. They change the authority itself and still need the
+   old-authority/new-authority check before they land.
+3. After bound candidates land, the single writer publishes one catch-up that
+   contains only the two generated files for current `main`.
+   - **Dispatch.** `native-retirement-catch-up.yml` runs from trusted `main`
+     on `main` pushes and every 30 minutes. When `snapshot_stale` finds the
+     committed snapshot behind the admitted sources, it opens one bot-owned
+     PR from `native-retirement/catch-up` whose only commit is empty. It does
+     not enable auto-merge, because a `GITHUB_TOKEN` enqueue starts no
+     `merge_group` workflows. The standing-authorization controller
+     (`native-retirement-automation.yml`, #1791) then dispatches the existing
+     writer for it as an ordinary request, with no prerequisite CI. No human
+     dispatches anything; see
+     [automation](native-retirement-automation.md#automatic-catch-up-1893).
+   - **Route to `main`.** The writer publishes the usual two-parent
+     integration head on that PR, then enables auto-merge with its
+     publication credential, which queues it in the same native queue. The writer gets no direct write path to `main` and no ruleset
+     bypass.
+   - **Admission.** A catch-up is a writer integration of an empty candidate.
+     It is admitted when all of these hold:
+     - its generated pair is byte-identical to a trusted reconstruction at
+       its recorded publication base;
+     - that base is an ancestor of the group base;
+     - it has no other delta.
+
+     It does not have to be fresh for the whole group tree. So a bound PR
+     that lands ahead of it cannot make it fail, and it never evicts other
+     groups from the queue. It moves `main` forward to a verified identity,
+     and the controller publishes the next catch-up if sources have moved
+     on since then.
+4. While a catch-up is outstanding, `main` carries a pair that is behind but
+   internally consistent: the header still binds the committed snapshot
+   bytes. Each landed tree was ephemerally reconstructed before it landed.
+   During that window:
+   - the `push` rebind run reports the pair as catch-up pending instead of
+     failing, and still reconstructs and runs the contract suite
+     ephemerally;
+   - acceptance evidence and census runs that need the committed quartet
+     must target a revision where `rebind.py check` is clean, which is a
+     catch-up or a later revision with no pending source changes.
+     `native-retirement-evidence.yml` fails early with that reason;
+   - no feature PR waits on a catch-up.
+
+The stale window is one writer run plus one queue CI cycle after the last
+bound merge. Several bound merges share one catch-up. In the sampled history
+(`main` from 2026-09-19 to 2026-09-29), 8 of 245 first-parent merges changed
+an admitted source.
+
+Batching bound PRs is the fallback if catch-up cannot be installed, because
+any unrelated merge still invalidates a batch. Regenerating inside the merge
+group is not possible with GitHub's native queue.
 
 ## Evidence compatibility
 

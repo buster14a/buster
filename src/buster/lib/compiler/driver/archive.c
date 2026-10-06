@@ -61,6 +61,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_member_needed(ObjectFile* membe
 typedef struct CompilerDriverArchiveProvider CompilerDriverArchiveProvider;
 struct CompilerDriverArchiveProvider
 {
+    String8 name;
     u64 next;
     u32 member;
     bool weak_extracts;
@@ -202,13 +203,43 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_archive_add_object(CompilerDriverArchiv
     }
 }
 
+// Indexed candidates carry definitions only. Read and target-admit a member
+// exactly when the ordered extractor consumes it, before publishing its object
+// or introducing its undefined references into the name state.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_admit(Arena* arena, ObjectArchive* archive, u32 member)
+{
+    bool result = true;
+    if (archive->member_bytes && archive->member_bytes[member].pointer)
+    {
+        Target actual = archive->objects[member].target;
+        ObjectFile object = object_read(arena, archive->member_bytes[member], archive->target);
+        if (object.error == OBJECT_ERROR_NONE)
+        {
+            archive->objects[member] = object;
+            archive->member_bytes[member] = (ByteSlice){0};
+        }
+        else
+        {
+            result = false;
+            archive->error = object.error;
+            archive->failed_member = member;
+            String8 actual_cpu = cpu_arch_to_string_os(actual.cpu_arch);
+            archive->diagnostic = string_format(arena, S8("selected member {S8} ({S8}-{S8}) for {S8}-{S8}: {S8}error {u32}"),
+                archive->member_names[member], actual_cpu.length ? actual_cpu : S8("unknown"), operating_system_to_string_os(actual.os),
+                cpu_arch_to_string_os(archive->target.cpu_arch), operating_system_to_string_os(archive->target.os),
+                object.diagnostic.length ? string_format(arena, S8("{S8}; "), object.diagnostic) : S8(""), (u32)object.error);
+        }
+    }
+    return result;
+}
+
 // An archive without undefined global symbols cannot create more extraction
 // requests. Probe selected state in one forward pass without indexing or
 // retaining names from irrelevant members.
-BUSTER_GLOBAL_LOCAL void compiler_driver_archive_extract_leaves(CompilerDriverArchiveState* state, ObjectArchive* archive,
+BUSTER_GLOBAL_LOCAL void compiler_driver_archive_extract_leaves(Arena* arena, CompilerDriverArchiveState* state, ObjectArchive* archive,
                                                                ObjectFile* objects, u32* object_count)
 {
-    for (u32 member = 0; member < archive->object_count; member += 1)
+    for (u32 member = 0; member < archive->object_count && archive->error == OBJECT_ERROR_NONE; member += 1)
     {
         ObjectFile* object = &archive->objects[member];
         bool weak_extracts = object_format_for_target(object->target) != OBJECT_FORMAT_ELF64;
@@ -221,7 +252,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_archive_extract_leaves(CompilerDriverAr
                 needed = compiler_driver_archive_unresolved(compiler_driver_archive_slot(state, symbol->name)->flags, weak_extracts);
             }
         }
-        if (needed)
+        if (needed && compiler_driver_archive_admit(arena, archive, member))
         {
             objects[(*object_count)++] = *object;
             compiler_driver_archive_add_object(state, 0, object);
@@ -246,33 +277,34 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_small(ObjectArchive* archive, O
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_archive_extract_small(ObjectArchive* archive, ObjectFile* objects, u32* object_count)
+BUSTER_GLOBAL_LOCAL void compiler_driver_archive_extract_small(Arena* arena, ObjectArchive* archive, ObjectFile* objects, u32* object_count)
 {
     bool selected[COMPILER_DRIVER_ARCHIVE_SMALL_OBJECTS] = {0};
     bool added;
     do
     {
         added = false;
-        for (u32 member = 0; member < archive->object_count; member += 1)
+        for (u32 member = 0; member < archive->object_count && archive->error == OBJECT_ERROR_NONE; member += 1)
         {
-            if (!selected[member] && compiler_driver_archive_member_needed(&archive->objects[member], objects, *object_count))
+            if (!selected[member] && compiler_driver_archive_member_needed(&archive->objects[member], objects, *object_count) &&
+                compiler_driver_archive_admit(arena, archive, member))
             {
                 selected[member] = true;
                 objects[(*object_count)++] = archive->objects[member];
                 added = true;
             }
         }
-    } while (added);
+    } while (added && archive->error == OBJECT_ERROR_NONE);
 }
 
 void compiler_driver_archive_extract(Arena* arena, CompilerDriverArchiveState* state, ObjectArchive* archive,
                                     ObjectFile* objects, u32* object_count)
 {
-    if (archive->object_count && *object_count && !state->arena && compiler_driver_archive_small(archive, objects, *object_count))
+    if (archive->error == OBJECT_ERROR_NONE && archive->object_count && *object_count && !state->arena && compiler_driver_archive_small(archive, objects, *object_count))
     {
-        compiler_driver_archive_extract_small(archive, objects, object_count);
+        compiler_driver_archive_extract_small(arena, archive, objects, object_count);
     }
-    else if (archive->object_count && *object_count)
+    else if (archive->error == OBJECT_ERROR_NONE && archive->object_count && *object_count)
     {
         if (!state->arena) state->arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
         while (state->processed_objects < *object_count)
@@ -281,7 +313,7 @@ void compiler_driver_archive_extract(Arena* arena, CompilerDriverArchiveState* s
         }
         TemporalArena scratch = scratch_begin(&arena, 1);
         u64 definition_count = 0;
-        bool has_references = false;
+        bool has_references = archive->member_bytes != 0;
         for (u32 member = 0; member < archive->object_count; member += 1)
         {
             ObjectFile* object = &archive->objects[member];
@@ -294,7 +326,7 @@ void compiler_driver_archive_extract(Arena* arena, CompilerDriverArchiveState* s
         }
         if (!has_references)
         {
-            compiler_driver_archive_extract_leaves(state, archive, objects, object_count);
+            compiler_driver_archive_extract_leaves(arena, state, archive, objects, object_count);
         }
         else
         {
@@ -315,35 +347,28 @@ void compiler_driver_archive_extract(Arena* arena, CompilerDriverArchiveState* s
                     if (!symbol->global || symbol->section == OBJECT_SECTION_UNDEFINED) continue;
                     CompilerDriverArchiveSymbol* entry = compiler_driver_archive_symbol(state, symbol->name);
                     u64 provider = ++provider_count;
-                    work.providers[provider] = (CompilerDriverArchiveProvider){entry->providers, member, weak_extracts};
+                    work.providers[provider] = (CompilerDriverArchiveProvider){.name = symbol->name, .next = entry->providers, .member = member, .weak_extracts = weak_extracts};
                     entry->providers = provider;
                     work.members[member].needed += compiler_driver_archive_unresolved(entry->flags, weak_extracts);
                 }
                 compiler_driver_archive_enqueue(&work, member);
             }
-            while (work.count)
+            while (work.count && archive->error == OBJECT_ERROR_NONE)
             {
                 u32 member = compiler_driver_archive_pop(&work);
-                if (work.members[member].needed)
+                if (work.members[member].needed && compiler_driver_archive_admit(arena, archive, member))
                 {
                     work.members[member].selected = true;
                     objects[(*object_count)++] = archive->objects[member];
                     compiler_driver_archive_add_object(state, &work, &archive->objects[member]);
                 }
             }
-            // Clear only this archive's provider heads: scanning the whole retained
-            // name table here would penalize a command with many small archives.
-            for (u32 member = 0; member < archive->object_count; member += 1)
+            // Admission replaces descriptor symbols. Clear the original
+            // indexed provider names, including any name the full reader did
+            // not retain, before releasing this archive's scratch edges.
+            for (u64 provider = 1; provider <= provider_count; provider += 1)
             {
-                ObjectFile* object = &archive->objects[member];
-                for (u32 index = 0; index < object->symbol_count; index += 1)
-                {
-                    ObjectSymbol* symbol = &object->symbols[index];
-                    if (symbol->global && symbol->section != OBJECT_SECTION_UNDEFINED)
-                    {
-                        compiler_driver_archive_slot(state, symbol->name)->providers = 0;
-                    }
-                }
+                compiler_driver_archive_slot(state, work.providers[provider].name)->providers = 0;
             }
         }
         state->processed_objects = *object_count;

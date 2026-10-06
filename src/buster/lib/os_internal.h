@@ -1,12 +1,94 @@
 #pragma once
-// Private deterministic file-I/O and virtual-memory seams. Only the calling
+// Private captured-pipe replay, file-I/O and virtual-memory seams. Only the calling
 // thread and the exact opened path are affected; scripts are bounded data,
 // never callbacks. A staging file created for the selected path as destination
 // is selected too: OPEN fails its creation, descriptor steps apply to it, and
 // REPLACE/DELETE apply to renaming or deleting it. Injected file steps skip
 // the system call.
 #include <buster/lib/os.h>
+
+// Ordinary POSIX captured-pipe draining. This reducer owns no native handles:
+// the wait loop observes events and makes the one close attempt it requests.
+// Bytes are successful read counts, never recorded output or paths.
+typedef enum OsProcessCapturePhase
+{
+    OS_PROCESS_CAPTURE_WAITING,
+    OS_PROCESS_CAPTURE_READY,
+    OS_PROCESS_CAPTURE_CLOSING,
+    OS_PROCESS_CAPTURE_CLOSED,
+} OsProcessCapturePhase;
+
+enum { OS_PROCESS_CAPTURE_READ_LIMIT = 16 * 1024 };
+
+typedef enum OsProcessCaptureEvent
+{
+    OS_PROCESS_CAPTURE_WAIT_READY,
+    OS_PROCESS_CAPTURE_WAIT_IDLE,
+    OS_PROCESS_CAPTURE_WAIT_INTERRUPTED,
+    OS_PROCESS_CAPTURE_WAIT_FAILED,
+    OS_PROCESS_CAPTURE_READ_BYTES,
+    OS_PROCESS_CAPTURE_READ_INTERRUPTED,
+    OS_PROCESS_CAPTURE_READ_EOF,
+    OS_PROCESS_CAPTURE_READ_FAILED,
+    OS_PROCESS_CAPTURE_STOP,
+    OS_PROCESS_CAPTURE_CLOSE_OK,
+    OS_PROCESS_CAPTURE_CLOSE_FAILED,
+    OS_PROCESS_CAPTURE_EVENT_COUNT,
+} OsProcessCaptureEvent;
+
+typedef struct OsProcessCaptureState OsProcessCaptureState;
+struct OsProcessCaptureState
+{
+    OsProcessCapturePhase phase;
+    u64 observed_bytes;
+    u32 close_attempts;
+    // Transport/cleanup failure, independent of abandonment without EOF.
+    // A timeout alone must not suppress a consumer's permitted fresh-child retry.
+    bool failed;
+    bool eof;
+    // A close error ends our authority to use/retry that descriptor. It does
+    // not prove resource release under every POSIX implementation.
+    bool close_outcome_unknown;
+};
+
+// Invalid events leave state untouched. Blocking pipes never produce a read
+// EAGAIN event; idle readiness polls and zero-byte EINTR are recoverable.
+BUSTER_F_DECL bool os_process_capture_step(OsProcessCaptureState* state, OsProcessCaptureEvent event, u64 bytes);
+BUSTER_F_DECL ProcessResult os_process_capture_result(const OsProcessCaptureState* state, ProcessResult child_result);
 #if BUSTER_INCLUDE_TESTS
+
+// Deterministic retained-payload collection through the production append and
+// flatten boundaries. read_size zero feeds the input in one call; positive
+// sizes split it into bounded fragments. Empty inputs still feed an empty read.
+// The collector owns no native process or global failure state.
+typedef struct OsProcessCaptureTestInput OsProcessCaptureTestInput;
+struct OsProcessCaptureTestInput
+{
+    StandardStream stream;
+    ByteSlice bytes;
+    u64 read_size;
+};
+
+typedef struct OsProcessCaptureTestResult OsProcessCaptureTestResult;
+struct OsProcessCaptureTestResult
+{
+    ProcessWaitResult wait;
+    // Requested scratch-arena bytes, including chunk headers and alignment,
+    // before flattening into the caller's arena; not committed bytes or RSS.
+    u64 storage_bytes;
+    u64 chunk_count[(size_t)STANDARD_STREAM_COUNT];
+};
+
+BUSTER_F_DECL OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, ProcessSpawnResult spawn,
+    OsProcessCaptureTestInput const* inputs, u64 input_count);
+
+#if BUSTER_LINUX || BUSTER_MACOS
+// One failure on this thread in an ordinary (non-group) wait. WAIT/READ skip
+// the syscall and report ENOMEM/EBADF; CLOSE releases the real descriptor,
+// then reports EIO. These test the observation wiring, not kernel fault rates.
+BUSTER_F_DECL void os_process_capture_test_fail_on_call(OsProcessCaptureEvent event, u32 call_index);
+BUSTER_F_DECL bool os_process_capture_test_end(void);
+#endif
 
 typedef enum OsFileTestOperation
 {
@@ -42,6 +124,15 @@ struct OsFileTestStep
 BUSTER_F_DECL void os_file_test_begin(String8 path, const OsFileTestStep* steps, u32 count);
 BUSTER_F_DECL u32 os_file_test_end(void);
 BUSTER_F_DECL bool os_file_test_map_unavailable(String8 path);
+// Calling-thread census of mapping views file_map_read created and
+// file_map_unmap released. Nothing resets it; snapshot it before and after.
+typedef struct FileMapTestCounters FileMapTestCounters;
+struct FileMapTestCounters
+{
+    u64 mapped;
+    u64 unmapped;
+};
+BUSTER_F_DECL FileMapTestCounters file_map_test_counters(void);
 #if BUSTER_LINUX || BUSTER_MACOS
 BUSTER_F_DECL void os_process_wait_test_expire_deadline_after_ready_once(void);
 BUSTER_F_DECL bool os_process_group_reservation_release_self_test(void);
@@ -50,6 +141,9 @@ BUSTER_F_DECL bool os_process_group_ownership_loss_self_test(void);
 BUSTER_F_DECL bool os_process_group_escaped_capture_self_test(Arena* arena);
 #endif
 #if BUSTER_LINUX
+BUSTER_F_DECL bool os_linux_proc_context_select_self_test(String8 status, s32 process_id, bool identity_valid,
+                                                           u32* namespace_index, u32* namespace_depth);
+BUSTER_F_DECL bool os_linux_proc_context_live_self_test(void);
 BUSTER_F_DECL bool os_linux_process_stat_parse_self_test(void);
 BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);
 #endif

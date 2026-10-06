@@ -54,10 +54,15 @@
   per-invocation floor of every `ide cc`, not an optional extra. Its per-form
   caches — the normalized row, the parsed pattern, the operand views, the
   derived facts and each record's validity — fill on the first *serial* touch
-  of each form, so a caller about to hand the tables to a gang must call
+  of each form, as do each string-pool offset's NUL distance and the coverage
+  rows, so a caller about to hand the tables to a gang must call
   `buster_x86_metadata_prewarm_all_forms()` first, which fills every one of
-  them. A new lazily built global adds both the check and a line in its
-  module's prewarm.
+  them. The machine encoder's closed expansion-shape set follows the same
+  rule: `machine_x86_64_exact_prewarm` registers its queries and resolves
+  each shape on its first serial lookup, and
+  `machine_x86_64_exact_prewarm_all_shapes()` resolves all of them before a
+  gang may emit x86-64 code. A new lazily built global adds both the check
+  and a line in its module's prewarm.
   Publish the flag *after* the state, never before: the x86 metadata decode
   needs two flags for this, one guarding re-entry from the reads its own
   layout checks make through the accessors and one, set last, that every
@@ -84,6 +89,28 @@ IR source cursors, module line suppression and inline-assembly symbol changes
 are shared within a TU. Serial table prewarm does not remove these dependencies.
 `compiler_parallel_prewarm()` is the complete native-C prewarm entry for a
 caller launching an external gang; idle persistent workers still count as live.
+
+`buster_x86_metadata_exact_plan_prepare` checks serial initialization only on
+an unprepared key. A prepared key validates and returns immutable process-owned
+state without writing the cache, so repeated preparation is safe on active
+lanes and after the gang parks. An uncached key still requires serial prewarm.
+The registered driver cache-lifetime fixture permutes work identities and
+batch boundaries through the same lane kernel and checks fixed encoding bytes;
+the unit-batch fixture also compiles valid input after each failed cohort.
+These tests do not require linked images to retain their layout after changing
+command-line input order. Within a fixed input/options/path cell, every byte
+and stable diagnostic must remain identical; worker counts and timing counters
+are execution telemetry, not artifact identity.
+
+Arena reuse pools are per thread (`arena_pool_head` in `arena.c`): a destroyed
+arena parks on the destroying thread and only that thread's `arena_create`
+can take it back. A pooled arena that one lane fills and another thread
+releases must therefore be created by the releasing thread. The TU cohort's
+coordinator creates each slot's arena before `lane_run` and destroys it after
+ordered publication, so at most one TU arena per slot circulates. Creating it
+on the lane reserved a fresh arena on every worker lane in every cohort and
+parked each one on the coordinator, up to `ARENA_POOL_LIMIT`; no worker ever
+reused one.
 
 Lane startup allocates worker records and handle storage before acquiring the
 startup gate. Allocation failures may enter the fatal diagnostic path, so the

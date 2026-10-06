@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/string.h>
 
 
 BUSTER_GLOBAL_LOCAL bool dwarf_test_read_uleb128(ByteSlice bytes, u64* offset, u64* value)
@@ -473,9 +474,148 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_list_bases(UnitTestArguments* argu
     return result;
 }
 
+// Array bounds and bit-field geometry, checked against the DWARF 4 encodings
+// rather than against dwarf.c's own names (#1440): bounds live on a
+// DW_TAG_subrange_type child (5.5.2, 5.11) -- written on the array itself
+// they were invisible, and lldb printed every array as {} -- and a bit-field
+// names its bits from the record's start with DW_AT_data_bit_offset and
+// DW_AT_bit_size (5.5.6) -- without them lldb read the whole declared type.
+// The expected numbers are the model's; the model's layout is checked against
+// Clang by record_layout_tests.
+BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_array_and_bit_field_geometry(UnitTestArguments* arguments)
+{
+    enum
+    {
+        DWARF_SPEC_TAG_ARRAY_TYPE = 0x01,
+        DWARF_SPEC_TAG_MEMBER = 0x0d,
+        DWARF_SPEC_TAG_SUBRANGE_TYPE = 0x21,
+        DWARF_SPEC_AT_NAME = 0x03,
+        DWARF_SPEC_AT_BIT_SIZE = 0x0d,
+        DWARF_SPEC_AT_UPPER_BOUND = 0x2f,
+        DWARF_SPEC_AT_COUNT = 0x37,
+        DWARF_SPEC_AT_DATA_MEMBER_LOCATION = 0x38,
+        DWARF_SPEC_AT_DATA_BIT_OFFSET = 0x6b,
+    };
+    UnitTestResult result = {0};
+    String8 path = S8("geometry.c");
+    DebugTypeField fields[] = {
+        {.name = S8("a"), .type = 1, .offset = 0},
+        {.name = S8("b"), .type = 0, .offset = 0, .bit_offset = 8, .bit_width = 3, .is_bit_field = true},
+        {.name = S8("c"), .type = 0, .offset = 4, .bit_offset = 5, .bit_width = 13, .is_bit_field = true},
+    };
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("unsigned int"), .size = 4},
+        {.kind = DEBUG_TYPE_BASE, .name = S8("char"), .size = 1, .is_signed = true},
+        {.kind = DEBUG_TYPE_ARRAY, .element_type = 0, .element_count = 7, .size = 28},
+        {.kind = DEBUG_TYPE_ARRAY, .element_type = 2, .element_count = 3, .size = 84},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("geometry"), .size = 8, .fields = fields, .field_count = BUSTER_ARRAY_LENGTH(fields)},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugFunction function = {.name = S8("geometry_function"), .type = 5, .scope = DEBUG_SCOPE_INVALID, .code_size = 0x10};
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .functions = &function, .function_count = 1, .valid = true};
+    DwarfResult built = dwarf_build(arguments->arena, (DwarfInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .producer = S8("buster"), .comp_dir = S8("."), .code_size = 0x10, .target = {.cpu_arch = CPU_ARCH_X86_64}});
+    if (BUSTER_REQUIRE(arguments, built.valid))
+    {
+        ByteSlice info = built.sections[DWARF_SECTION_INFO];
+        ByteSlice abbreviations = built.sections[DWARF_SECTION_ABBREV];
+        ByteSlice strings = built.sections[DWARF_SECTION_STR];
+        // A DW_FORM_strp slot is written as zero with its .debug_str offset
+        // in a relocation, as a linker would resolve it.
+        for (u32 index = 0; index < built.relocation_count; index += 1)
+        {
+            DwarfRelocation relocation = built.relocations[index];
+            if (!relocation.address && relocation.section == DWARF_SECTION_INFO && relocation.target == DWARF_SECTION_STR &&
+                relocation.offset + 4 <= info.length)
+            {
+                u32 string_offset = (u32)relocation.addend;
+                memcpy(info.pointer + relocation.offset, &string_offset, sizeof(string_offset));
+            }
+        }
+        u64 cursor = 11;
+        u32 arrays_with_children = 0;
+        u32 arrays_with_upper_bound = 0;
+        u64 counts[4] = {0};
+        u32 count_total = 0;
+        bool b_checked = false;
+        bool c_checked = false;
+        bool valid = true;
+        while (valid && cursor < info.length)
+        {
+            u64 number = 0;
+            valid = dwarf_test_read_uleb128(info, &cursor, &number);
+            DwarfTestAbbrev abbreviation = {0};
+            if (!valid || !number)
+            {
+                continue;
+            }
+            valid = dwarf_test_find_abbrev(abbreviations, (u32)number, &abbreviation);
+            String8 name = {0};
+            u64 data_bit_offset = UINT64_MAX;
+            u64 bit_size = UINT64_MAX;
+            u64 count = UINT64_MAX;
+            bool member_location = false;
+            for (u32 index = 0; valid && index < abbreviation.attribute_count; index += 1)
+            {
+                u32 attribute = abbreviation.attributes[index];
+                u32 form = abbreviation.forms[index];
+                u64 value = 0;
+                if (form == DWARF_TEST_FORM_UDATA)
+                {
+                    valid = dwarf_test_read_uleb128(info, &cursor, &value);
+                }
+                else if (form == DWARF_TEST_FORM_STRP && cursor + 4 <= info.length)
+                {
+                    u32 string_offset = 0;
+                    memcpy(&string_offset, info.pointer + cursor, sizeof(string_offset));
+                    cursor += 4;
+                    value = string_offset;
+                    u64 end = string_offset;
+                    while (end < strings.length && strings.pointer[end])
+                    {
+                        end += 1;
+                    }
+                    name = string_offset < strings.length ? (String8){.pointer = (char8*)strings.pointer + string_offset, .length = end - string_offset}
+                                                          : (String8){0};
+                }
+                else
+                {
+                    valid = dwarf_test_skip_form(info, &cursor, form);
+                }
+                data_bit_offset = attribute == DWARF_SPEC_AT_DATA_BIT_OFFSET ? value : data_bit_offset;
+                bit_size = attribute == DWARF_SPEC_AT_BIT_SIZE ? value : bit_size;
+                count = attribute == DWARF_SPEC_AT_COUNT ? value : count;
+                member_location |= attribute == DWARF_SPEC_AT_DATA_MEMBER_LOCATION;
+                arrays_with_upper_bound += abbreviation.tag == DWARF_SPEC_TAG_ARRAY_TYPE && attribute == DWARF_SPEC_AT_UPPER_BOUND;
+            }
+            arrays_with_children += abbreviation.tag == DWARF_SPEC_TAG_ARRAY_TYPE && abbreviation.children;
+            if (abbreviation.tag == DWARF_SPEC_TAG_SUBRANGE_TYPE && count_total < BUSTER_ARRAY_LENGTH(counts))
+            {
+                counts[count_total++] = count;
+            }
+            if (abbreviation.tag == DWARF_SPEC_TAG_MEMBER && string_equal(name, S8("b")))
+            {
+                b_checked = data_bit_offset == 8 && bit_size == 3 && !member_location;
+            }
+            if (abbreviation.tag == DWARF_SPEC_TAG_MEMBER && string_equal(name, S8("c")))
+            {
+                c_checked = data_bit_offset == 4 * 8 + 5 && bit_size == 13 && !member_location;
+            }
+        }
+        BUSTER_TEST(arguments, valid);
+        BUSTER_TEST(arguments, arrays_with_children == 2 && arrays_with_upper_bound == 0);
+        BUSTER_TEST(arguments, count_total == 2 && counts[0] == 7 && counts[1] == 3);
+        BUSTER_TEST(arguments, b_checked && c_checked);
+    }
+    return result;
+}
+
 UnitTestResult dwarf_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = dwarf_test_list_bases(arguments);
+    UnitTestResult geometry = dwarf_test_array_and_bit_field_geometry(arguments);
+    result.succeeded_test_count += geometry.succeeded_test_count;
+    result.test_count += geometry.test_count;
     String8 files[] = {
         S8_INITIALIZER("main.c"),
         S8_INITIALIZER("helper.h"),
@@ -727,6 +867,223 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, has_inline_abbrev);
 
+        // Independent DWARF v4 bytes for the existing register/frame/piece/
+        // constant fixture. A repeat build alone cannot prove byte stability.
+        u8 const ordinary_locations[] = {
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x90, 0x02, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x91, 0x70, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x90, 0x00, 0x93, 0x04, 0x91, 0x68,
+            0x93, 0x04, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x03, 0x00, 0x10, 0x07, 0x9f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        };
+        ByteSlice ordinary_loc = model_built.sections[DWARF_SECTION_LOC];
+        BUSTER_TEST(arguments, ordinary_loc.length == sizeof(ordinary_locations) &&
+                               memcmp(ordinary_loc.pointer, ordinary_locations, sizeof(ordinary_locations)) == 0);
+
+        // Sixteen genuine changes for one variable exceed the old 160-byte
+        // estimate. Decode each entry, including the uncovered one-byte gaps.
+        DebugLocationRange many_locations[16];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(many_locations); index += 1)
+        {
+            many_locations[index] = (DebugLocationRange){
+                .start = index * 2,
+                .end = index * 2 + 1,
+                .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = index},
+            };
+        }
+        dwarf_variables[0].locations = many_locations;
+        dwarf_variables[0].location_count = BUSTER_ARRAY_LENGTH(many_locations);
+        DwarfResult many_built = dwarf_build(arguments->arena, dwarf_model_input);
+        ByteSlice many_loc = many_built.sections[DWARF_SECTION_LOC];
+        bool many_matches = many_built.valid && many_loc.length == 16 * 21 + 16;
+        for (u32 index = 0; many_matches && index < BUSTER_ARRAY_LENGTH(many_locations); index += 1)
+        {
+            u64 start;
+            u64 end;
+            u16 length;
+            u64 offset = (u64)index * 21;
+            memcpy(&start, many_loc.pointer + offset, sizeof(start));
+            memcpy(&end, many_loc.pointer + offset + 8, sizeof(end));
+            memcpy(&length, many_loc.pointer + offset + 16, sizeof(length));
+            u8 const expression[] = {0x10, (u8)index, 0x9f};
+            many_matches = start == (u64)index * 2 && end == (u64)index * 2 + 1 && length == sizeof(expression) &&
+                           memcmp(many_loc.pointer + offset + 18, expression, sizeof(expression)) == 0;
+        }
+        u8 const list_end[16] = {0};
+        many_matches = many_matches && memcmp(many_loc.pointer + 16 * 21, list_end, sizeof(list_end)) == 0;
+        BUSTER_TEST(arguments, many_matches);
+
+        // Eight register entries fill the old allocation exactly. The ninth
+        // then reaches its unchecked length patch at offset 160, isolating
+        // the failed writes followed by an unbounded patch in the old writer.
+        DebugLocationRange register_locations[9];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(register_locations); index += 1)
+        {
+            register_locations[index] = (DebugLocationRange){
+                .start = index * 2,
+                .end = index * 2 + 1,
+                .location = {.kind = DEBUG_LOCATION_REGISTER,
+                             .reg = (index & 1) ? DEBUG_REGISTER_X86_RAX : DEBUG_REGISTER_X86_RCX},
+            };
+        }
+        dwarf_variables[0].locations = register_locations;
+        dwarf_variables[0].location_count = BUSTER_ARRAY_LENGTH(register_locations);
+        DwarfResult register_built = dwarf_build(arguments->arena, dwarf_model_input);
+        BUSTER_TEST(arguments, register_built.valid && register_built.sections[DWARF_SECTION_LOC].length == 9 * 20 + 16);
+        dwarf_variables[0].locations = many_locations;
+        dwarf_variables[0].location_count = BUSTER_ARRAY_LENGTH(many_locations);
+
+        // A repeated ID and a descendant reference are separate serialized
+        // lists. Their relocation addends must follow the actual scope walk.
+        DebugVariableId repeated_ids[] = {0, 0};
+        dwarf_scopes[0].variables = repeated_ids;
+        dwarf_scopes[0].variable_count = BUSTER_ARRAY_LENGTH(repeated_ids);
+        dwarf_scopes[1].variables = dwarf_variable_ids;
+        dwarf_scopes[1].variable_count = 1;
+        DwarfResult repeated_built = dwarf_build(arguments->arena, dwarf_model_input);
+        ByteSlice repeated_loc = repeated_built.sections[DWARF_SECTION_LOC];
+        bool repeated_matches = many_matches && repeated_built.valid && repeated_loc.length == many_loc.length * 3;
+        for (u32 index = 0; repeated_matches && index < 3; index += 1)
+        {
+            repeated_matches = memcmp(repeated_loc.pointer + many_loc.length * index, many_loc.pointer, many_loc.length) == 0;
+        }
+        u32 location_relocations = 0;
+        for (u32 index = 0; repeated_matches && index < repeated_built.relocation_count; index += 1)
+        {
+            DwarfRelocation relocation = repeated_built.relocations[index];
+            if (relocation.section == DWARF_SECTION_INFO && relocation.target == DWARF_SECTION_LOC)
+            {
+                repeated_matches = relocation.addend == (s64)(many_loc.length * location_relocations);
+                location_relocations += 1;
+            }
+        }
+        BUSTER_TEST(arguments, repeated_matches && location_relocations == 3);
+
+        // Two functions sharing the same bounded scope tree serialize it
+        // twice. Keep this topology small enough to isolate location storage.
+        DebugFunction shared_functions[] = {dwarf_functions[0], dwarf_functions[0]};
+        dwarf_model.functions = shared_functions;
+        dwarf_model.function_count = BUSTER_ARRAY_LENGTH(shared_functions);
+        dwarf_model.scope_count = 2;
+        dwarf_model.inline_site_count = 0;
+        DwarfResult shared_built = dwarf_build(arguments->arena, dwarf_model_input);
+        ByteSlice shared_loc = shared_built.sections[DWARF_SECTION_LOC];
+        bool shared_matches = repeated_matches && shared_built.valid && shared_loc.length == many_loc.length * 6;
+        for (u32 index = 0; shared_matches && index < 6; index += 1)
+        {
+            shared_matches = memcmp(shared_loc.pointer + many_loc.length * index, many_loc.pointer, many_loc.length) == 0;
+        }
+        BUSTER_TEST(arguments, shared_matches);
+        dwarf_model.functions = dwarf_functions;
+        dwarf_model.function_count = BUSTER_ARRAY_LENGTH(dwarf_functions);
+        dwarf_model.scope_count = BUSTER_ARRAY_LENGTH(dwarf_scopes);
+        dwarf_model.inline_site_count = BUSTER_ARRAY_LENGTH(dwarf_inline_sites);
+        dwarf_scopes[0].variables = dwarf_variable_ids;
+        dwarf_scopes[0].variable_count = 1;
+        dwarf_scopes[1].variables = 0;
+        dwarf_scopes[1].variable_count = 0;
+
+        DebugLocationRange skipped_locations[] = {
+            {.start = 0, .end = 8, .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+            {.start = 8, .end = 8, .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX}},
+            {.start = 16, .end = 8, .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 7}},
+        };
+        dwarf_variables[0].locations = skipped_locations;
+        dwarf_variables[0].location_count = BUSTER_ARRAY_LENGTH(skipped_locations);
+        DwarfResult skipped_built = dwarf_build(arguments->arena, dwarf_model_input);
+        ByteSlice skipped_loc = skipped_built.sections[DWARF_SECTION_LOC];
+        BUSTER_TEST(arguments, skipped_built.valid && skipped_loc.length == sizeof(list_end) &&
+                               memcmp(skipped_loc.pointer, list_end, sizeof(list_end)) == 0);
+        dwarf_variables[0].locations = 0;
+        dwarf_variables[0].location_count = 0;
+        DwarfResult empty_built = dwarf_build(arguments->arena, dwarf_model_input);
+        ByteSlice empty_loc = empty_built.sections[DWARF_SECTION_LOC];
+        BUSTER_TEST(arguments, empty_built.valid && empty_loc.length == sizeof(list_end) &&
+                               memcmp(empty_loc.pointer, list_end, sizeof(list_end)) == 0);
+
+        DebugLocationRange empty_piece_location = {
+            .start = 0,
+            .end = 32,
+            .location = {.kind = DEBUG_LOCATION_PIECEWISE},
+        };
+        dwarf_variables[0].locations = &empty_piece_location;
+        dwarf_variables[0].location_count = 1;
+        DwarfResult empty_piece_built = dwarf_build(arguments->arena, dwarf_model_input);
+        ByteSlice empty_piece_loc = empty_piece_built.sections[DWARF_SECTION_LOC];
+        BUSTER_TEST(arguments, empty_piece_built.valid && empty_piece_loc.length == 18 + sizeof(list_end) &&
+                               empty_piece_loc.pointer[16] == 0 && empty_piece_loc.pointer[17] == 0 &&
+                               memcmp(empty_piece_loc.pointer + 18, list_end, sizeof(list_end)) == 0);
+
+        // Every constant/piece pair is five literal bytes. The largest
+        // representable expression succeeds; one additional operand byte
+        // refuses the model instead of truncating its two-byte length.
+        u32 const boundary_piece_count = UINT16_MAX / 5;
+        DebugLocationPiece* boundary_pieces = arena_allocate(arguments->arena, DebugLocationPiece, boundary_piece_count);
+        for (u32 index = 0; index < boundary_piece_count; index += 1)
+        {
+            boundary_pieces[index] = (DebugLocationPiece){
+                .kind = DEBUG_LOCATION_CONSTANT,
+                .constant = 0,
+                .value_offset = index * 4,
+                .size = 4,
+            };
+        }
+        DebugType boundary_types[] = {
+            dwarf_types[0],
+            dwarf_types[1],
+            {.kind = DEBUG_TYPE_ARRAY, .element_type = 0, .element_count = boundary_piece_count, .size = (u64)boundary_piece_count * 4},
+        };
+        dwarf_model.types = boundary_types;
+        dwarf_model.type_count = BUSTER_ARRAY_LENGTH(boundary_types);
+        dwarf_variables[0].type = 2;
+        DebugLocationRange boundary_location = {
+            .start = 0,
+            .end = 32,
+            .location = {.kind = DEBUG_LOCATION_PIECEWISE, .pieces = boundary_pieces, .piece_count = boundary_piece_count},
+        };
+        dwarf_variables[0].locations = &boundary_location;
+        dwarf_variables[0].location_count = 1;
+        DwarfResult boundary_built = dwarf_build(arguments->arena, dwarf_model_input);
+        ByteSlice boundary_loc = boundary_built.sections[DWARF_SECTION_LOC];
+        bool boundary_matches = boundary_built.valid && boundary_loc.length == 18 + UINT16_MAX + 16;
+        u8 const piece_expression[] = {0x10, 0x00, 0x9f, 0x93, 0x04};
+        for (u32 index = 0; boundary_matches && index < boundary_piece_count; index += 1)
+        {
+            boundary_matches = memcmp(boundary_loc.pointer + 18 + (u64)index * sizeof(piece_expression),
+                                      piece_expression, sizeof(piece_expression)) == 0;
+        }
+        boundary_matches = boundary_matches && boundary_loc.pointer[16] == 0xff && boundary_loc.pointer[17] == 0xff &&
+                           memcmp(boundary_loc.pointer + 18 + UINT16_MAX, list_end, sizeof(list_end)) == 0;
+        BUSTER_TEST(arguments, boundary_matches);
+        boundary_pieces[boundary_piece_count - 1].constant = 128;
+        DwarfResult oversized_built = dwarf_build(arguments->arena, dwarf_model_input);
+        bool oversized_empty = !oversized_built.valid && !oversized_built.relocation_count;
+        for (u32 index = 0; oversized_empty && index < DWARF_SECTION_COUNT; index += 1)
+        {
+            oversized_empty = !oversized_built.sections[index].pointer && !oversized_built.sections[index].length;
+        }
+        BUSTER_TEST(arguments, oversized_empty);
+
+        // An unreachable oversized variable contributes no location list.
+        dwarf_scopes[0].variables = 0;
+        dwarf_scopes[0].variable_count = 0;
+        DwarfResult unreachable_built = dwarf_build(arguments->arena, dwarf_model_input);
+        BUSTER_TEST(arguments, unreachable_built.valid && !unreachable_built.sections[DWARF_SECTION_LOC].length);
+        dwarf_scopes[0].variables = dwarf_variable_ids;
+        dwarf_scopes[0].variable_count = 1;
+        dwarf_variables[0].kind = DEBUG_VARIABLE_GLOBAL;
+        DwarfResult global_built = dwarf_build(arguments->arena, dwarf_model_input);
+        BUSTER_TEST(arguments, global_built.valid && !global_built.sections[DWARF_SECTION_LOC].length);
+        dwarf_variables[0].kind = DEBUG_VARIABLE_PARAMETER;
+        dwarf_model.types = dwarf_types;
+        dwarf_model.type_count = BUSTER_ARRAY_LENGTH(dwarf_types);
+        dwarf_variables[0].type = 0;
+        dwarf_variables[0].locations = dwarf_locations;
+        dwarf_variables[0].location_count = BUSTER_ARRAY_LENGTH(dwarf_locations);
+
+
         // A SysV x87 long double has an 80-bit semantic value in a 16-byte
         // storage slot.  Decode the emitted abbreviation and DIEs instead of
         // merely searching for the value: the attribute must be standard
@@ -740,6 +1097,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 4,
                 .alignment = 4,
                 .bit_width = 32,
+                .is_float = true,
             },
             {
                 .name = S8("f64"),
@@ -747,6 +1105,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 8,
                 .alignment = 8,
                 .bit_width = 64,
+                .is_float = true,
             },
             {
                 .name = S8("f80"),
@@ -754,6 +1113,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 16,
                 .alignment = 16,
                 .bit_width = 80,
+                .is_float = true,
             },
             {
                 .name = S8("float"),
@@ -761,6 +1121,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 4,
                 .alignment = 4,
                 .bit_width = 32,
+                .is_float = true,
             },
             {
                 .name = S8("double"),
@@ -768,6 +1129,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 8,
                 .alignment = 8,
                 .bit_width = 64,
+                .is_float = true,
             },
             {
                 .name = S8("long double"),
@@ -775,6 +1137,23 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                 .size = 16,
                 .alignment = 16,
                 .bit_width = 80,
+                .is_float = true,
+            },
+            {
+                .name = S8("_Float16"),
+                .kind = DEBUG_TYPE_BASE,
+                .size = 2,
+                .alignment = 2,
+                .bit_width = 16,
+                .is_float = true,
+            },
+            {
+                // Spelled like a float but structurally an integer (#2737).
+                .name = S8("float_count"),
+                .kind = DEBUG_TYPE_BASE,
+                .size = 4,
+                .alignment = 4,
+                .bit_width = 32,
             },
         };
         DebugModel dwarf_float_model = {
@@ -838,6 +1217,10 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
             cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &float_die);
             cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &double_die);
             cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 26, &long_double_die);
+            DwarfTestBaseDie half_die = {0};
+            DwarfTestBaseDie spelled_float_die = {0};
+            cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &half_die);
+            cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &spelled_float_die);
             BUSTER_TEST(arguments, cu_decoded);
             BUSTER_TEST(arguments, f32_die.byte_size == 4 && f32_die.bit_size == 0 && !f32_die.has_bit_size && f32_die.encoding == 0x04);
             BUSTER_TEST(arguments, f64_die.byte_size == 8 && f64_die.bit_size == 0 && !f64_die.has_bit_size && f64_die.encoding == 0x04);
@@ -845,6 +1228,9 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, float_die.byte_size == 4 && float_die.bit_size == 0 && !float_die.has_bit_size && float_die.encoding == 0x04);
             BUSTER_TEST(arguments, double_die.byte_size == 8 && double_die.bit_size == 0 && !double_die.has_bit_size && double_die.encoding == 0x04);
             BUSTER_TEST(arguments, long_double_die.byte_size == 16 && long_double_die.bit_size == 80 && long_double_die.has_bit_size && long_double_die.encoding == 0x04);
+            // DW_ATE_float is 0x04 and DW_ATE_unsigned 0x07 (DWARF 5, table 7.11).
+            BUSTER_TEST(arguments, half_die.byte_size == 2 && half_die.encoding == 0x04);
+            BUSTER_TEST(arguments, spelled_float_die.byte_size == 4 && spelled_float_die.encoding == 0x07);
         }
 
         DebugType dwarf_narrow_float_types[] = {
@@ -896,6 +1282,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
             .size = 16,
             .alignment = 16,
             .bit_width = 160,
+            .is_float = true,
         };
         DebugModel dwarf_inconsistent_model = dwarf_narrow_float_model;
         dwarf_inconsistent_model.types = &dwarf_inconsistent_float;
@@ -937,6 +1324,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
         DebugVariable dwarf_global = {
             .name = S8("global_value"),
             .linkage_name = S8("global_value"),
+            .symbol = {.value = 7},
             .type = 0,
             .kind = DEBUG_VARIABLE_GLOBAL,
         };
@@ -960,6 +1348,16 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                                                                         .language = 0x000c,
                                                                     });
         BUSTER_TEST(arguments, globals_built.valid && globals_built.sections[DWARF_SECTION_INFO].length > 16);
+        // The address relocation names the variable and carries its program
+        // symbol, which the object writer resolves without the name.
+        u32 global_address_relocations = 0;
+        for (u32 index = 0; globals_built.valid && index < globals_built.relocation_count; index += 1)
+        {
+            DwarfRelocation relocation = globals_built.relocations[index];
+            global_address_relocations += relocation.symbol_address && string_equal(relocation.symbol_name, S8("global_value")) &&
+                                          relocation.symbol.value == 7;
+        }
+        BUSTER_TEST(arguments, global_address_relocations == 1);
 
         CodegenUnwindAction x64_actions[] = {
             {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},

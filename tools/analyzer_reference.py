@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fail-closed provenance and selection for the CI Clang analyzer reference.
+"""Candidate build-driver provenance and read-only historical selection decoding.
 
-The candidate and historical build drivers are compiled with Clang dependency
-files.  This helper normalizes those compiler-selected repository dependencies,
-verifies their materialized bytes against exact Git blob identities, and binds
-the comparison policy to a versioned manifest.  It never uses a changed-file
-heuristic or reads dependency identities from an uncommitted tree.
+The candidate is compiled once with Clang dependency output. Its complete source,
+executable, compiler, command and environment identities are revalidated before
+one full analysis. No event or dependency change can select another execution.
+
+The original module name and load_selection decoder remain for source-pinned
+historical CI measurement readers. They do not select or launch reference work.
 """
 
 from __future__ import annotations
@@ -16,14 +17,15 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 from typing import Any
 
-MANIFEST_SCHEMA = "BUSTER_ANALYZER_DRIVER_PROVENANCE_V1"
-SELECTION_SCHEMA = "BUSTER_ANALYZER_COMPARISON_SELECTION_V2"
+MANIFEST_SCHEMA = "BUSTER_ANALYZER_DRIVER_PROVENANCE_V2"
+SELECTION_SCHEMA = "BUSTER_ANALYZER_COMPARISON_SELECTION_V3"
 ROOT_SOURCE = "build.c"
 POLICY_INPUTS = (".github/workflows/ci.yml", "tools/analyzer_reference.py")
 COMPILE_PROFILE = {
@@ -48,7 +50,13 @@ COMPILE_PROFILE = {
 }
 HEX_OBJECT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-SAFE_EVENT = re.compile(r"[A-Za-z0-9_.-]+\Z")
+# Only compiler/driver inputs, never credentials or unrelated runner metadata.
+CONTEXT_ENVIRONMENT = (
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+    "LIBRARY_PATH", "LD_LIBRARY_PATH", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET",
+    "CCC_OVERRIDE_OPTIONS", "CLANG_CONFIG_FILE_SYSTEM_DIR", "CLANG_CONFIG_FILE_USER_DIR",
+)
 
 
 class ProvenanceError(RuntimeError):
@@ -247,8 +255,54 @@ def closure_fingerprint(
     return sha256_bytes(payload)
 
 
+def driver_command(compiler: Path, dependency_file: Path, driver: Path) -> list[str]:
+    substitutions = {"<dependency-file>": str(dependency_file), "<driver-output>": str(driver)}
+    return [str(compiler), *(substitutions.get(value, value) for value in COMPILE_PROFILE["arguments"])]
+
+
+def compiler_identity() -> dict[str, str]:
+    compiler_name = shutil.which(COMPILE_PROFILE["compiler"])
+    if compiler_name is None:
+        raise ProvenanceError("Clang is unavailable for driver context")
+    compiler = Path(compiler_name).resolve(strict=True)
+    ensure_regular_file(compiler)
+    version = subprocess.run([str(compiler), "--version"], check=True, capture_output=True, timeout=30)
+    return {
+        "compiler": str(compiler),
+        "compiler_sha256": sha256_bytes(compiler.read_bytes()),
+        "compiler_version_sha256": sha256_bytes(version.stdout + b"\0" + version.stderr),
+    }
+
+
+def driver_context(root: Path, dependency_file: Path, driver: Path) -> dict[str, Any]:
+    """Bind one executable used in one root; never infer cross-root equivalence.
+
+    The bootstrap subcommand executes driver_command itself. Revalidation derives
+    this context again before the candidate campaign. Environment values are only
+    hashed; BUSTER_* covers the driver's repository-specific inputs.
+    """
+    identity = compiler_identity()
+    ensure_regular_file(driver)
+    if not os.access(driver, os.X_OK):
+        raise ProvenanceError("candidate driver is not executable")
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key in CONTEXT_ENVIRONMENT or key.startswith(("BUSTER_", "LC_"))
+    }
+    encoded = json.dumps(environment, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "root": str(root),
+        "driver": str(driver.absolute()),
+        "driver_sha256": sha256_bytes(driver.read_bytes()),
+        **identity,
+        "compile_command": driver_command(Path(identity["compiler"]), dependency_file.absolute(), driver.absolute()),
+        "environment_sha256": sha256_bytes(encoded),
+    }
+
+
 def build_manifest(
-    repository: Path, revision: str, root: Path, dependency_file: Path
+    repository: Path, revision: str, root: Path, dependency_file: Path,
+    driver: Path | None = None,
 ) -> dict[str, Any]:
     repository = repository.resolve(strict=True)
     root = root.resolve(strict=True)
@@ -299,6 +353,7 @@ def build_manifest(
         entry = tree.get(path)
         if entry is None:
             policy_inputs.append({"path": path, "state": "missing"})
+            issues.append(f"missing-policy-input:{path}")
             continue
         if entry["type"] != "blob" or entry["mode"] not in ("100644", "100755"):
             policy_inputs.append(
@@ -333,6 +388,7 @@ def build_manifest(
         "issues": issues,
         "dependency_file_sha256": sha256_bytes(dependency_raw),
         "closure_sha256": closure_fingerprint(dependencies, policy_inputs),
+        "execution_context": driver_context(root, dependency_file, driver) if driver is not None else None,
         **manifest_payload(dependencies, policy_inputs),
     }
 
@@ -361,6 +417,7 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
         "compile_profile",
         "dependencies",
         "policy_inputs",
+        "execution_context",
     }
     if not isinstance(manifest, dict) or set(manifest) != required:
         raise ProvenanceError(f"manifest has unexpected fields: {path}")
@@ -383,78 +440,26 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
         raise ProvenanceError(f"manifest dependency-file hash is malformed: {path}")
     if not HEX_OBJECT.fullmatch(str(manifest["revision"])) or not HEX_OBJECT.fullmatch(str(manifest["tree"])):
         raise ProvenanceError(f"manifest Git identities are malformed: {path}")
+    context = manifest["execution_context"]
+    if context is not None:
+        context_keys = {"root", "driver", "driver_sha256", "compiler", "compiler_sha256",
+                        "compiler_version_sha256", "compile_command", "environment_sha256"}
+        if not isinstance(context, dict) or set(context) != context_keys:
+            raise ProvenanceError(f"malformed driver execution context: {path}")
+        for key in ("root", "driver", "compiler"):
+            if not isinstance(context[key], str) or not Path(context[key]).is_absolute() or "\0" in context[key]:
+                raise ProvenanceError(f"invalid context path {key}: {path}")
+        for key in ("driver_sha256", "compiler_sha256", "compiler_version_sha256", "environment_sha256"):
+            if not HEX_SHA256.fullmatch(str(context[key])):
+                raise ProvenanceError(f"invalid context hash {key}: {path}")
+        if not isinstance(context["compile_command"], list) or not all(
+            isinstance(value, str) and "\0" not in value for value in context["compile_command"]
+        ):
+            raise ProvenanceError(f"invalid context compile command: {path}")
     return manifest, raw
 
 
-def parse_bool(value: str) -> bool:
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    raise ProvenanceError(f"expected true or false, got {value!r}")
-
-
-def select_campaign(
-    repository: Path,
-    event: str,
-    requested_text: str,
-    candidate_revision: str,
-    reference_revision: str,
-    candidate_path: Path,
-    reference_path: Path,
-) -> bytes:
-    repository = repository.resolve(strict=True)
-    if not SAFE_EVENT.fullmatch(event):
-        raise ProvenanceError(f"invalid event name {event!r}")
-    requested = parse_bool(requested_text)
-    if requested and event != "workflow_dispatch":
-        raise ProvenanceError("explicit analyzer comparison is valid only for workflow_dispatch")
-    candidate_commit, candidate_tree = resolve_revision(repository, candidate_revision)
-    reference_commit, reference_tree = resolve_revision(repository, reference_revision)
-    candidate, candidate_raw = load_manifest(candidate_path)
-    reference, reference_raw = load_manifest(reference_path)
-    if candidate["revision"] != candidate_commit or candidate["tree"] != candidate_tree:
-        raise ProvenanceError("candidate provenance does not match the selected commit")
-    if reference["revision"] != reference_commit or reference["tree"] != reference_tree:
-        raise ProvenanceError("reference provenance does not match the selected commit")
-
-    if requested:
-        selection, reason = "compare", "requested"
-    elif candidate_commit == reference_commit:
-        if event in ("push", "workflow_dispatch"):
-            selection, reason = "skip", "same-revision"
-        else:
-            selection, reason = "compare", "event-requires-comparison"
-    elif event == "pull_request":
-        if not candidate["complete"] or not reference["complete"]:
-            selection, reason = "compare", "provenance-uncertain"
-        elif candidate["closure_sha256"] == reference["closure_sha256"]:
-            selection, reason = "skip", "unchanged-driver-closure"
-        else:
-            selection, reason = "compare", "changed-driver-closure"
-    else:
-        selection, reason = "compare", "distinct-revisions"
-
-    fields = [
-        SELECTION_SCHEMA,
-        f"event={event}",
-        f"requested={'true' if requested else 'false'}",
-        f"candidate_revision={candidate_commit}",
-        f"reference_revision={reference_commit}",
-        f"candidate_tree={candidate_tree}",
-        f"reference_tree={reference_tree}",
-        f"candidate_closure_sha256={candidate['closure_sha256']}",
-        f"reference_closure_sha256={reference['closure_sha256']}",
-        f"candidate_complete={'true' if candidate['complete'] else 'false'}",
-        f"reference_complete={'true' if reference['complete'] else 'false'}",
-        f"candidate_manifest_sha256={sha256_bytes(candidate_raw)}",
-        f"reference_manifest_sha256={sha256_bytes(reference_raw)}",
-        f"selection={selection}",
-        f"reason={reason}",
-    ]
-    return ("\n".join(fields) + "\n").encode("ascii")
-
-
+# Historical V3 records are decoded unchanged, never produced by current CI.
 SELECTION_KEYS = (
     "event",
     "requested",
@@ -514,28 +519,26 @@ def command_manifest(arguments: argparse.Namespace) -> None:
         arguments.revision,
         Path(arguments.root),
         Path(arguments.depfile),
+        Path(arguments.driver),
     )
+    if not manifest["complete"]:
+        raise ProvenanceError("candidate provenance is incomplete: " + "; ".join(manifest["issues"]))
     write_manifest(Path(arguments.output), manifest)
 
 
-def command_select(arguments: argparse.Namespace) -> None:
-    record = select_campaign(
-        Path(arguments.repository),
-        arguments.event,
-        arguments.requested,
-        arguments.candidate_revision,
-        arguments.reference_revision,
-        Path(arguments.candidate_manifest),
-        Path(arguments.reference_manifest),
-    )
-    write_atomic(Path(arguments.output), record)
-
-
-def command_field(arguments: argparse.Namespace) -> None:
-    record = load_selection(Path(arguments.record))
-    if arguments.field not in SELECTION_KEYS:
-        raise ProvenanceError(f"unknown selection field {arguments.field!r}")
-    print(record[arguments.field])
+def command_bootstrap(arguments: argparse.Namespace) -> None:
+    root = Path(arguments.root).resolve(strict=True)
+    identity = compiler_identity()
+    compiler = Path(identity["compiler"])
+    dependency_file = Path(arguments.depfile).absolute()
+    driver = Path(arguments.driver).absolute()
+    subprocess.run(driver_command(compiler, dependency_file, driver), cwd=root, check=True)
+    manifest = build_manifest(Path(arguments.repository), arguments.revision, root, dependency_file, driver)
+    if not manifest["complete"]:
+        raise ProvenanceError("candidate provenance is incomplete: " + "; ".join(manifest["issues"]))
+    if any(manifest["execution_context"][key] != value for key, value in identity.items()):
+        raise ProvenanceError("Clang identity changed during driver compilation")
+    write_manifest(Path(arguments.output), manifest)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -548,23 +551,14 @@ def parser() -> argparse.ArgumentParser:
     manifest.add_argument("--root", required=True)
     manifest.add_argument("--depfile", required=True)
     manifest.add_argument("--output", required=True)
+    manifest.add_argument("--driver", required=True, help="bind and revalidate the exact executable context")
     manifest.set_defaults(handler=command_manifest)
 
-    select = subparsers.add_parser("select", help="select comparison or candidate-only analysis")
-    select.add_argument("--repository", required=True)
-    select.add_argument("--event", required=True)
-    select.add_argument("--requested", required=True)
-    select.add_argument("--candidate-revision", required=True)
-    select.add_argument("--reference-revision", required=True)
-    select.add_argument("--candidate-manifest", required=True)
-    select.add_argument("--reference-manifest", required=True)
-    select.add_argument("--output", required=True)
-    select.set_defaults(handler=command_select)
+    bootstrap = subparsers.add_parser("bootstrap", help="compile the driver with the recorded exact profile")
+    for option in ("repository", "revision", "root", "depfile", "driver", "output"):
+        bootstrap.add_argument("--" + option, required=True)
+    bootstrap.set_defaults(handler=command_bootstrap)
 
-    field = subparsers.add_parser("field", help="read one validated selection-record field")
-    field.add_argument("--record", required=True)
-    field.add_argument("--field", required=True)
-    field.set_defaults(handler=command_field)
     return result
 
 

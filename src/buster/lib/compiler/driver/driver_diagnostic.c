@@ -43,6 +43,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
         [C_DIAGNOSTIC_INVALID_INTEGER_LITERAL] = S8_INITIALIZER("c.invalid-integer-literal"),
         [C_DIAGNOSTIC_INVALID_UTF8] = S8_INITIALIZER("c.invalid-utf8"),
         [C_DIAGNOSTIC_UNKNOWN_TYPE_NAME] = S8_INITIALIZER("c.unknown-type-name"),
+        [C_DIAGNOSTIC_SOURCE_TOO_LARGE] = S8_INITIALIZER("c.source-too-large"),
+        [C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS] = S8_INITIALIZER("c.extra-directive-tokens"),
+        [C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL] = S8_INITIALIZER("c.error-attribute-call"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == C_DIAGNOSTIC_KIND_COUNT);
     return (u32)kind < (u32)BUSTER_ARRAY_LENGTH(names) ? names[kind] : S8("not-applicable");
@@ -330,6 +333,25 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnosticLocation compiler_driver_backend_location(
     return result;
 }
 
+// The LLVM bitcode, WebAssembly and eBPF emitters report a failure as a fixed
+// message plus the IDs it concerns. When it concerns a function, name that
+// function and point at it, as a native code generation refusal does; a bare
+// message gives no way to find the function in a large translation unit.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_emitter_diagnostic(Arena* arena, IrProgram* program, IrModule* module, IrFunctionId function,
+                                                               IrInstructionId instruction, String8 message)
+{
+    String8 result = message;
+    if (program && module && function.value < module->function_count)
+    {
+        CompilerDiagnostic diagnostic = {
+            .message = string_format(arena, S8("{S8} (in function '{S8}')"), message, module->functions[function.value].name),
+            .primary = compiler_driver_backend_location(program, module, function, instruction),
+        };
+        result = compiler_diagnostic_render(arena, diagnostic);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL CompilerDiagnosticBackend compiler_driver_backend_context(Arena* arena, CompilerDriverInvocation invocation,
                                                                                  IrProgram* program, IrModule* module, CodegenModule code)
 {
@@ -400,6 +422,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_error_code(CompilerDriverError error
         [COMPILER_DRIVER_ERROR_OBJECT] = S8_INITIALIZER("driver.object"),
         [COMPILER_DRIVER_ERROR_LINK] = S8_INITIALIZER("driver.link"),
         [COMPILER_DRIVER_ERROR_FILE_WRITE] = S8_INITIALIZER("driver.file-write"),
+        [COMPILER_DRIVER_ERROR_SPIRV] = S8_INITIALIZER("driver.spirv"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == COMPILER_DRIVER_ERROR_COUNT);
     return (u32)error < (u32)BUSTER_ARRAY_LENGTH(names) ? names[error] : S8("driver.unknown");

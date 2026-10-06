@@ -10,14 +10,19 @@ on:
 
 permissions:
   contents: read
-  actions: read
-  pull-requests: read
-  statuses: read
-  checks: write
 
+env:
+  MAIN_PUSH_MAINTENANCE_SHA256: 118669698721ecc0d5da220d598bdf87afa172111dac784b6142e1f82a251ce5
+
+# Candidate heads retain ordinary cancellation. Main pushes use exact-SHA groups
+# so GitHub cannot cancel or replace an older pending run. The push-only helper
+# orders the maintenance job through the Actions API before it mutates state.
+# See docs/main-push-maintenance.md for the ordering and failure contract. The
+# pin above also covers the push maintenance run by native-retirement-admission.yml;
+# this job verifies it on every event, including merge groups.
 concurrency:
-  group: api-migration-policy-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: api-migration-policy-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   policy:
@@ -35,6 +40,20 @@ jobs:
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
           fi
+      - name: Check out exact combined maintenance authority
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: authority
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify main-push maintenance authority
+        shell: bash
+        working-directory: authority
+        run: >-
+          printf '%s  %s\n' "$MAIN_PUSH_MAINTENANCE_SHA256"
+          tools/main_push_maintenance.py |
+          sha256sum --check --strict
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -48,152 +67,3 @@ jobs:
       - name: Test the migration audit
         working-directory: candidate
         run: python3 -B tools/api_migration_audit_test.py -v
-
-  native-retirement-admission:
-    name: Native retirement merge admission
-    if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 310
-    steps:
-      - name: Require CI admission to be enabled
-        shell: bash
-        env:
-          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
-        run: |
-          if [[ "$CI_ENABLED" != true ]]; then
-            echo '::error::Required validation is disabled; refusing a skipped admission check.'
-            exit 1
-          fi
-      - name: Check out exact candidate
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          path: candidate
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Check out the independently trusted admission policy
-        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          repository: ${{ github.repository }}
-          ref: main
-          path: trusted
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Check out exact combined validation tree
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          # On PRs this is GitHub's immutable merge revision, not the old head.
-          # Self-tests added on main must not require rebasing clean branches.
-          # This checkout is test input only; trusted/ remains the authority.
-          ref: ${{ github.sha }}
-          path: validation
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Test native-retirement merge admission
-        shell: bash
-        working-directory: validation
-        run: |
-          python3 -B tools/native_retirement_merge_gate_test.py -v
-          python3 -B tools/native_retirement_merge_gate_workflow_test.py -v
-      - name: Enforce trusted native-retirement integration
-        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
-        run: |
-          set -euo pipefail
-          tool="$GITHUB_WORKSPACE/trusted/tools/native_retirement_merge_gate.py"
-          if [[ ! -f "$tool" ]]; then
-            if [[ "$EVENT_NAME" == merge_group ]]; then
-              echo '::error::Trusted main has no native-retirement gate.'
-              exit 1
-            fi
-            tool="$GITHUB_WORKSPACE/candidate/tools/native_retirement_merge_gate.py"
-          fi
-          status_args=()
-          wait_base_supported=false
-          if [[ "$EVENT_NAME" == pull_request ]]; then
-            rows="$RUNNER_TEMP/native-retirement-status-rows.json"
-            gh api --paginate --slurp \
-              "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA?per_page=100" > "$rows"
-            python3 - "$HEAD_SHA" "$rows" "$RUNNER_TEMP/native-retirement-status.json" <<'PY_STATUS'
-          import json, pathlib, sys
-          head, rows_path, output_path = sys.argv[1:]
-          pages = json.loads(pathlib.Path(rows_path).read_text())
-          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-              raise SystemExit("commit status pages are not arrays")
-          rows = [row for page in pages for row in page]
-          pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
-          PY_STATUS
-            status_args=(--status-json "$RUNNER_TEMP/native-retirement-status.json")
-          elif [[ "$EVENT_NAME" == merge_group ]]; then
-            status_args=(--repository "$GITHUB_REPOSITORY")
-            # The queued base can be an unmerged predecessor. Only the code
-            # checked out from live main may wait; candidate bytes are input.
-            # The first queue merge of this policy still runs under the older
-            # trusted main, which has no wait-base command. It is safe only
-            # when that trusted revision is the group's already-landed base.
-            if python3 -B "$GITHUB_WORKSPACE/trusted/tools/merge_queue_admission.py" \
-                wait-base --help >/dev/null 2>&1; then
-              wait_base_supported=true
-              python3 -B "$GITHUB_WORKSPACE/trusted/tools/merge_queue_admission.py" wait-base \
-                --repo-root "$GITHUB_WORKSPACE/candidate" \
-                --trusted-root "$GITHUB_WORKSPACE/trusted" \
-                --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
-                --sha "$GITHUB_SHA" --wait-seconds 18000
-            else
-              trusted_main=$(git -C trusted rev-parse HEAD)
-              if [[ "$BASE_SHA" != "$trusted_main" ]]; then
-                echo '::error::Speculative group requires trusted main with wait-base support.' >&2
-                exit 1
-              fi
-            fi
-          fi
-          current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
-          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$EVENT_NAME" == pull_request ]]; then
-            # The PR event's base SHA can predate a successful current-main writer.
-            BASE_SHA=$(git -C trusted rev-parse HEAD)
-            if [[ "$BASE_SHA" != "$current_main" ]]; then
-              echo '::error::Main advanced after trusted PR policy checkout.' >&2
-              exit 1
-            fi
-          fi
-          python3 "$tool" check \
-            --repo-root "$GITHUB_WORKSPACE/candidate" \
-            --base "$BASE_SHA" \
-            --head "$HEAD_SHA" \
-            --current-main "$current_main" \
-            --event "$EVENT_NAME" \
-            "${status_args[@]}" \
-            | tee "$RUNNER_TEMP/native-retirement-admission.json"
-          if [[ "$EVENT_NAME" == merge_group ]]; then
-            if [[ "$wait_base_supported" == true ]]; then
-              python3 -B "$GITHUB_WORKSPACE/trusted/tools/merge_queue_admission.py" wait-base \
-                --repo-root "$GITHUB_WORKSPACE/candidate" \
-                --trusted-root "$GITHUB_WORKSPACE/trusted" \
-                --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
-                --sha "$GITHUB_SHA" --wait-seconds 0
-            else
-              current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
-              if [[ "$current_main" != "$BASE_SHA" ]]; then
-                echo '::error::Main advanced during first-position legacy admission.' >&2
-                exit 1
-              fi
-            fi
-          fi
-      - name: Invalidate stale trusted integrations after main advances
-        if: ${{ github.event_name == 'push' }}
-        working-directory: candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 tools/native_retirement_merge_gate.py invalidate-stale \
-            --repository "$GITHUB_REPOSITORY" \
-            --new-main "$GITHUB_SHA" \
-            --details-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            | tee "$RUNNER_TEMP/native-retirement-invalidation.json"

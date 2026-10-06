@@ -1,0 +1,259 @@
+TEST_FIXTURE_WATCHDOG_V1 status=armed deadline_seconds=1800
+TEST_FIXTURE_START_V1 kind=module module=machine_tests fixture=body index=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_fast_consumer_register_hint index=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_fast_consumer_register_hint index=0 arena_slot=0 start=261336 end=344372 retained_bytes=83036 high_water=344372 peak_bytes=83036 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_fast_consumer_register_hint index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=280 peak_bytes=152 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_fast_consumer_register_hint index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_source_writer_guards index=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_source_writer_guards index=1 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_source_writer_guards index=1 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=701 peak_bytes=573 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_source_writer_guards index=1 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_sparse_local_state index=2
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_sparse_local_state index=2 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=1114616 peak_bytes=853280 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_sparse_local_state index=2 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=29456 peak_bytes=29328 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_sparse_local_state index=2 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=84 peak_bytes=20 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_encode_into_caller_buffer index=3
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_encode_into_caller_buffer index=3 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_encode_into_caller_buffer index=3 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=7764296 peak_bytes=7764168 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_encode_into_caller_buffer index=3 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=262276 peak_bytes=262212 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_constant_short_circuit index=4
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_constant_short_circuit index=4 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=2052389 peak_bytes=1791053 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_constant_short_circuit index=4 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=16808 peak_bytes=16680 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_constant_short_circuit index=4 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=100 peak_bytes=36 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_schedule_line_mark_repair index=5
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_schedule_line_mark_repair index=5 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=364792 peak_bytes=103456 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_schedule_line_mark_repair index=5 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=283108 peak_bytes=282980 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_schedule_line_mark_repair index=5 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_schedule_trace_equivalence index=6
+MACHINE_SCHEDULE_TRACE scheduled_functions=8 moved=7 gate_rejected=1 stale=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_schedule_trace_equivalence index=6 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=26833480 peak_bytes=26572144 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_schedule_trace_equivalence index=6 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=663216 peak_bytes=663088 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_schedule_trace_equivalence index=6 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=6064 peak_bytes=6000 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_debug_value_capacity index=7
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_value_capacity index=7 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_value_capacity index=7 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2688 peak_bytes=2560 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_value_capacity index=7 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=3040 peak_bytes=2976 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_debug_values_differential index=8
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_values_differential index=8 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_values_differential index=8 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=8824 peak_bytes=8696 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_values_differential index=8 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=18212 peak_bytes=18148 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_debug_values_sparse_work index=9
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_values_sparse_work index=9 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_values_sparse_work index=9 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=86144 peak_bytes=86016 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_values_sparse_work index=9 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=39044 peak_bytes=38980 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_quality_sparse_pins index=10
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_sparse_pins index=10 arena_slot=0 start=261336 end=265679 retained_bytes=4343 high_water=2424772 peak_bytes=2163436 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_sparse_pins index=10 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=349768 peak_bytes=349640 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_sparse_pins index=10 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=284 peak_bytes=220 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_quality_traffic index=11
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_traffic index=11 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_traffic index=11 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_traffic index=11 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_widths index=12
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_widths index=12 arena_slot=0 start=261336 end=830392 retained_bytes=569056 high_water=830392 peak_bytes=569056 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_widths index=12 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=98664 peak_bytes=98536 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_widths index=12 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_zero_idiom_flags index=13
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_zero_idiom_flags index=13 arena_slot=0 start=261336 end=383632 retained_bytes=122296 high_water=383632 peak_bytes=122296 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_zero_idiom_flags index=13 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=98840 peak_bytes=98712 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_zero_idiom_flags index=13 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_edges index=14
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_edges index=14 arena_slot=0 start=261336 end=730280 retained_bytes=468944 high_water=730280 peak_bytes=468944 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_edges index=14 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=98960 peak_bytes=98832 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_edges index=14 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_source index=15
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_source index=15 arena_slot=0 start=261336 end=262214 retained_bytes=878 high_water=262214 peak_bytes=878 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_source index=15 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1043184 peak_bytes=1043056 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_source index=15 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=88008 peak_bytes=87944 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_bank index=16
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_bank index=16 arena_slot=0 start=261336 end=904120 retained_bytes=642784 high_water=904120 peak_bytes=642784 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_bank index=16 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=100456 peak_bytes=100328 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_predicate_bank index=16 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_win64_wide index=17
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_wide index=17 arena_slot=0 start=261336 end=263391 retained_bytes=2055 high_water=263391 peak_bytes=2055 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_wide index=17 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2044587 peak_bytes=2044459 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_wide index=17 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=299160 peak_bytes=299096 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_wide_vector_boundaries index=18
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_wide_vector_boundaries index=18 arena_slot=0 start=261336 end=265618 retained_bytes=4282 high_water=265618 peak_bytes=4282 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_wide_vector_boundaries index=18 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2459812 peak_bytes=2459684 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_wide_vector_boundaries index=18 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=188048 peak_bytes=187984 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_win64_aligned index=19
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_aligned index=19 arena_slot=0 start=261336 end=265849 retained_bytes=4513 high_water=265849 peak_bytes=4513 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_aligned index=19 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2237834 peak_bytes=2237706 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_aligned index=19 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=300832 peak_bytes=300768 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_win64_vector index=20
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_vector index=20 arena_slot=0 start=261336 end=264993 retained_bytes=3657 high_water=264993 peak_bytes=3657 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_vector index=20 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1496840 peak_bytes=1496712 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_win64_vector index=20 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=205720 peak_bytes=205656 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_x64_result_alignment index=21
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_result_alignment index=21 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_result_alignment index=21 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1695792 peak_bytes=1695664 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_result_alignment index=21 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=138160 peak_bytes=138096 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_native_aggregate index=22
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_native_aggregate index=22 arena_slot=0 start=261336 end=265814 retained_bytes=4478 high_water=265814 peak_bytes=4478 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_native_aggregate index=22 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=3283994 peak_bytes=3283866 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_native_aggregate index=22 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=342384 peak_bytes=342320 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_f80 index=23
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_f80 index=23 arena_slot=0 start=261336 end=280713 retained_bytes=19377 high_water=280713 peak_bytes=19377 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_f80 index=23 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=4221712 peak_bytes=4221584 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_f80 index=23 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=304344 peak_bytes=304280 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_native_variadic index=24
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_native_variadic index=24 arena_slot=0 start=261336 end=296781 retained_bytes=35445 high_water=296781 peak_bytes=35445 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_native_variadic index=24 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=9726138 peak_bytes=9726010 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_native_variadic index=24 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=906516 peak_bytes=906452 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_sysv_va_list_extent index=25
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_sysv_va_list_extent index=25 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_sysv_va_list_extent index=25 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=871272 peak_bytes=871144 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_sysv_va_list_extent index=25 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=124312 peak_bytes=124248 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_aarch64_call_relocations index=26
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_aarch64_call_relocations index=26 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_aarch64_call_relocations index=26 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_aarch64_call_relocations index=26 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_block_relocations index=27
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_block_relocations index=27 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_block_relocations index=27 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_block_relocations index=27 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_x64_inline_shift_breakpoint index=28
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_inline_shift_breakpoint index=28 arena_slot=0 start=261336 end=289062 retained_bytes=27726 high_water=289062 peak_bytes=27726 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_inline_shift_breakpoint index=28 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2679712 peak_bytes=2679584 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_inline_shift_breakpoint index=28 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=118768 peak_bytes=118704 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_cpu_queries index=29
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_cpu_queries index=29 arena_slot=0 start=261336 end=264182 retained_bytes=2846 high_water=264182 peak_bytes=2846 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_cpu_queries index=29 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1443016 peak_bytes=1442888 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_cpu_queries index=29 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=108816 peak_bytes=108752 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_x64_inline_timestamps index=30
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_inline_timestamps index=30 arena_slot=0 start=261336 end=267411 retained_bytes=6075 high_water=267411 peak_bytes=6075 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_inline_timestamps index=30 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1275552 peak_bytes=1275424 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_inline_timestamps index=30 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=141376 peak_bytes=141312 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_compiler_barrier index=31
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_compiler_barrier index=31 arena_slot=0 start=261336 end=268601 retained_bytes=7265 high_water=268601 peak_bytes=7265 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_compiler_barrier index=31 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1406308 peak_bytes=1406180 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_compiler_barrier index=31 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=20336 peak_bytes=20272 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_fixed_register_alias index=32
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_fixed_register_alias index=32 arena_slot=0 start=261336 end=286505 retained_bytes=25169 high_water=286505 peak_bytes=25169 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_fixed_register_alias index=32 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=4572113 peak_bytes=4571985 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_fixed_register_alias index=32 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=569024 peak_bytes=568960 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_fixed_register_overlap index=33
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_fixed_register_overlap index=33 arena_slot=0 start=261336 end=266493 retained_bytes=5157 high_water=266493 peak_bytes=5157 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_fixed_register_overlap index=33 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1593896 peak_bytes=1593768 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_fixed_register_overlap index=33 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=148800 peak_bytes=148736 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_x64_uefi_platform_variadic index=34
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_uefi_platform_variadic index=34 arena_slot=0 start=261336 end=274606 retained_bytes=13270 high_water=274606 peak_bytes=13270 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_uefi_platform_variadic index=34 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=3535700 peak_bytes=3535572 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_uefi_platform_variadic index=34 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=277800 peak_bytes=277736 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_x64_variadic_workspace index=35
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_variadic_workspace index=35 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_variadic_workspace index=35 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=753776 peak_bytes=753648 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_variadic_workspace index=35 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=62464 peak_bytes=62400 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_a64_atomic_pair_updates index=36
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_a64_atomic_pair_updates index=36 arena_slot=0 start=261336 end=265656 retained_bytes=4320 high_water=265656 peak_bytes=4320 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_a64_atomic_pair_updates index=36 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=714840 peak_bytes=714712 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_a64_atomic_pair_updates index=36 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=137196 peak_bytes=137132 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_a64_large_aggregate_copy index=37
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_a64_large_aggregate_copy index=37 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_a64_large_aggregate_copy index=37 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1296856 peak_bytes=1296728 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_a64_large_aggregate_copy index=37 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=137316 peak_bytes=137252 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_goto index=38
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_goto index=38 arena_slot=0 start=261336 end=266558 retained_bytes=5222 high_water=266558 peak_bytes=5222 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_goto index=38 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2798828 peak_bytes=2798700 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_assembly_goto index=38 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=90232 peak_bytes=90168 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_inline_hints index=39
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_hints index=39 arena_slot=0 start=261336 end=262071 retained_bytes=735 high_water=262071 peak_bytes=735 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_hints index=39 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=888356 peak_bytes=888228 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_inline_hints index=39 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=26168 peak_bytes=26104 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_clear_instruction_cache index=40
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_clear_instruction_cache index=40 arena_slot=0 start=261336 end=262005 retained_bytes=669 high_water=262005 peak_bytes=669 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_clear_instruction_cache index=40 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=893184 peak_bytes=893056 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_clear_instruction_cache index=40 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=164588 peak_bytes=164524 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_unsigned_switch index=41
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_unsigned_switch index=41 arena_slot=0 start=261336 end=262239 retained_bytes=903 high_water=262239 peak_bytes=903 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_unsigned_switch index=41 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1224545 peak_bytes=1224417 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_unsigned_switch index=41 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=244620 peak_bytes=244556 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_quality_switch_cfg index=42
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_switch_cfg index=42 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_switch_cfg index=42 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1386178 peak_bytes=1386050 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_switch_cfg index=42 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=331628 peak_bytes=331564 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_quality_backward_switch_cfg index=43
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_backward_switch_cfg index=43 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_backward_switch_cfg index=43 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=261052 peak_bytes=260924 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_quality_backward_switch_cfg index=43 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=104200 peak_bytes=104136 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_disconnected_dominance index=44
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_disconnected_dominance index=44 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_disconnected_dominance index=44 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=620 peak_bytes=492 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_disconnected_dominance index=44 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_frame_storage_reuse index=45
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_frame_storage_reuse index=45 arena_slot=0 start=261336 end=737360 retained_bytes=476024 high_water=737360 peak_bytes=476024 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_frame_storage_reuse index=45 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=98800 peak_bytes=98672 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_frame_storage_reuse index=45 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_frame_address_rematerialization index=46
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_frame_address_rematerialization index=46 arena_slot=0 start=261336 end=553884 retained_bytes=292548 high_water=553884 peak_bytes=292548 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_frame_address_rematerialization index=46 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=100728 peak_bytes=100600 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_frame_address_rematerialization index=46 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_i128_block_parameters index=47
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_i128_block_parameters index=47 arena_slot=0 start=261336 end=264205 retained_bytes=2869 high_water=264205 peak_bytes=2869 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_i128_block_parameters index=47 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2409916 peak_bytes=2409788 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_i128_block_parameters index=47 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=148112 peak_bytes=148048 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_pointer_block_parameters index=48
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_pointer_block_parameters index=48 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=261336 peak_bytes=0 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_pointer_block_parameters index=48 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1623026 peak_bytes=1622898 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_pointer_block_parameters index=48 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=278028 peak_bytes=277964 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_parameter_edge_split index=49
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_parameter_edge_split index=49 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=1375580 peak_bytes=1114244 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_parameter_edge_split index=49 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_parameter_edge_split index=49 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_fast_edge_index index=50
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_fast_edge_index index=50 arena_slot=0 start=261336 end=261336 retained_bytes=0 high_water=581996 peak_bytes=320660 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_fast_edge_index index=50 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_fast_edge_index index=50 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_x64_dynamic_stack index=51
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_dynamic_stack index=51 arena_slot=0 start=261336 end=262825 retained_bytes=1489 high_water=262825 peak_bytes=1489 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_dynamic_stack index=51 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1925432 peak_bytes=1925304 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_dynamic_stack index=51 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=272184 peak_bytes=272120 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_x64_i128_complement index=52
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_i128_complement index=52 arena_slot=0 start=261336 end=263415 retained_bytes=2079 high_water=263415 peak_bytes=2079 after=261336 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_i128_complement index=52 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1104272 peak_bytes=1104144 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_x64_i128_complement index=52 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=90056 peak_bytes=89992 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_prepared_movabs index=53
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_prepared_movabs index=53 arena_slot=0 start=991016 end=991016 retained_bytes=0 high_water=991016 peak_bytes=0 after=991016 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_prepared_movabs index=53 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_prepared_movabs index=53 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_prepared_frame_chunk index=54
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_prepared_frame_chunk index=54 arena_slot=0 start=991016 end=991016 retained_bytes=0 high_water=991016 peak_bytes=0 after=991016 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_prepared_frame_chunk index=54 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_prepared_frame_chunk index=54 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=machine_tests fixture=machine_test_stack_aliases index=55
+MACHINE_ALIAS_RANGE architecture=0 mixed=0 before_spill_reload=295 after_spill_reload=207
+MACHINE_ALIAS_RANGE architecture=0 mixed=1 before_spill_reload=294 after_spill_reload=206
+MACHINE_ALIAS_RANGE architecture=1 mixed=0 before_spill_reload=155 after_spill_reload=65
+MACHINE_ALIAS_RANGE architecture=1 mixed=1 before_spill_reload=155 after_spill_reload=65
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_stack_aliases index=55 arena_slot=0 start=16007736 end=37072464 retained_bytes=21064728 high_water=37072464 peak_bytes=21064728 after=16007736 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_stack_aliases index=55 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=6122556 peak_bytes=6122428 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_stack_aliases index=55 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=663152 peak_bytes=663088 after=64 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=machine_tests fixture=body index=0 arena_slot=0 start=4648 end=65665800 retained_bytes=65661152 high_water=65665800 peak_bytes=65661152 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=machine_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=9726138 peak_bytes=9726010 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=machine_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=906516 peak_bytes=906452 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=machine_tests fixtures=56 retained_fixture=machine_test_stack_aliases retained_bytes=21064728 peak_fixture=machine_test_schedule_trace_equivalence peak_bytes=26572144
+TEST_FIXTURE_START_V1 kind=module module=codegen_tests fixture=body index=0
+TEST_FIXTURE_START_V1 kind=fixture module=codegen_tests fixture=codegen_test_ebpf_local_calls index=0
+EBPF_LOCAL_CALL_ORACLE available=0 executions=0 reason=kernel-unavailable; loader controls checked
+TEST_ARENA_V1 kind=fixture module=codegen_tests fixture=codegen_test_ebpf_local_calls index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=codegen_tests fixture=codegen_test_ebpf_local_calls index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=611818 peak_bytes=611690 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=codegen_tests fixture=codegen_test_ebpf_local_calls index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=27576 peak_bytes=27512 after=64 live_bytes=0 rewind=0
+eBPF kernel verifier/JIT for codegen_test_ebpf_scalars: unavailable, VM only
+eBPF kernel verifier/JIT for codegen_test_ebpf_argument_images: unavailable, VM only
+eBPF kernel verifier/JIT for codegen_test_ebpf_stack_liveness: unavailable, VM only
+eBPF kernel verifier/JIT for codegen_test_ebpf_local_aggregates: unavailable, VM only
+eBPF kernel verifier/JIT for codegen_test_ebpf_kernel_regressions: unavailable, VM only
+eBPF kernel verifier/JIT for codegen_test_canonical_entry: unavailable, VM only
+TEST_ARENA_V1 kind=module module=codegen_tests fixture=body index=0 arena_slot=0 start=4648 end=22654112 retained_bytes=22649464 high_water=22654112 peak_bytes=22649464 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=codegen_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=6391496 peak_bytes=6391368 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=codegen_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=1760624 peak_bytes=1760560 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=codegen_tests fixtures=1 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_FIXTURE_START_V1 kind=module module=x86_64_tests fixture=body index=0
+TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=x86_64_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+[617099/617099] Unit tests (3 of 57 modules selected)
+[3/3] Module tests
+[0/0] External tests

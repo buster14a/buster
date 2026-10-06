@@ -74,6 +74,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
         {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
     };
     u64 inputs[][2] = {{0, 0}, {1, 2}, {7, 3}, {UINT64_MAX, UINT64_MAX - 1}};
+    CodegenTestEbpfOracle oracle = codegen_test_ebpf_oracle(arguments->arena);
     for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
     {
         for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
@@ -103,7 +104,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                         u32 rotation = permutation == 2 ? function->block_count - 1 : permutation;
                         codegen_test_rotate_blocks(arguments->arena, function, rotation);
                         BUSTER_TEST(arguments, function->entry.value == rotation);
-                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        // Rotation invalidates the published CFG; republish it
+                        // without changing the entry or reducing permutations.
+                        IrValidationResult rotated = ir_prepare_canonical_module(program, module, false);
+                        BUSTER_TEST(arguments, rotated.error == IR_VALIDATION_NONE);
                         if (target.cpu_arch == CPU_ARCH_BPFEL)
                         {
                             EbpfArtifact artifact = ebpf_emit_program(arguments->arena, program);
@@ -112,15 +116,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                             {
                                 for (u32 input = 0; input < BUSTER_ARRAY_LENGTH(inputs); input += 1)
                                 {
-                                    u64 actual = 0;
                                     u64 expected = codegen_test_entry_expected(fixture, inputs[input][0], inputs[input][1]);
-                                    bool ran = codegen_test_ebpf_execute(artifact.bytes, inputs[input][0], inputs[input][1], &actual);
-                                    if (!ran || actual != expected)
+                                    bool agreed = codegen_test_ebpf_check(arguments, &oracle, artifact.bytes, inputs[input][0], inputs[input][1], expected);
+                                    if (!agreed)
                                     {
-                                        arguments->show(arguments, S8("eBPF entry fixture {u32}, entry {u32}, input {u32}: ran={u32}, actual={u64}, expected={u64}\n"),
-                                            fixture, rotation, input, (u32)ran, actual, expected);
+                                        arguments->show(arguments, S8("eBPF entry fixture {u32}, entry {u32}, input {u32}\n"), fixture, rotation, input);
                                     }
-                                    BUSTER_TEST(arguments, ran && actual == expected);
+                                    BUSTER_TEST(arguments, agreed);
                                 }
                             }
                         }
@@ -213,5 +215,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
             }
         }
     }
+    codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_canonical_entry"));
     return result;
 }

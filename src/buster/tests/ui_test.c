@@ -2,49 +2,10 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/ui_builder.h>
+#include <buster/tests/ui_test_internal.h>
+#include <buster/tests/ui_slider_test.h>
 #include <buster/lib/rendering/internal.h>
 #include <buster/lib/string.h>
-
-BUSTER_GLOBAL_LOCAL void ui_test_frame(UI_State* state, Arena* arena, UI_EventList events, f64 frame_time)
-{
-    ui_state_select(state);
-    // Test callers use seconds; ui_build_begin's public frame-time unit is ms.
-    ui_build_begin(0, 0, frame_time * 1000.0, events);
-    BUSTER_UNUSED(arena);
-}
-
-BUSTER_GLOBAL_LOCAL UI_EventList ui_test_single_event(Arena* arena, UI_EventKind kind, WmKey key, float2 position, float2 delta, String8 string)
-{
-    UI_EventList result = {0};
-    UI_Event event = {
-        .kind = kind,
-        .key = key,
-        .pos = position,
-        .delta = delta,
-        .string = string,
-    };
-    ui_event_list_push(arena, &result, &event);
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL UI_EventList ui_test_key_event(Arena* arena, UI_EventKind kind, WmKey key, u8 modifiers, float2 position, String8 string)
-{
-    UI_EventList result = {0};
-    UI_Event event = {
-        .kind = kind,
-        .key = key,
-        .modifiers = modifiers,
-        .pos = position,
-        .string = string,
-    };
-    ui_event_list_push(arena, &result, &event);
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL float2 ui_test_box_center(UI_Box* box)
-{
-    return float2_make((box->rect.x0 + box->rect.x1) * 0.5f, (box->rect.y0 + box->rect.y1) * 0.5f);
-}
 
 BUSTER_GLOBAL_LOCAL UI_EventList ui_test_drop_event(Arena* arena, float2 position, String8 path)
 {
@@ -290,7 +251,7 @@ BUSTER_GLOBAL_LOCAL void ui_test_flag_inventory(UnitTestArguments* arguments, Un
         UI_BoxFlagInfo info = ui_box_flag_info(bit);
         BUSTER_TEST_RAW(arguments, info.implemented && info.flag == ((UI_BoxFlags)1ull << bit), S8("UI flag inventory missing bit"));
     }
-    for (u32 bit = 57; bit < 63; bit += 1)
+    for (u32 bit = UI_BOX_FLAG_COUNT; bit < 63; bit += 1)
     {
         UI_BoxFlagInfo info = ui_box_flag_info(bit);
         BUSTER_TEST_RAW(arguments, !info.implemented && info.flag == 0, S8("UI unassigned flag bit became classified"));
@@ -305,7 +266,7 @@ BUSTER_GLOBAL_LOCAL void ui_test_flag_inventory(UnitTestArguments* arguments, Un
                     S8("UI renderer dependency audit status changed"));
     BUSTER_TEST(arguments, (UI_BoxFlag_All & UI_BoxFlag_AllContiguous) == UI_BoxFlag_AllContiguous);
     BUSTER_TEST(arguments, (UI_BoxFlag_All & UI_BoxFlag_Debug) == UI_BoxFlag_Debug);
-    BUSTER_TEST(arguments, (UI_BoxFlag_All & ((UI_BoxFlags)0x3full << 57)) == 0);
+    BUSTER_TEST(arguments, (UI_BoxFlag_All & ((UI_BoxFlags)0x1full << UI_BOX_FLAG_COUNT)) == 0);
 #undef result
     result->succeeded_test_count += result_local.succeeded_test_count;
     result->test_count += result_local.test_count;
@@ -2775,6 +2736,9 @@ UnitTestResult ui_tests(UnitTestArguments* arguments)
     ui_test_utf8_tooltip_and_draw_commands(arguments, &result);
     ui_test_scoped_directional_focus(arguments, &result);
     ui_test_keyboard_focus_changed_signal(arguments, &result);
+    UnitTestResult sliders = ui_slider_tests(arguments);
+    result.succeeded_test_count += sliders.succeeded_test_count;
+    result.test_count += sliders.test_count;
     ui_test_text_and_widgets(arguments, &result);
     return result;
 }

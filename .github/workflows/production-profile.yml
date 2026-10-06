@@ -74,6 +74,7 @@ jobs:
             --pairs 1 \
             --warmups 1 \
             --jobs 2 \
+            --build-lanes 2 \
             --timeout 3600
 
       - name: Verify compact acceptance evidence
@@ -83,8 +84,24 @@ jobs:
           test -s build/production-profile/summary.txt
           test -s build/production-profile/profile/training-contract.txt
           test -s build/production-profile/profile/manifest.txt
+          grep -qx 'build_lto=ON' build/production-profile/profile/manifest.txt
+          test -s build/production-profile/profile-no-lto/training-contract.txt
+          test -s build/production-profile/profile-no-lto/manifest.txt
+          grep -qx 'build_lto=OFF' build/production-profile/profile-no-lto/manifest.txt
           test -d build/production-profile/evidence
+          grep -q $'^BUSTER_PGO_PHASES_V1\tcomplete=1\t' build/production-profile/evidence/phases.tsv
           cat build/production-profile/summary.txt
+
+      - name: Publish production-profile phase accounting
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -s build/production-profile/evidence/phases.md ]]; then
+            cat build/production-profile/evidence/phases.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '## Production PGO/LTO phase accounting\n\nNo phase ledger was written.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Retain production-profile evidence
         if: ${{ always() }}
@@ -95,6 +112,8 @@ jobs:
             build/production-profile/summary.txt
             build/production-profile/profile/training-contract.txt
             build/production-profile/profile/manifest.txt
+            build/production-profile/profile-no-lto/training-contract.txt
+            build/production-profile/profile-no-lto/manifest.txt
             build/production-profile/evidence
           if-no-files-found: warn
           retention-days: 7

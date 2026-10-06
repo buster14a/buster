@@ -18,6 +18,9 @@
 #include <buster/lib/os.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/file.h>
+#if BUSTER_INCLUDE_TESTS || BUSTER_FUZZ_AVAILABLE
+#include <buster/lib/image.h>
+#endif
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.h>
@@ -25,17 +28,22 @@
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_semantics.h>
+#if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
+#endif
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_alias_projection.h>
+#include <buster/lib/compiler/assembly/aarch64_base_assembly.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
@@ -59,15 +67,21 @@
 
 #if BUSTER_UNITY_BUILD
 #if BUSTER_INCLUDE_TESTS
-// Keep the intrinsic vocabulary outside the optnone region used for test
-// bodies; otherwise Clang can make production SIMD intrinsics uninlinable.
+// Test bodies compile optnone to bound the unity compile's memory (#781).
+// `#pragma clang optimize off` marks only the functions *defined* inside its
+// region. The `#pragma clang attribute` form it replaces marked every
+// function a test source merely *declared* there too, so the production
+// functions that test headers redeclare ran at -O0 in the trusted Release
+// `ide` (#1376). A production header that defines functions must still be
+// included before the region, as simd.h's fallbacks are here;
+// `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
 #if BUSTER_COMPILER_CLANG
-#pragma clang attribute push (__attribute__((optnone)), apply_to=function)
+#pragma clang optimize off
 #endif
 #include <buster/tests/test.c>
 #if BUSTER_COMPILER_CLANG
-#pragma clang attribute pop
+#pragma clang optimize on
 #endif
 #endif
 #include <buster/lib/byte_writer.c>
@@ -89,6 +103,9 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/truetype.c>
 #endif
+#if BUSTER_INCLUDE_TESTS || BUSTER_FUZZ_AVAILABLE
+#include <buster/lib/image.c>
+#endif
 #include <buster/lib/compiler/frontend/c/c.c>
 #include <buster/lib/compiler/assembly/aarch64_encoding.c>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.c>
@@ -96,12 +113,16 @@
 #include <buster/lib/compiler/assembly/aarch64_system_registers.c>
 #include <buster/lib/compiler/assembly/aarch64_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_system_semantics.c>
+#if BUSTER_INCLUDE_TESTS
+// The AArch64 syntax model has only test consumers (#1315).
 #include <buster/lib/compiler/assembly/aarch64_syntax.c>
+#endif
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.c>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_alias_projection.c>
+#include <buster/lib/compiler/assembly/aarch64_base_assembly.c>
 #include <buster/lib/compiler/assembly/assembly.c>
 #include <buster/lib/compiler/assembly/assembly_unit.c>
 #include <buster/lib/compiler/assembly/x86_64_metadata.c>
@@ -122,6 +143,7 @@
 #include <buster/lib/compiler/gpu/gpu.c>
 #include <buster/lib/compiler/llvm/bitcode.c>
 #include <buster/lib/compiler/ebpf/ebpf.c>
+#include <buster/lib/compiler/spirv/spirv.c>
 #include <buster/lib/compiler/driver/driver.c>
 #include <buster/lib/hash.c>
 #endif
@@ -148,6 +170,7 @@ struct CompilerProgram
     String8 selection_benchmark_path;
 #if BUSTER_INCLUDE_TESTS
     String8 coff_relocation_fixture_path;
+    String8 test_module_selection;
 #endif
     CompilerCommand command;
 };
@@ -159,7 +182,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
 {
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
-                    "  ide test [--verbose=0|1] [--ci=0|1] [--coff-relocation-fixture=<path>]\n"
+                    "  ide test [--verbose=0|1] [--ci=0|1] [--module=<name>[,<name>...]] [--coff-relocation-fixture=<path>]\n"
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
                     "  ide bench-select <self-contained-source.c>\n"
@@ -200,23 +223,48 @@ ProcessResult process_arguments(void)
     if (string_equal(command, S8("test")) || string_equal(command, S8("metamorphic")))
     {
         compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
-        for (u64 index = 2; index < arguments.length; index += 1)
+        ProcessResult result = PROCESS_RESULT_SUCCESS;
+        for (u64 index = 2; result == PROCESS_RESULT_SUCCESS && index < arguments.length; index += 1)
         {
             String8 argument = arguments.pointer[index];
 #if BUSTER_INCLUDE_TESTS
-            if (string_starts_with_sequence(argument, S8("--coff-relocation-fixture=")))
+            if (compiler_state.command == COMPILER_COMMAND_TEST && string_starts_with_sequence(argument, S8("--module=")))
+            {
+                if (compiler_state.test_module_selection.length)
+                {
+                    string_print(S8("test: --module may only be specified once\n"));
+                    result = PROCESS_RESULT_FAILED;
+                }
+                else
+                {
+                    compiler_state.test_module_selection = string_slice(argument, S8("--module=").length, argument.length);
+                    if (!compiler_state.test_module_selection.length)
+                    {
+                        string_print(S8("test: expected a module name after --module=\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                    else if (!buster_test_module_selection_check(compiler_state.test_module_selection))
+                    {
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                }
+            }
+            else if (string_starts_with_sequence(argument, S8("--coff-relocation-fixture=")))
             {
                 if (compiler_state.coff_relocation_fixture_path.length)
                 {
                     string_print(S8("test: --coff-relocation-fixture may only be specified once\n"));
-                    return PROCESS_RESULT_FAILED;
+                    result = PROCESS_RESULT_FAILED;
                 }
-                compiler_state.coff_relocation_fixture_path =
-                    string_slice(argument, S8("--coff-relocation-fixture=").length, argument.length);
-                if (!compiler_state.coff_relocation_fixture_path.length)
+                else
                 {
-                    string_print(S8("test: expected a path after --coff-relocation-fixture=\n"));
-                    return PROCESS_RESULT_FAILED;
+                    compiler_state.coff_relocation_fixture_path =
+                        string_slice(argument, S8("--coff-relocation-fixture=").length, argument.length);
+                    if (!compiler_state.coff_relocation_fixture_path.length)
+                    {
+                        string_print(S8("test: expected a path after --coff-relocation-fixture=\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
                 }
             }
             else
@@ -224,10 +272,10 @@ ProcessResult process_arguments(void)
             if (!compiler_process_common_argument(index))
             {
                 string_print(S8("test: unsupported option: {S8}\n"), argument);
-                return PROCESS_RESULT_FAILED;
+                result = PROCESS_RESULT_FAILED;
             }
         }
-        return PROCESS_RESULT_SUCCESS;
+        return result;
     }
     if (string_equal(command, S8("bench-select")))
     {
@@ -325,6 +373,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
                 .show = &default_show,
 #if BUSTER_INCLUDE_TESTS
                 .coff_relocation_fixture_path = compiler_state.coff_relocation_fixture_path,
+                .module_selection = compiler_state.test_module_selection,
 #endif
             };
 
@@ -460,6 +509,16 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
         if (arena)
         {
+            ByteSlice image_bytes = {.pointer = (u8*)pointer, .length = size};
+            image_decode(arena, image_bytes,
+                         (ImageDecodeOptions){
+                             .max_width = 4096,
+                             .max_height = 4096,
+                             .max_pixels = BUSTER_MB(8),
+                             .max_decoded_bytes = BUSTER_MB(32),
+                             .max_work = BUSTER_MB(64),
+                         });
+            arena_reset_to_start(arena);
             String8 source = {.pointer = pointer ? (char8*)pointer : S8("").pointer, .length = size};
             CPreprocessResult preprocess = c_preprocess(arena, source,
                                                         (CPreprocessOptions){
@@ -875,6 +934,10 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
     MachineQualityCensus quality = machine_quality_census_snapshot();
     IrConstructionCounters construction = ir_construction_counters();
+    CCensusCounters source_census = c_census_counters();
+    IrSemanticCounters semantics = ir_semantic_counters();
+    WorkLedgerCounters work = work_ledger_counters();
+    IrDiagnosticCensus diagnostic_census = ir_diagnostic_census();
 #endif
     String8 text = {0};
     source_metrics_append_line(&text, string_format(arena, S8("version={u32}\n"), (u32)SOURCE_METRICS_FILE_VERSION));
@@ -899,6 +962,60 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     {
         source_metrics_append_field(arena, &text, S8("ir_construction"), ir_construction_counter_name((IrConstructionCounter)index),
                                     construction.values[index]);
+    }
+    source_metrics_append_field(arena, &text, S8("c_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("c_census"), S8("overflowed"), source_census.overflowed);
+    for (u32 index = 0; index < C_CENSUS_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("c_census"), c_census_counter_name((CCensusCounter)index), source_census.values[index]);
+    }
+    // Literal groups: formatting one here would interleave its bytes with the
+    // contiguous report text the append helper extends.
+    String8 const census_groups[C_CENSUS_PHASE_COUNT] = {
+        [C_CENSUS_PHASE_OTHER] = S8("c_census.other"),
+        [C_CENSUS_PHASE_PREPROCESS] = S8("c_census.preprocess"),
+        [C_CENSUS_PHASE_PARSE] = S8("c_census.parse"),
+        [C_CENSUS_PHASE_SEMANTIC] = S8("c_census.semantic"),
+        [C_CENSUS_PHASE_LOWER] = S8("c_census.lower"),
+    };
+    for (u32 phase = 0; phase < C_CENSUS_PHASE_COUNT; phase += 1)
+    {
+        String8 group = census_groups[phase];
+        for (u32 index = 0; index < C_CENSUS_PHASE_COUNTER_COUNT; index += 1)
+        {
+            source_metrics_append_field(arena, &text, group, c_census_phase_counter_name((CCensusPhaseCounter)index),
+                                        source_census.phase_values[phase][index]);
+        }
+    }
+    source_metrics_append_field(arena, &text, S8("ir_semantics"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("ir_semantics"), S8("overflowed"), semantics.overflowed);
+    for (u32 index = 0; index < IR_SEMANTIC_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("ir_semantics"), ir_semantic_counter_name((IrSemanticCounter)index), semantics.values[index]);
+    }
+    source_metrics_append_field(arena, &text, S8("work"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("work"), S8("overflowed"), work.overflowed);
+    for (u32 index = 0; index < WORK_LEDGER_COUNT; index += 1)
+    {
+        source_metrics_append_line(&text, string_format(arena, S8("work.{S8}.{S8}={u64}\n"), work_ledger_counter_mechanism((WorkLedgerCounter)index),
+                                                        work_ledger_counter_name((WorkLedgerCounter)index), work.values[index]));
+    }
+    for (u32 index = 0; index < WORK_LEDGER_PHASE_COUNT; index += 1)
+    {
+        String8 phase = work_ledger_phase_name((WorkLedgerPhase)index);
+        WorkLedgerPhaseTotals totals = work.phases[index];
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.marks={u64}\n"), phase, totals.marks));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.minor_faults={u64}\n"), phase, totals.minor_faults));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_calls={u64}\n"), phase, totals.arena_calls));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_bytes={u64}\n"), phase, totals.arena_bytes));
+        source_metrics_append_line(&text, string_format(arena, S8("work.phase.{S8}.arena_zero_written={u64}\n"), phase, totals.arena_zero_written));
+    }
+    source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("diagnostic_census"), S8("overflowed"), diagnostic_census.overflowed);
+    for (u32 index = 0; index < IR_DIAGNOSTIC_CENSUS_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("diagnostic_census"), ir_diagnostic_census_counter_name((IrDiagnosticCensusCounter)index),
+                                    diagnostic_census.values[index]);
     }
 #endif
     return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
@@ -950,6 +1067,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
+    // The metrics clock starts after argument parsing: reading it earlier
+    // would cost every compile a clock read to learn the option was absent.
+    // Per-input offsets and wall_ns share this origin.
+    bool write_metrics = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.metrics_output_path.length != 0;
+    if (write_metrics)
+    {
+        invocation.metrics_origin = timestamp_take();
+        invocation.has_metrics_origin = true;
+    }
+    // Only the source reports below read the spelled-byte sum.
+    invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
     CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
@@ -958,10 +1086,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     }
     if (compile.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        compiler_print_diagnostic(S8("cc: error: {S8}\n"), compile.diagnostic);
+        // Under -fkeep-going every failed input reports its own first error;
+        // a failure outside any input (a link, an argument) keeps one line.
+        u32 reported = 0;
+        for (u32 index = 0; index < compile.input_result_count && invocation.keep_going; index += 1)
+        {
+            CompilerDriverInputResult const* input = &compile.inputs[index];
+            if (input->status == COMPILER_DRIVER_INPUT_STATUS_REJECTED || input->status == COMPILER_DRIVER_INPUT_STATUS_FAILED)
+            {
+                compiler_print_diagnostic(S8("cc: error: {S8}\n"), input->message.length ? input->message : input->diagnostic_code);
+                reported += 1;
+            }
+        }
+        if (!reported)
+        {
+            compiler_print_diagnostic(S8("cc: error: {S8}\n"), compile.diagnostic);
+        }
         result = PROCESS_RESULT_FAILED;
     }
-    else if (!invocation.output_path.length)
+    else if (!invocation.output_path.length || string_equal(invocation.output_path, S8("-")))
     {
         string_print(S8("{S8}"), compile.output);
     }
@@ -1014,6 +1157,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
+        CTypeLayoutStatistics layout = compile.type_layout;
+        string_print(S8("C_TYPE_LAYOUT solves={u64} pass_solves={u64} pass_state_types={u64} pass_attempts={u64} agenda_solves={u64} agenda_types={u64} "
+                        "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
+                     layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
+                     layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
         if (invocation.fast_passes)
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
@@ -1060,6 +1208,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         string_print(S8("CODEGEN_ENCODER exact_attempts={u64} exact_successes={u64} exact_failures={u64}\n"),
                      compile.codegen_statistics.exact_attempts, compile.codegen_statistics.exact_successes, compile.codegen_statistics.exact_failures);
         string_print(S8("CODEGEN_MIR mutable_virtual_registers={u64}\n"), compile.codegen_statistics.mutable_virtual_register_count);
+        string_print(S8("CODEGEN_EMIT machine_code_in_place={u64} machine_code_copied={u64}\n"),
+                     compile.codegen_statistics.machine_code_bytes_in_place, compile.codegen_statistics.machine_code_bytes_copied);
+        if (compile.object_write_statistics.output_bytes)
+        {
+            ObjectWriteStatistics written = compile.object_write_statistics;
+            string_print(S8("OBJECT_WRITE format={S8} section_visits={u64} symbol_visits={u64} relocation_visits={u64} image_reserved={u64} "
+                            "image_stored={u64} image_zeroed={u64} image_patched={u64} payload_copied={u64} payload_borrowed={u64} scratch={u64} "
+                            "retained={u64} output={u64}\n"),
+                         object_format_name(object_format_for_target(invocation.target)), written.section_visits, written.symbol_visits,
+                         written.relocation_visits, written.image_bytes_reserved, written.image_bytes_stored, written.image_bytes_zeroed,
+                         written.image_bytes_patched, written.payload_bytes_copied, written.payload_bytes_borrowed, written.scratch_bytes,
+                         written.retained_bytes, written.output_bytes);
+        }
         for (u32 reason = 0; reason < CODEGEN_FALLBACK_REASON_COUNT; reason += 1)
         {
             if (compile.codegen_statistics.fallback_reason_counts[reason])
@@ -1111,6 +1272,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          compiler_census_hex(arena, record.source), compiler_census_hex(arena, record.function));
         }
     }
+    // Written last so wall_ns covers everything this invocation printed. An
+    // unwritable metrics file fails the process like an unwritable -o.
+    if (write_metrics)
+    {
+        CompilerDriverProcessMetrics process = {
+            .wall_nanoseconds = timestamp_ns_between(invocation.metrics_origin, timestamp_take()),
+            .peak_resident_bytes = os_get_peak_resident_memory_size(),
+            .exit_status = result == PROCESS_RESULT_SUCCESS ? 0 : 1,
+        };
+        String8 records = compiler_driver_metrics_format(arena, &invocation, &compile, process);
+        if (!file_publish(invocation.metrics_output_path, BUSTER_SLICE_TO_BYTE_SLICE(records)))
+        {
+            compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.metrics_output_path);
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
     arena_destroy(arena, 1);
     return result;
 }
@@ -1128,10 +1305,35 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_process_spawn_probe(String8 mode)
         if (valid)
         {
 #if BUSTER_WINDOWS
+            HANDLE probe = (HANDLE)(uintptr_t)parsed.value;
             DWORD flags = 0;
             SetLastError(ERROR_SUCCESS);
-            BOOL present = GetHandleInformation((HANDLE)(uintptr_t)parsed.value, &flags);
-            success = !present && GetLastError() == ERROR_INVALID_HANDLE;
+            BOOL present = GetHandleInformation(probe, &flags);
+            if (!present)
+            {
+                success = GetLastError() == ERROR_INVALID_HANDLE;
+            }
+            else
+            {
+                // Handle values are per process: this process (for example its
+                // sanitizer runtime) may own an unrelated handle with the same
+                // value. Fail only when it names the parent's event object.
+                String8 name = os_get_environment_variable(S8("BUSTER_OS_SPAWN_PROBE_NAME"));
+                typedef BOOL(WINAPI * CompareObjectHandlesProc)(HANDLE, HANDLE);
+                HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
+                CompareObjectHandlesProc compare_object_handles =
+                    kernelbase ? (CompareObjectHandlesProc)(void (*)(void))GetProcAddress(kernelbase, "CompareObjectHandles") : 0;
+                if (name.length && compare_object_handles)
+                {
+                    String16 name16 = string16_from_string8(program_state->arena, name, true);
+                    HANDLE named = OpenEventW(SYNCHRONIZE, FALSE, (LPCWSTR)name16.pointer);
+                    if (named)
+                    {
+                        success = !compare_object_handles(probe, named);
+                        CloseHandle(named);
+                    }
+                }
+            }
 #else
             errno = 0;
             success = fcntl((int)parsed.value, F_GETFD) < 0 && errno == EBADF;

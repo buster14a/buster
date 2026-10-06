@@ -40,6 +40,12 @@
 #define BUSTER_SANITIZE 0
 #endif
 
+// Reference-equivalence and other invariant checks too costly for the
+// production Release tree. Debug and every sanitized build compile them, so
+// the checks-enabled sanitized Release suite executes them now that sanitized
+// Debug is build-only CI coverage (#2657). Ordinary Release pays nothing.
+#define BUSTER_REFERENCE_CHECKS (!BUSTER_OPTIMIZE || BUSTER_SANITIZE)
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN 1
 #endif
@@ -245,6 +251,16 @@
 #define BUSTER_V_IMPL
 #endif
 
+// BUSTER_INLINE for a function other modules declare with BUSTER_F_DECL (or a
+// frontend's shared linkage): forced only in the unity build, where those
+// declarations are static too. Elsewhere the function keeps external linkage,
+// which a forced-inline definition does not promise on every compiler.
+#if BUSTER_UNITY_BUILD
+#define BUSTER_SHARED_INLINE BUSTER_INLINE
+#else
+#define BUSTER_SHARED_INLINE
+#endif
+
 #define BUSTER_PACKED __attribute__((packed))
 
 // Over-alignment for a buffer. The self-hosted C frontend accepts `_Alignas`
@@ -375,7 +391,12 @@
 #else
 #define BUSTER_ASSUME(x) BUSTER_UNUSED(x)
 #endif
-#if BUSTER_OPTIMIZE
+// BUSTER_RAW_UNREACHABLE and BUSTER_ASSUME are raw optimizer escape hatches in
+// every configuration, sanitized ones included: reaching them is undefined
+// behavior. BUSTER_UNREACHABLE is the checked form. It becomes the raw hint
+// only in optimized unsanitized builds; Debug and every sanitized build,
+// optimized or not, trap first so a sanitized Release run diagnoses the path.
+#if BUSTER_OPTIMIZE && !BUSTER_SANITIZE
 #define BUSTER_UNREACHABLE() BUSTER_RAW_UNREACHABLE()
 #else
 #define BUSTER_UNREACHABLE()                                                                                                                                   \
@@ -617,8 +638,6 @@ typedef enum IntegerFormat
 #define BUSTER_SLICE_START(s, start) ((__typeof__(s)){(s).pointer + (start), (s).length - (start)})
 #define BUSTER_STRING_NO_MATCH UINT64_MAX
 
-#define BUSTER_SLICE_IS_ZERO_TERMINATED(s) (((s).pointer[(s).length]) == 0)
-
 // Kernel headers cannot depend on hosted Unicode conversion declarations.
 #if BUSTER_APPLE == 0 && BUSTER_KERNEL == 0
 #include <uchar.h>
@@ -653,6 +672,15 @@ struct String8
     u64 length;
 };
 
+// A UTF-8 byte string with an accessible terminator and no embedded NUL,
+// suitable for C APIs that require a terminated string.
+typedef struct String8Z String8Z;
+struct String8Z
+{
+    char8* pointer;
+    u64 length;
+};
+
 typedef struct SliceString8 SliceString8;
 struct SliceString8
 {
@@ -662,6 +690,15 @@ struct SliceString8
 
 typedef struct String16 String16;
 struct String16
+{
+    char16* pointer;
+    u64 length;
+};
+
+// A UTF-16 string with an accessible terminator and no embedded NUL code unit,
+// suitable for Win32 APIs that require a terminated string.
+typedef struct String16Z String16Z;
+struct String16Z
 {
     char16* pointer;
     u64 length;

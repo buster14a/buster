@@ -4,15 +4,22 @@
 // Input fonts are untrusted files — offsets and counts are checked before
 // use.
 // truetype_font_initialize owns table discovery; truetype_get_codepoint_bitmap
-// admits scales and ttf_bitmap_box bounds before outline allocation, then
+// admits scales and ttf_bitmap_box bounds before outline allocation.
+// ttf_decode_glyph_outline retains encoded points for compound attachment on
+// a bounded frame stack; ttf_append_outline_path flattens positioned contours.
 // ttf_bitmap_work_is_valid limits scanline edge searches before rasterization.
+// truetype_font_atlas_build packs glyph bitmaps into a bounded atlas.
+// truetype_font_select_first_usable picks the first candidate file this
+// parser accepts, so system font discovery never selects an unparseable face.
 
 #include <buster/lib/truetype.h>
 #include <buster/lib/truetype_internal.h>
 #include <buster/lib/float.h>
 #include <buster/lib/string.h>
+#include <buster/lib/file.h>
 
-#define TTF_GLYPH_RECURSION_LIMIT 8u
+#define TTF_GLYPH_DEPTH_LIMIT 8u
+#define TTF_GLYPH_WORK_LIMIT (BUSTER_TTF_MAX_RASTER_POINTS * (TTF_GLYPH_DEPTH_LIMIT + 1u))
 #define TTF_CURVE_FLATNESS_TOLERANCE 0.25f
 #define TTF_CURVE_SUBDIVISION_LIMIT 10u
 #define TTF_CURVE_STACK_CAPACITY (TTF_CURVE_SUBDIVISION_LIMIT + 1u)
@@ -97,6 +104,44 @@ struct TTF_Transform
     f32 m11;
     f32 dx;
     f32 dy;
+};
+
+typedef struct TTF_OutlineChunk TTF_OutlineChunk;
+struct TTF_OutlineChunk
+{
+    TTF_OutlineChunk* next;
+    TTF_Point* points;
+    ByteSlice data;
+    u32 first_point;
+    u32 point_count;
+    u32 contour_count;
+};
+
+typedef struct TTF_Outline TTF_Outline;
+struct TTF_Outline
+{
+    TTF_OutlineChunk* first;
+    TTF_OutlineChunk* last;
+    u32 point_count;
+    u32 contour_count;
+    u32 work_remaining;
+};
+
+typedef struct TTF_GlyphFrame TTF_GlyphFrame;
+struct TTF_GlyphFrame
+{
+    TTF_Transform transform;
+    TTF_OutlineChunk* previous_chunk;
+    ByteSlice data;
+    u64 cursor;
+    u32 glyph;
+    u32 first_point;
+    u32 parent_point;
+    u32 child_point;
+    bool entered;
+    bool more;
+    bool point_attached;
+    bool instructions;
 };
 
 BUSTER_GLOBAL_LOCAL bool ttf_range_is_valid(ByteSlice data, u64 offset, u64 length)
@@ -266,7 +311,6 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
     u64 font_start = ttf_font_offset_for_index(file, font_index);
     if (!ttf_range_is_valid(file, font_start, 12))
     {
-        string_print(S8("ttf range not valid"));
         result.result = TTF_FONT_INITIALIZATION_FAILED;
         return result;
     }
@@ -275,7 +319,6 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
     bool supported_sfnt = sfnt_version == 0x00010000u || ttf_tag_equal(file, font_start, 't', 'r', 'u', 'e');
     if (!supported_sfnt)
     {
-        string_print(S8("not supported_sfnt"));
         result.result = TTF_FONT_INITIALIZATION_UNSUPPORTED;
         return result;
     }
@@ -299,8 +342,6 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
 
     if (!have_cmap || !have_loca || !have_head || !have_glyf || !have_hhea || !have_hmtx || !have_maxp)
     {
-        string_print(S8("cmap: {u32}. loca: {u32}. head: {u32}. glyf: {u32}. hhea: {u32}. hmtx: {u32}. maxp: {u32}\n"), have_cmap, have_loca, have_head,
-                     have_glyf, have_hhea, have_hmtx, have_maxp);
         result.result = TTF_FONT_INITIALIZATION_FAILED;
         return result;
     }
@@ -309,7 +350,6 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
     u32 cmap_format = 0;
     if (!ttf_find_unicode_cmap(file, cmap, &cmap_subtable, &cmap_format))
     {
-        string_print(S8("ttf_find_unicode_cmap failed"));
         result.result = TTF_FONT_INITIALIZATION_UNSUPPORTED;
         return result;
     }
@@ -494,7 +534,7 @@ BUSTER_GLOBAL_LOCAL s32 truetype_get_glyph_kern_advance(const TTF_FontInformatio
 {
     ByteSlice data = information->data;
     s32 result = 0;
-    if (information->kern != 0 && ttf_range_is_valid(data, information->kern, 4))
+    if (information->kern != 0 && ttf_range_is_valid(data, information->kern, 4) && ttf_u16(data, information->kern) == 0)
     {
         u32 table_count = (u32)ttf_u16(data, information->kern + 2);
         u64 subtable = information->kern + 4;
@@ -507,14 +547,16 @@ BUSTER_GLOBAL_LOCAL s32 truetype_get_glyph_kern_advance(const TTF_FontInformatio
             u32 length = (u32)ttf_u16(data, subtable + 2);
             u16 coverage = ttf_u16(data, subtable + 4);
             u32 format = (u32)(coverage >> 8u);
-            bool horizontal = (coverage & 1u) != 0;
-            if (format == 0u && horizontal && length >= 14u && ttf_range_is_valid(data, subtable, (u64)length))
+            // Minimum distances and cross-stream offsets are not advance deltas.
+            bool horizontal_advance = (coverage & 7u) == 1u;
+            if (ttf_u16(data, subtable) == 0 && format == 0u && horizontal_advance && length >= 14u && ttf_range_is_valid(data, subtable, (u64)length))
             {
                 u32 pair_count = (u32)ttf_u16(data, subtable + 6);
                 u64 pairs = subtable + 14;
                 u32 needle = (glyph_left << 16u) | glyph_right;
                 u32 low = 0;
-                u32 high = pair_count;
+                // A pair array must fit its own subtable, not just the font file.
+                u32 high = pair_count <= (length - 14u) / 6u ? pair_count : 0;
                 while (low < high)
                 {
                     u32 mid = low + (high - low) / 2u;
@@ -530,8 +572,9 @@ BUSTER_GLOBAL_LOCAL s32 truetype_get_glyph_kern_advance(const TTF_FontInformatio
                     }
                     else
                     {
-                        result = (s32)ttf_s16(data, pair + 4);
-                        return result;
+                        s32 value = (s32)ttf_s16(data, pair + 4);
+                        result = (coverage & 8u) != 0 ? value : result + value;
+                        break;
                     }
                 }
             }
@@ -710,323 +753,375 @@ TTF_QuadraticTestResult truetype_flatten_quadratic_for_test(TTF_RasterTestPoint 
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL bool ttf_append_glyph_path(Arena* arena, const TTF_FontInformation* information, u32 glyph, TTF_Transform transform, f32 scale_x,
-                                               f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path);
-
-BUSTER_GLOBAL_LOCAL bool ttf_append_simple_glyph_path(Arena* arena, const TTF_FontInformation* information, TTF_GlyphRange range, s32 contour_count,
-                                                      TTF_Transform transform, f32 scale_x, f32 scale_y, s32 x0, s32 y0, TTF_RasterPath* path)
+BUSTER_GLOBAL_LOCAL bool ttf_outline_work(TTF_Outline* outline, u32 count)
 {
-    ByteSlice data = information->data;
-    if (contour_count <= 0)
+    bool result = count <= outline->work_remaining;
+    if (result)
     {
-        return true;
+        outline->work_remaining -= count;
     }
-
-    u64 contour_count_u64 = (u64)(u32)contour_count;
-    if (!ttf_range_is_valid(data, range.offset + 10, contour_count_u64 * 2u + 2u))
-    {
-        return false;
-    }
-
-    u16 last_end_point = ttf_u16(data, range.offset + 10u + (contour_count_u64 - 1u) * 2u);
-    u32 point_count = (u32)last_end_point + 1u;
-    if (point_count == 0 || point_count > 65535u)
-    {
-        return false;
-    }
-
-    u16 instruction_length = ttf_u16(data, range.offset + 10u + contour_count_u64 * 2u);
-    u64 point_data = range.offset + 10u + contour_count_u64 * 2u + 2u + (u64)instruction_length;
-    if (!ttf_range_is_valid(data, point_data, 0))
-    {
-        return false;
-    }
-
-    TTF_Point* points = arena_allocate(arena, TTF_Point, point_count);
-    u8* flags = arena_allocate(arena, u8, point_count);
-
-    u64 cursor = point_data;
-    for (u32 point = 0; point < point_count;)
-    {
-        if (!ttf_range_is_valid(data, cursor, 1))
-        {
-            return false;
-        }
-        u8 flag = ttf_u8(data, cursor);
-        cursor += 1;
-        u32 repeat_count = 1;
-        if ((flag & 8u) != 0)
-        {
-            if (!ttf_range_is_valid(data, cursor, 1))
-            {
-                return false;
-            }
-            repeat_count += (u32)ttf_u8(data, cursor);
-            cursor += 1;
-        }
-        for (u32 repeat = 0; repeat < repeat_count && point < point_count; repeat += 1)
-        {
-            flags[point] = flag;
-            points[point].on_curve = (flag & 1u) != 0;
-            point += 1;
-        }
-    }
-
-    s32* xs = arena_allocate(arena, s32, point_count);
-    s32* ys = arena_allocate(arena, s32, point_count);
-    s32 x = 0;
-    for (u32 point = 0; point < point_count; point += 1)
-    {
-        u8 flag = flags[point];
-        s32 dx = 0;
-        if ((flag & 2u) != 0)
-        {
-            if (!ttf_range_is_valid(data, cursor, 1))
-            {
-                return false;
-            }
-            dx = (s32)ttf_u8(data, cursor);
-            cursor += 1;
-            if ((flag & 16u) == 0)
-            {
-                dx = -dx;
-            }
-        }
-        else if ((flag & 16u) == 0)
-        {
-            if (!ttf_range_is_valid(data, cursor, 2))
-            {
-                return false;
-            }
-            dx = (s32)ttf_s16(data, cursor);
-            cursor += 2;
-        }
-        x += dx;
-        xs[point] = x;
-    }
-    s32 y = 0;
-    for (u32 point = 0; point < point_count; point += 1)
-    {
-        u8 flag = flags[point];
-        s32 dy = 0;
-        if ((flag & 4u) != 0)
-        {
-            if (!ttf_range_is_valid(data, cursor, 1))
-            {
-                return false;
-            }
-            dy = (s32)ttf_u8(data, cursor);
-            cursor += 1;
-            if ((flag & 32u) == 0)
-            {
-                dy = -dy;
-            }
-        }
-        else if ((flag & 32u) == 0)
-        {
-            if (!ttf_range_is_valid(data, cursor, 2))
-            {
-                return false;
-            }
-            dy = (s32)ttf_s16(data, cursor);
-            cursor += 2;
-        }
-        y += dy;
-        ys[point] = y;
-    }
-    for (u32 point = 0; point < point_count; point += 1)
-    {
-        TTF_Point transformed = ttf_transform_point(transform, xs[point], ys[point]);
-        points[point].x = transformed.x;
-        points[point].y = transformed.y;
-    }
-
-    u32 contour_start = 0;
-    for (u32 contour = 0; contour < (u32)contour_count; contour += 1)
-    {
-        u32 contour_end = (u32)ttf_u16(data, range.offset + 10u + (u64)contour * 2u);
-        if (contour_end < contour_start || contour_end >= point_count)
-        {
-            return false;
-        }
-
-        TTF_Point first = points[contour_start];
-        TTF_Point last = points[contour_end];
-        TTF_Point start_point = first.on_curve ? first : (last.on_curve ? last : ttf_midpoint(last, first));
-        TTF_Point current = start_point;
-        ttf_raster_path_add_point(path, ttf_pixel_point(start_point, scale_x, scale_y, x0, y0));
-
-        u32 point = first.on_curve ? contour_start + 1u : contour_start;
-        while (point <= contour_end)
-        {
-            TTF_Point p = points[point];
-            if (p.on_curve)
-            {
-                ttf_append_line(path, p, scale_x, scale_y, x0, y0);
-                current = p;
-                point += 1;
-            }
-            else
-            {
-                TTF_Point next = point == contour_end ? first : points[point + 1u];
-                if (next.on_curve)
-                {
-                    ttf_append_quadratic(path, current, p, next, scale_x, scale_y, x0, y0, 0);
-                    current = next;
-                    point += 2u;
-                }
-                else
-                {
-                    TTF_Point mid = ttf_midpoint(p, next);
-                    ttf_append_quadratic(path, current, p, mid, scale_x, scale_y, x0, y0, 0);
-                    current = mid;
-                    point += 1u;
-                }
-            }
-        }
-
-        if (!ttf_points_equal(current, start_point))
-        {
-            ttf_append_line(path, start_point, scale_x, scale_y, x0, y0);
-        }
-        ttf_raster_path_end_contour(path);
-        contour_start = contour_end + 1u;
-    }
-
-    return !path->overflowed;
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ttf_append_compound_glyph_path(Arena* arena, const TTF_FontInformation* information, TTF_GlyphRange range, TTF_Transform transform,
-                                                        f32 scale_x, f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path)
+BUSTER_GLOBAL_LOCAL bool ttf_decode_simple_outline(Arena* arena, ByteSlice data, u32 contour_count, TTF_Transform transform,
+                                                   u32 contour_capacity, TTF_Outline* outline)
 {
-    ByteSlice data = information->data;
-    u64 cursor = range.offset + 10u;
-    bool more = true;
-    while (more)
+    bool valid = contour_count <= contour_capacity - outline->contour_count && ttf_range_is_valid(data, 10, (u64)contour_count * 2u + 2u);
+    u32 point_count = valid ? (u32)ttf_u16(data, 10u + (u64)(contour_count - 1u) * 2u) + 1u : 0;
+    valid = valid && point_count <= 65535u && point_count <= BUSTER_TTF_MAX_RASTER_POINTS - outline->point_count && ttf_outline_work(outline, point_count);
+    TTF_Point* points = 0;
+    if (valid)
     {
-        if (!ttf_range_is_valid(data, cursor, 4))
+        u32 contour_start = 0;
+        for (u32 contour = 0; contour < contour_count && valid; contour += 1)
         {
-            return false;
+            u32 contour_end = (u32)ttf_u16(data, 10u + (u64)contour * 2u);
+            valid = contour_end >= contour_start && contour_end < point_count;
+            contour_start = contour_end + 1u;
         }
-        u16 flags = ttf_u16(data, cursor);
-        u32 component_glyph = (u32)ttf_u16(data, cursor + 2u);
-        cursor += 4u;
-
-        s32 arg1 = 0;
-        s32 arg2 = 0;
-        if ((flags & 1u) != 0)
+        u64 instructions = 10u + (u64)contour_count * 2u;
+        u64 cursor = instructions + 2u + (u64)ttf_u16(data, instructions);
+        valid = valid && ttf_range_is_valid(data, cursor, 0);
+        if (valid)
         {
-            if (!ttf_range_is_valid(data, cursor, 4))
+            points = arena_allocate(arena, TTF_Point, point_count);
+            u8* flags = arena_allocate(arena, u8, point_count);
+            for (u32 point = 0; point < point_count && valid;)
             {
-                return false;
+                valid = ttf_range_is_valid(data, cursor, 1);
+                if (valid)
+                {
+                    u8 flag = ttf_u8(data, cursor++);
+                    u32 repeat_count = 1;
+                    if ((flag & 8u) != 0)
+                    {
+                        valid = ttf_range_is_valid(data, cursor, 1);
+                        if (valid)
+                        {
+                            repeat_count += (u32)ttf_u8(data, cursor++);
+                        }
+                    }
+                    valid = valid && repeat_count <= point_count - point;
+                    for (u32 repeat = 0; repeat < repeat_count && valid; repeat += 1)
+                    {
+                        flags[point] = flag;
+                        points[point].on_curve = (flag & 1u) != 0;
+                        point += 1;
+                    }
+                }
             }
-            arg1 = (s32)ttf_s16(data, cursor);
-            arg2 = (s32)ttf_s16(data, cursor + 2u);
-            cursor += 4u;
+            s32* xs = arena_allocate(arena, s32, point_count);
+            s32* ys = arena_allocate(arena, s32, point_count);
+            for (u32 axis = 0; axis < 2 && valid; axis += 1)
+            {
+                s32 coordinate = 0;
+                u32 short_mask = axis == 0 ? 2u : 4u;
+                u32 same_mask = axis == 0 ? 16u : 32u;
+                s32* coordinates = axis == 0 ? xs : ys;
+                for (u32 point = 0; point < point_count && valid; point += 1)
+                {
+                    u8 flag = flags[point];
+                    s32 delta = 0;
+                    if ((flag & short_mask) != 0)
+                    {
+                        valid = ttf_range_is_valid(data, cursor, 1);
+                        if (valid)
+                        {
+                            delta = (s32)ttf_u8(data, cursor++);
+                            if ((flag & same_mask) == 0)
+                            {
+                                delta = -delta;
+                            }
+                        }
+                    }
+                    else if ((flag & same_mask) == 0)
+                    {
+                        valid = ttf_range_is_valid(data, cursor, 2);
+                        if (valid)
+                        {
+                            delta = (s32)ttf_s16(data, cursor);
+                            cursor += 2u;
+                        }
+                    }
+                    coordinate += delta;
+                    coordinates[point] = coordinate;
+                }
+            }
+            for (u32 point = 0; point < point_count && valid; point += 1)
+            {
+                TTF_Point transformed = ttf_transform_point(transform, xs[point], ys[point]);
+                points[point].x = transformed.x;
+                points[point].y = transformed.y;
+            }
+        }
+    }
+    if (valid)
+    {
+        TTF_OutlineChunk* chunk = arena_allocate(arena, TTF_OutlineChunk, 1);
+        *chunk = (TTF_OutlineChunk){.points = points, .data = data, .first_point = outline->point_count,
+                                  .point_count = point_count, .contour_count = contour_count};
+        if (outline->last)
+        {
+            outline->last->next = chunk;
         }
         else
         {
-            if (!ttf_range_is_valid(data, cursor, 2))
-            {
-                return false;
-            }
-            arg1 = ttf_s8_as_s32(data, cursor);
-            arg2 = ttf_s8_as_s32(data, cursor + 1u);
-            cursor += 2u;
+            outline->first = chunk;
         }
-
-        f32 m00 = 1.0f;
-        f32 m01 = 0.0f;
-        f32 m10 = 0.0f;
-        f32 m11 = 1.0f;
-        if ((flags & 8u) != 0)
-        {
-            if (!ttf_range_is_valid(data, cursor, 2))
-            {
-                return false;
-            }
-            f32 scale = (f32)ttf_s16(data, cursor) / 16384.0f;
-            cursor += 2u;
-            m00 = scale;
-            m11 = scale;
-        }
-        else if ((flags & 64u) != 0)
-        {
-            if (!ttf_range_is_valid(data, cursor, 4))
-            {
-                return false;
-            }
-            m00 = (f32)ttf_s16(data, cursor) / 16384.0f;
-            m11 = (f32)ttf_s16(data, cursor + 2u) / 16384.0f;
-            cursor += 4u;
-        }
-        else if ((flags & 128u) != 0)
-        {
-            if (!ttf_range_is_valid(data, cursor, 8))
-            {
-                return false;
-            }
-            m00 = (f32)ttf_s16(data, cursor) / 16384.0f;
-            m01 = (f32)ttf_s16(data, cursor + 2u) / 16384.0f;
-            m10 = (f32)ttf_s16(data, cursor + 4u) / 16384.0f;
-            m11 = (f32)ttf_s16(data, cursor + 6u) / 16384.0f;
-            cursor += 8u;
-        }
-
-        f32 dx = 0.0f;
-        f32 dy = 0.0f;
-        if ((flags & 2u) != 0)
-        {
-            dx = (f32)arg1;
-            dy = (f32)arg2;
-        }
-
-        TTF_Transform component = {
-            .m00 = transform.m00 * m00 + transform.m10 * m01,
-            .m01 = transform.m01 * m00 + transform.m11 * m01,
-            .m10 = transform.m00 * m10 + transform.m10 * m11,
-            .m11 = transform.m01 * m10 + transform.m11 * m11,
-            .dx = transform.m00 * dx + transform.m10 * dy + transform.dx,
-            .dy = transform.m01 * dx + transform.m11 * dy + transform.dy,
-        };
-        if (!ttf_append_glyph_path(arena, information, component_glyph, component, scale_x, scale_y, x0, y0, recursion_depth + 1u, path))
-        {
-            return false;
-        }
-
-        more = (flags & 32u) != 0;
+        outline->last = chunk;
+        outline->point_count += point_count;
+        outline->contour_count += contour_count;
     }
-    return !path->overflowed;
+    return valid;
 }
 
-BUSTER_GLOBAL_LOCAL bool ttf_append_glyph_path(Arena* arena, const TTF_FontInformation* information, u32 glyph, TTF_Transform transform, f32 scale_x,
-                                               f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path)
+BUSTER_GLOBAL_LOCAL TTF_Point* ttf_outline_point(TTF_Outline* outline, u32 point)
 {
-    if (recursion_depth > TTF_GLYPH_RECURSION_LIMIT)
+    TTF_Point* result = 0;
+    for (TTF_OutlineChunk* chunk = outline->first; chunk && !result; chunk = chunk->next)
     {
-        return false;
+        if (!ttf_outline_work(outline, 1))
+        {
+            break;
+        }
+        if (point >= chunk->first_point && point - chunk->first_point < chunk->point_count)
+        {
+            result = &chunk->points[point - chunk->first_point];
+        }
     }
+    return result;
+}
 
-    TTF_GlyphRange range = truetype_glyph_range(information, glyph);
-    if (range.length == 0)
+BUSTER_GLOBAL_LOCAL bool ttf_align_outline_child(TTF_Outline* outline, TTF_GlyphFrame frame)
+{
+    bool valid = frame.child_point < outline->point_count - frame.first_point;
+    if (valid)
     {
-        return true;
+        TTF_Point* parent = ttf_outline_point(outline, frame.parent_point);
+        TTF_Point* child = ttf_outline_point(outline, frame.first_point + frame.child_point);
+        valid = parent && child;
+        if (valid)
+        {
+            f32 dx = parent->x - child->x;
+            f32 dy = parent->y - child->y;
+            TTF_OutlineChunk* first = frame.previous_chunk ? frame.previous_chunk->next : outline->first;
+            for (TTF_OutlineChunk* chunk = first; chunk && valid; chunk = chunk->next)
+            {
+                valid = ttf_outline_work(outline, chunk->point_count);
+                for (u32 point = 0; point < chunk->point_count && valid; point += 1)
+                {
+                    chunk->points[point].x += dx;
+                    chunk->points[point].y += dy;
+                }
+            }
+        }
     }
-    if (!ttf_range_is_valid(information->data, range.offset, 10))
-    {
-        return false;
-    }
+    return valid;
+}
 
-    s32 contour_count = (s32)ttf_s16(information->data, range.offset);
-    bool result = false;
-    if (contour_count >= 0)
+BUSTER_GLOBAL_LOCAL bool ttf_decode_glyph_outline(Arena* arena, const TTF_FontInformation* information, u32 glyph,
+                                                  u32 contour_capacity, TTF_Outline* outline)
+{
+    TTF_GlyphFrame frames[TTF_GLYPH_DEPTH_LIMIT + 1u];
+    frames[0] = (TTF_GlyphFrame){.glyph = glyph, .transform = {.m00 = 1.0f, .m11 = 1.0f}};
+    u32 frame_count = 1;
+    bool valid = true;
+    while (frame_count != 0 && valid)
     {
-        result = ttf_append_simple_glyph_path(arena, information, range, contour_count, transform, scale_x, scale_y, x0, y0, path);
+        TTF_GlyphFrame* frame = &frames[frame_count - 1u];
+        bool complete = false;
+        if (!frame->entered)
+        {
+            valid = frame->glyph < information->num_glyphs && ttf_outline_work(outline, 1);
+            if (valid)
+            {
+                TTF_GlyphRange range = truetype_glyph_range(information, frame->glyph);
+                complete = range.length == 0;
+                if (!complete)
+                {
+                    valid = range.length >= 10u && ttf_range_is_valid(information->data, range.offset, range.length);
+                    if (valid)
+                    {
+                        frame->data = (ByteSlice){.pointer = information->data.pointer + range.offset, .length = range.length};
+                        s32 contour_count = (s32)ttf_s16(frame->data, 0);
+                        if (contour_count >= 0)
+                        {
+                            valid = contour_count == 0 || ttf_decode_simple_outline(arena, frame->data, (u32)contour_count,
+                                                                                   frame->transform, contour_capacity, outline);
+                            complete = true;
+                        }
+                        else
+                        {
+                            frame->cursor = 10u;
+                            frame->more = true;
+                        }
+                    }
+                }
+            }
+            frame->entered = true;
+        }
+        else if (frame->more)
+        {
+            ByteSlice data = frame->data;
+            u64 cursor = frame->cursor;
+            valid = ttf_range_is_valid(data, cursor, 4) && ttf_outline_work(outline, 1);
+            if (valid)
+            {
+                u16 flags = ttf_u16(data, cursor);
+                u32 component_glyph = (u32)ttf_u16(data, cursor + 2u);
+                cursor += 4u;
+                bool xy = (flags & 2u) != 0;
+                bool words = (flags & 1u) != 0;
+                u32 argument_bytes = words ? 4u : 2u;
+                valid = ttf_range_is_valid(data, cursor, argument_bytes);
+                if (valid)
+                {
+                    // XY offsets are signed; original outline point numbers are unsigned.
+                    s32 arg1 = words ? (xy ? (s32)ttf_s16(data, cursor) : (s32)ttf_u16(data, cursor)) :
+                                      (xy ? ttf_s8_as_s32(data, cursor) : (s32)ttf_u8(data, cursor));
+                    s32 arg2 = words ? (xy ? (s32)ttf_s16(data, cursor + 2u) : (s32)ttf_u16(data, cursor + 2u)) :
+                                      (xy ? ttf_s8_as_s32(data, cursor + 1u) : (s32)ttf_u8(data, cursor + 1u));
+                    cursor += argument_bytes;
+                    TTF_Transform local = {.m00 = 1.0f, .m11 = 1.0f};
+                    u32 matrix_bytes = (flags & 8u) != 0 ? 2u : ((flags & 64u) != 0 ? 4u : ((flags & 128u) != 0 ? 8u : 0u));
+                    valid = ttf_range_is_valid(data, cursor, matrix_bytes);
+                    if (valid)
+                    {
+                        if (matrix_bytes == 2u)
+                        {
+                            local.m00 = (f32)ttf_s16(data, cursor) / 16384.0f;
+                            local.m11 = local.m00;
+                        }
+                        else if (matrix_bytes == 4u)
+                        {
+                            local.m00 = (f32)ttf_s16(data, cursor) / 16384.0f;
+                            local.m11 = (f32)ttf_s16(data, cursor + 2u) / 16384.0f;
+                        }
+                        else if (matrix_bytes == 8u)
+                        {
+                            local.m00 = (f32)ttf_s16(data, cursor) / 16384.0f;
+                            local.m01 = (f32)ttf_s16(data, cursor + 2u) / 16384.0f;
+                            local.m10 = (f32)ttf_s16(data, cursor + 4u) / 16384.0f;
+                            local.m11 = (f32)ttf_s16(data, cursor + 6u) / 16384.0f;
+                        }
+                        if (xy)
+                        {
+                            local.dx = (f32)arg1;
+                            local.dy = (f32)arg2;
+                        }
+                        TTF_Transform outer = frame->transform;
+                        TTF_Transform component = {
+                            .m00 = outer.m00 * local.m00 + outer.m10 * local.m01,
+                            .m01 = outer.m01 * local.m00 + outer.m11 * local.m01,
+                            .m10 = outer.m00 * local.m10 + outer.m10 * local.m11,
+                            .m11 = outer.m01 * local.m10 + outer.m11 * local.m11,
+                            .dx = outer.m00 * local.dx + outer.m10 * local.dy + outer.dx,
+                            .dy = outer.m01 * local.dx + outer.m11 * local.dy + outer.dy,
+                        };
+                        valid = frame_count < BUSTER_ARRAY_LENGTH(frames) && (xy || (u32)arg1 < outline->point_count - frame->first_point);
+                        if (valid)
+                        {
+                            frame->cursor = cursor + matrix_bytes;
+                            frame->more = (flags & 32u) != 0;
+                            frame->instructions |= (flags & 256u) != 0;
+                            frames[frame_count] = (TTF_GlyphFrame){.glyph = component_glyph, .transform = component,
+                                .first_point = outline->point_count, .previous_chunk = outline->last, .point_attached = !xy,
+                                .parent_point = xy ? 0 : frame->first_point + (u32)arg1, .child_point = xy ? 0 : (u32)arg2};
+                            frame_count += 1u;
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            if (frame->instructions)
+            {
+                valid = ttf_range_is_valid(frame->data, frame->cursor, 2);
+                if (valid)
+                {
+                    u32 length = (u32)ttf_u16(frame->data, frame->cursor);
+                    valid = ttf_range_is_valid(frame->data, frame->cursor + 2u, length);
+                }
+            }
+            complete = true;
+        }
+        if (complete && valid)
+        {
+            if (frame->point_attached)
+            {
+                valid = ttf_align_outline_child(outline, *frame);
+            }
+            frame_count -= 1u;
+        }
     }
-    else
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ttf_append_outline_path(const TTF_Outline* outline, f32 scale_x, f32 scale_y, s32 x0, s32 y0, TTF_RasterPath* path)
+{
+    // Flatten only after attachment: source indices exclude implied midpoints,
+    // repeated closure points and adaptive curve subdivisions.
+    for (TTF_OutlineChunk* chunk = outline->first; chunk && !path->overflowed; chunk = chunk->next)
     {
-        result = ttf_append_compound_glyph_path(arena, information, range, transform, scale_x, scale_y, x0, y0, recursion_depth, path);
+        TTF_Point* points = chunk->points;
+        u32 contour_start = 0;
+        for (u32 contour = 0; contour < chunk->contour_count && !path->overflowed; contour += 1)
+        {
+            u32 contour_end = (u32)ttf_u16(chunk->data, 10u + (u64)contour * 2u);
+            TTF_Point first = points[contour_start];
+            TTF_Point last = points[contour_end];
+            TTF_Point start_point = first.on_curve ? first : (last.on_curve ? last : ttf_midpoint(last, first));
+            TTF_Point current = start_point;
+            ttf_raster_path_add_point(path, ttf_pixel_point(start_point, scale_x, scale_y, x0, y0));
+
+            u32 point = first.on_curve ? contour_start + 1u : contour_start;
+            while (point <= contour_end)
+            {
+                TTF_Point p = points[point];
+                if (p.on_curve)
+                {
+                    ttf_append_line(path, p, scale_x, scale_y, x0, y0);
+                    current = p;
+                    point += 1;
+                }
+                else
+                {
+                    TTF_Point next = point == contour_end ? first : points[point + 1u];
+                    if (next.on_curve)
+                    {
+                        ttf_append_quadratic(path, current, p, next, scale_x, scale_y, x0, y0, 0);
+                        current = next;
+                        point += 2u;
+                    }
+                    else
+                    {
+                        TTF_Point mid = ttf_midpoint(p, next);
+                        ttf_append_quadratic(path, current, p, mid, scale_x, scale_y, x0, y0, 0);
+                        current = mid;
+                        point += 1u;
+                    }
+                }
+            }
+
+            if (!ttf_points_equal(current, start_point))
+            {
+                ttf_append_line(path, start_point, scale_x, scale_y, x0, y0);
+            }
+            ttf_raster_path_end_contour(path);
+            contour_start = contour_end + 1u;
+        }
     }
+    bool result = !path->overflowed;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ttf_append_glyph_path(Arena* arena, const TTF_FontInformation* information, u32 glyph, f32 scale_x,
+                                               f32 scale_y, s32 x0, s32 y0, TTF_RasterPath* path)
+{
+    TTF_Outline outline = {.work_remaining = TTF_GLYPH_WORK_LIMIT};
+    bool result = ttf_decode_glyph_outline(arena, information, glyph, path->contour_capacity, &outline) &&
+                  ttf_append_outline_path(&outline, scale_x, scale_y, x0, y0, path);
     return result;
 }
 
@@ -1415,8 +1510,7 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
                 .contour_capacity = max_contours,
             };
 
-            TTF_Transform identity = {.m00 = 1.0f, .m11 = 1.0f};
-            bool counted = ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, result.x_offset, result.y_offset, 0, &counted_path) &&
+            bool counted = ttf_append_glyph_path(arena, information, glyph, scale_x, scale_y, result.x_offset, result.y_offset, &counted_path) &&
                            !counted_path.overflowed && counted_path.point_count != 0;
             u32 raster_point_count = counted_path.point_count;
             u32 raster_contour_count = counted_path.contour_count;
@@ -1429,7 +1523,7 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
                     .point_capacity = raster_point_count,
                     .contour_capacity = raster_contour_count,
                 };
-                if (ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, result.x_offset, result.y_offset, 0, &path) && !path.overflowed &&
+                if (ttf_append_glyph_path(arena, information, glyph, scale_x, scale_y, result.x_offset, result.y_offset, &path) && !path.overflowed &&
                     path.point_count == raster_point_count && path.contour_count == raster_contour_count &&
                     ttf_bitmap_work_is_valid((u32)result.width, (u32)result.height, path.point_count))
                 {
@@ -1453,4 +1547,184 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
     }
 
     return result;
+}
+
+TTF_AtlasBuild truetype_font_atlas_build(Arena* arena, ByteSlice font_file, u32 text_height)
+{
+    TTF_AtlasBuild result = {0};
+    TTF_FontInitialization initialization = {0};
+    if (text_height == 0 || text_height > BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT)
+    {
+        result.status = TTF_ATLAS_INVALID_TEXT_HEIGHT;
+    }
+    else
+    {
+        initialization = truetype_font_initialize(font_file, 0);
+        result.initialization = initialization.result;
+        result.status = initialization.result == TTF_FONT_INITIALIZATION_SUCCESS ? TTF_ATLAS_SUCCESS : TTF_ATLAS_INVALID_FONT;
+    }
+
+    if (result.status == TTF_ATLAS_SUCCESS)
+    {
+        const TTF_FontInformation* font_information = &initialization.information;
+        FontTextureAtlasDescription atlas = {0};
+        u32 character_count = UINT8_MAX + 1u;
+        // The renderer indexes the character and kerning tables with arbitrary
+        // bytes; only ' '..'~' are filled below, so the rest must read as empty.
+        atlas.characters = arena_allocate_zeroed(arena, FontCharacter, character_count);
+        atlas.kerning_tables = arena_allocate_zeroed(arena, s32, (u64)character_count * (u64)character_count);
+        // text_height is bounded above, so the square root is exactly 16 * text_height.
+        atlas.height = (u32)sqrt_f32((f32)(text_height * text_height * character_count));
+        atlas.width = atlas.height;
+        atlas.pointer = arena_allocate_zeroed(arena, u32, (u64)atlas.width * (u64)atlas.height);
+        f32 scale_factor = truetype_scale_for_pixel_height(font_information, (f32)text_height);
+
+        TTF_VerticalMetrics vertical_metrics = truetype_get_font_vertical_metrics(font_information);
+        atlas.ascent = (s32)round_f32((f32)vertical_metrics.ascent * scale_factor);
+        atlas.descent = (s32)round_f32((f32)vertical_metrics.descent * scale_factor);
+        atlas.line_gap = (s32)round_f32((f32)vertical_metrics.line_gap * scale_factor);
+
+        u64 x = 0;
+        u64 y = 0;
+        u64 max_row_height = 0;
+        u32 first_character = ' ';
+        u32 last_character = '~';
+        u64 loop_start_position = arena->position;
+
+        for (u32 i = first_character; result.status == TTF_ATLAS_SUCCESS && i <= last_character; i += 1)
+        {
+            FontCharacter* character = &atlas.characters[i];
+            TTF_HorizontalMetrics horizontal_metrics = truetype_get_codepoint_horizontal_metrics(font_information, i);
+            character->advance = (u32)round_f32((f32)horizontal_metrics.advance_width * scale_factor);
+            character->left_bearing = (u32)round_f32((f32)horizontal_metrics.left_side_bearing * scale_factor);
+
+            TTF_Bitmap bitmap = truetype_get_codepoint_bitmap(arena, font_information, scale_factor, scale_factor, i);
+
+            s32* kerning_table = atlas.kerning_tables + (u64)i * character_count;
+            for (u32 j = first_character; j <= last_character; j += 1)
+            {
+                s32 kerning_advance = truetype_get_codepoint_kern_advance(font_information, i, j);
+                kerning_table[j] = (s32)round_f32((f32)kerning_advance * scale_factor);
+            }
+
+            // Glyph sizes come from the font file. Only the horizontal axis
+            // wraps, so a glyph that exceeds the atlas in either axis fails the
+            // build here, in every build mode, before any pixel is written. A
+            // negative dimension converts to a huge value and fails the same way.
+            u64 glyph_width = (u64)(u32)bitmap.width;
+            u64 glyph_height = (u64)(u32)bitmap.height;
+            if (x + glyph_width > (u64)atlas.width)
+            {
+                y += max_row_height;
+                max_row_height = glyph_height;
+                x = 0;
+            }
+            else
+            {
+                max_row_height = BUSTER_MAX(glyph_height, max_row_height);
+            }
+
+            if (y + glyph_height <= (u64)atlas.height && x + glyph_width <= (u64)atlas.width)
+            {
+                character->x = (u32)x;
+                character->y = (u32)y;
+                character->width = (u32)glyph_width;
+                character->height = (u32)glyph_height;
+                character->x_offset = bitmap.x_offset;
+                character->y_offset = bitmap.y_offset;
+
+                for (u64 bitmap_y = 0; bitmap_y < glyph_height; bitmap_y += 1)
+                {
+                    for (u64 bitmap_x = 0; bitmap_x < glyph_width; bitmap_x += 1)
+                    {
+                        u32 value = bitmap.pixels[bitmap_y * glyph_width + bitmap_x];
+                        atlas.pointer[(bitmap_y + y) * (u64)atlas.width + (bitmap_x + x)] = (value << 24u) | 0x00ffffffu;
+                    }
+                }
+
+                x += glyph_width;
+            }
+            else
+            {
+                result.status = TTF_ATLAS_GLYPH_DOES_NOT_FIT;
+            }
+
+            arena_set_position(arena, loop_start_position);
+        }
+
+        if (result.status == TTF_ATLAS_SUCCESS)
+        {
+            result.description = atlas;
+        }
+    }
+
+    return result;
+}
+
+String8 truetype_font_candidate_status_description(TTF_FontCandidateStatus status)
+{
+    String8 result = S8("unknown");
+    switch (status)
+    {
+    case TTF_FONT_CANDIDATE_NOT_TRIED:
+        result = S8("not tried");
+        break;
+    case TTF_FONT_CANDIDATE_USABLE:
+        result = S8("usable");
+        break;
+    case TTF_FONT_CANDIDATE_UNREADABLE:
+        result = S8("missing, empty or unreadable");
+        break;
+    case TTF_FONT_CANDIDATE_MALFORMED:
+        result = S8("not a well-formed TrueType font");
+        break;
+    case TTF_FONT_CANDIDATE_UNSUPPORTED:
+        result = S8("unsupported font format (needs glyf outlines and a Unicode cmap, first face of a collection)");
+        break;
+    case TTF_FONT_CANDIDATE_COUNT:
+        break;
+    }
+    return result;
+}
+
+u64 truetype_font_select_first_usable(const String8* paths, u64 count, TTF_FontCandidateStatus* statuses)
+{
+    u64 selected = count;
+    TemporalArena temp = scratch_begin(0, 0);
+    for (u64 index = 0; index < count && selected == count; index += 1)
+    {
+        u64 mark = temp.arena->position;
+        TTF_FontCandidateStatus status = TTF_FONT_CANDIDATE_UNREADABLE;
+        ByteSlice file = {0};
+        if (paths[index].pointer && paths[index].length)
+        {
+            file = file_read(temp.arena, paths[index], (FileReadOptions){0});
+        }
+
+        if (file.pointer && file.length)
+        {
+            TTF_FontInitialization initialization = truetype_font_initialize(file, 0);
+            if (initialization.result == TTF_FONT_INITIALIZATION_SUCCESS)
+            {
+                status = TTF_FONT_CANDIDATE_USABLE;
+                selected = index;
+            }
+            else if (initialization.result == TTF_FONT_INITIALIZATION_UNSUPPORTED)
+            {
+                status = TTF_FONT_CANDIDATE_UNSUPPORTED;
+            }
+            else
+            {
+                status = TTF_FONT_CANDIDATE_MALFORMED;
+            }
+        }
+
+        if (statuses)
+        {
+            statuses[index] = status;
+        }
+        arena_set_position(temp.arena, mark);
+    }
+    scratch_end(temp);
+    return selected;
 }

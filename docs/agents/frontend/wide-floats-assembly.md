@@ -2,6 +2,45 @@
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+Generic `__builtin_isfinite`, `__builtin_isinf`, `__builtin_isinf_sign` and
+`__builtin_isnan` retain a wide argument's original floating format. Narrower
+floating arguments keep their existing exact binary64 widening. Their
+infinity operands widen exactly from binary32/binary64, so a finite x87 or
+binary128 argument never becomes infinite through a classifier conversion.
+The explicit `__builtin_isinff` and `__builtin_isnanf` spellings retain their
+float parameter conversion. This preserves the existing comparison semantics;
+it adds no floating-exception guarantee.
+
+`c_test_float_classifier_widths` checks comparison operand types and absence
+of narrowing in both canonical frontend forms on six native layouts.
+`c_test_x87_classifier_runtime` builds values from independent integer images
+and checks both signs of zero, finite values beyond binary64's range, x87
+normal/subnormal boundaries, infinity and quiet NaNs, plus exactly-once
+argument evaluation. Its native allocator/frontend matrix and independent
+GCC/Clang controls run on supported hosted x86-64 platforms; the registered
+coverage itself is not an execution result.
+
+`__builtin_isnormal`, `__builtin_fpclassify(nan, infinite, normal, subnormal,
+zero, x)` and the quiet comparisons `__builtin_isgreater`,
+`__builtin_isgreaterequal`, `__builtin_isless`, `__builtin_islessequal`,
+`__builtin_islessgreater` and `__builtin_isunordered` (glibc's `<math.h>`
+spellings) lower inline in `c_ir_emit_math_call` with no new IR opcode and no
+runtime call. Each operand keeps its own float, double, x87 or binary128
+format; integer and binary16 operands are refused, as GCC and Clang refuse
+integers. Classification reads the exponent and fraction fields from the stored
+bits and selects the class arithmetically, so it cannot raise an exception or
+quiet a signaling NaN. The backends' IR float compares signal invalid on a
+quiet NaN, so a comparison first decides NaN-ness from the bits, replaces a NaN
+operand with zero through a two-element temporary, widens exactly to the wider
+operand format, compares, and masks the result with the ordered flag;
+`isunordered` is the NaN flags alone. `c_test_generic_float_builtins_lowering`
+checks canonical validation and the absence of runtime calls on six native
+layouts in both frontend forms, plus refused operands and arities;
+`c_test_generic_float_builtins_runtime` runs a self-checking program over
+float, double and long double (NaN, infinities, signed zeros, subnormals,
+normals, `fetestexcept(FE_INVALID)` and exactly-once evaluation) across the
+x86-64 allocator/frontend matrix and the host GCC and Clang.
+
 `signbit` reads the original float representation through canonical memory
 operations: bit 31 for binary32, bit 63 for binary64, byte-eight bit 15 for
 x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value
@@ -10,8 +49,8 @@ floating exception state. `basic_c_signbit_images.c` and its independent host
 observer cover those images across the native target/mode/frontend/PIC matrix.
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary
-checks. Arithmetic, comparison, truth conversion and general narrowing remain
-separately unsupported.
+checks. Binary128 arithmetic, comparison, truth conversion and rounding
+conversions lower to compiler-runtime calls; see the AAPCS64 bullet below.
 The host FENV fixture in `tests/host_aarch64_float_to_f128.c` uses ordinary
 GNU inline asm for `mrs`/`msr` reads and writes of `fpsr`/`fpcr`; the baseline
 AArch64 inline-assembly vocabulary selects these checked system-register rows
@@ -20,6 +59,27 @@ their source/debug locations.
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Source-format literal rounding
+
+`c_ir_float_literal_value` rounds a float-suffixed literal to binary32 before
+widening its value into the binary64 constant carrier. Exact rational overflow
+materializes source-format infinity; underflow materializes zero only when the
+converter reports that the rounded significand is zero. Nonzero subnormals
+retain their `C_IR_ROUND_OK` image. Unary negation then preserves the sign of
+infinity and zero. Only `C_IR_ROUND_FAILED` retains the existing approximate
+parser fallback; it is separate from representable special results.
+`c_ir_emit_float_spelling` applies the same range statuses to automatic
+expressions, including bounded large mantissas whose approximate accumulator
+would produce infinity divided by infinity instead of the rounded zero.
+
+Registered `c_test_float_literal_initializer_rounding` checks fixed IEEE images
+for scalar and array globals, source-format comparison queries and rejected
+nonfinite integer conversions on six target layouts and both frontend forms.
+Its runtime companion checks the same independently specified images in
+global, automatic and local-static storage through all four native allocators
+and both frontend forms. Decimal/hexadecimal maximum, subnormal, halfway and
+negative-zero rows preserve finite-boundary and per-literal rounding behavior.
+
 - **`_Float16` is IEEE-754 binary16, and it is a real type rather than a
   storage alias.** Two naturally aligned bytes on every supported target
   (`TargetDataLayout.float16_type`, `C_TYPE_FLOAT16`), its own rank below
@@ -27,25 +87,39 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `vector_size` element ladder, and `_Float16 _Complex` beside it as clang's
   extension (`C_TYPE_FLOAT16_COMPLEX`, two contiguous halves). The C23
   `f16`/`F16` constant suffix and the `__FLT16_*__` prelude macros carry it,
-  and every constant rounds through one encoder pair,
-  `c_ir_float16_bits_from_f64` / `c_ir_float16_to_f64` in `c_gen.c`: no host
+  and typed-half tokens round directly from their exact decimal/hex rational
+  value to binary16 through `c_ir_float16_literal_bits` in `c_gen.c`. Only
+  after rounding may a half value widen into the binary64 carrier; rounding
+  a source token to binary64 first can lose its side of a half midpoint.
+  Genuine double-source conversions still use
+  `c_ir_float16_bits_from_f64` / `c_ir_float16_to_f64`: no host
   half type is used, because the compiler builds under four C compilers and
   cross-compiles. Every static-initializer writer routes its 16-bit case
-  through that pair; the byte strings in `c_test_float16_type` were taken
-  from clang 18 compiling the same spellings.
+  through that pair after rounding the token in its declared source format.
+  `c_test_float16_type` retains Clang 18 goldens and exact-grid #1226
+  regressions for midpoint parity, signs, subnormals and decimal zero padding.
+  The registered driver test observes static bytes and executed literal stores
+  from separately compiled objects in both Clang/Buster link directions.
 
   **Native code generation implements the binary16 runtime vocabulary.**
   Scalar arguments and results use the ABI's real floating position: the low
   sixteen bits of an XMM register on System V and Win64 x86-64, and the H/V
-  register position on AArch64. The direct emitter and the MIR value-shape
-  tables agree on that classification, so `none`, `mir-stack`, `fast` and
-  `quality` compile the same signatures without machine fallback. Baseline
+  register position on AArch64. Shared canonical-IR ABI classification and the
+  MIR value-shape tables preserve that placement, so `none`, `mir-stack`, `fast`
+  and `quality` compile the same signatures without machine fallback. The
+  `none` spelling selects MIR-stack. Baseline
   targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
   `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
-  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Darwin x86-64's
-  compiler-runtime entry points carry the half bits in the integer ABI even
-  though ordinary `_Float16` still uses XMM, so lowering bridges those symbols
-  through an internal `unsigned short` view. AArch64 uses baseline scalar `FCVT`
+  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`, and an x87
+  `long double` source (real or complex) uses `__truncxfhf2` with the f80
+  operand in its usual memory position, so it rounds once rather than through
+  binary32. Widening `_Float16` to x87 is exact through `__extendhfsf2`. Other
+  wider-than-64-bit sources (binary128) stay refused. Darwin x86-64's
+  binary32/binary64 compiler-runtime entry points carry the half bits in the
+  integer ABI even though ordinary `_Float16` still uses XMM, so lowering
+  bridges those symbols through an internal `unsigned short` view. The newer
+  `__truncxfhf2` returns its half in XMM0 there, as Clang expects, and takes no
+  bridge. AArch64 uses baseline scalar `FCVT`
   instructions for the same half/wider conversions, without runtime imports.
   Apple AArch64 packs named stack-only scalar arguments at their natural
   alignment; unnamed variadic arguments retain eightbyte-aligned slots;
@@ -95,19 +169,60 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   native intrinsic lowering. `c_test_bfloat16_semantic_acceptance` covers
   source-format rounding on six layouts in both frontend forms, mixed-format
   identity, positive/negative builtin operands, and deep nested calls.
-- **Base AAPCS64 `long double` is IEEE binary128 and supports scalar
-  transport.** A scalar argument or result is one complete sixteen-byte image
-  in a Q register; after V0-V7 are exhausted, named arguments occupy their
-  sixteen-byte-aligned stack slot. Canonical and MIR backends keep the value
-  slot-backed internally and bridge only at the ABI edges, so assignment,
+- **Base AAPCS64 and x86-64 Android `long double` are IEEE binary128.**
+  A scalar argument or result is one complete sixteen-byte image: AAPCS64
+  carries it in a Q register and Android System V x86-64 in an XMM register.
+  After the respective FP argument register file is exhausted, named arguments
+  occupy a sixteen-byte-aligned stack slot. Canonical and MIR backends keep the
+  value slot-backed internally and bridge only at ABI edges, so assignment,
   literal return, direct/indirect calls and mixed Clang/Buster linkage preserve
-  every payload bit, including negative zero. `c_ir_signature_type_supported`
-  admits only the exact scalar shape proven by `ir_type_abi_value`; aggregates,
-  variadic wide parameters, arithmetic, comparisons, truth conversion and
-  general conversions remain behind their existing structured rejections.
-  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1, ninth-argument stack
-  spill and both mixed-compiler directions on native Linux AArch64, with strict
-  no-fallback compilation across the AAPCS64 target/mode/frontend/PIC matrix.
+  every payload bit, including negative zero. `c_ir_target_supports_f128_transport`
+  in `c_internal.h` is the one target fact lowering and the parser's
+  lowering-constraint mirror share.
+
+  There is no binary128 instruction vocabulary, so lowering calls the
+  libgcc/compiler-rt soft-float entry points with `long double` operands and
+  results, exactly as Clang does: `__addtf3`/`__subtf3`/`__multf3`/`__divtf3`;
+  `__eqtf2`/`__netf2`/`__lttf2`/`__letf2`/`__gttf2`/`__getf2`, whose int
+  result is compared with zero so a NaN operand gives C's answer; truth
+  conversion as `__netf2(x, +0.0)`; `__trunctf{hf,sf,df}2` for narrowing; and
+  `__fix[uns]tf{si,di,ti}` / `__float[un]{si,di,ti}tf` for integers, where an
+  integer narrower than `int` converts through the `int` entry point.
+  `c_ir_type_is_binary128_runtime` gates these in `c_ir_emit_binary_value`,
+  `c_ir_emit_cast` (`c_ir_emit_binary128_conversion`) and `c_ir_truth_value`.
+  Exact binary16/32/64 widening remains a native MIR image on AArch64; x86-64
+  uses `__extend{hf,sf,df}tf2` because its selector has no binary128 conversion
+  row. Negation flips the high limb's sign bit through a slot
+  (`c_ir_emit_float_image_negate`) so NaN payloads survive. An invalid operation
+  on constant operands folds to the positive quiet NaN, as for narrower
+  formats. Hosted links therefore need libgcc or compiler-rt, as x86-64
+  binary16 and complex links already do.
+
+  Static initializers store the constant evaluator's exact two-limb image
+  (`c_ir_binary128_static_target`), for scalar globals and aggregate elements
+  alike. A variadic binary128 argument, and `va_arg(ap, long double)`, travel
+  as a sixteen-byte two-lane vector image (`c_ir_binary128_variadic_carrier_type`),
+  which both supported ABI classifiers place identically to the scalar, so the
+  backends need no separate reader; a named binary128 parameter before `...`
+  is admitted for the same reason. AAPCS64 gives each binary128 HFA member one
+  sixteen-byte VECTOR part, so `struct { long double a, b; }` and
+  `long double _Complex` use Q registers. System V x86-64 collapses a scalar
+  or one-member wrapper's SSE/SSEUP pair into one sixteen-byte VECTOR part;
+  larger or merged aggregates follow its ordinary register/memory classes.
+  Variadic aggregates therefore use their named classification through
+  `c_ir_type_is_binary128_aggregate` with no separate carrier. Complex
+  arithmetic uses the element operations above, including Smith's division
+  with a high-limb magnitude.
+
+  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1,
+  ninth-argument stack spill and both mixed-compiler directions on native Linux
+  AArch64. `compiler_driver_test_binary128_runtime` compiles a Clang-oracled
+  fixture strictly across AArch64 Linux/Android/UEFI and x86-64 Android, every
+  MIR allocator, both frontend forms and PIC/non-PIC; it requires the relevant
+  soft-float imports, and on native Linux AArch64 links with the host runtime
+  and executes. The retired direct `none` emitter refused binary128 widening
+  and loads through pointers; current `none` uses the same MIR-stack lowering
+  as the explicit `mir-stack` spelling.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and
@@ -127,11 +242,15 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Unsigned-64 conversion composes signed conversion, comparison, scalar masks
   and an exact zero/2^63 correction at extended precision; it preserves all
   four rounding modes and restores the complete control word after truncation.
-  The direct implementation is `codegen_canonical_x64_emit_f80_*` in
-  `codegen.c`; f80/i128 conversions remain unsupported by both backends.
+  `machine_x64_emit_f80` in `machine_x86_64.c` encodes these MIR rows. The
+  machine selector also lowers i128 casts to and from f80
+  through two frame limbs and closed x87 transactions. Its final addition
+  selects 24-, 53-, or 64-bit precision for one row, preserving the caller's
+  complete control word; f80-to-i128 extracts high and low unsigned limbs
+  at 64-bit precision before restoring a signed result.
   Preserve the caller's
-  x87 control word: canonical truncate helpers and the MIR conversion row
-  may temporarily change only rounding control for a C integer cast, then
+  x87 control word: MIR conversion rows may temporarily change only rounding
+  control for a C integer cast, then
   restore the exact saved word. `tests/basic_c_f80_machine.c` checks this
   subset under strict MIR; its HOST/LIBRARY/FENV modes support independent
   Clang callers and callees. `tests/basic_c_f80_u64.c` covers unsigned
@@ -166,6 +285,15 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   emission copies through x87 and clears padding; MIR copies the ten payload
   bytes directly, preserving payload/sign and making no padding promise.
   An opaque aggregate reads back through the ordinary eightbyte path.
+  MEMORY-class f80 aggregates larger than sixteen bytes use the MIR overflow
+  copy of their complete storage image; member types do not impose a separate
+  size limit in the frontend or its semantic-only lowering mirror.
+  `compiler_driver_test_sysv_wide_aggregate_va_arg` covers seven 32/48-byte
+  layouts, register pools available/exhausted, sixteen-byte overflow alignment,
+  following arguments and `va_copy`, with the configured host and available Linux GCC in both call directions in
+  MIR-stack, FAST and QUALITY, both C forms and PIC/non-PIC. The retired direct
+  `none` emitter's larger-aggregate limitation is historical evidence in
+  #1264/#2390; current `none` selects MIR-stack.
   `tests/basic_c_va_arg_long_double.c` pins both under all four
   allocators, including a read through a `va_list *` and one past a `va_copy`
   — the spellings musl's `pop_arg` uses. Strict MIR selection, allocation and
@@ -201,12 +329,40 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   that edge. `tests/basic_c_long_double_static_initializer.c` pins the finite
   arithmetic and `tests/basic_c_long_double_static_special.c` everything from
   the infinities out, both against bytes read out of Clang's own object.
-  The canonical emitter still refuses a fixed wide-float parameter of a
-  variadic *definition* (the SysV `va_start`
-  register-save area does not account for it), an aggregate whose
-  classification carries an X87 class without being the ABI-proven single-f80
-  or complex shape, and every wide float on a target whose `long double` is
-  not this format.
+  Historical direct-emitter refusals included a fixed wide-float parameter of
+  a variadic *definition* (its SysV `va_start` register-save area did not account
+  for it), an aggregate whose classification carries an X87 class without being
+  the ABI-proven single-f80 or complex shape, and every wide float on a target
+  whose `long double` is not this format. Current native admission follows the
+  MIR selectors and shared canonical-IR ABI classification; `none` selects
+  MIR-stack and does not restore those retired direct-emitter paths.
+- **GNU x86 inline-assembly unions `am` on outputs and `dN` on inputs select
+  their existing fixed-register member.** `=am`, `+am`, `=&am` and `+&am`
+  carry A/RAX, preserving ties, early clobbers and exactly-once output-place
+  evaluation; `dN` carries D/RDX for both constants and runtime values. The
+  shared selector is used by lowering and its semantic-only validation mirror.
+  This bounded vocabulary does not plan alternatives across conflicts: an
+  otherwise legal memory member of `am`, or immediate member of `dN`, still
+  cannot rescue a conflicting fixed register. Those combinations retain the
+  existing conflict diagnostic. Neither union is admitted on AArch64.
+  Numeric x86 clobber `0` denotes AX/RAX rather than operand zero; lowering
+  canonicalizes it to `rax` before publishing IR, so register exclusion,
+  operand conflicts, literal-register checks and duplicate `0`/`rax` rejection
+  use the existing clobber machinery. Lowering and semantic-only validation
+  both reject duplicate normalized names, including ordinary `rax`/`rax`
+  lists in unused static definitions. Other numeric clobbers remain refused.
+  `inb` and `outb` use the shared assembler's checked AL/DX forms; their port
+  fixture is compile-only because execution requires OS privileges. GNU
+  operand-width modifiers such as `%w1` retain their existing refusal; the
+  fixture supplies the port operand's width through its `unsigned short` type.
+  `c_test_inline_assembly_constraint_unions` checks both frontend forms,
+  semantic-only validation, normalized IR, malformed neighbours and the
+  deliberately unsupported register-conflict cases described above.
+  `machine_test_inline_assembly_constraint_unions` checks exact port bytes
+  `EC`/`EE`, all four allocators and both PIC/frontend forms on three x86 OS
+  layouts; the registered driver fixture executes the nonprivileged union and
+  numeric-clobber cases on matching desktop hosts. These registrations do not
+  constitute a validation result.
 - **A module-level `__asm__` block emits into the module's text through
   `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
   directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives
@@ -240,6 +396,65 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   the one in the instruction's IR literal (`codegen_assembly_durable_name`).
   Labels are refused inside a template rather than defined, because a template
   is emitted once per instruction rather than once per file.
+- String-literal records retain source module/function/instruction ordinals and
+  use lower-bound lookup. Function collection carries those ordinals without
+  relational comparisons across unrelated allocations; import-first function
+  numbering remains separate. `compiler_driver_test_wasm_string_records` covers
+  distinct module allocations, repeated/distinct literals, deterministic
+  Wasm32/Memory64 bytes and logarithmically bounded record probes.
+- Both WebAssembly C layouts use sixteen-byte, sixteen-byte-aligned IEEE
+  binary128 `long double`, including Memory64. Layout queries and the
+  `__SIZEOF_LONG_DOUBLE__` / `__LDBL_*` predefines retain that ABI independently
+  of operation support. Scalar and aggregate static initializers store the
+  exact binary128 byte image; `c_ir_binary128_static_target` admits this storage
+  without enabling the native `c_ir_target_supports_f128_transport` ABI gate.
+  Runtime binary128 literals and parameter/return transport retain explicit
+  unsupported diagnostics. `c_test_wasm_long_double_storage` checks precision,
+  record offsets, array stride, constant images, direct Wasm emission and both
+  frontend SSA forms. Emitting a module in this test does not execute it.
 - The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
   instruction shapes must be diagnosed; never silently fall back to a native
   backend.
+
+## x87 integer unary domain
+
+The registered `c_test_x87_integer_unary_initializers` fixture keeps #1294's
+integer-domain obligations separate from real negation. Thirty-three original
+standard expressions cover unsigned 32/64-bit wrap, grouping and nested signs,
+unsigned high bits, integer positive zero, real negative zero, and float/double
+rounding before a later unary operation. Six Microsoft ui8/ui16 extension
+spellings separately require promotion to signed int before unary negation.
+One canonical-only unsuffixed-u64 magnitude row protects Buster's existing
+signed-128 literal-selection policy; it is not a portable reference-compiler
+conformance assertion.
+
+Each expression initializes five original objects: scalar global, one-element
+array, record member, function-local static scalar and static array. GNU17/GNU23
+and both frontend forms on Linux/macOS x86-64 must certify canonical IR and
+match independently pinned binary80 images, including six zero padding bytes.
+Zero storage is accepted only when all sixteen expected bytes are zero. These
+x87 expectations are never applied to binary128 or Windows runtime layouts.
+
+`c_test_x87_integer_unary_runtime` reads only the first ten value bytes through
+volatile unsigned-char accesses, ignoring ABI padding. Each original standard
+or extension source runs in four allocator modes, both frontend forms and
+O0/O2 on native x86-64 Linux/macOS; every row executes all five observations.
+On hosted Linux, mandatory GCC and Clang GNU17/GNU2x O0/O2 controls use the same
+standard source and fixed images. Only Clang with `-fms-extensions` observes the
+separate ui8/ui16 source. Compiler/process errors and 30-second timeouts are
+failures; expected values never adapt to reference output. Existing frozen
+long-double inputs, rounding/special/refusal fixtures and support policy remain
+unchanged.
+
+The bounded folder retains one promoted unsigned-width byte alongside an
+integer's exact x87 encoding. Both direct and grouped unary signs share the
+same integer-domain operation: unsigned 32/64-bit negation wraps before real
+conversion, narrow unsigned literals promote to signed int, and integer zero
+remains positive. Real negation continues to flip the format's sign bit,
+including zero. Every successful real conversion clears the integer fact,
+including zero/special values and exact long-double widening; failures do not
+commit a partial conversion. A nonzero unsigned width beyond 64 declines
+negation rather than substituting a u64 wrap. The existing signed-128 selection
+for parsed u64 magnitudes is preserved. Integer binary operations still refuse
+and the existing depth limit is unchanged; no new recursion, pass, allocation
+or dependency is introduced.
