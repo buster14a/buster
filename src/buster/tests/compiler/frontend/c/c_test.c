@@ -5693,7 +5693,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_member_lookup_semantics(UnitTestA
                         " int n0; int n1; int n2; int n3; int n4; int n5; int n6; int n7;"
                         " struct { int a0; union { int u0; float f0; }; };"
                         " int n8; int n9; int n10; int n11; int n12; int n13; int n14; int n15;"
-                        " struct { struct { int deep; }; long l0; };"
+                        " struct { struct { int deep; }; long long l0; };"
                         " int last;");
     String8 good = S8(" };\n"
                       "_Static_assert(offsetof(struct W, a0) == 32, \"a0\");\n"
