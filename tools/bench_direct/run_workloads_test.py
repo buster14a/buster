@@ -271,6 +271,52 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", out)
         self.assertNotIn("Wall over", out)
 
+    def test_render_does_not_summarize_failed_runs(self) -> None:
+        import run_workloads
+
+        def row(exit_code=0, timed_out=False, wall=1_000_000):
+            return {"exit": exit_code, "timed_out": timed_out, "wall_ns": wall, "cpu_ns": wall,
+                    "rss_bytes": 4096, "output": b"x"}
+
+        def shaped(overrides: dict[int, dict]) -> list[dict]:
+            return [overrides.get(index, row()) for index in range(11)]
+
+        cases = {
+            "all-success": ({}, True),
+            "failed warmup": ({0: row(1)}, False),
+            "one signal": ({5: row(-11)}, False),
+            "one timeout": ({6: row(-9, True)}, False),
+            "mixed timed failures": ({3: row(2), 7: row(1)}, False),
+        }
+        for label, (overrides, expected) in cases.items():
+            with self.subTest(label=label):
+                lines, passed = run_workloads.render("w.c", "s", "p", shaped(overrides))
+                text = "\n".join(lines)
+                self.assertEqual(passed, expected)
+                self.assertEqual(text.count("| sample ") + text.count("| warmup "), 11)
+                if expected:
+                    self.assertIn("Validity: all 11 planned runs", text)
+                    self.assertIn("Wall over 9 measured runs", text)
+                else:
+                    self.assertLess(text.index("INVALID, NOT A COMPLETE MEASUREMENT"),
+                                    text.index("Incomplete and not comparable"))
+                    self.assertNotIn("Wall over", text)
+        lines, passed = run_workloads.render("w.c", "s", "p", [row(3) for _ in range(11)])
+        text = "\n".join(lines)
+        self.assertFalse(passed)
+        self.assertIn("No valid timed samples: no latency summary is given.", text)
+        self.assertNotIn("median", text)
+        # Failed samples are excluded from the partial estimator.
+        lines, _ = run_workloads.render("w.c", "s", "p", shaped({4: row(1, wall=1)}))
+        self.assertIn("only the 8 valid of 9 planned samples", "\n".join(lines))
+
+    def test_immediately_failing_workload_has_no_latency_headline(self) -> None:
+        result = self.run_harness(self.commit({"benchmarks/9700x/broken.c": FAILING}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No valid timed samples", result.stdout)
+        self.assertNotIn("Wall over", result.stdout)
+        self.assertEqual(result.stdout.count("| sample "), 9)
+
     def test_every_run_starts_without_predecessor_files(self) -> None:
         marker = ('#include <stdio.h>\nint main(void) { FILE* f = fopen("marker", "rb"); int existed = f != 0;\n'
                   '  if (f) fclose(f); else { f = fopen("marker", "wb"); if (f) fclose(f); }\n'

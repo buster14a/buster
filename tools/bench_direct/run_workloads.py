@@ -164,19 +164,37 @@ def run_sample(program: Path, scratch: Path, cpu: int, index: int, data: bytes |
 
 
 def render(name: str, source_sha: str, program_sha: str, rows: list[dict], data_sha: str = "") -> tuple[list[str], bool]:
-    measured = rows[WARMUPS:]
-    passed = len(rows) == WARMUPS + SAMPLES and all(
-        row["exit"] == 0 and not row["timed_out"] and not row.get("invalid") for row in rows)
+    def valid(row: dict) -> bool:
+        return row["exit"] == 0 and not row["timed_out"] and not row.get("invalid")
+
+    passed = len(rows) == WARMUPS + SAMPLES and all(valid(row) for row in rows)
+    # Failed executions never enter the latency estimator; they stay in the table.
+    measured = [row for row in rows[WARMUPS:] if valid(row)]
+    invalid = len(rows) - sum(valid(row) for row in rows)
     data = f", `{DATA_NAME}` sha256 `{data_sha}`" if data_sha else ", no input data"
-    lines = [f"### `{name}`", "",
-             f"source sha256 `{source_sha}`, executable sha256 `{program_sha}`{data}", ""]
-    if measured:
+    lines = [f"### `{name}`", ""]
+    if passed:
+        lines += [f"Validity: all {len(rows)} planned runs completed and were valid.", ""]
+    else:
+        lines += [f"**INVALID, NOT A COMPLETE MEASUREMENT:** {len(rows)} of {WARMUPS + SAMPLES} planned runs "
+                  f"completed, {invalid} of them failed (nonzero exit, signal, timeout or changed input).", ""]
+    lines += [f"source sha256 `{source_sha}`, executable sha256 `{program_sha}`{data}", ""]
+    if measured and passed:
         walls = [row["wall_ns"] for row in measured]
         lines += [
             f"Wall over {len(measured)} measured runs: median {statistics.median(walls) / 1e6:.3f} ms, "
             f"min {min(walls) / 1e6:.3f} ms, max {max(walls) / 1e6:.3f} ms. "
             f"CPU median {statistics.median(row['cpu_ns'] for row in measured) / 1e6:.3f} ms. "
             f"Peak RSS {max(row['rss_bytes'] for row in measured)} bytes.", ""]
+    elif measured:
+        walls = [row["wall_ns"] for row in measured]
+        lines += [
+            f"Incomplete and not comparable: descriptive wall statistics over only the {len(measured)} valid "
+            f"of {SAMPLES} planned samples, failed runs excluded: median "
+            f"{statistics.median(walls) / 1e6:.3f} ms, min {min(walls) / 1e6:.3f} ms, "
+            f"max {max(walls) / 1e6:.3f} ms.", ""]
+    else:
+        lines += ["No valid timed samples: no latency summary is given.", ""]
     lines += ["| run | exit | timed out | wall ms | cpu ms | rss bytes | output sha256 |",
               "|---|---|---|---|---|---|---|"]
     for index, row in enumerate(rows):
