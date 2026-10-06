@@ -2236,6 +2236,15 @@ struct CIrQueryMachine
     CIrConstantValue* values;
     CIrConstantOperator* operators;
     CIrQueryResume* resumes;
+    // Hash index over `completed`: chain_heads[bucket] holds the newest live
+    // completed index plus one, chain_next[i] the next older entry of the same
+    // bucket, chain_bucket[i] the bucket entry i was linked into. Completed
+    // entries are a stack, so a rewind unlinks them newest first.
+    u32* chain_heads;
+    u32* chain_next;
+    u32* chain_bucket;
+    u32 chain_mask;
+    u32 reserved_chain;
     CIrQueryFrame request;
     u32 frame_count;
     u32 frame_capacity;
@@ -3388,23 +3397,67 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
     return false;
 }
 
+BUSTER_C_INTERNAL u32 c_ir_query_key_hash(CIrQueryFrame key)
+{
+    u64 hash = (u64)key.kind + 1;
+    u64 first = key.start;
+    u64 second = key.end;
+    switch (key.kind)
+    {
+    case C_IR_QUERY_FRAME_ARRAY_BOUND:
+        first = key.bound.token_start;
+        second = key.bound.token_count;
+        hash += (u64)key.bound.inferred_count * 0x9e3779b97f4a7c15ull;
+        break;
+    case C_IR_QUERY_FRAME_COMPOUND_TYPE: hash += ((u64)key.third << 32 | key.fourth) * 0x9e3779b97f4a7c15ull; break;
+    case C_IR_QUERY_FRAME_CONDITIONAL_TYPE:
+        hash += ((u64)key.third << 32 | key.fourth) * 0x9e3779b97f4a7c15ull;
+        hash += ((u64)key.first_type.value << 32 | key.second_type.value) * 0xc2b2ae3d27d4eb4full;
+        break;
+    case C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT: hash += (u64)key.first_type.value * 0xc2b2ae3d27d4eb4full; break;
+    default: break;
+    }
+    hash += (first << 32 | second) * 0xff51afd7ed558ccdull;
+    hash ^= hash >> 32;
+    hash *= 0xd6e8feb86659fd93ull;
+    hash ^= hash >> 32;
+    return (u32)hash;
+}
+
+// Unlinks completed entries at and above `target`, newest first, so each is
+// the head of its bucket, then lowers the count.
+BUSTER_C_INTERNAL void c_ir_query_completed_rewind(CIrQueryMachine* machine, u32 target)
+{
+    for (u32 index = machine->completed_count; index > target; index -= 1)
+    {
+        machine->chain_heads[machine->chain_bucket[index - 1]] = machine->chain_next[index - 1];
+    }
+    machine->completed_count = target;
+}
+
 BUSTER_C_INTERNAL bool c_ir_query_request(CIntegerIrBuilder* builder, CIrQueryFrame key, CIrQueryFrame* result_out)
 {
     CIrQueryMachine* machine = builder->queries;
     BUSTER_CHECK(machine && machine->frame_count);
-    for (u32 index = machine->completed_count; index != 0; index -= 1)
+    bool found = false;
+    // The chain is newest first, so the first match is the most recent
+    // completed query with this key.
+    for (u32 link = machine->chain_heads[c_ir_query_key_hash(key) & machine->chain_mask]; link != 0 && !found; link = machine->chain_next[link - 1])
     {
-        CIrQueryFrame completed = machine->completed[index - 1];
+        CIrQueryFrame completed = machine->completed[link - 1];
         if (c_ir_query_key_equal(completed, key))
         {
             *result_out = completed;
-            return true;
+            found = true;
         }
     }
-    BUSTER_CHECK(!machine->has_request);
-    machine->request = key;
-    machine->has_request = true;
-    return false;
+    if (!found)
+    {
+        BUSTER_CHECK(!machine->has_request);
+        machine->request = key;
+        machine->has_request = true;
+    }
+    return found;
 }
 
 BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFrame root, CIrQueryFrame* result_out)
@@ -3475,7 +3528,7 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
                 builder->failure_message = S8("C query nesting exceeds the query frame capacity");
                 builder->failure_token_index = frame->start;
                 machine->frame_count = frame_start;
-                machine->completed_count = completed_start;
+                c_ir_query_completed_rewind(machine, completed_start);
                 machine->value_count = value_start;
                 machine->operator_count = operator_start;
                 machine->has_request = false;
@@ -3489,7 +3542,7 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
         {
             *result_out = *frame;
             machine->frame_count = frame_start;
-            machine->completed_count = completed_start;
+            c_ir_query_completed_rewind(machine, completed_start);
             machine->value_count = value_start;
             machine->operator_count = operator_start;
             return true;
@@ -3499,19 +3552,23 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             builder->failure_message = S8("C query result count exceeds the query buffer capacity");
             builder->failure_token_index = frame->start;
             machine->frame_count = frame_start;
-            machine->completed_count = completed_start;
+            c_ir_query_completed_rewind(machine, completed_start);
             machine->value_count = value_start;
             machine->operator_count = operator_start;
             return false;
         }
         CIrQueryFrame completed = *frame;
         machine->frame_count -= 1;
+        u32 bucket = c_ir_query_key_hash(completed) & machine->chain_mask;
+        machine->chain_bucket[machine->completed_count] = bucket;
+        machine->chain_next[machine->completed_count] = machine->chain_heads[bucket];
         machine->completed[machine->completed_count++] = completed;
+        machine->chain_heads[bucket] = machine->completed_count;
     }
     BUSTER_CHECK(machine->completed_count > completed_start);
     *result_out = machine->completed[machine->completed_count - 1];
     machine->frame_count = frame_start;
-    machine->completed_count = completed_start;
+    c_ir_query_completed_rewind(machine, completed_start);
     machine->value_count = value_start;
     machine->operator_count = operator_start;
     return true;
@@ -47316,7 +47373,11 @@ bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_
         CIrConstantValue query_values[16] = {0};
         CIrConstantOperator query_operators[16] = {0};
         CIrQueryResume query_resumes[16] = {0};
+        u32 query_chain_heads[16] = {0};
+        u32 query_chain_next[16] = {0};
+        u32 query_chain_bucket[16] = {0};
         CIrQueryMachine queries = {
+            .chain_heads = query_chain_heads, .chain_next = query_chain_next, .chain_bucket = query_chain_bucket, .chain_mask = 15,
             .frames = query_frames, .completed = query_completed, .values = query_values,
             .operators = query_operators, .resumes = query_resumes,
             .frame_capacity = 16, .completed_capacity = 16, .value_capacity = 16, .operator_capacity = 16,
@@ -52630,7 +52691,9 @@ BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* po
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryFrame), capacity, BUSTER_ALIGN_OF(CIrQueryFrame)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantValue), capacity, BUSTER_ALIGN_OF(CIrConstantValue)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantOperator), capacity, BUSTER_ALIGN_OF(CIrConstantOperator)) &&
-                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryResume), capacity, BUSTER_ALIGN_OF(CIrQueryResume));
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryResume), capacity, BUSTER_ALIGN_OF(CIrQueryResume)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(u32), (u64)capacity * 2, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(u32), (u64)capacity * 2, BUSTER_ALIGN_OF(u32));
     return fits;
 }
 
@@ -52715,6 +52778,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     queries.values = arena_allocate(temporary_arena, CIrConstantValue, query_frame_capacity);
     queries.operators = arena_allocate(temporary_arena, CIrConstantOperator, query_frame_capacity);
     queries.resumes = arena_allocate(temporary_arena, CIrQueryResume, query_frame_capacity);
+    u64 chain_bucket_count = 16;
+    while (chain_bucket_count < query_frame_capacity)
+    {
+        chain_bucket_count <<= 1;
+    }
+    queries.chain_heads = arena_allocate_zeroed(temporary_arena, u32, chain_bucket_count);
+    queries.chain_next = arena_allocate(temporary_arena, u32, query_frame_capacity);
+    queries.chain_bucket = arena_allocate(temporary_arena, u32, query_frame_capacity);
+    queries.chain_mask = (u32)(chain_bucket_count - 1);
     // One per declaration for the lowering failures, one per entity for the
     // definition failures, one per deferred static assertion, a second per
     // declaration for an __attribute__((alias)) naming a target this unit
