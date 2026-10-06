@@ -153,9 +153,69 @@ BUSTER_GLOBAL_LOCAL int cm_inventory_tests(void)
     else ++failures;
     return failures;
 }
+BUSTER_GLOBAL_LOCAL int cm_publication_tests(void)
+{
+    int failures = 0;
+    failures += cm_test_check(cm_publication_path("history/2026-10-01/0.jsonl") &&
+        !cm_publication_path("history/2026-02-29/0.jsonl") && !cm_publication_path("history/2026-10-01/64.jsonl") &&
+        !cm_publication_path("reports/payload.sh") && !cm_publication_path(".github/workflows/test.yml"),
+        "publisher path grammar excludes code and malformed shard identities");
+    const char *keys[] = {"GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"};
+    const char *values[] = {"refs/heads/main", "schedule", "7", "1"};
+    char *before[4] = {0};
+    for (unsigned i = 0; i < 4; ++i) { const char *value = getenv(keys[i]); if (value) before[i] = strdup(value); setenv(keys[i], values[i], 1); }
+    const char *manifest = "{\"schema\":\"buster-ci-history-manifest-v1\","
+        "\"watermark\":\"2026-10-06T12:00:00Z\",\"collector_revision\":\"1111111111111111111111111111111111111111\","
+        "\"policy\":\"" CM_POLICY "\",\"producer_run_id\":\"7\",\"producer_run_attempt\":\"1\"}";
+    CmOutputs out = {0}; FILE *file = tmpfile();
+    int ready = file != NULL;
+    if (file) { fputs(manifest, file); ready = cm_output(&out, "manifest.json", file); }
+    CmTransport publisher = {0}; publisher.deadline = cm_clock() + 60;
+    cm_copy(publisher.revision, sizeof(publisher.revision), "1111111111111111111111111111111111111111");
+    char directory[] = "/tmp/buster-ci-publication-test-XXXXXX"; char *created = mkdtemp(directory);
+    ready = ready && created && rmdir(directory) == 0 && cm_stage(&publisher, &out, directory, "2026-10-06T12:00:00Z");
+    CmResponse replies[] =
+    {
+        {"git/ref/heads/" CM_BRANCH, "GET", "{\"object\":{\"type\":\"commit\",\"sha\":\"2222222222222222222222222222222222222222\"}}", 1, 0},
+        {"git/commits/2222222222222222222222222222222222222222", "GET", "{\"tree\":{\"sha\":\"3333333333333333333333333333333333333333\"}}", 1, 0},
+        {"contents/manifest.json?ref=2222222222222222222222222222222222222222", "GET", manifest, 1, 0},
+        {"contents/manifest.json?ref=2222222222222222222222222222222222222222", "GET", manifest, 1, 0}
+    };
+    publisher.fixture = replies; publisher.fixture_count = 4;
+    failures += cm_test_check(ready && cm_publish_stage(&publisher, directory) && publisher.fixture_cursor == 4,
+        "exact successful publication replay does not write another Git object or ref");
+    const char *newer = "{\"schema\":\"buster-ci-history-manifest-v1\","
+        "\"watermark\":\"2026-10-06T13:00:00Z\",\"collector_revision\":\"1111111111111111111111111111111111111111\","
+        "\"policy\":\"" CM_POLICY "\",\"producer_run_id\":\"8\",\"producer_run_attempt\":\"1\"}";
+    replies[2].content = newer; publisher.fixture_cursor = 0;
+    failures += cm_test_check(ready && !cm_publish_stage(&publisher, directory) && publisher.fixture_cursor == 3,
+        "older bundle cannot overwrite newer report or bypass its lease");
+    setenv("GITHUB_RUN_ID", "8", 1); publisher.fixture_cursor = 0;
+    failures += cm_test_check(ready && !cm_publish_stage(&publisher, directory) && publisher.fixture_cursor == 0,
+        "wrong producer run is rejected before any publication API call");
+    if (created)
+    {
+        char path[4096]; snprintf(path, sizeof(path), "%s/publish.json", directory); unlink(path);
+        snprintf(path, sizeof(path), "%s/000.txt", directory); unlink(path); rmdir(directory);
+    }
+    cm_outputs_free(&out);
+    for (unsigned i = 0; i < 4; ++i) { if (before[i]) setenv(keys[i], before[i], 1); else unsetenv(keys[i]); free(before[i]); }
+    const char *matrix = "name: Fixture\njobs:\n  test:\n    strategy:\n      matrix:\n        include:\n"
+        "          - name: Linux\n            runner: ubuntu-26.04\n            mode: Release\n"
+        "          - name: Windows\n            runner: windows-2025\n            mode: Debug\n"
+        "    steps:\n      - name: Machine specifications\n"
+        "        uses: buster14a/buster/.github/actions/machine-specifications@" CM_REPORTER "\n"
+        "        with:\n          matrix-index: ${{ strategy.job-index }}\n";
+    char identity[2048];
+    failures += cm_test_check(cm_matrix_identity(identity, sizeof(identity), matrix, "test", 1) &&
+        strstr(identity, "windows-2025") && strstr(identity, "Debug") &&
+        !cm_matrix_identity(identity, sizeof(identity), matrix, "test", 2),
+        "matrix ordinal binds the complete selected include configuration and rejects an absent cell");
+    return failures;
+}
 BUSTER_GLOBAL_LOCAL int cm_self_test(void)
 {
-    int failures = cm_inventory_tests();
+    int failures = cm_inventory_tests() + cm_publication_tests();
     const char *valid[] = {"{}", "[]", "{\"a\":[1,true,false,null,\"a\\n\\u20ac\\ud83d\\ude00\"]}", "0", "-1.25e+2"};
     const char *invalid[] = {"", "{\"a\":1,\"a\":2}", "[1,]", "{\"a\":}", "{\"a\":1,}", "[01]", "[NaN]",
         "[Infinity]", "[1e]", "\"\\u0000\"", "\"\\ud800\"", "\"\\udc00\"", "{}{}", "\"bad\nstring\""};

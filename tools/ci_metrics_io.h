@@ -255,6 +255,41 @@ BUSTER_GLOBAL_LOCAL char *cm_data_read(CmTransport *t, const char *path, int *av
     }
     return result;
 }
+BUSTER_GLOBAL_LOCAL int cm_publication_path(const char *path)
+{
+    int valid = cm_path(path);
+    int allowed = cm_equal(path, "manifest.json") || cm_equal(path, "README.md") ||
+        cm_equal(path, "history/progress.json") || cm_equal(path, "reports/index.md") ||
+        cm_equal(path, "reports/all.md") || cm_equal(path, "reports/recent.jsonl") || cm_equal(path, "reports/recent.csv");
+    const char *hex = NULL, *suffix = NULL;
+    if (valid && strncmp(path, "history/anchors/", 16) == 0) { hex = path + 16; suffix = ".jsonl"; }
+    else if (valid && strncmp(path, "reports/series-", 15) == 0) { hex = path + 15; suffix = ".md"; }
+    if (hex)
+    {
+        int shaped = strlen(hex) == 16 + strlen(suffix);
+        for (unsigned i = 0; shaped && i < 16; ++i) shaped = cm_hex(hex[i]) >= 0 && !(hex[i] >= 'A' && hex[i] <= 'F');
+        allowed |= shaped && cm_equal(hex + 16, suffix);
+    }
+    if (valid && strlen(path) >= 26 && strncmp(path, "history/", 8) == 0 && path[18] == '/')
+    {
+        char date[32]; memcpy(date, path + 8, 10); memcpy(date + 10, "T00:00:00Z", 11);
+        int dated = cm_time(date) >= 0;
+        const char *name = path + 19;
+        if (dated && cm_equal(name, "index.json")) allowed = 1;
+        else if (dated)
+        {
+            const char *dot = strchr(name, '.'); size_t digits = dot ? (size_t)(dot - name) : 0;
+            char ordinal[4]; uint64_t shard = 0;
+            if (digits && digits < sizeof(ordinal) && cm_equal(dot, ".jsonl"))
+            {
+                memcpy(ordinal, name, digits); ordinal[digits] = 0;
+                allowed |= cm_unsigned(ordinal, &shard) && shard < 64 && (digits == 1 || ordinal[0] != '0');
+            }
+        }
+    }
+    int result = valid && allowed;
+    return result;
+}
 typedef struct CmFile CmFile;
 struct CmFile { const char *path; const char *content; char sha[41]; };
 BUSTER_GLOBAL_LOCAL int cm_publish(CmTransport *t, CmFile *files, unsigned count, const char *observation)
@@ -263,9 +298,7 @@ BUSTER_GLOBAL_LOCAL int cm_publish(CmTransport *t, CmFile *files, unsigned count
     // This function is called only by trusted schedule/dispatch code, never a PR.
     for (unsigned i = 0; valid && i < count; ++i)
     {
-        valid = cm_path(files[i].path) &&
-            (strncmp(files[i].path, "history/", 8) == 0 || strncmp(files[i].path, "reports/", 8) == 0 ||
-             cm_equal(files[i].path, "manifest.json") || cm_equal(files[i].path, "README.md"));
+        valid = cm_publication_path(files[i].path);
         for (unsigned k = 0; valid && k < i; ++k) valid = !cm_equal(files[i].path, files[k].path);
         FILE *body = valid ? tmpfile() : NULL;
         valid = valid && body;

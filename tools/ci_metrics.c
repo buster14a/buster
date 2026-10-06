@@ -117,7 +117,7 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
                 size_t length = 0; char *records = cm_read(input, CM_BYTES, &length);
                 valid = records && cm_import(&store, records, length); free(records);
                 CmOutputs outputs = {0};
-                if (valid) valid = cm_reports(&transport, &store, &outputs, observed, event, revision, since, until);
+                if (valid) valid = cm_reports(&transport, &store, &outputs, observed, event, revision, since, until, job_filter, os_filter, cpu_filter, branch_filter);
                 if (valid) valid = cm_stage(&transport, &outputs, directory, observed);
                 cm_outputs_free(&outputs);
             }

@@ -219,6 +219,82 @@ BUSTER_GLOBAL_LOCAL int cm_workflow_source(const char *workflow, const char *key
     free(copy);
     return result;
 }
+BUSTER_GLOBAL_LOCAL int cm_matrix_identity(char *out, size_t size, const char *workflow, const char *key, uint64_t ordinal)
+{
+    char declaration[160]; snprintf(declaration, sizeof(declaration), "  %s:", key);
+    char *copy = workflow ? strdup(workflow) : NULL;
+    FILE *file = copy ? tmpfile() : NULL;
+    int valid = file != NULL, in_job = 0, in_matrix = 0, include = 0, matrix_count = 0;
+    unsigned cell = 0, fields = 0; int selected = 0, index_bound = 0, in_startup = 0;
+    if (file) fputc('{', file);
+    for (char *line = copy; valid && line && *line; )
+    {
+        char *next = strchr(line, '\n'); if (next) *next++ = 0;
+        size_t indent = strspn(line, " "); const char *text = line + indent;
+        if (cm_equal(line, declaration)) in_job = 1;
+        else if (in_job && indent <= 2 && text[0] && text[0] != '#') in_job = 0;
+        if (in_job)
+        {
+            if (indent == 6 && cm_equal(text, "matrix:")) { in_matrix = 1; ++matrix_count; }
+            else if (in_matrix && indent <= 6 && text[0] && text[0] != '#') in_matrix = 0;
+            if (in_matrix && indent == 8 && cm_equal(text, "include:")) include = 1;
+            else if (in_matrix && text[0] && text[0] != '#' && indent >= 8)
+            {
+                if (indent == 10 && strncmp(text, "- ", 2) == 0)
+                {
+                    selected = cell++ == ordinal; text += 2;
+                    valid = include && cell <= 256;
+                }
+                else valid = include && indent == 12 && cell > 0;
+                const char *colon = strchr(text, ':');
+                valid = valid && colon && colon > text && (size_t)(colon - text) < 128 && !strstr(text, "${{");
+                if (valid && selected)
+                {
+                    char name[128], value[CM_FIELD + 1];
+                    size_t key_length = (size_t)(colon - text); memcpy(name, text, key_length); name[key_length] = 0;
+                    valid = cm_job_key(name);
+                    const char *begin = colon + 1; while (*begin == ' ') ++begin;
+                    size_t n = strlen(begin); while (n && begin[n - 1] == ' ') --n;
+                    // This restricted include-only contract excludes YAML aliases,
+                    // block scalars and compound values rather than interpreting them.
+                    valid = valid && n < sizeof(value) && n && begin[0] != '[' && begin[0] != '{' &&
+                        begin[0] != '&' && begin[0] != '*' && begin[0] != '|' && begin[0] != '>';
+                    if (valid && (begin[0] == 34 || begin[0] == 39))
+                    {
+                        valid = n >= 2 && begin[n - 1] == begin[0];
+                        if (valid) { ++begin; n -= 2; }
+                    }
+                    if (valid)
+                    {
+                        memcpy(value, begin, n); value[n] = 0;
+                        valid = !strchr(value, '\\') && !strchr(value, 39) && !strchr(value, 34) && ++fields <= 32;
+                        if (valid)
+                        {
+                            if (fields > 1) fputc(',', file);
+                            cm_quote(file, name); fputc(':', file); cm_quote(file, value);
+                        }
+                    }
+                }
+            }
+            if (indent == 6 && strncmp(text, "- ", 2) == 0)
+                in_startup = cm_equal(text, "- name: Machine specifications");
+            if (in_startup && indent == 10 && cm_equal(text, "matrix-index: ${{ strategy.job-index }}")) index_bound = 1;
+        }
+        line = next;
+    }
+    if (file)
+    {
+        fputc('}', file); char *identity = cm_memory(file); fclose(file);
+        valid = valid && matrix_count == 1 && include && ordinal < cell && fields && index_bound &&
+            identity && strlen(identity) < size;
+        CmJson canonical = cm_json_parse(identity ? identity : "", identity ? strlen(identity) : 0);
+        valid = valid && canonical.valid && canonical.tokens[1].kind == 'o';
+        if (valid) cm_copy(out, size, identity);
+        cm_json_free(&canonical); free(identity);
+    }
+    free(copy);
+    return valid;
+}
 BUSTER_GLOBAL_LOCAL int cm_workflow_proof(CmCollection *c, const CmJson *machine, CmRow *row, char fields[CM_FIELD_COUNT][CM_FIELD + 1])
 {
     char path[512], endpoint[1024];
@@ -245,13 +321,13 @@ BUSTER_GLOBAL_LOCAL int cm_workflow_proof(CmCollection *c, const CmJson *machine
             const char *index = cm_machine_value(machine, "matrix_index");
             unsigned field = cm_member(machine, 1, "matrix_index");
             uint64_t ordinal = 0;
-            if (cm_unsigned(index, &ordinal) && ordinal < 256 && static_matrix)
-                snprintf(fields[CM_MATRIX], CM_FIELD + 1, "definition:%s/cell:%" PRIu64, blob_sha, ordinal);
+            if (cm_unsigned(index, &ordinal) && ordinal < 256 && static_matrix &&
+                cm_matrix_identity(fields[CM_MATRIX], CM_FIELD + 1, workflow, key, ordinal)) { }
             else if (cm_equal(cm_get(machine, field, "status"), "not_applicable"))
                 cm_copy(fields[CM_MATRIX], CM_FIELD + 1, "non-matrix");
             else cm_copy(fields[CM_MATRIX], CM_FIELD + 1, "unavailable-dynamic-or-reusable-matrix");
             // Dynamic inputs and reusable invocation context cannot be guessed.
-            cm_copy(fields[CM_INVOCATION], CM_FIELD + 1, "unavailable-caller-context");
+            cm_copy(fields[CM_INVOCATION], CM_FIELD + 1, "direct");
             row->s[CM_HARDWARE] = "verified-startup";
         }
         free(workflow);

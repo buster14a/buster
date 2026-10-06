@@ -301,7 +301,7 @@ BUSTER_GLOBAL_LOCAL int cm_publish_stage(CmTransport *t, const char *directory)
         {
             const char *path = cm_get(&plan, entry, "path"), *name = cm_get(&plan, entry, "file");
             char *content = NULL;
-            valid = out.count < CM_FILES && cm_path(path) && strlen(name) == 7 &&
+            valid = out.count < CM_FILES && cm_publication_path(path) && strlen(name) == 7 &&
                 cm_regular_read(directory, name, &content);
             if (valid && strlen(path) > 6 && cm_equal(path + strlen(path) - 6, ".jsonl") && strncmp(path, "history/", 8) == 0)
             {
@@ -313,6 +313,18 @@ BUSTER_GLOBAL_LOCAL int cm_publish_stage(CmTransport *t, const char *directory)
                 if (available < 0) valid = 0;
                 if (prior) valid = valid && strlen(content) >= strlen(prior) && strncmp(content, prior, strlen(prior)) == 0;
                 free(prior);
+            }
+            for (unsigned i = 0; valid && i < out.count; ++i) valid = !cm_equal(out.files[i].path, path);
+            if (valid && cm_equal(path, "manifest.json"))
+            {
+                CmJson manifest = cm_json_parse(content, strlen(content));
+                valid = manifest.valid && cm_equal(cm_get(&manifest, 1, "schema"), "buster-ci-history-manifest-v1") &&
+                    cm_equal(cm_get(&manifest, 1, "watermark"), cm_get(&plan, 1, "observed_at")) &&
+                    cm_equal(cm_get(&manifest, 1, "collector_revision"), t->revision) &&
+                    cm_equal(cm_get(&manifest, 1, "policy"), CM_POLICY) &&
+                    cm_equal(cm_get(&manifest, 1, "producer_run_id"), cm_get(&plan, 1, "producer_run_id")) &&
+                    cm_equal(cm_get(&manifest, 1, "producer_run_attempt"), cm_get(&plan, 1, "producer_run_attempt"));
+                cm_json_free(&manifest);
             }
             if (valid && cm_equal(path, "history/progress.json"))
             {
@@ -331,6 +343,9 @@ BUSTER_GLOBAL_LOCAL int cm_publish_stage(CmTransport *t, const char *directory)
             }
             if (!valid) free(content);
         }
+        int has_manifest = 0;
+        for (unsigned i = 0; i < out.count; ++i) has_manifest |= cm_equal(out.files[i].path, "manifest.json");
+        valid = valid && has_manifest;
         if (valid) valid = identical ? out.count > 0 : lease && newer &&
             cm_publish(t, out.files, out.count, cm_get(&plan, 1, "observed_at"));
     }

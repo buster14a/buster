@@ -237,13 +237,13 @@ BUSTER_GLOBAL_LOCAL int cm_sample(const CmRow *r)
 }
 BUSTER_GLOBAL_LOCAL int cm_context(const CmRow *r)
 {
-    const unsigned required[] = {CM_WORKFLOW, CM_JOB_KEY, CM_MATRIX, CM_WORKFLOW_BLOB, CM_CPU,
+    const unsigned required[] = {CM_WORKFLOW, CM_JOB_KEY, CM_MATRIX, CM_INVOCATION, CM_WORKFLOW_BLOB, CM_CPU,
         CM_OS, CM_OS_VERSION, CM_KERNEL, CM_ARCH, CM_PROCESS_ARCH, CM_EFFECTIVE_CPU,
         CM_IMAGE, CM_IMAGE_VERSION, CM_TOOLCHAIN, CM_CACHE, CM_WORKLOAD, CM_WORKERS, CM_TESTED_SHA};
     int result = cm_equal(r->s[CM_HARDWARE], "verified-startup") &&
         cm_equal(r->s[CM_CONTEXT_STATUS], "complete");
     for (unsigned i = 0; result && i < sizeof(required) / sizeof(required[0]); ++i)
-        result = r->s[required[i]][0] && !cm_equal(r->s[required[i]], "unknown") && !cm_equal(r->s[required[i]], "unavailable");
+        result = r->s[required[i]][0] && strncmp(r->s[required[i]], "unknown", 7) != 0 && strncmp(r->s[required[i]], "unavailable", 11) != 0;
     return result;
 }
 BUSTER_GLOBAL_LOCAL int cm_same_series(const CmRow *a, const CmRow *b)
