@@ -455,11 +455,12 @@ captures (#2741).
   diagnostic, unsealed process latency; see
   [`benchmarks/9700x/README.md`](../../benchmarks/9700x/README.md) and its
   [admission guide](../../benchmarks/9700x/ADMISSION.md). Once enabled, it
-  also runs the routine `uarch_lab.py compare` of each owner-authored main
-  merge-queue candidate against its first parent (#2752; frozen
-  `compiler-compare-v1` profile, report-only). Each comparison is published as
-  the `9700X compiler benchmark` check on the candidate commit; see
-  [merge-queue admission](../merge-queue-admission.md#9700x-compiler-comparison-2752).
+  also runs the routine `uarch_lab.py compare` of each commit after it lands
+  on main against its first parent (#2752; frozen `compiler-compare-v1`
+  profile, report-only, merging never waits). Each comparison is published as
+  the `9700X compiler benchmark` check on that main commit; during merge bursts
+  only the newest pending commit is measured. See the
+  [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
   An owner pull request can request the same comparison of its head against
   its merge base before merging by changing
   `benchmarks/9700x/compiler-compare.request` (#2769); see the

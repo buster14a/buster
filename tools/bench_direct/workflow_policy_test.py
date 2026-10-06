@@ -138,15 +138,16 @@ DIRECT_REQUEST_TRIGGER = (
     "      - 'benchmarks/9700x/compiler-compare.request'",
 )
 
-# The merge-group compiler comparison (#2752): main's definition, started by
-# the merge_group request marker's completion, only while both variables are
-# set. GitHub starts queue events, so the actor is not the authority; the
-# authorizer re-reads the queue ref, the group commit and its pull request.
+# The main compiler comparison (#2752): main's definition, started by the
+# push-to-main request marker's completion, only while both variables are set.
+# Main is trusted code, so the pusher is not the authority; the authorizer
+# re-reads the commit, its first parent and main itself.
 COMPILER_TERMS = (
     "vars.BENCH_DIRECT_ENABLED == 'true'",
     "vars.BENCH_COMPILER_ENABLED == 'true'",
     "github.event_name == 'workflow_run'",
-    "github.event.workflow_run.event == 'merge_group'",
+    "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.head_branch == 'main'",
     "github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml'",
     "github.event.workflow_run.conclusion == 'success'",
     "github.event.workflow_run.head_repository.full_name == github.repository",
@@ -176,19 +177,17 @@ COMPILER_AUTHORIZE_BLOCKS = (
         "          BQ_REPOSITORY: ${{ github.repository }}",
         "          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}",
         "          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}",
-        "          BQ_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}",
         "          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}",
         "        run: python3 -B tools/bench_direct/authorize_compiler.py",
     ),
 )
 COMPILER_AUTHORIZER_MARKERS = (
-    "from authorize import COMMIT, DECIMAL, MAINTAINER, REPOSITORY, fetch, full_name, identity",
+    "from authorize import COMMIT, DECIMAL, REPOSITORY, fetch, full_name",
     'REQUEST_WORKFLOW = ".github/workflows/9700x-compiler-request.yml"',
-    '("request event", run.get("event") == "merge_group")',
-    '("live queue ref names the head")',
-    '("pull request author", identity(pull.get("user")) == MAINTAINER)',
-    '("pull request head repository", full_name(pull_head_record.get("repo")) == repository)',
-    '("pull request head is the second parent", bool(pull_head) and pull_head_record.get("sha") == pull_head)',
+    '("request event", run.get("event") == "push")',
+    '("request branch", run.get("head_branch") == "main")',
+    'on_main = fetch(f"{prefix}/compare/{head}...main", token)',
+    'failures.append("commit is still on main")',
 )
 COMPILER_RUN_LINES = (
     "    needs: authorize-compiler",
@@ -229,21 +228,28 @@ COMPILER_RUN_SCRIPT = [
     "          for commit in \"$BQ_BASE_COMMIT\" \"$BQ_BASE_TREE\" \"$BQ_HEAD_COMMIT\" \"$BQ_HEAD_TREE\" \"$BQ_PULL_HEAD\" \"$BQ_TRUSTED_REVISION\"; do",
     "            [[ \"$commit\" =~ ^[0-9a-f]{40}$ ]]",
     "          done",
-    "          [[ \"$BQ_PULL\" =~ ^[1-9][0-9]*$ ]]",
+    "          [[ \"$BQ_PULL\" =~ ^[0-9]+$ ]]",
     "          [[ \"$(git -C candidate rev-parse HEAD)\" == \"$BQ_HEAD_COMMIT\" ]]",
-    "          python3 -B trusted/tools/bench_direct/compiler_compare.py --mode queue \\",
+    "          python3 -B trusted/tools/bench_direct/compiler_compare.py --mode main \\",
     "            --candidate candidate --lab trusted/tools/uarch_lab.py \\",
     "            --work \"$RUNNER_TEMP/compiler-bench/work\" --evidence \"$RUNNER_TEMP/compiler-bench/evidence\" \\",
-    "            --summary \"$GITHUB_STEP_SUMMARY\" --repository \"$BQ_REPOSITORY\" --ref \"refs/heads/$BQ_QUEUE_BRANCH\" \\",
+    "            --summary \"$GITHUB_STEP_SUMMARY\" --repository \"$BQ_REPOSITORY\" --ref refs/heads/main \\",
     "            --pull \"$BQ_PULL\" --pull-head \"$BQ_PULL_HEAD\" --base \"$BQ_BASE_COMMIT\" --base-tree \"$BQ_BASE_TREE\" \\",
     "            --head \"$BQ_HEAD_COMMIT\" --head-tree \"$BQ_HEAD_TREE\" --trusted-revision \"$BQ_TRUSTED_REVISION\" \\",
     "            --request-run-id \"$BQ_REQUEST_RUN_ID\" --run-id \"$BQ_RUN_ID\" --run-attempt \"$BQ_RUN_ATTEMPT\"",
 ]
-PULL_RUN_SCRIPT = [line.replace("--mode queue", "--mode pull")
-                   .replace("--ref \"refs/heads/$BQ_QUEUE_BRANCH\"", "--ref \"refs/pull/$BQ_PULL/head\"")
+PULL_RUN_SCRIPT = [line.replace("--mode main", "--mode pull")
+                   .replace("--ref refs/heads/main", "--ref \"refs/pull/$BQ_PULL/head\"")
+                   .replace("^[0-9]+$", "^[1-9][0-9]*$")
                    .replace("--pull-head \"$BQ_PULL_HEAD\"", "--pull-head \"$BQ_HEAD_COMMIT\"")
                    .replace(" \"$BQ_PULL_HEAD\" \"$BQ_TRUSTED_REVISION\"", " \"$BQ_TRUSTED_REVISION\"")
                    for line in COMPILER_RUN_SCRIPT]
+# A main measurement in progress is never cancelled; pull requests coalesce.
+DIRECT_CONCURRENCY = (
+    "concurrency:",
+    "  group: buster-9700x-direct-bench-${{ github.event.workflow_run.event == 'push' && 'main-compare' || github.event.workflow_run.head_branch }}",
+    "  cancel-in-progress: ${{ github.event.workflow_run.event != 'push' }}",
+)
 PULL_RUN_LINES = (
     "    needs: authorize",
     PULL_RUN_IF,
@@ -287,8 +293,8 @@ COMPILER_PUBLISH_BLOCKS = (
 )
 COMPILER_REQUEST_TRIGGER = (
     "on:",
-    "  merge_group:",
-    "    types: [checks_requested]",
+    "  push:",
+    "    branches: [main]",
 )
 
 DOCUMENTATION_REQUIREMENTS = {
@@ -305,7 +311,7 @@ DOCUMENTATION_REQUIREMENTS = {
         "## Administrator steps",
         ".github/workflows/9700x-direct-bench.yml@refs/heads/main",
         "must use **Re-run all jobs**",
-        "## Merge-group compiler comparison",
+        "## Main compiler comparison",
         "BENCH_COMPILER_ENABLED",
         "The performance verdict is report-only.",
     ),
@@ -515,7 +521,9 @@ def check_compiler_path(errors: list[str]) -> None:
     start = request_lines.index("on:") if "on:" in request_lines else len(request_lines)
     trigger = [line for line in request_lines[start:start + len(COMPILER_REQUEST_TRIGGER) + 1] if line.strip()]
     if tuple(trigger) != COMPILER_REQUEST_TRIGGER:
-        errors.append("compiler request workflow trigger must be exactly the reviewed merge_group block")
+        errors.append("compiler request workflow trigger must be exactly the reviewed push-to-main block")
+    if not contains_block(DIRECT.read_text(encoding="utf-8").splitlines(), DIRECT_CONCURRENCY):
+        errors.append("direct workflow concurrency must never cancel a main measurement in progress")
     if [line.rstrip() for line in request_lines if line.lstrip().startswith("permissions:")] != ["permissions: {}"]:
         errors.append("compiler request workflow must grant no GITHUB_TOKEN permissions")
     for marker in ("uses:", "self-hosted", "buster-zen5", "ryzen-9700x", "group: buster-9700x-service",
