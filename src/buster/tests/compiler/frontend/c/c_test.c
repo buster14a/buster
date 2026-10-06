@@ -800,6 +800,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression(UnitTestArgumen
         {S8("struct S { _Alignas(16) char m; }; enum { QUERY = sizeof(*(struct S *)0) };"), 16},
         {S8("int (*p)(void); enum { QUERY = sizeof(0 ? p : p) };"), 8},
         {S8("static int table[3]; enum { QUERY = sizeof(table) / sizeof((table)[0]) };"), 3},
+        // Alignment operands that are expressions need the typed query, not the
+        // preprocessor-style integer evaluator.
+        {S8("struct S { char c; _Alignas(sizeof(void *)) char d; }; enum { QUERY = sizeof(struct S) };"), 16},
+        {S8("struct S { char c; _Alignas(_Alignof(double)) char d; }; enum { QUERY = sizeof(struct S) };"), 16},
+        {S8("struct S { char c; _Alignas(sizeof(void *)) char d; }; enum { QUERY = _Alignof(struct S) };"), 8},
     };
     typedef struct CTestEnumSizeofRefusal CTestEnumSizeofRefusal;
     struct CTestEnumSizeofRefusal
@@ -3127,6 +3132,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                 c_test_scratch_end(temporary);
             }
         }
+    }
+    return result;
+}
+
+// Enumerator initializers and bit-field widths evaluate typed constants in a
+// scratch region. When the parse itself runs in a scratch arena, that region
+// must not be the parse arena: the lazily built delimiter index lives there
+// and a rewind below it leaves a stale "built" index (#1576).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_scratch_keeps_position_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("enum { E = sizeof(int) + (1 << 2) };\nint probe(void) { return E; }\n"),
+        S8("struct B { unsigned a : sizeof(int) - 1; unsigned b : (1 + 1); };\nint probe(void) { return sizeof(struct B); }\n"),
+    };
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[fixture],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0, sources[fixture]);
+        if (BUSTER_REQUIRE(arguments, parsed.position_index))
+        {
+            if (parsed.position_index->built)
+            {
+                u8 const* arena_end = (u8 const*)parsed.arena + parsed.arena->position;
+                u8 const* index_end = (u8 const*)(parsed.position_index->matching_delimiters_plus_one + (tokens.token_count ? tokens.token_count : 1));
+                BUSTER_TEST_RAW(arguments, index_end <= arena_end, sources[fixture]);
+            }
+        }
+        scratch_end(temporary);
     }
     return result;
 }
@@ -44095,6 +44132,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
     C_TEST_FIXTURE(arguments, c_test_enum_runtime);
+    C_TEST_FIXTURE(arguments, c_test_enum_scratch_keeps_position_index);
     C_TEST_FIXTURE(arguments, c_test_unnamed_parameter_definitions);
     C_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
     C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
