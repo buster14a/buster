@@ -55811,16 +55811,18 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                       });
         declaration_functions[declaration_index] = function;
     }
-    Arena* lowering_arena = arena_create((ArenaCreation){0});
+    Arena* lowering_arena = c_frontend_arena_create((ArenaCreation){0}, C_FRONTEND_RESERVATION_LOWERING);
     if (!lowering_arena)
     {
         *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-            .message = S8("could not allocate C function lowering arena"),
+            .message = S8("could not reserve the C function lowering arena"),
             .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
             .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
         };
+        result.program = 0;
         return result;
     }
+    bool reservation_failed = false;
     // Counting a definition's locals by scanning every entity per function is
     // quadratic in the translation unit; bucket the counts in one pass instead.
     u32* declaration_local_counts = arena_allocate(temporary_arena, u32, parse.declaration_count);
@@ -55960,6 +55962,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         u64 call_array_capacity = prepared_call_capacity ? prepared_call_capacity : 1;
         u64 body_array_capacity = declaration.body_token_count ? declaration.body_token_count : 1;
         u64 cleanup_capacity = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index];
+        String8 function_reservation_error = {0};
         // Match the builder initializer's carve order before allocating its
         // first array. Capacity failure is a source diagnostic, never a bump
         // allocator assertion after reserving only part of the builder.
@@ -56001,8 +56004,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                            c_ir_scratch_reservation_size(position, lowering_arena->reserved_size, &requested_size);
             if (scratch_fits && requested_size > lowering_arena->reserved_size)
             {
-                Arena* grown = arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}});
+                Arena* grown = c_frontend_arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}},
+                                                      C_FRONTEND_RESERVATION_LOWERING);
                 scratch_fits = grown != 0;
+                if (!grown)
+                {
+                    reservation_failed = true;
+                    function_reservation_error = string_format(arena, S8("could not reserve {u64} bytes for C function lowering scratch arena"), requested_size);
+                }
                 if (scratch_fits)
                 {
                     // No builder rows exist yet. Close the old mark before
@@ -56020,7 +56029,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             scratch_end(lowering_temporary);
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = scratch_fits ? S8("C function body is too large to lower") : S8("C function lowering scratch reservation exceeded"),
+                .message = function_reservation_error.length ? function_reservation_error :
+                           scratch_fits ? S8("C function body is too large to lower") : S8("C function lowering scratch reservation exceeded"),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
@@ -56483,6 +56493,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         };
     }
     arena_destroy(lowering_arena, 1);
+    if (reservation_failed)
+    {
+        result.program = 0;
+    }
     result.canonical_ir_certified = result.program && !result.diagnostic_count &&
                                     !program->rejected_function_count && !module->rejected_function_count;
     return result;
@@ -56493,13 +56507,19 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
 {
     CIRLowerResult result = {0};
     CIrLowerCapacityPlan plan = {0};
-    if (arena && c_ir_lower_capacity_plan(preprocess, parse, &plan))
+    if (parse.diagnostic_count)
+    {
+        result.diagnostics = parse.diagnostics;
+        result.diagnostic_count = parse.diagnostic_count;
+    }
+    else if (arena && parse.analysis_complete && c_ir_lower_capacity_plan(preprocess, parse, &plan))
     {
         Arena* temporary_conflicts[] = {arena};
         TemporalArena temporary = scratch_begin(temporary_conflicts, BUSTER_ARRAY_LENGTH(temporary_conflicts));
         Arena* temporary_arena = temporary.arena;
         u64 reserved_size = query_reservation_limit ? BUSTER_MIN(query_reservation_limit, temporary_arena->reserved_size) : ARENA_MAX_RESERVATION;
         Arena* owned_temporary_arena = 0;
+        String8 reservation_error = {0};
         u64 position = temporary_arena->position;
         bool fits = true;
         if (!parse.scope_children_offsets)
@@ -56531,8 +56551,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             u64 query_position = position - (fits ? workspace : 0);
             if (fits && query_position > temporary_arena->reserved_size)
             {
-                owned_temporary_arena = arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}});
+                owned_temporary_arena = c_frontend_arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}},
+                                                               C_FRONTEND_RESERVATION_LOWERING);
                 fits = owned_temporary_arena != 0;
+                if (!fits)
+                {
+                    reservation_error = string_format(arena, S8("could not reserve {u64} bytes for C IR lowering query arena"), requested_size);
+                }
                 if (fits)
                 {
                     temporary_arena = owned_temporary_arena;
@@ -56546,7 +56571,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         else
         {
             *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){
-                .message = S8("C IR query capacity exceeds the lowering scratch reservation"),
+                .message = reservation_error.length ? reservation_error : S8("C IR query capacity exceeds the lowering scratch reservation"),
                 .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
@@ -56556,6 +56581,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             arena_destroy(owned_temporary_arena, 1);
         }
         scratch_end(temporary);
+    }
+    else if (arena)
+    {
+        *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){
+            .message = !parse.analysis_complete ? S8("C IR lowering requires completed semantic analysis") :
+                                                  S8("C IR lowering capacity exceeded"),
+            .location = (CSourceLocation){.line = 1, .column = 1},
+            .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+        };
     }
     return result;
 }

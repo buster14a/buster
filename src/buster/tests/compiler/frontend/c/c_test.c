@@ -14,6 +14,102 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/os.h>
 
+// Each ordinal names an actual arena_create in the chosen frontend phase.
+// The private seam arms arena_test_fail_next_reserve at that boundary, so
+// previously pooled mappings cannot make a supposed failure test succeed.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 parts[66];
+    parts[0] = S8("static int id(int x){return x;} int main(void){int x=0;");
+    for (u32 index = 1; index <= 64; index += 1)
+    {
+        parts[index] = S8("x += 1;");
+    }
+    parts[65] = S8("return id(x);}");
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    CFrontendReservationPhase phases[] = {C_FRONTEND_RESERVATION_PREPROCESS, C_FRONTEND_RESERVATION_ANALYSIS, C_FRONTEND_RESERVATION_LOWERING};
+    u32 counts[] = {4, 2, 2};
+    String8 names[] = {S8("preprocessing"), S8("semantic analysis"), S8("lowering")};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 phase = 0; phase < BUSTER_ARRAY_LENGTH(phases); phase += 1)
+        {
+            for (u32 ordinal = 1; ordinal <= counts[phase]; ordinal += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessOptions options = {.source_path = S8("reserve-failure.c"), .target = target_native,
+                                              .data_layout = target_data_layout(target_native)};
+                CPreprocessResult preprocess;
+                CAnalysisResult analysis;
+                CIRLowerResult lowered;
+                c_test_lowering_initial_reservation(phase == 2 && ordinal == 2 ? BUSTER_KB(64) : 0);
+                c_test_fail_frontend_reservation(phases[phase], ordinal);
+                preprocess = c_preprocess(temporary.arena, source, options);
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                lowered = c_lower_to_ir_with_options(temporary.arena, options.source_path, preprocess, analysis, target_native,
+                                                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                bool pending = c_test_frontend_reservation_pending();
+                c_test_fail_frontend_reservation(phases[phase], 0);
+                c_test_lowering_initial_reservation(0);
+                BUSTER_TEST(arguments, !pending);
+                BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified && lowered.diagnostic_count == 1);
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostics && lowered.diagnostic_count != 0))
+                {
+                    BUSTER_TEST(arguments, lowered.diagnostics[0].message.length != 0);
+                    BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, names[phase]) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, S8("reserve")) != BUSTER_STRING_NO_MATCH);
+                }
+                if (phase == 0)
+                {
+                    BUSTER_TEST(arguments, preprocess.error_count == 1 && !preprocess.tokens && !preprocess.token_count);
+                    BUSTER_TEST(arguments, syntax.diagnostic_count != 0 && !syntax.first_declaration);
+                }
+                if (phase == 1)
+                {
+                    BUSTER_TEST(arguments, !analysis.analysis_complete && analysis.diagnostic_count == 1);
+                }
+                c_preprocess_release(&preprocess);
+                CPreprocessResult recovered = c_preprocess(temporary.arena, source, options);
+                CParserResult recovered_syntax = c_parse_ast(temporary.arena, recovered);
+                CIRLowerResult recovered_ir = c_analyze_with_options(temporary.arena, options.source_path, recovered, recovered_syntax, target_native,
+                                                                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, !recovered.error_count && !recovered_ir.diagnostic_count && recovered_ir.canonical_ir_certified);
+                if (BUSTER_REQUIRE(arguments, recovered_ir.program && recovered_ir.program->module_count == 1))
+                {
+                    BUSTER_TEST(arguments, recovered_ir.program->modules[0].function_count == 2);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(recovered_ir.program, recovered_ir.program->modules).error == IR_VALIDATION_NONE);
+                    if (phase == 2 && ordinal == 2)
+                    {
+                        CAnalysisResult model = c_analyze_semantics_only(temporary.arena, recovered, recovered_syntax);
+                        if (BUSTER_REQUIRE(arguments, model.analysis_complete && !model.diagnostic_count && model.declaration_count != 0))
+                        {
+                            CDeclaration large = model.declarations[0];
+                            large.token_count = 1000000;
+                            model.declarations = &large;
+                            model.declaration_count = 1;
+                            c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_LOWERING, 1);
+                            CIRLowerResult query = c_lower_to_ir_with_options(temporary.arena, options.source_path, recovered, model, target_native,
+                                                                             (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                            bool query_pending = c_test_frontend_reservation_pending();
+                            c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_LOWERING, 0);
+                            BUSTER_TEST(arguments, !query_pending && !query.program && !query.canonical_ir_certified);
+                            if (BUSTER_REQUIRE(arguments, query.diagnostics && query.diagnostic_count == 1))
+                            {
+                                BUSTER_TEST(arguments, string_first_sequence(query.diagnostics[0].message, S8("C IR lowering query arena")) != BUSTER_STRING_NO_MATCH);
+                            }
+                        }
+                    }
+                }
+                c_preprocess_release(&recovered);
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23368,6 +23464,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
         BUSTER_TEST(arguments, model_temporary.arena != message_temporary.arena);
         u64 model_position = model_temporary.arena->position;
         u64 message_position = message_temporary.arena->position;
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 1);
+        CDiagnostic refused_reservation = c_test_check_named_call_arities(message_temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
+        bool reserve_pending = c_test_frontend_reservation_pending();
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_ANALYSIS, 0);
+        BUSTER_TEST(arguments, !reserve_pending);
+        BUSTER_STRING_TEST(arguments, refused_reservation.message, S8("could not reserve the C semantic analysis GNU attribute-role arena"));
         for (u32 repetition = 0; repetition < 16; repetition += 1)
         {
             CDiagnostic checked = c_test_check_named_call_arities(message_temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
@@ -38814,7 +38916,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_diagnostic_storage(UnitTestArgu
         CIRLowerResult analysis = c_analyze(temporary.arena, S8("syntax-storage.c"), tokens, syntax, target_native);
         BUSTER_TEST(arguments, analysis.diagnostic_count == 0);
         CParserResult empty = c_parse_ast(temporary.arena, (CPreprocessResult){0});
-        BUSTER_TEST(arguments, empty.diagnostics == 0 && empty.diagnostic_count == 0 && empty.diagnostic_capacity == 0);
+        if (BUSTER_REQUIRE(arguments, empty.diagnostics != 0 && empty.diagnostic_count == 1 && empty.diagnostic_capacity == 1))
+        {
+            BUSTER_TEST(arguments, empty.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_TEST(arguments, empty.diagnostics[0].message.length != 0);
+        }
         CParserResult no_arena = c_parse_ast(0, tokens);
         BUSTER_TEST(arguments, no_arena.diagnostics == 0 && no_arena.diagnostic_count == 0 && no_arena.diagnostic_capacity == 0);
         c_test_scratch_end(temporary);
@@ -44203,6 +44309,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     C_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
     C_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
+    C_TEST_FIXTURE(arguments, c_test_frontend_reservation_failures);
     C_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
     C_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
     C_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
@@ -44989,7 +45096,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     CParseResult nested_parse = c_parse(nested_temporary.arena, nested_tokens);
     CIRLowerResult nested_ir = c_lower_to_ir(nested_temporary.arena, S8("nested-calls.c"), nested_tokens, nested_parse, target_native);
     BUSTER_TEST(arguments, nested_ir.diagnostic_count == 0);
-    if (nested_ir.program)
+    if (BUSTER_REQUIRE(arguments, nested_ir.program && nested_ir.program->module_count == 1 &&
+                                      nested_ir.program->modules[0].functions && nested_ir.program->modules[0].function_count >= 2))
     {
         IrFunction* nested_main = nested_ir.program->modules[0].functions + 1;
         u32 nested_call_count = 0;
