@@ -14867,7 +14867,72 @@ BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 
     }
 }
 
+BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope_attempt(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                 CScopeId scope, u32 start, u32 end, bool tag_only_declaration,
+                                                                 u32* declarator_start);
+
+// Defines the struct and union bodies written inside a `typeof (...)` operand
+// of [start, end) that no type carries yet, each through its own parse so the
+// operand's expression read finds a complete type to select members from --
+// `__typeof__(((struct { char c[7]; } *)0)->c)`. The operand's own parse
+// cannot define a tag, so without this its expression read sees an incomplete
+// one and the whole declaration is dropped. Returns whether a definition was
+// added. One level only: a body nested in a member is its own parse's job.
+BUSTER_C_INTERNAL bool c_parse_define_typeof_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                          u32 start, u32 end)
+{
+    bool defined = false;
+    for (u32 index = start; index + 1 < end; index += 1)
+    {
+        String8 word = preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]) : (String8){0};
+        bool is_typeof = string_equal(word, S8("typeof")) || string_equal(word, S8("__typeof__")) || string_equal(word, S8("__typeof")) ||
+                         string_equal(word, S8("typeof_unqual"));
+        if (is_typeof && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close < end)
+            {
+                for (u32 scan = index + 2; scan < close; scan += 1)
+                {
+                    u32 definition_close = 0;
+                    bool enumeration = c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[scan], C_SYMBOL_WELL_KNOWN_ENUM);
+                    if (!enumeration && c_parse_aggregate_definition_at(preprocess, scan, close, &definition_close))
+                    {
+                        u32 open = scan + 1 + (preprocess.tokens[scan + 1].kind == C_TOKEN_IDENTIFIER ? 1 : 0);
+                        if (!c_parse_aggregate_definition_registered(result, open))
+                        {
+                            // The first attempt already reported anything wrong
+                            // with the body; the retry reports it once more.
+                            u32 ignored = 0;
+                            u32 diagnostic_count = result->diagnostic_count;
+                            c_parse_scalar_type_in_scope_attempt(machine, result, preprocess, scope, scan, definition_close + 1, false, &ignored);
+                            result->diagnostic_count = diagnostic_count;
+                            defined |= c_parse_aggregate_definition_registered(result, open);
+                        }
+                        scan = definition_close;
+                    }
+                }
+                index = close;
+            }
+        }
+    }
+    return defined;
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope_context(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                 CScopeId scope, u32 start, u32 end, bool tag_only_declaration,
+                                                                 u32* declarator_start)
+{
+    bool outermost = machine->frame_count == 0;
+    CTypeId type = c_parse_scalar_type_in_scope_attempt(machine, result, preprocess, scope, start, end, tag_only_declaration, declarator_start);
+    if (type.value == C_ID_UNDERLYING_INVALID && outermost && c_parse_define_typeof_aggregates(machine, result, preprocess, scope, start, end))
+    {
+        type = c_parse_scalar_type_in_scope_attempt(machine, result, preprocess, scope, start, end, tag_only_declaration, declarator_start);
+    }
+    return type;
+}
+
+BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope_attempt(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                                  CScopeId scope, u32 start, u32 end, bool tag_only_declaration,
                                                                  u32* declarator_start)
 {
@@ -15065,7 +15130,30 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type_core(CParseResult* resul
                                      : string_equal(tag_word, S8("union")) ? C_TYPE_UNION
                                      : string_equal(tag_word, S8("enum"))  ? C_TYPE_ENUM
                                                                            : C_TYPE_INVALID;
-                if (tag_kind != C_TYPE_INVALID)
+                // A definition written in the operand -- `(struct { int a; } *)`
+                // -- is already a registered type once the declaration pass
+                // has defined it; this walk cannot define one, so it reads
+                // the row by where its body opens.
+                u32 definition_close = 0;
+                if (tag_kind != C_TYPE_INVALID && !result->protected_type_constant_query &&
+                    c_parse_aggregate_definition_at(preprocess, tag_index, base_end, &definition_close))
+                {
+                    u32 body_open = tag_index + 1 + (preprocess.tokens[tag_index + 1].kind == C_TOKEN_IDENTIFIER ? 1 : 0);
+                    for (u32 row = c_parse_definition_scan_start(result, body_open + 1); row < result->type_count && type.value == C_ID_UNDERLYING_INVALID;
+                         row += 1)
+                    {
+                        if (result->types[row].definition_start == body_open + 1 && (result->types[row].is_complete || result->types[row].kind == C_TYPE_ENUM))
+                        {
+                            type.value = row;
+                            index = definition_close + 1;
+                        }
+                    }
+                    if (type.value != C_ID_UNDERLYING_INVALID && has_tag_qualifier)
+                    {
+                        type = c_parse_add_qualified_type(result, type, tag_qualifiers);
+                    }
+                }
+                if (type.value == C_ID_UNDERLYING_INVALID && tag_kind != C_TYPE_INVALID)
                 {
                     u32 name_index = c_parse_skip_attributes(preprocess, tag_index + 1, base_end);
                     if (name_index < base_end && preprocess.tokens[name_index].kind == C_TOKEN_IDENTIFIER)
