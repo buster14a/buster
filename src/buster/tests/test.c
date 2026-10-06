@@ -14,7 +14,8 @@
 // test_watchdog_child_run is its private hanging payload. Parallel gang
 // boundaries are written live around deterministic lane replay, and
 // test_parallel_crash_child_self_test covers abrupt lane exit without changing
-// registered assertion or TEST_MODULE_TIMING totals.
+// registered assertion or TEST_MODULE_TIMING totals. iOS launch observations
+// bracket library_tests preparation before the first fixture can report.
 // Deliberate harness failures preserve their diagnostics and accounting while
 // suppressing only their debugger stop; test_debugger_failure_self_test checks
 // that ordinary argument-bearing and argument-free failures still stop.
@@ -33,6 +34,7 @@
 // selected timing rows to the complete registered suite for the parent.
 
 #include <buster/tests/test.h>
+#include <buster/lib/entry_point.h>
 
 #include <buster/lib/os.h>
 #include <buster/lib/arena.h>
@@ -2425,6 +2427,9 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test(UnitTestAr
 
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
+#if BUSTER_IOS
+    buster_ios_launch_trace(S8("suite-entry"));
+#endif
     BatchTestResult result = {0};
     if (!arguments || !arguments->arena || !arguments->show)
     {
@@ -2457,6 +2462,9 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     // for later work on their selected context. Fill every compiler-global
     // read-only table before the first module can create those workers.
     compiler_prewarm();
+#if BUSTER_IOS
+    buster_ios_launch_trace(S8("prewarm-ready"));
+#endif
     BUSTER_CHECK(c_test_lex_compact_tables_ready());
     // Keep the root path outside the per-descriptor arena rewind points. A
     // child that exits before requesting a path therefore owns no filesystem
@@ -2542,6 +2550,9 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     bool watchdog_started = test_watchdog_start(arguments, TEST_ID_COUNT);
+#if BUSTER_IOS
+    buster_ios_launch_trace(S8("fixtures-ready"));
+#endif
     u64 timing_record_count = 0;
     result = buster_test_run_parallel_descriptors(arguments, descriptors, TEST_ID_COUNT, timing_enabled, &timing_record_count);
     bool watchdog_stopped = test_watchdog_stop();
