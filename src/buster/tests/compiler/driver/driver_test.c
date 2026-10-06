@@ -23,6 +23,7 @@
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 // compiler_driver_test_scalar_argument_boundaries exchanges fixed-prototype scalar
 // register/stack boundaries with independent objects, controls, and native-only runs.
+// compiler_driver_test_wasm_node_cold_start pays Node's first page-in under its own budget.
 // compiler_driver_test_wasm_string_records checks multi-module lookup scaling.
 // compiler_driver_test_wasm_signature_interning checks hashed signature numbering.
 // compiler_driver_test_wasm_export_names checks hashed export-name uniqueness.
@@ -12933,6 +12934,58 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
     return result;
 }
 
+// #2194: the first Node launch in a job pages its executable in from disk.
+// Hosted Linux AArch64 runners have stalled that page-in for about a minute
+// at near-zero CPU, so the oracle charged with the cold start timed out before
+// its script ran. This fixture pays that one-time cost under its own bounded
+// budget, before the first real oracle in module order, and fails if Node
+// cannot start and compile Wasm within it. Every oracle keeps its unchanged
+// deadline, retry and success rules.
+#define COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS 120000000
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_cold_start(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+    if (node.length)
+    {
+        // Compile and instantiate an empty module so V8's Wasm paths are
+        // paged in too, then write synchronously and exit explicitly (#2066).
+        String8 marker = S8("WASM_NODE_COLD_START_DONE\n");
+        String8 node_arguments[] = {node, S8("-e"),
+                                    S8("new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0])));"
+                                       "require('fs').writeSync(1, 'WASM_NODE_COLD_START_DONE\\n');process.exit(0);")};
+        u64 start = os_now_microseconds();
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
+                                                    (ProcessSpawnOptions){
+                                                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                                   ((u64)1 << STANDARD_STREAM_ERROR),
+                                                        .use_process_environment = true,
+                                                        .search_path = true,
+                                                    });
+        ProcessWaitResult waited = {.result = PROCESS_RESULT_NOT_EXISTENT};
+        if (spawn.handle)
+        {
+            waited = os_process_wait_deadline(arguments->arena, spawn, COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS);
+        }
+        u64 elapsed = os_now_microseconds() - start;
+        String8 standard_output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+        String8 standard_error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+        arguments->show(arguments,
+                        S8("WASM_NODE_COLD_START spawned={u32} result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64} "
+                           "deadline_us={u64}\nstdout:\n{S8}stderr:\n{S8}\n"),
+                        (u32)(spawn.handle != 0), (u32)waited.result, waited.platform_status, (u32)waited.timed_out, elapsed,
+                        (u64)COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS, standard_output, standard_error);
+        BUSTER_TEST(arguments, spawn.handle && !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && standard_error.length == 0 &&
+                                   string_equal(standard_output, marker));
+    }
+    else
+    {
+        arguments->show(arguments, S8("Wasm Node cold start skipped: Node is not installed\n"));
+    }
+    return result;
+}
+
 // Process-policy controls use a native child and a readiness handshake so their
 // short hang deadlines measure the payload after sanitizer startup. Real Wasm
 // oracles still execute Node with the platform deadline below.
@@ -23700,6 +23753,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_import_facts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_cold_start);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_aggregate_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_section_attribute);
