@@ -8668,6 +8668,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArgument
 // counted the same way. Each shape is checked at static storage, at automatic
 // storage and through an incomplete array, with a value that reaches the bytes
 // at run time. The source is inline so the frozen tests/ census is unchanged.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 const c_test_promoted_designator_continuation_types =
     S8_INITIALIZER("struct S\n"
        "{\n"
@@ -8818,6 +8819,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_promoted_designator_continuation_checks
        "    check(sizeof s_sized / sizeof s_sized[0] == 2 && s_sized[1].x == 6 && s_sized[1].u == 7 && s_sized[1].b == 8);\n"
        "    return automatic(5) != 0;\n"
        "}\n");
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_designator_continuation_runtime(UnitTestArguments* arguments)
 {
