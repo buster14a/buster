@@ -12694,6 +12694,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     };
     if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETER_RESULT)
     {
+        machine->member_declarator_depth -= 1;
         if (!machine->result_valid)
         {
             // `int (*fp)(void) junk;` fails the child, which reports nothing.
@@ -12703,6 +12704,11 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             if (extent < frame->declarator_end && !c_token_is_punctuator(&preprocess.tokens[extent], C_PUNCTUATOR_COLON))
             {
                 c_type_parse_aggregate_segment_trailing_token(machine, frame, extent);
+            }
+            else if (result->diagnostic_count != c_type_parse_frame_checkpoint(machine, frame)->diagnostic_count)
+            {
+                // The child named a parameter type it could not parse.
+                c_type_parse_aggregate_segment_fail(machine, frame, c_type_parse_frame_checkpoint(machine, frame)->diagnostic_count);
             }
             else
             {
@@ -12838,6 +12844,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 frame->name = preprocess.tokens[name_index];
                 frame->index = declarator;
                 frame->stage = C_TYPE_PARSE_STAGE_PARAMETER_RESULT;
+                machine->member_declarator_depth += 1;
                 if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                           .result = result,
                                                           .preprocess = frame->preprocess,
@@ -12850,6 +12857,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                                                           .has_name = true,
                                                       }))
                 {
+                    machine->member_declarator_depth -= 1;
                     c_type_parse_rollback(machine, result, c_type_parse_frame_checkpoint(machine, frame), frame->mutation_mark);
                     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
                 }
@@ -14002,6 +14010,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
         frame->definition_type_start = result->array_bound_count;
+        frame->diagnostic_start = result->diagnostic_count;
         if (result->position_index && !result->position_index->built)
         {
             c_parse_position_index_build(result, preprocess);
@@ -14049,6 +14058,21 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
     {
         if (!machine->result_valid)
         {
+            // A member's function-pointer parameter list reaches here with no
+            // later reader of its specifiers, so name the token the scalar
+            // parse stopped at, the way c_parse_parameter_segment does for a
+            // declaration. The identifier-list form is not a parameter
+            // declaration here: it is only valid in a definition.
+            if (machine->member_declarator_depth && result->diagnostic_count == frame->diagnostic_start)
+            {
+                u32 type_name = c_parse_skip_attributes(preprocess, frame->start, frame->end);
+                while (type_name < frame->end && preprocess.tokens[type_name].kind == C_TOKEN_IDENTIFIER &&
+                       c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[type_name]))
+                {
+                    type_name = c_parse_skip_attributes(preprocess, type_name + 1, frame->end);
+                }
+                c_parse_diagnose_unknown_type_name(result, preprocess, type_name, false, frame->start, frame->end, false);
+            }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
         }
@@ -14727,6 +14751,9 @@ BUSTER_C_INTERNAL void c_type_parse_function_suffix_step(CTypeParseMachine* mach
 BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start)
 {
     WORK_LEDGER_RECORD(REDERIVE_TYPE_MACHINE_RUNS, 1);
+    // A discarded aggregate segment never reaches the stage that releases its
+    // count, and the machine outlives the failure.
+    u32 entry_member_declarator_depth = machine->member_declarator_depth;
     while (machine->frame_count > frame_start && !machine->failed)
     {
         CTypeParseFrame* frame = machine->frames + machine->frame_count - 1;
@@ -14780,6 +14807,7 @@ BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 
             }
         }
         machine->frame_count = frame_start;
+        machine->member_declarator_depth = entry_member_declarator_depth;
         machine->result_type = C_TYPE_ID_INVALID;
         machine->result_valid = false;
     }
@@ -16749,8 +16777,14 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 // comma boundary, so a sibling declarator's own list is never
                 // taken for this one's.
                 suffix_end = c_parse_trailing_attribute_start(preprocess, declarator_start, suffix_end);
+                // A declaration that creates storage reports a parameter type
+                // it cannot parse; a typedef, prototype or extern declaration
+                // stays lenient, as c_parse_declaration_declares_no_storage says.
+                bool reports_parameter_types = !c_parse_declaration_declares_no_storage(preprocess, declaration);
+                machine->member_declarator_depth += reports_parameter_types;
                 declaration->type =
                     c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
+                machine->member_declarator_depth -= reports_parameter_types;
                 // The parenthesized declarator parser owns the parameter
                 // records it creates, but the declaration still needs to
                 // point at that range for function signatures and body

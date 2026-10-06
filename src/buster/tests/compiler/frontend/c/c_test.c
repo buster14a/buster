@@ -38468,6 +38468,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         {S8("int f(void)\n{\n    __builtin_ms_va_list *p = 0;\n    return 0;\n}\nint following;\n"), S8("__builtin_ms_va_list"), 3, 5, true},
         {S8("int f(void)\n{\n    return (int)sizeof(__builtin_ms_va_list);\n}\nint following;\n"), S8("__builtin_ms_va_list"), 3, 24, true},
         {S8("int f(void *q)\n{\n    return q == (__builtin_ms_va_list *)0;\n}\nint following;\n"), S8("__builtin_ms_va_list"), 3, 18, true},
+        // A function-pointer member with an unknown parameter type (#2764).
+        {S8("void (*fp)(nosuch_t);\nint following;\n"), S8("nosuch_t"), 1, 12, true},
+        {S8("struct S { void (*fp)(nosuch_t); int a; };\nint following;\n"), S8("nosuch_t"), 1, 23, true},
+        {S8("struct S { void (*fp)(nosuch_t); int a; };\nint f(void) { struct S s; s.a = 1; return s.a; }\nint following;\n"),
+         S8("nosuch_t"), 1, 23, true},
+        {S8("union U { int a; void (*fp)(int, nosuch_t *); };\nint following;\n"), S8("nosuch_t"), 1, 34, true},
+        {S8("struct O { struct I { void (*fp)(const nosuch_t); } in; int b; };\nint following;\n"), S8("nosuch_t"), 1, 40, true},
+        {S8("struct S { void (*fp[2])(nosuch_t); int a; };\nint following;\n"), S8("nosuch_t"), 1, 26, true},
+        {S8("struct S { void (*(*fp)(int))(nosuch_t); int a; };\nint following;\n"), S8("nosuch_t"), 1, 31, true},
+        {S8("struct S { int a, (*fp)(nosuch_t); };\nint following;\n"), S8("nosuch_t"), 1, 25, true},
+        // The identifier-list form is only valid in a definition (Clang: "a
+        // parameter list without types is only allowed in a function
+        // definition"), so a member spells an unknown type name.
+        {S8("struct S { void (*fp)(old_style); int a; };\nint following;\n"), S8("old_style"), 1, 23, true},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
     {
@@ -38507,6 +38521,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         S8("[[maybe_unused]];\n"),
         S8("__attribute__((unused)) int attributed; __declspec(noinline) int decorated(void) { return 1; }\n"),
         S8("int legacy(old_style_argument); int unspecified();\n"),
+        S8("typedef int T; struct S { void (*fp)(T); void (*g)(const T *, int); void (*h[2])(void); void (*(*k)(int))(T); int a; };\n"),
+        S8("struct S { void (*fp)(struct S *); void (*g)(struct Later *); int a; };\n"),
         S8("int variadic(int marker, ...) { __builtin_va_list cursor; __builtin_va_start(cursor, marker); __builtin_va_end(cursor); "
            "return __builtin_expect(marker, 0); }\n"),
     };
@@ -38556,6 +38572,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unsupported_float_extension_diagnostic
         {S8(""), S8(" return_type(void) { return 0; }\nint following;\n")},
         {S8("int parameter_type("), S8(" a) { return 0; }\nint following;\n")},
         {S8("void (*function_pointer_object)("), S8(");\nint following;\n")},
+        // The member function-pointer forms (#2764).
+        {S8("struct S { void (*fp)("), S8("); int a; };\nint following;\n")},
+        {S8("struct S { void (*fp)(int, "), S8(" *); int a; };\nint following;\n")},
+        {S8("union U { int a; void (*fp)("), S8("); };\nint following;\n")},
+        {S8("struct O { struct I { void (*fp)("), S8("); } in; int b; };\nint following;\n")},
+        {S8("struct S { void (*fp[2])("), S8("); int a; };\nint following;\n")},
+        {S8("struct S { void (*(*fp)(int))("), S8("); int a; };\nint following;\n")},
+        {S8("struct S { void (*fp)("), S8("); int a; };\nint f(void) { struct S s; s.a = 1; return s.a; }\n")},
     };
     struct
     {
@@ -38652,6 +38676,50 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unsupported_float_extension_diagnostic
             BUSTER_TEST_RAW(arguments, errored, source);
             scratch_end(temporary);
         }
+    }
+    // A member function-pointer parse that exhausts the type machine abandons
+    // its aggregate segment mid-parse. The machine is reused for every later
+    // declaration, so the failure must not leave it reporting parameter types
+    // for declarations that create no storage (#2764): the prototypes, typedef
+    // and extern declarations that follow stay accepted.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("");
+        // Completing each forward-declared tag inside one parameter list records
+        // a mutation per tag, which outruns the machine's mutation capacity.
+        for (u32 tag = 0; tag < 200; tag += 1)
+        {
+            source = string_format(temporary.arena, S8("{S8}struct A{u32};\n"), source, tag);
+        }
+        source = string_format(temporary.arena, S8("{S8}{S8}"), source, S8("struct S { void (*fp)("));
+        for (u32 tag = 0; tag < 200; tag += 1)
+        {
+            source = string_format(temporary.arena, S8("{S8}{S8}struct A{u32}{S8}*p{u32}"), source, tag ? S8(", ") : S8(""), tag, S8(" { int x; } "), tag);
+        }
+        source = string_format(temporary.arena, S8("{S8}{S8}"), source,
+                               S8("); int a; };\n"
+                                  "extern _Float128 f(_Float128);\n"
+                                  "void g(nosuch_t);\n"
+                                  "typedef void (*callback_t)(_Float128);\n"
+                                  "extern void h(void (*)(_Float128));\n"
+                                  "extern void (*external_pointer)(_Float128);\n"
+                                  "int following;\n"));
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.source_path = S8("machine-failure-leak.c"), .target = target_native,
+                                 .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool machine_failed = false;
+        bool leaked_report = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            machine_failed |= string_equal(diagnostic.message, S8("C type parsing exceeded its explicit-machine capacity"));
+            leaked_report |= diagnostic.kind == C_DIAGNOSTIC_UNKNOWN_TYPE_NAME || string_equal(diagnostic.message, S8("unsupported type '_Float128'"));
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, S8("machine failure then lenient declarations"));
+        BUSTER_TEST_RAW(arguments, machine_failed, S8("machine failure then lenient declarations"));
+        BUSTER_TEST_RAW(arguments, !leaked_report, S8("machine failure then lenient declarations"));
+        scratch_end(temporary);
     }
     return result;
 }

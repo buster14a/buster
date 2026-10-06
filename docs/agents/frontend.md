@@ -239,9 +239,17 @@ contains `typedef __float128 _Float128;` and `_GNU_SOURCE` adds `_Float128`
 prototypes (`strtof128`, the math functions) to `<stdlib.h>`, `<math.h>` and
 `<Python.h>` users. The ignored typedef declares no name, so a later
 `typedef __float128 T; T x;` fails with `unknown type name 'T'`, and a use of
-the spelling itself is diagnosed as above. A function-pointer member of a struct
-whose parameter has one of these types is still dropped silently, like an
-unknown type there. `c_test_unsupported_float_extension_diagnostics` pins this.
+the spelling itself is diagnosed as above. A function-pointer parameter inside a
+struct or union member (including nested, array and function-returning-function-pointer
+declarators) is diagnosed the same way, as is an unknown type name there; the
+type-machine parameter frame reports it while `member_declarator_depth` is nonzero,
+which aggregate members and storage-creating parenthesized declarations set.
+An identifier-list parameter such as `void (*fp)(a)` is not accepted in a member
+(Clang: only valid in a function definition) and reports `unknown type name 'a'`;
+plain prototypes such as `int legacy(old_style_argument);` keep the GNU acceptance.
+Typedef, prototype and `extern` declarations of function pointers stay lenient.
+`c_test_unsupported_float_extension_diagnostics` and
+`c_test_unknown_type_name_diagnostics` pin this.
 
 ## Trigraph translation policy
 
