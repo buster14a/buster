@@ -6884,6 +6884,16 @@ BUSTER_C_INTERNAL u32 c_parse_identity_separator(CParseResult* result, CPreproce
     return found;
 }
 
+#define C_GENERIC_LOCAL_ASSOCIATIONS 16
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_generic_association_scratch_bytes;
+
+u64 c_test_generic_association_scratch_bytes(void)
+{
+    return c_generic_association_scratch_bytes;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                      CParseResult* result, CScopeId scope, u32 start, u32 end,
                                                      String8* message, u32* location)
@@ -6905,7 +6915,11 @@ BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine,
         if (!valid) *message = S8("could not determine the type of the _Generic controlling expression");
     }
     u64 mark = machine->scratch_arena->position;
-    CTypeId* associations = valid ? arena_allocate(machine->scratch_arena, CTypeId, close - controller_end) : 0;
+    // Only typed associations occupy this list; their expression token spans
+    // do not contribute storage. Nothing in the list escapes this query.
+    CTypeId local_associations[C_GENERIC_LOCAL_ASSOCIATIONS];
+    CTypeId* associations = local_associations;
+    u32 association_capacity = BUSTER_ARRAY_LENGTH(local_associations);
     u32 association_count = 0;
     u32 match_count = 0;
     CTypeIdentityQuery answer = {.token_start = start, .token_end = close + 1, .result_start = UINT32_MAX};
@@ -6944,6 +6958,26 @@ BUSTER_C_INTERNAL bool c_parse_generic_selection_one(CTypeParseMachine* machine,
                 {
                     *message = S8("_Generic selection has multiple compatible type associations");
                     valid = false;
+                }
+            }
+            if (valid)
+            {
+                if (association_count == association_capacity)
+                {
+                    u32 capacity = association_capacity * 2;
+                    valid = capacity > association_capacity;
+                    CTypeId* grown = valid ? arena_allocate(machine->scratch_arena, CTypeId, capacity) : 0;
+                    valid &= grown != 0;
+                    if (valid)
+                    {
+                        memcpy(grown, associations, association_count * sizeof(*grown));
+                        associations = grown;
+                        association_capacity = capacity;
+#if BUSTER_INCLUDE_TESTS
+                        c_generic_association_scratch_bytes += (u64)capacity * sizeof(*grown);
+#endif
+                    }
+                    else *message = S8("could not allocate _Generic association workspace");
                 }
             }
             if (valid)

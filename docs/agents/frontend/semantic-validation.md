@@ -166,6 +166,12 @@ controller or discarded values. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 
+Prepared `_Generic` lowering consumes the selected token range and lets its
+ordinary child expression produce the value and canonical type. It does not
+predict a selected type that the caller discards. Association duplicate checks
+keep up to sixteen type IDs locally; larger lists grow on accepted typed arms,
+independently of their expression token spans, and rewind at query completion.
+
 `c_test_type_identity_authority` inspects the independent expected return
 constants in raw canonical IR for both frontend forms on six native layouts.
 The `fixtures/type_identity.c` fixture beside the frontend tests repeats qualifier, decay, function
