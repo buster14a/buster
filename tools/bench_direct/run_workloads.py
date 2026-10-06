@@ -200,9 +200,20 @@ def main() -> int:
     for value in (arguments.base, arguments.head):
         if not re.fullmatch(r"[0-9a-f]{40}", value):
             failures.append("base and head must be full lowercase commit IDs")
-    compiler = shutil.which(arguments.cc)
+    # Every path is made absolute here, before any child changes directory, so
+    # the compile command and each launch name the same executable.
+    arguments.candidate = Path(os.path.abspath(arguments.candidate))
+    arguments.work = Path(os.path.abspath(arguments.work))
+    if arguments.summary:
+        arguments.summary = Path(os.path.abspath(arguments.summary))
+    found = shutil.which(arguments.cc)
+    compiler = os.path.abspath(found) if found else None
     if not compiler:
         failures.append(f"compiler not found: {arguments.cc}")
+    if not arguments.candidate.is_dir():
+        failures.append(f"--candidate is not a directory: {arguments.candidate}")
+    if arguments.summary and not arguments.summary.parent.is_dir():
+        failures.append(f"--summary directory does not exist: {arguments.summary.parent}")
     if arguments.cpu not in os.sched_getaffinity(0):
         failures.append(f"CPU {arguments.cpu} is not available to this process")
     workloads = [] if failures else changed_workloads(arguments.candidate, arguments.base, arguments.head)

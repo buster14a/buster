@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 HARNESS = Path(__file__).resolve().with_name("run_workloads.py")
+sys.path.insert(0, str(HARNESS.parent))
 COMPILER = shutil.which("clang") or shutil.which("cc")
 PASSING = '#include <stdio.h>\nint main(void) { puts("self-check ok checksum=2a"); return 0; }\n'
 FAILING = "int main(void) { return 3; }\n"
@@ -57,13 +58,15 @@ class DirectWorkloadTest(unittest.TestCase):
         git(self.repository, "commit", "-q", "-m", "head")
         return git(self.repository, "rev-parse", "HEAD")
 
-    def run_harness(self, head: str, cpu_model: str = APPROVED_CPU) -> subprocess.CompletedProcess:
+    def run_harness(self, head: str, cpu_model: str = APPROVED_CPU, work: str = "",
+                    cwd: Path | None = None, cc: str = "", candidate: str = "") -> subprocess.CompletedProcess:
         cpu = min(os.sched_getaffinity(0))
         return subprocess.run(
-            [sys.executable, "-B", "-c", LAUNCHER, str(HARNESS.parent), cpu_model, "--candidate", str(self.repository),
-             "--base", self.base, "--head", head, "--work", str(self.root / "work"),
-             "--summary", str(self.root / "summary.md"), "--cc", COMPILER, "--cpu", str(cpu)],
-            capture_output=True, text=True, check=False)
+            [sys.executable, "-B", "-c", LAUNCHER, str(HARNESS.parent), cpu_model,
+             "--candidate", candidate or str(self.repository),
+             "--base", self.base, "--head", head, "--work", work or str(self.root / "work"),
+             "--summary", str(self.root / "summary.md"), "--cc", cc or COMPILER, "--cpu", str(cpu)],
+            capture_output=True, text=True, check=False, cwd=cwd)
 
     def test_reports_every_run_and_its_output(self) -> None:
         result = self.run_harness(self.commit({"benchmarks/9700x/sort_check.c": PASSING}))
@@ -74,6 +77,70 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertEqual(result.stdout.count("| sample "), 9)
         self.assertEqual(result.stdout.count("| warmup "), 2)
         self.assertEqual((self.root / "summary.md").read_text(encoding="utf-8"), result.stdout)
+
+    def test_relative_work_path_from_another_directory(self) -> None:
+        head = self.commit({"benchmarks/9700x/sort_check.c": PASSING})
+        for label, work in (("relative", "rel work/nested"), ("dotted", "./dot work")):
+            with self.subTest(label=label):
+                cwd = self.root / f"cwd {label}"
+                cwd.mkdir()
+                result = self.run_harness(head, work=work, cwd=cwd)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((cwd / work / "sort_check" / "program").is_file())
+                self.assertFalse((cwd / work / "sort_check" / Path(work)).exists())
+
+    def test_relative_compiler_path(self) -> None:
+        head = self.commit({"benchmarks/9700x/sort_check.c": PASSING})
+        cwd = Path(COMPILER).parent
+        result = self.run_harness(head, cwd=cwd, cc="./" + Path(COMPILER).name)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"Compiler: `{COMPILER}`", result.stdout)
+
+    def test_compile_and_launches_use_one_absolute_executable(self) -> None:
+        import run_workloads
+        head = self.commit({"benchmarks/9700x/sort_check.c": PASSING})
+        cwd = self.root / "elsewhere"
+        cwd.mkdir()
+        seen: list[str] = []
+        real_run, real_once = subprocess.run, run_workloads.run_once
+
+        def fake_run(command, **keywords):
+            if command[0] != "git":
+                seen.append(command[command.index("-o") + 1])
+            return real_run(command, **keywords)
+
+        def fake_once(program, scratch, cpu):
+            seen.append(str(program))
+            return real_once(program, scratch, cpu)
+
+        arguments = ["run_workloads.py", "--candidate", str(self.repository), "--base", self.base,
+                     "--head", head, "--work", "rel work", "--cpu", str(min(os.sched_getaffinity(0))),
+                     "--cc", COMPILER]
+        previous = os.getcwd()
+        os.chdir(cwd)
+        try:
+            with open(os.devnull, "w") as quiet, patch.object(sys, "argv", arguments), \
+                    patch.object(run_workloads, "observed_cpu_model", lambda: APPROVED_CPU), \
+                    patch.object(run_workloads.subprocess, "run", fake_run), \
+                    patch.object(run_workloads, "run_once", fake_once), \
+                    patch.object(sys, "stdout", quiet):
+                status = run_workloads.main()
+        finally:
+            os.chdir(previous)
+        self.assertEqual(status, 0)
+        self.assertEqual(len(seen), 1 + 11)
+        self.assertEqual(set(seen), {str(cwd / "rel work" / "sort_check" / "program")})
+
+    def test_invalid_paths_fail_before_measuring(self) -> None:
+        head = self.commit({"benchmarks/9700x/sort_check.c": PASSING})
+        cases = (({"candidate": str(self.root / "missing")}, "--candidate is not a directory"),
+                 ({"cc": "no-such-compiler-2934"}, "compiler not found: no-such-compiler-2934"))
+        for keywords, reason in cases:
+            with self.subTest(reason=reason):
+                result = self.run_harness(head, **keywords)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(reason, result.stdout)
+                self.assertNotIn("| sample ", result.stdout)
 
     def test_other_or_unknown_host_measures_nothing(self) -> None:
         head = self.commit({"benchmarks/9700x/sort_check.c": PASSING})
