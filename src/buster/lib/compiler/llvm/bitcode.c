@@ -2909,6 +2909,13 @@ BUSTER_GLOBAL_LOCAL bool llvm_bc_struct_has_bit_field(IrType* type)
     return result;
 }
 
+// Unions and bit-field structs share one LLVM representation, an opaque byte
+// array, so their aggregate values are built in a temporary by member offset.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_aggregate_is_byte_array(IrType* type)
+{
+    return type && (type->kind == IR_TYPE_UNION || llvm_bc_struct_has_bit_field(type));
+}
+
 BUSTER_GLOBAL_LOCAL u32 llvm_bc_bit_field_aggregate(LlvmBcContext* context, LlvmBcFunction* record, IrFunction* function, IrBlock* block,
                                                     IrInstruction* instruction, u32* current_value_id, LlvmBcBitFieldAggregateMode mode);
 
@@ -3004,7 +3011,7 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
                 // undefined value an empty aggregate numbers to.
                 u32 undefined = llvm_bc_undef_constant(context, context->ir_type_ids[type->id.value]);
                 constant_value_ids[instruction_index] = instruction->operand_count ? LLVM_BC_INVALID_ID : undefined;
-                if (instruction->opcode == IR_OPCODE_AGGREGATE && llvm_bc_struct_has_bit_field(type))
+                if (instruction->opcode == IR_OPCODE_AGGREGATE && llvm_bc_aggregate_is_byte_array(type))
                 {
                     llvm_bc_bit_field_aggregate(context, 0, function, 0, instruction, 0, LLVM_BC_BIT_FIELD_AGGREGATE_CONSTANTS);
                     break;
@@ -3233,14 +3240,14 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     case IR_OPCODE_AGGREGATE:
     {
         IrType* aggregate = llvm_bc_ir_type(context, instruction->canonical_type);
-        if (!aggregate || aggregate->kind != IR_TYPE_STRUCT)
+        if (!aggregate || (aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION))
         {
             llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION,
-                         llvm_bc_s8("LLVM aggregate values currently require a non-bit-field struct"), function, block, instruction,
+                         llvm_bc_s8("LLVM aggregate values require a struct or union type"), function, block, instruction,
                          IR_SYMBOL_ID_INVALID);
             return LLVM_BC_INVALID_ID;
         }
-        if (llvm_bc_struct_has_bit_field(aggregate))
+        if (llvm_bc_aggregate_is_byte_array(aggregate))
         {
             return llvm_bc_bit_field_aggregate(context, 0, function, block, instruction, 0, LLVM_BC_BIT_FIELD_AGGREGATE_COUNT);
         }
@@ -3519,7 +3526,7 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_plan_instruction_allocas(LlvmBcContext* context,
     case IR_OPCODE_AGGREGATE:
     {
         IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
-        if (llvm_bc_struct_has_bit_field(type))
+        if (llvm_bc_aggregate_is_byte_array(type))
         {
             llvm_bc_plan_fixed_alloca(context, record, context->ir_type_ids[type->id.value],
                                      type->layout.alignment ? type->layout.alignment : 1);
@@ -4286,8 +4293,8 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_load(LlvmBcContext* context, u32 pointer, u3
     return result;
 }
 
-// A struct with bit-fields is an opaque byte array in LLVM, which insertvalue
-// cannot address by member. Its value is built in a zeroed temporary: members
+// A struct with bit-fields or a union is an opaque byte array in LLVM, which
+// insertvalue cannot address by member. Its value is built in a zeroed temporary: members
 // are stored at their byte offsets, and each bit-field byte is ORed in from the
 // masked, shifted value in i64, matching the little-endian allocation layout.
 // COUNT sizes the value plan, CONSTANTS registers every constant before value
@@ -4858,7 +4865,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         break;
     case IR_OPCODE_ARRAY:
     case IR_OPCODE_AGGREGATE:
-        if (instruction->opcode == IR_OPCODE_AGGREGATE && llvm_bc_struct_has_bit_field(llvm_bc_ir_type(context, instruction->canonical_type)))
+        if (instruction->opcode == IR_OPCODE_AGGREGATE && llvm_bc_aggregate_is_byte_array(llvm_bc_ir_type(context, instruction->canonical_type)))
         {
             if (llvm_bc_bit_field_aggregate(context, record, function, block, instruction, current_value_id, LLVM_BC_BIT_FIELD_AGGREGATE_EMIT) ==
                 LLVM_BC_INVALID_ID)

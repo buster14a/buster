@@ -222,6 +222,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_variadic_aggregates.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_variadic_aggregates_check.c"),
          .both_optimizations = true},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_bit_field_aggregates.c"),
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_bit_field_aggregates_check.c"),
+         .both_optimizations = true},
 #endif
 #endif
         {.source = S8("tests/basic_c_llvm_integer_boundary_values.c"), .caller = S8("tests/basic_c_llvm_integer_boundary_check.c")},

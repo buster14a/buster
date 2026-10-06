@@ -282,6 +282,10 @@ controls consume the original C and bitcode at `-O0`/`-O2`; the separate observe
 checks 65,536 iterations of 256-byte storage and cycling bit-field values.
 Linux x86-64 also checks direct and indirect aggregate ABI temporaries,
 aggregate definitions, compound bit-field values and copied variadic lists.
+Whole-value bit-field structs and unions (copy, return, by-value argument,
+`{0}`/brace construction of a union, member reads after a copy) share the
+opaque byte-array representation and are cross-checked against Clang in the
+`basic_c_llvm_bit_field_aggregates` consumer fixture.
 Consumer processes have 30-second deadlines, bounded capture and stop further
 admission if process-tree ownership or cleanup fails. Hosted execution is
 required to establish results; registration alone is not passing evidence.
