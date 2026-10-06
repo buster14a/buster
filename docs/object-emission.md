@@ -20,10 +20,12 @@ section limit or the arena is refused like the plan's own limits.
 
 1. **Plan** (`object_elf64_plan`). One pass over the relocations counts each
    section's and the number of RELA tables; one pass over the symbols counts
-   the locals and sizes `.strtab`; one pass over the sections assigns each name
-   its `.shstrtab` offset and each payload its file offset after alignment
-   padding. Every offset and size is a checked `u64` sum. The plan refuses,
-   before any image exists:
+   the locals, sizes `.strtab` and marks sections named by definitions; one pass
+   over the sections maps retained inputs to emitted ELF section numbers and
+   assigns their name/payload offsets. Every offset and size is a checked `u64`
+   sum. Empty, unreferenced canonical model slots are omitted; nonempty storage,
+   zero-size definitions, custom names and additional sections are retained.
+   The plan refuses, before any image exists:
    - a relocation kind with no ELF type (`OBJECT_ERROR_UNSUPPORTED_TARGET`);
    - a section count that reaches `SHN_LORESERVE` (`0xff00`), which `e_shnum`
      and `st_shndx` cannot state without extended numbering;
@@ -63,12 +65,35 @@ Mach-O never borrow. `compiler_driver_test_object_borrowed_payloads` compares
 the published file, the slices and `object_write`'s image, and holds the
 ledger identities below.
 
-The bytes are identical to the writer this replaced. Test builds keep that
-writer as `object_test_write_elf64_reference`, a differential oracle; the
-registered `object_test_elf_planned_writer` compares both on seeded and
-adversarial objects. Retire the oracle when an intended ELF output change
-lands (for example [#1288](https://github.com/buster14a/buster/issues/1288)'s
-empty-section removal), replacing byte comparison with a read-back comparison.
+[#1288](https://github.com/buster14a/buster/issues/1288) intentionally changes
+ELF output by removing unused canonical empty sections. The plan's input-to-ELF
+map is applied to payload/name offsets, symbol `st_shndx` and RELA `sh_info`
+after initializer-priority splitting. Generated format tables remain present.
+The section-count guard remains conservative over the input count; compaction
+does not extend the supported index range. Borrowing and the work ledger retain
+their existing contracts.
+
+The obsolete pre-plan writer and its private test API are retired. The
+registered `object_test_elf_planned_writer` now independently decodes section,
+symbol and RELA fields for the same seeded/adversarial shapes, including split
+priority groups, duplicate names and arbitrary 64-bit symbol values. Those
+values need not fit their sections, so this is a raw serialization comparison;
+valid public-reader and native-link/runtime controls are separate. Capacity,
+error, exact-store and linear-visit assertions remain. The historical
+[reference probe](https://github.com/buster14a/buster/blob/353c338398173120a36bbe18221d6ce032ec4cd3/docs/performance-audits/evidence/2026-09-27T021030Z/reference_probe.py)
+is unchanged and belongs to that pinned pre-compaction source.
+
+On import, bounded symbol-table discovery marks sections named by definitions
+before payload alignment is merged. An unreferenced, zero-size canonical
+contribution or legacy empty readonly `.pdata`/`.xdata` contributes no padding
+or alignment. Its original bounds/alignment are still validated. Named/custom
+contributions and referenced empty definitions retain their alignment and
+identity. `object_test_elf_empty_sections` and `object_test_elf_empty_reader`
+check raw indexes, zero-size/TLS definitions, RELA addends, borrowed/contiguous
+file equality, identity and malformed-input refusals on both architectures.
+`compiler_driver_elf_empty_tests` checks source/direct-object path parity and
+uses configured native LLD to require no `PT_TLS` for a no-TLS object, with an
+initialized/zero-fill TLS runtime positive control.
 
 ## ELF64 reader refusal diagnostics
 
@@ -120,7 +145,8 @@ copies.
 objects when there are several inputs (`object_write_statistics_add`). For the
 unity compiler at `-g0` (`ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1
 -DBUSTER_INCLUDE_TESTS=0 -g0 -v -c src/buster/apps/ide/ide.c`), every
-non-empty payload is at least 4 KiB, so all of them are borrowed:
+non-empty payload is at least 4 KiB, so all of them are borrowed. This is a
+historical pre-compaction measurement, not the current output size:
 
 ```text
 OBJECT_WRITE format=elf64 section_visits=150 symbol_visits=62646 relocation_visits=191454 image_reserved=38328904 image_stored=2509361 image_zeroed=107 image_patched=0 payload_copied=0 payload_borrowed=35819543 scratch=85312 retained=38329000 output=38328904

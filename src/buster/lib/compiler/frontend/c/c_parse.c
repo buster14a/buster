@@ -5427,6 +5427,16 @@ BUSTER_C_INTERNAL bool c_parse_expression_real_kind(CTypeKind kind)
 BUSTER_C_INTERNAL bool c_parse_range_is_null_pointer_constant(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                 CTypeId type_id, u32 start, u32 end);
 
+BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, CParseResult* result, CTypeId type_id, bool decay);
+
+BUSTER_C_INTERNAL String8 c_parse_invalid_unary_operand_message(CParseResult* result, CPreprocessResult preprocess, u32 operator_index, CTypeId operand)
+{
+    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[operator_index]);
+    String8 type = c_parse_assignment_conversion_type_name(result->arena, result, operand, false);
+    String8 message = string_format(result->arena, S8("invalid operand to unary '{S8}' (have '{S8}')"), spelling, type);
+    return message;
+}
+
 BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime)
 {
     String8 message = {0};
@@ -6056,6 +6066,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             task->operation == C_PARSE_EXPRESSION_TYPE_UPDATE)
         {
             bool operand_typed = last.value < result->type_count;
+            CTypeId operand = last;
             if (!operand_typed)
             {
                 last = C_TYPE_ID_INVALID;
@@ -6066,7 +6077,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
                     (kind == C_TYPE_STRUCT || kind == C_TYPE_UNION || kind == C_TYPE_VOID))
                 {
-                    machine->expression_constraint = S8("could not lower logical expression core");
+                    machine->expression_constraint = c_parse_invalid_unary_operand_message(result, preprocess, task->start, last);
                     machine->expression_constraint_token = task->end;
                 }
                 last = c_parse_expression_scalar_type(result, C_TYPE_INT);
@@ -6108,7 +6119,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             }
             if (machine->validate_expression_constraints && operand_typed && !machine->expression_constraint.length && last.value >= result->type_count)
             {
-                machine->expression_constraint = S8("could not lower logical expression core");
+                machine->expression_constraint = c_parse_invalid_unary_operand_message(result, preprocess, task->start, operand);
                 machine->expression_constraint_token = task->end;
             }
             nonplace_projection = false;
@@ -6149,7 +6160,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 !machine->expression_constraint.length &&
                 (nonplace_projection || !c_parse_expression_place_shape(result, preprocess, task->start + 1, task->end)))
             {
-                machine->expression_constraint = S8("could not lower logical expression core");
+                machine->expression_constraint = S8("cannot take the address of an operand that is not an lvalue");
                 machine->expression_constraint_token = task->end;
             }
             if (last.value >= result->type_count)
@@ -6171,7 +6182,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 if (machine->validate_expression_constraints && pointer->kind != C_TYPE_POINTER && pointer->kind != C_TYPE_ARRAY &&
                     pointer->kind != C_TYPE_FUNCTION && !machine->expression_constraint.length)
                 {
-                    machine->expression_constraint = S8("could not lower logical expression core");
+                    machine->expression_constraint = string_format(result->arena, S8("indirection requires a pointer operand (have '{S8}')"),
+                        c_parse_assignment_conversion_type_name(result->arena, result, last, false));
                     machine->expression_constraint_token = task->end;
                 }
                 last = pointer->kind == C_TYPE_POINTER || pointer->kind == C_TYPE_ARRAY ? pointer->element_type
@@ -6188,7 +6200,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 CTypeKind kind = result->types[last.value].kind;
                 if (kind == C_TYPE_STRUCT || kind == C_TYPE_UNION || kind == C_TYPE_VOID)
                 {
-                    machine->expression_constraint = S8("could not lower logical expression core");
+                    machine->expression_constraint = string_format(result->arena, S8("conditional operator requires a scalar condition (have '{S8}')"),
+                        c_parse_assignment_conversion_type_name(result->arena, result, last, false));
                     machine->expression_constraint_token = task->split;
                 }
             }
@@ -6288,8 +6301,12 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             if (invalid || (complex && !complex_operator))
             {
                 machine->expression_constraint = void_operand ? S8("void value not ignored as it ought to be")
-                                                 : invalid    ? S8("could not lower logical expression core")
-                                                              : S8("this operator has no complex form");
+                    : invalid
+                    ? string_format(result->arena, S8("invalid operands to binary '{S8}' (have '{S8}' and '{S8}')"),
+                                    c_token_spelling(preprocess.spelling_base, token),
+                                    c_parse_assignment_conversion_type_name(result->arena, result, left, false),
+                                    c_parse_assignment_conversion_type_name(result->arena, result, right, false))
+                    : S8("this operator has no complex form");
                 machine->expression_constraint_token = task->end;
             }
         }
@@ -17237,7 +17254,7 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
     };
     bool compatible = true;
     WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_CALLS, 1);
-    while (stack_count)
+    while (stack_count && compatible)
     {
         CTypePair pair = stack[--stack_count];
         WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_PAIRS, 1);
@@ -17351,12 +17368,31 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             // types have to agree -- provided the other type is not
             // variadic. This is what makes musl's
             // `long __syscall_cp_asm();` and the prototype beside it one
-            // function; the parameter types are checked at the call.
+            // function. C17 6.7.6.3p15 further requires each adjusted
+            // parameter type of the prototype to be unchanged by the default
+            // argument promotions. Enum values use their selected compatible
+            // integer kind; array/function parameters already adjust to
+            // pointers and do not promote.
             if (left_type.is_unprototyped || right_type.is_unprototyped)
             {
                 if (left_type.is_variadic || right_type.is_variadic)
                 {
                     compatible = false;
+                    break;
+                }
+                CType prototype = left_type.is_unprototyped ? right_type : left_type;
+                for (u32 parameter_index = 0; parameter_index < prototype.parameter_count; parameter_index += 1)
+                {
+                    CTypeId parameter = result->parameters[prototype.parameter_start + parameter_index].type;
+                    CTypeKind kind = c_parse_expression_value_kind(result, parameter);
+                    if (kind == C_TYPE_INVALID || kind == C_TYPE_FLOAT || c_parse_expression_promoted_kind(kind) != kind)
+                    {
+                        compatible = false;
+                        break;
+                    }
+                }
+                if (!compatible)
+                {
                     break;
                 }
                 stack[stack_count++] = (CTypePair){
@@ -17378,47 +17414,24 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             {
                 CTypeId left_parameter = result->parameters[left_type.parameter_start + parameter_index].type;
                 CTypeId right_parameter = result->parameters[right_type.parameter_start + parameter_index].type;
-                // C 6.7.6.3p7/p8: a parameter declared as an array or a
-                // function is adjusted to the corresponding pointer, so a
-                // prototype's `char **` and a definition's `char *argv[]`
-                // declare one and the same function. The declared spelling
-                // survives into the parameter type, so decay the halves that
-                // disagree here rather than rejecting them. Qualifiers are
-                // ignored only at the top level, which is why the decayed
-                // pointee pair keeps them.
+                // C17 6.7.6.3p7/p8/p15: adjust both parameter spellings
+                // before comparing, including two arrays with different
+                // documentary outer bounds. Only the adjusted pointer's
+                // top qualifiers disappear; its pointee retains qualifiers
+                // and every inner array bound.
                 CTypeKind left_parameter_kind =
                     left_parameter.value < result->type_count ? result->types[left_parameter.value].kind : C_TYPE_INVALID;
                 CTypeKind right_parameter_kind =
                     right_parameter.value < result->type_count ? result->types[right_parameter.value].kind : C_TYPE_INVALID;
-                if (left_parameter_kind == C_TYPE_ARRAY && right_parameter_kind == C_TYPE_POINTER)
+                bool left_adjusted = left_parameter_kind == C_TYPE_ARRAY || left_parameter_kind == C_TYPE_FUNCTION;
+                bool right_adjusted = right_parameter_kind == C_TYPE_ARRAY || right_parameter_kind == C_TYPE_FUNCTION;
+                if ((left_adjusted || right_adjusted) &&
+                    (left_adjusted || left_parameter_kind == C_TYPE_POINTER) &&
+                    (right_adjusted || right_parameter_kind == C_TYPE_POINTER))
                 {
                     stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_POINTER && right_parameter_kind == C_TYPE_ARRAY)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_FUNCTION && right_parameter_kind == C_TYPE_POINTER)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = left_parameter,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_POINTER && right_parameter_kind == C_TYPE_FUNCTION)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = right_parameter,
+                        .left = left_parameter_kind == C_TYPE_FUNCTION ? left_parameter : result->types[left_parameter.value].element_type,
+                        .right = right_parameter_kind == C_TYPE_FUNCTION ? right_parameter : result->types[right_parameter.value].element_type,
                     };
                     continue;
                 }
@@ -24522,7 +24535,8 @@ BUSTER_C_INTERNAL bool c_parse_checked_expression_type(CTypeParseMachine* machin
         !c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_PLUS_PLUS) &&
         !c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_MINUS_MINUS))
     {
-        machine->expression_constraint = S8("could not lower logical expression core");
+        machine->expression_constraint = string_format(result->arena, S8("expected an operand after '{S8}'"),
+                                                       c_token_spelling(preprocess.spelling_base, preprocess.tokens[end - 1]));
         machine->expression_constraint_token = end;
     }
     c_parse_lowering_constraint_consider(diagnostic, machine->expression_constraint, start, machine->expression_constraint_token);
@@ -25073,7 +25087,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             u64 character = 0;
             CTypeKind kind = C_TYPE_INT;
             if (!c_ir_decode_character_value(machine->scratch_arena, preprocess.spelling_base, token, preprocess.target, &character, &kind))
-                c_parse_lowering_constraint_consider(diagnostic, S8("could not lower logical expression core"), index, index);
+                c_parse_lowering_constraint_consider(diagnostic, S8("invalid character constant"), index, index);
         }
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
@@ -25164,6 +25178,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             arena_set_position(machine->scratch_arena, query_mark);
             if (typed && operand_type.value < result->type_count)
             {
+                CTypeId written_type = operand_type;
                 CType value = result->types[operand_type.value];
                 if ((call || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW)) && (value.kind == C_TYPE_POINTER || value.kind == C_TYPE_ARRAY) &&
                     value.element_type.value < result->type_count)
@@ -25188,21 +25203,24 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 }
                 else if (member)
                 {
-                    c_parse_lowering_constraint_consider(diagnostic, S8("could not lower logical expression core"), index, index + 1);
+                    bool arrow = c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW);
+                    String8 name = index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER
+                                       ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]) : S8("");
+                    String8 message = !name.length
+                        ? string_format(result->arena, S8("expected a member name after '{S8}'"), arrow ? S8("->") : S8("."))
+                        : string_format(result->arena,
+                            arrow ? S8("member reference '->{S8}' requires a pointer to a structure or union (have '{S8}')")
+                                  : S8("member reference '.{S8}' requires a structure or union operand (have '{S8}')"),
+                            name, c_parse_assignment_conversion_type_name(result->arena, result, written_type, false));
+                    c_parse_lowering_constraint_consider(diagnostic, message, index, index + 1);
                 }
                 else if (call && value.kind != C_TYPE_FUNCTION)
                 {
-                    String8 message = S8("a call target must have pointer-to-function type");
-                    u32 use = c_parse_identifier_use_index(result, operand_start);
-                    if (operand_start + 1 == index && use != C_ID_UNDERLYING_INVALID)
-                    {
-                        CEntityId entity = result->identifier_uses[use].entity;
-                        if (entity.value < result->entity_count)
-                        {
-                            message = string_format(result->arena, S8("could not lower call to '{S8}' bound to C entity {u32} of kind {u32}"),
-                                c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start]), entity.value, (u32)result->entities[entity.value].kind);
-                        }
-                    }
+                    String8 type_name = c_parse_assignment_conversion_type_name(result->arena, result, written_type, false);
+                    String8 message = operand_start + 1 == index && preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER
+                        ? string_format(result->arena, S8("called object '{S8}' is not a function or function pointer (have '{S8}')"),
+                                        c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start]), type_name)
+                        : string_format(result->arena, S8("called object is not a function or function pointer (have '{S8}')"), type_name);
                     c_parse_lowering_constraint_consider(diagnostic, message, index, operand_start);
                 }
                 else if (call && value.kind == C_TYPE_FUNCTION)
@@ -26371,7 +26389,21 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
                 !result->array_bounds[value.array_bound].has_inferred_count)
             {
                 u64 count = 0;
-                if (c_parse_infer_initializer_array_count(machine, result->arena, preprocess, result, literal_scope, value.element_type, open, close + 1, &count))
+                CTypeId element = value.element_type;
+                while (element.value < result->type_count && result->types[element.value].has_unqualified_type)
+                {
+                    element = result->types[element.value].unqualified_type;
+                }
+                // Braced string literals are one pointer element of an array
+                // of pointers; the character-array inference refuses them.
+                u32 body_end = close > open + 1 && c_token_is_punctuator(&preprocess.tokens[close - 1], C_PUNCTUATOR_COMMA) ? close - 1 : close;
+                bool pointer_string = element.value < result->type_count && result->types[element.value].kind == C_TYPE_POINTER &&
+                                      open + 1 < body_end && c_ir_tokens_are_string_literals(preprocess, open + 1, body_end);
+                if (pointer_string)
+                {
+                    count = 1;
+                }
+                if (pointer_string || c_parse_infer_initializer_array_count(machine, result->arena, preprocess, result, literal_scope, value.element_type, open, close + 1, &count))
                 {
                     result->array_bounds[value.array_bound].has_inferred_count = true;
                     result->array_bounds[value.array_bound].inferred_count = count;
@@ -26916,12 +26948,12 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
         ? c_parse_statement_end(preprocess, header_close + 1, function_end, suffix, function_end - header_close) : UINT32_MAX;
     bool braced_body = header_close < function_end && header_close + 1 < function_end &&
                        c_token_is_punctuator(&preprocess.tokens[header_close + 1], C_PUNCTUATOR_LEFT_BRACE);
-    if (!braced_body)
+    if (switch_end == UINT32_MAX)
     {
         c_parse_lowering_constraint_consider(diagnostic, S8("unsupported C function-body statement or expression near 'switch'"),
                                              switch_index, switch_index);
     }
-    else if (switch_end != UINT32_MAX)
+    else
     {
         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, switch_index);
         u64 controlling_mark = machine->scratch_arena->position;
@@ -26972,7 +27004,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                 CToken token = preprocess.tokens[index];
                 brace_depth += c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE);
                 brace_depth -= brace_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
-                if (brace_depth > 1 && !value_count && !has_default && c_token_in_well_known_set(preprocess.spelling_base, token,
+                if (brace_depth > (braced_body ? 1u : 0u) && !value_count && !has_default && c_token_in_well_known_set(preprocess.spelling_base, token,
                         C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(DEFAULT)))
                 {
                     c_parse_lowering_constraint_consider(diagnostic, S8("case label inside a block precedes every case of its switch"), index, index);
@@ -29505,8 +29537,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 .value = (u32)(conflicting - result.entities),
             };
             c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                               string_format(arena, S8("conflicting declaration of '{S8}' (previous type {u32}, new type {u32})"), declaration->name,
-                                             conflicting->type.value, declaration->type.value));
+                               string_format(arena, S8("conflicting declaration of '{S8}' (previous type '{S8}', new type '{S8}')"), declaration->name,
+                                             c_parse_assignment_conversion_type_name(arena, &result, conflicting->type, false),
+                                             c_parse_assignment_conversion_type_name(arena, &result, declaration->type, false)));
             continue;
         }
         CEntityId entity = {

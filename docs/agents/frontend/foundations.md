@@ -357,6 +357,19 @@ without facts for identical bitcode and diagnostics.
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
   `c_test_variadic_comma_omission` checks omission, explicit emptiness, forwarding,
   named variadics and ordinary placemarkers in every supported dialect.
+- C23 `__VA_OPT__ ( content )` is accepted in every dialect. A variadic
+  definition writing it sets `has_va_opt`, which stages it through
+  `c_macro_replacement_tokens` and prescans the variable argument: the content
+  stands when that argument has tokens after expansion and is a placemarker
+  otherwise, so `##` on either side pastes against the content's edge tokens.
+  `#__VA_OPT__` pastes the content on its own (`c_macro_paste_tokens`) before
+  stringifying it. `c_macro_va_opt_violation` rejects the definition when
+  `__VA_OPT__` appears in a non-variadic macro, lacks its parenthesized
+  content, nests, or has `##` at a content edge; a `__VA_OPT__` reaching
+  expansion output was written outside a replacement list and is diagnosed.
+  `c_test_variadic_va_opt` covers empty, macro-expanding-to-empty and
+  non-empty arguments, `#`/`##` operands, nested `__VA_ARGS__` and the
+  diagnostics (GitHub #2509).
 - `_Pragma` destringizes either an ordinary or `L`-prefixed string operand.
   It strips the optional `L` and the quotes, and removes a backslash only
   before a quote or another backslash. Macro-generated operands use the same
@@ -576,6 +589,48 @@ without facts for identical bitcode and diagnostics.
   addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
   non-null integer-to-pointer static casts remains unsupported; it is refused
   rather than folded as if the trailing operator belonged inside the cast.
+- Static literal-address regressions are registered in
+  `compiler_driver_test_static_literal_addresses` and
+  `compiler_driver_test_static_literal_native` (GitHub #1268). The isolated
+  original sources cover whole and concatenated strings, pointer casts,
+  signed subscripts, constant selection, UTF-16/UTF-32 element strides,
+  aggregate pointer members, file-scope compound literal arrays/records,
+  and block-static `__func__` offsets. Fixed payloads and byte addends are
+  checked in both the direct object and the serialized ELF. Resolve the
+  relocation's symbol plus addend before comparing the image: an ELF writer
+  may use a section anchor rather than the unnamed object's own symbol.
+  The shared native source reads every pointer through volatile pointees
+  under both frontend forms, all four allocators, C17/GNU17 and O0/O2.
+  Linux GCC/Clang GNU17/GNU2x references receive identical source bytes.
+  Two mutable compound literal occurrences must retain separate storage;
+  string literals and const-qualified compound literals may share storage.
+  Function-body compound literals retain automatic storage duration and
+  cannot initialize static pointers. This boundary follows WG14 N1570
+  6.4.5, 6.5.2.5 and 6.6; it does not admit non-null integer-pointer
+  arithmetic or unrepresentable signed relocation addends.
+  Literal operands now export typed static array/aggregate lvalues to the
+  existing constant folder, preserving its cast and subscript scaling. String
+  object emission is shared by runtime and static paths; all uses of the
+  implicit static `__func__` object in one function share its symbol.
+  Incomplete compatible character-array compound literals with one string
+  initializer include its terminator when determining their element count.
+  The general compound-address operand route materializes through the existing
+  initializer machinery with one guarded entry. Nested compound objects on
+  that new route remain unsupported and produce a diagnostic; existing whole
+  compound-address shortcuts retain their prior behavior. No general nested
+  initializer evaluator or pointer-to-integer capability is added.
+  `compiler_driver_test_static_literal_guard` checks refusal followed by valid
+  array, scalar-child, string-child, UTF and trailing-comma globals in the same
+  lowering builder, plus a one-element pointer array carrying a real string
+  relocation. `compiler_driver_test_function_literal_identity` compares static
+  and runtime `__func__` pointers twice under both forms/four allocators/O0/O2
+  and independent Linux GCC/Clang runs. The original 22 payload/addend sources
+  and shared 4554-byte native/reference program remain unchanged.
+  General function-body operand queries decline automatic compound objects
+  without leaving initializer failure state in benign `__builtin_constant_p`
+  probes. The same-function probe followed by a dynamic binary16 conversion
+  and an ordinary automatic compound-array use is checked in canonical
+  lowering and the Linux native/reference identity cells.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
@@ -1567,6 +1622,32 @@ the aligned-base case against Clang. `c_test_enum_runtime` runs these two source
 and the bit-field source in all four native allocator modes with strict codegen
 verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
 fallback.
+
+## Unbraced switch bodies (#1617)
+
+A switch controls one C statement. Semantic validation measures that statement's
+extent instead of requiring a compound body. Lowering uses the existing
+controlled-body range helper and resumes at its separate after-statement token;
+label-prefixed blocks retain their braces and all labels in the statement.
+Nested switches keep ownership of their own labels. Break cleanup resolves the
+scope surrounding the switch keyword, including when the body introduces no
+scope. Integer promotion, supported control widths, duplicate/range diagnostics
+and the existing first-label-inside-a-nested-block restriction are unchanged.
+
+The registered `c_test_unbraced_switch_bodies` covers the three issue examples,
+empty and chained bodies, nested switches, nested labels and fallthrough,
+following-statement boundaries, label-prefixed block/if/while bodies,
+break/continue/return, exact-once control evaluation and GNU cleanup ownership.
+Semantic and canonical checks span six native data models, GNU17/GNU23 and both
+frontend forms. Supported desktop drivers execute independent result oracles in
+all four allocator modes and both forms with codegen verification. Negative
+controls retain floating/pointer/128-bit control refusals, duplicate cases and
+defaults, overlapping ranges and the existing first-nested-label refusal.
+
+The existing driver syntax/object diagnostic-equivalence corpus also accepts
+these standard unbraced bodies in C17/C23 and keeps invalid controlling types
+and duplicate labels rejected in both forms. Its former label-free switch
+refusal row now records the valid C behavior.
 
 ## Static address-to-integer initializers (#1273)
 
