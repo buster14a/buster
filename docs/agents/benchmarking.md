@@ -428,6 +428,16 @@ captures (#2741).
   escape for method testing. `--skip-build` reuses the existing Release binary
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
+- **Performance validation needs Zen 5 execution evidence (#2761).** Every
+  performance-validation test requires actual execution of its relevant
+  workload on the approved Zen 5 benchmark host. Without complete evidence
+  matching the candidate, workload and configuration, report performance
+  validation as incomplete. Cloud-only and static evidence is diagnostic, not
+  a substitute: hosted timing, static instruction counts, a `znver5` target, a
+  request or policy check, or an unrelated self-host benchmark. Correctness and
+  native-platform CI stay on their current infrastructure. The merge-queue
+  comparison below covers only the stage-1 self-host compile; #2761 tracks the
+  per-test inventory.
 - **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
   The queued benchmark service, its dispatch workflow and the earlier
   `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
