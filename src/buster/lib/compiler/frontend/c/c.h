@@ -450,6 +450,9 @@ struct CPreprocessDetail
     CSourceFileMetrics* lexed_files;
     CPreprocessedMetrics preprocessed;
     CPhaseBoundaryMetrics boundary;
+    // `#define` listing of the macros defined at the end of preprocessing,
+    // filled only when CPreprocessOptions.dump_macros asked for it (`-dM`).
+    String8 macro_dump;
 #if BUSTER_INCLUDE_TESTS
     // Actual include-identity table slot examinations for end-to-end scaling
     // fixtures. Tests-disabled builds neither store nor increment this value.
@@ -610,6 +613,8 @@ struct CPreprocessOptions
     // that sums spelling lengths is skipped and the field stays zero. Every
     // other metric is still gathered.
     bool omit_spelled_bytes;
+    // Render the surviving macro table into CPreprocessDetail.macro_dump.
+    bool dump_macros;
     // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
     u8 position_independent_level;
     // The selected position-independent spelling was a PIE flag.
