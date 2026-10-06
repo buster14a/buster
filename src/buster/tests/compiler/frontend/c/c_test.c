@@ -29051,6 +29051,113 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_long_shallow_operand(UnitTestAr
     return result;
 }
 
+// One `tall_H` function per height plus a main that runs them all; the
+// expression is H binary `+` over `i` then `+ (int)u` (GitHub #2531).
+BUSTER_GLOBAL_LOCAL String8 c_test_tall_expression_source(Arena* arena, const u32* heights, u32 height_count)
+{
+    String8* functions = arena_allocate(arena, String8, height_count);
+    String8* calls = arena_allocate(arena, String8, height_count);
+    for (u32 height_index = 0; height_index < height_count; height_index += 1)
+    {
+        u32 height = heights[height_index];
+        String8* expression_parts = arena_allocate(arena, String8, 2 * height);
+        for (u32 operand = 0; operand < height; operand += 1)
+        {
+            expression_parts[2 * operand] = S8("i");
+            expression_parts[2 * operand + 1] = operand + 1 == height ? S8(" + (int)u") : S8(" + ");
+        }
+        String8 expression = string_join_arena(arena, (SliceString8){expression_parts, 2 * height}, false);
+        functions[height_index] = string_format(arena,
+            S8("static int tall_{u32}(int i, unsigned long u, int c) {{\n"
+               "    _Static_assert(sizeof(({S8})) == sizeof(int), \"tall {u32}\");\n"
+               "    __typeof__(({S8})) t = 0;\n"
+               "    int failed = sizeof(({S8})) != sizeof(int) || sizeof t != sizeof(int);\n"
+               "    failed |= _Generic(c ? ({S8}) : 0, int: 0, default: 1);\n"
+               "    failed |= !((c ? ({S8}) : 0) < 0);\n"
+               "    return failed;\n"
+               "}}\n"),
+            height, expression, height, expression, expression, expression, expression);
+        calls[height_index] = string_format(arena, S8("    failed |= tall_{u32}(vi, vu, vc);\n"), height);
+    }
+    String8 functions_text = string_join_arena(arena, (SliceString8){functions, height_count}, false);
+    String8 calls_text = string_join_arena(arena, (SliceString8){calls, height_count}, false);
+    String8 source_text = string_format(arena,
+        S8("{S8}"
+           "int main(void) {{\n"
+           "    volatile int vi = -1, vc = 1;\n"
+           "    volatile unsigned long vu = 0;\n"
+           "    int failed = 0;\n"
+           "{S8}"
+           "    return failed;\n"
+           "}}\n"),
+        functions_text, calls_text);
+    return source_text;
+}
+
+// Both operand typers (the parser's and the lowering's sizeof resolver) type a
+// left-associative chain and a conditional nested in every false arm in time
+// linear in the operand count (GitHub #2715). Each typer used to split at the
+// last operator and retype the whole prefix, so 10,000 operands took seconds
+// in Release; each _Static_assert fails the unit when an operand is mistyped.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 heights[] = {1, 2, 63, 64, 65, 4096, 10000};
+    String8 source_text = c_test_tall_expression_source(arguments->arena, heights, BUSTER_ARRAY_LENGTH(heights));
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tall-expression-types.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
+    // The other chain shapes, in unevaluated operands so the cost measured is
+    // typing: a conditional nested in every false arm, a mixed chain of `|`,
+    // `^`, `*` and `-` levels, and a shift chain typed by its first operand.
+    {
+        u32 height = 4096;
+        String8* conditional_parts = arena_allocate(arguments->arena, String8, height + 1);
+        String8* mixed_parts = arena_allocate(arguments->arena, String8, height + 1);
+        String8* shift_parts = arena_allocate(arguments->arena, String8, height + 1);
+        for (u32 operand = 0; operand < height; operand += 1)
+        {
+            conditional_parts[operand] = S8("c ? i : ");
+            mixed_parts[operand] = operand % 4 == 3 ? S8("i * i - i | ") : S8("i * i - i ^ ");
+            shift_parts[operand] = S8("i << ");
+        }
+        conditional_parts[height] = S8("(int)u");
+        mixed_parts[height] = S8("(int)u");
+        shift_parts[height] = S8("u");
+        String8 conditional = string_join_arena(arguments->arena, (SliceString8){conditional_parts, height + 1}, false);
+        String8 mixed = string_join_arena(arguments->arena, (SliceString8){mixed_parts, height + 1}, false);
+        String8 shift = string_join_arena(arguments->arena, (SliceString8){shift_parts, height + 1}, false);
+        String8 chain_source = string_format(arguments->arena,
+            S8("int chains(int i, unsigned long u, int c) {{\n"
+               "    _Static_assert(sizeof({S8}) == sizeof(int), \"conditional\");\n"
+               "    _Static_assert(sizeof({S8}) == sizeof(int), \"shift\");\n"
+               "    __typeof__({S8}) t = 0;\n"
+               "    return t + _Generic({S8}, int: 0, default: 1) + _Generic({S8}, int: 0, default: 1);\n"
+               "}}\n"),
+            conditional, shift, mixed, conditional, shift);
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, chain_source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("tall-expression-chains.c"), tokens, parsed, target_native);
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Lua's userdata accessor combines nested pointer-cast macros, a
 // builtin-offsetof ternary, and a switch whose other arm returns void *.  The
 // strict expression-type walk must preserve the pointer result instead of
@@ -44384,6 +44491,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
+    C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
     C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
     C_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
     C_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
