@@ -8,8 +8,11 @@ the compile command, the pinned CPU and the sample plan come from `main`.
 
 A workload may bring one input file, `<name>.data` beside `<name>.c`, of at
 most DATA_LIMIT bytes (#2769). It is copied read-only into the run directory
-as `input.data` before the first run, and its digest is reported; changing
-only the data file also selects its workload.
+as `input.data` into a fresh directory for every warmup and sample, and its
+digest is reported; changing only the data file also selects its workload.
+A run that modifies or removes its `input.data` is reported invalid, and files
+a run leaves behind are deleted with its directory. This resets the
+filesystem state only; the OS page cache is not made cold (#2900).
 
 Each workload is built once with a fixed command, then started as two warmups
 and nine measured fresh processes. Every run's exit state, wall and CPU time,
@@ -22,7 +25,7 @@ heads the report (#2761). On any host other than the approved Zen 5 host
 nothing is compiled or run and the run fails, so a workload can only be
 reported as measured on the Ryzen 7 9700X.
 
-Map: changed_workloads, source_problem, run_once, render, main.
+Map: changed_workloads, source_problem, run_once, run_sample, render, main.
 """
 
 from __future__ import annotations
@@ -139,10 +142,31 @@ def run_once(program: Path, scratch: Path, cpu: int) -> dict:
     }
 
 
+def run_sample(program: Path, scratch: Path, cpu: int, index: int, data: bytes | None) -> dict:
+    """Run once in a fresh directory holding only the declared input bytes."""
+    directory = scratch / f"run-{index}"
+    directory.mkdir()
+    try:
+        if data is not None:
+            (directory / DATA_NAME).write_bytes(data)
+            (directory / DATA_NAME).chmod(0o444)
+        row = run_once(program, directory, cpu)
+        if data is not None:
+            try:
+                same = (directory / DATA_NAME).read_bytes() == data
+            except OSError:
+                same = False
+            if not same:
+                row["invalid"] = f"{DATA_NAME} was modified or removed during the run"
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    return row
+
+
 def render(name: str, source_sha: str, program_sha: str, rows: list[dict], data_sha: str = "") -> tuple[list[str], bool]:
     measured = rows[WARMUPS:]
     passed = len(rows) == WARMUPS + SAMPLES and all(
-        row["exit"] == 0 and not row["timed_out"] for row in rows)
+        row["exit"] == 0 and not row["timed_out"] and not row.get("invalid") for row in rows)
     data = f", `{DATA_NAME}` sha256 `{data_sha}`" if data_sha else ", no input data"
     lines = [f"### `{name}`", "",
              f"source sha256 `{source_sha}`, executable sha256 `{program_sha}`{data}", ""]
@@ -243,18 +267,20 @@ def main() -> int:
                       diagnostics.replace("```", "'''").rstrip("\n"), "```", ""]
             continue
         data = data_path(arguments.candidate, name)
-        data_sha = ""
-        if data.is_file():
-            shutil.copyfile(data, scratch / DATA_NAME)
-            (scratch / DATA_NAME).chmod(0o444)
-            data_sha = hashlib.sha256((scratch / DATA_NAME).read_bytes()).hexdigest()
-        rows = [run_once(program, scratch, arguments.cpu) for _ in range(WARMUPS + SAMPLES)]
+        data_bytes = data.read_bytes() if data.is_file() else None
+        data_sha = hashlib.sha256(data_bytes).hexdigest() if data_bytes is not None else ""
+        rows = [run_sample(program, scratch, arguments.cpu, index, data_bytes)
+                for index in range(WARMUPS + SAMPLES)]
         section, passed = render(
             name, hashlib.sha256(source.read_bytes()).hexdigest(),
             hashlib.sha256(program.read_bytes()).hexdigest(), rows, data_sha)
         lines += section
         if not passed:
-            failures.append(f"{name}: a run exited nonzero, was signalled or timed out")
+            failures.append(f"{name}: a run exited nonzero, was signalled, timed out or invalidated its input")
+        for row in rows:
+            if row.get("invalid"):
+                failures.append(f"{name}: {row['invalid']}")
+                break
     load_after = Path("/proc/loadavg").read_text(encoding="ascii").strip()
     lines += [f"Compiler: `{compiler}`. Flags: `{' '.join(COMPILE_FLAGS)}`.", "",
               f"Load average before: `{load_before}`; after: `{load_after}`.", ""]

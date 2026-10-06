@@ -184,6 +184,32 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("sum=198", result.stdout)
 
+    def test_every_run_starts_without_predecessor_files(self) -> None:
+        marker = ('#include <stdio.h>\nint main(void) { FILE* f = fopen("marker", "rb"); int existed = f != 0;\n'
+                  '  if (f) fclose(f); else { f = fopen("marker", "wb"); if (f) fclose(f); }\n'
+                  '  printf("existed=%d\\n", existed); return 0; }\n')
+        result = self.run_harness(self.commit({"benchmarks/9700x/marker.c": marker}))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("All 11 runs printed identical output:", result.stdout)
+        self.assertIn("existed=0", result.stdout)
+        self.assertEqual(os.listdir(self.root / "work" / "marker"), ["program"])
+
+    def test_input_mutation_is_reported_invalid(self) -> None:
+        mutate = ('#include <stdio.h>\n#include <sys/stat.h>\n#include <unistd.h>\n'
+                  'int main(void) { chmod("input.data", 0644); unlink("input.data");\n'
+                  '  FILE* f = fopen("input.data", "wb"); if (f) { fputc(90, f); fclose(f); } return 0; }\n')
+        self.commit({"benchmarks/9700x/mutate.c": mutate, "benchmarks/9700x/mutate.data": "AB"})
+        result = self.run_harness(git(self.repository, "rev-parse", "HEAD"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("input.data was modified or removed during the run", result.stdout)
+
+    def test_missing_input_is_visible_to_the_program(self) -> None:
+        reader = '#include <stdio.h>\nint main(void) { FILE* f = fopen("input.data", "rb"); return f ? 0 : 2; }\n'
+        result = self.run_harness(self.commit({"benchmarks/9700x/noinput.c": reader}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("a run exited nonzero", result.stdout)
+        self.assertIn("no input data", result.stdout)
+
     def test_oversized_data_fails_without_running(self) -> None:
         self.commit({"benchmarks/9700x/big.c": PASSING})
         (self.repository / "benchmarks/9700x/big.data").write_bytes(b"\0" * (8 * 1024 * 1024 + 1))
