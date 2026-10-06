@@ -5789,16 +5789,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_typedef_scopes(UnitTestArgume
 // c_ir_type_name_declarator.  Both used to take one host stack frame per
 // nested `(`, so a valid call through a few tens of thousands of dereference
 // groups overflowed the stack (the driver crashed with SIGSEGV at 64000
-// levels while -fsyntax-only succeeded).  The depth here is far below the
-// crashing one because lowering such a callee is still quadratic in its depth
-// (#2740): 16,000 levels cost 26 s in a Debug build and pushed the iOS Debug
-// payload past its launch deadline.  4,000 levels still drive both loops far
-// past any static bound; the shallow cases pin the answers they must give.
+// levels while -fsyntax-only succeeded).  Lowering such a callee was also
+// quadratic in its depth (#2740: 16,000 levels cost 26 s in a Debug build): the
+// expression core rescanned every group interior for control operators and
+// assignments and rescanned the operand for each group's close.  Both now read
+// the retained group facts and delimiter index, so 64,000 levels, far past any
+// static bound, run in linear time; the shallow cases pin the answers they
+// must give, and a native build executes the call.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_group_nesting(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(0, 0);
-    u32 depth = 4000;
+    u32 depth = 64000;
     String8 head = S8("int g(void);\nint f(void) { int (*p)(void) = g; return ");
     String8 open = S8("(*");
     String8 tail = S8("p");
@@ -5841,6 +5843,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_group_nesting(UnitTestArgum
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
         }
     }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    // The same callee shape, executed: g returns 7 and main reports a mismatch.
+    {
+        String8 run_head = S8("int g(void) { return 7; }\nint main(void) { int (*p)(void) = g; return ");
+        String8 run_call = S8("() != 7; }\n");
+        u64 run_capacity = run_head.length + (u64)depth * (open.length + close.length) + tail.length + run_call.length;
+        char8* run_buffer = arena_allocate(temporary.arena, char8, run_capacity);
+        u64 run_length = 0;
+        c_test_append_source(run_buffer, run_capacity, &run_length, run_head);
+        for (u32 index = 0; index < depth; index += 1)
+        {
+            c_test_append_source(run_buffer, run_capacity, &run_length, open);
+        }
+        c_test_append_source(run_buffer, run_capacity, &run_length, tail);
+        for (u32 index = 0; index < depth; index += 1)
+        {
+            c_test_append_source(run_buffer, run_capacity, &run_length, close);
+        }
+        c_test_append_source(run_buffer, run_capacity, &run_length, run_call);
+        String8 run_source = {.pointer = run_buffer, .length = run_length};
+        String8 source_path = buster_test_temporary_path(temporary.arena, S8("declarator-group-nesting"), S8(".c"));
+        String8 output = buster_test_temporary_path(temporary.arena, S8("declarator-group-nesting-run"), S8(".exe"));
+        if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(run_source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fregister-allocator=fast"), S8("-o"), output, source_path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+    }
+#endif
     scratch_end(temporary);
     return result;
 }

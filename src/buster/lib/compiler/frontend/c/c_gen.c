@@ -19286,6 +19286,11 @@ BUSTER_C_INTERNAL void c_ir_prepared_control_expression_rollback(CIntegerIrBuild
 // them. A longer interior reads the classifying pass instead.
 #define C_IR_GROUP_FACT_SCAN_LIMIT 32u
 
+// A debug build cross-checks a tabled answer against the scan it replaces only
+// for interiors up to this long, so the check itself cannot square the cost of
+// a deeply nested body (GitHub #2740).
+#define C_IR_GROUP_FACT_REFERENCE_LIMIT 4096u
+
 // Classify every `(` and `[` group of the body in one pass. A token is a root
 // token of a group exactly when that group is the innermost open one and no
 // `{` is open inside it, which is what the predicates' three depth counters
@@ -19379,7 +19384,8 @@ BUSTER_C_INTERNAL bool c_ir_group_fact(CIntegerIrBuilder* builder, u32 open, u32
 #if !BUSTER_OPTIMIZE
         // The scan the pass replaces, kept as the reference: a debug build
         // checks every tabled answer against it.
-        bool reference = fact == C_IR_GROUP_FACT_ROOT_CONTROL ? c_ir_has_root_control_operator(builder, open + 1, close)
+        bool reference = close - open > C_IR_GROUP_FACT_REFERENCE_LIMIT ? answer
+                         : fact == C_IR_GROUP_FACT_ROOT_CONTROL ? c_ir_has_root_control_operator(builder, open + 1, close)
                          : fact == C_IR_GROUP_FACT_ROOT_ASSIGNMENT ? c_ir_has_root_assignment(builder, open + 1, close)
                          : fact == C_IR_GROUP_FACT_TOP_COMMA ? c_ir_has_top_level_comma(builder, open + 1, close)
                          : fact == C_IR_GROUP_FACT_ANY_ASSIGNMENT ? c_ir_has_assignment_anywhere(builder, open + 1, close)
@@ -30778,7 +30784,7 @@ c_ir_expression_core_loop:
                                 c_token_is_punctuator(&token, C_PUNCTUATOR_EXCLAMATION) || c_token_is_punctuator(&token, C_PUNCTUATOR_TILDE);
             if (!outer_prefix && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
-                u32 close = c_ir_matching_delimiter_cached(builder, index, operand_end - 1, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                u32 close = c_ir_matching_delimiter_cached(builder, index, operand_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 outer_prefix =
                     close < operand_end - 1 && close + 1 < operand_end - 1 &&
                     !c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
@@ -31621,8 +31627,8 @@ c_ir_expression_core_loop:
             // prepared group), evaluate the group through the full
             // expression machine instead of leaving a C_CONDITIONAL_OPEN
             // marker for the arithmetic reducer.
-            if (close < end && (c_ir_has_root_control_operator(builder, index + 1, close) ||
-                                c_ir_has_assignment_anywhere(builder, index + 1, close) ||
+            if (close < end && (c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ROOT_CONTROL) ||
+                                c_ir_group_fact(builder, index, close, C_IR_GROUP_FACT_ANY_ASSIGNMENT) ||
                                 c_ir_has_root_comma(builder, index + 1, close)))
             {
                 c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
