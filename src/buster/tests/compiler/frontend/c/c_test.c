@@ -13733,6 +13733,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_popcount"), all_targets},
         {S8("__builtin_popcountl"), all_targets},
         {S8("__builtin_popcountll"), all_targets},
+        {S8("__builtin_isgreater"), all_targets},
+        {S8("__builtin_isgreaterequal"), all_targets},
+        {S8("__builtin_isless"), all_targets},
+        {S8("__builtin_islessequal"), all_targets},
+        {S8("__builtin_islessgreater"), all_targets},
+        {S8("__builtin_isunordered"), all_targets},
+        {S8("__builtin_isnormal"), all_targets},
+        {S8("__builtin_fpclassify"), all_targets},
         {S8("__is_target_arch"), all_targets},
         {S8("not_a_builtin"), 0},
         {S8("__atomic_"), 0},
@@ -33590,6 +33598,297 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_classifier_runtime(UnitTestArgumen
     return result;
 }
 
+// The type-generic classification and quiet comparison builtins glibc's
+// <math.h> expands isgreater, isless, isunordered, isnormal and fpclassify to.
+// They lower inline from the stored bits and the IR float compares, so a
+// function using them over float or double needs no runtime call on any
+// native target, and every function validates as canonical IR.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_lowering(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#if !__has_builtin(__builtin_isgreater) || !__has_builtin(__builtin_isgreaterequal) || !__has_builtin(__builtin_isless) || \\\n"
+        "    !__has_builtin(__builtin_islessequal) || !__has_builtin(__builtin_islessgreater) || !__has_builtin(__builtin_isunordered) || \\\n"
+        "    !__has_builtin(__builtin_isnormal) || !__has_builtin(__builtin_fpclassify)\n"
+        "#error hidden generic float builtin\n"
+        "#endif\n"
+        "_Static_assert(sizeof(__builtin_isgreater(1.0f, 2.0)) == sizeof(int), \"comparison result type\");\n"
+        "_Static_assert(sizeof(__builtin_isnormal(1.0L)) == sizeof(int), \"isnormal result type\");\n"
+        "_Static_assert(sizeof(__builtin_fpclassify(0, 1, 4, 3, 2, 1.0f)) == sizeof(int), \"fpclassify result type\");\n"
+        "int compare_double(double x, double y) { return __builtin_isgreater(x, y) + __builtin_isgreaterequal(x, y) * 2 + __builtin_isless(x, y) * 4 +\n"
+        "    __builtin_islessequal(x, y) * 8 + __builtin_islessgreater(x, y) * 16 + __builtin_isunordered(x, y) * 32; }\n"
+        "int compare_float(float x, float y) { return __builtin_isgreater(x, y) + __builtin_isunordered(x, y); }\n"
+        "int compare_mixed(float x, double y) { return __builtin_isless(x, y); }\n"
+        "int classify_double(double x) { return __builtin_fpclassify(0, 1, 4, 3, 2, x) + __builtin_isnormal(x); }\n"
+        "int classify_float(float x) { return __builtin_fpclassify(0, 1, 4, 3, 2, x) + __builtin_isnormal(x); }\n"
+        "int classify_wide(long double x) { return __builtin_fpclassify(0, 1, 4, 3, 2, x) + __builtin_isnormal(x); }\n"
+        "int compare_wide(long double x, double y) { return __builtin_isgreater(x, y) + __builtin_islessgreater(y, x) + __builtin_isunordered(x, x); }\n");
+    String8 names[] = {S8("compare_double"), S8("compare_float"), S8("compare_mixed"), S8("classify_double"), S8("classify_float"),
+        S8("classify_wide"), S8("compare_wide")};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("generic-float-builtins.c"), tokens, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            String8 context = string_format(temporary.arena, S8("generic float builtins target={u32} form={u32}"), target_index, form);
+            bool ready = !tokens.diagnostic_count && !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified;
+            BUSTER_TEST_RAW(arguments, ready, context);
+            if (ready && BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST_RAW(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE, context);
+                BUSTER_TEST_RAW(arguments, module->function_count == BUSTER_ARRAY_LENGTH(names), context);
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(names); row += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, names[row]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        // Only a binary128 long double compares through a
+                        // soft-float runtime entry point.
+                        bool binary128 = row >= 5 && target_data_layout(target).long_double_type.bit_width == 128;
+                        BUSTER_TEST_RAW(arguments, binary128 || c_test_ir_call_count(function) == 0, context);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    // Integer operands are rejected by GCC and Clang, and a wrong argument
+    // count has no meaning: both fail with a diagnostic, not a partial result.
+    String8 invalid_sources[] = {
+        S8("int f(int x) { return __builtin_isnormal(x); }"),
+        S8("int f(int x) { return __builtin_fpclassify(0, 1, 4, 3, 2, x); }"),
+        S8("int f(double x) { return __builtin_isnormal(x, x); }"),
+        S8("int f(double x) { return __builtin_isgreater(x); }"),
+        S8("int f(double x) { return __builtin_fpclassify(0, 1, 4, 3, x); }"),
+        S8("int f(double x, int y) { return __builtin_isunordered(x, y); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[index], (CPreprocessOptions){
+            .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("generic-float-builtins-invalid.c"), tokens, syntax, target,
+            (CIRLowerOptions){0});
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid_sources[index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+// A self-checking program over float, double and long double: NaN, infinities,
+// signed zeros, subnormals, minimum normals and maxima, every ordered pair
+// against independently ranked expectations, the quiet-NaN no-exception
+// guarantee through fetestexcept, and exactly-once operand evaluation. The same
+// source is also compiled by the host GCC and Clang, which pin the expected
+// values to the reference compilers' semantics.
+BUSTER_GLOBAL_LOCAL String8 const c_test_generic_float_builtins_source = S8_INITIALIZER(
+    "#define CLS_NAN 100\n"
+    "#define CLS_INF 101\n"
+    "#define CLS_NORMAL 102\n"
+    "#define CLS_SUB 103\n"
+    "#define CLS_ZERO 104\n"
+    "#define FPC(x) __builtin_fpclassify(CLS_NAN, CLS_INF, CLS_NORMAL, CLS_SUB, CLS_ZERO, x)\n"
+    "static volatile unsigned evaluations;\n"
+    "int feclearexcept(int);\n"
+    "int fetestexcept(int);\n"
+    "#define EXCEPT_INVALID 1\n"
+    "static void clear_flags(void) { feclearexcept(EXCEPT_INVALID); }\n"
+    "static unsigned read_flags(void) { return (unsigned)fetestexcept(EXCEPT_INVALID); }\n"
+    "#define DEFINE_TYPE_TEST(NAME, T, MIN, DENORM, MAX) \\\n"
+    "static T NAME##_next(T v) { evaluations++; return v; } \\\n"
+    "static int NAME##_test(void) \\\n"
+    "{ \\\n"
+    "int failed = 0; \\\n"
+    "volatile T zero = 0; \\\n"
+    "volatile T one = 1; \\\n"
+    "T inf = one / zero; \\\n"
+    "T nan = inf - inf; \\\n"
+    "T values[15] = {-inf, -(T)(MAX), -one, -(T)(MIN), -(T)(MIN) / 2, -(T)(DENORM), -zero, zero, \\\n"
+    "(T)(DENORM), (T)(MIN) / 2, (T)(MIN), one, (T)(MAX), inf, nan}; \\\n"
+    "int rank[15] = {0, 1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11, 12, 13}; \\\n"
+    "int klass[15] = {CLS_INF, CLS_NORMAL, CLS_NORMAL, CLS_NORMAL, CLS_SUB, CLS_SUB, CLS_ZERO, CLS_ZERO, \\\n"
+    "CLS_SUB, CLS_SUB, CLS_NORMAL, CLS_NORMAL, CLS_NORMAL, CLS_INF, CLS_NAN}; \\\n"
+    "for (int i = 0; i < 15; i++) \\\n"
+    "{ \\\n"
+    "T x = values[i]; \\\n"
+    "failed |= FPC(x) != klass[i]; \\\n"
+    "failed |= __builtin_isnormal(x) != (klass[i] == CLS_NORMAL); \\\n"
+    "failed |= !!__builtin_isunordered(x, x) != (i == 14); \\\n"
+    "for (int j = 0; j < 15; j++) \\\n"
+    "{ \\\n"
+    "T y = values[j]; \\\n"
+    "int ordered = i != 14 && j != 14; \\\n"
+    "failed |= !!__builtin_isgreater(x, y) != (ordered && rank[i] > rank[j]); \\\n"
+    "failed |= !!__builtin_isgreaterequal(x, y) != (ordered && rank[i] >= rank[j]); \\\n"
+    "failed |= !!__builtin_isless(x, y) != (ordered && rank[i] < rank[j]); \\\n"
+    "failed |= !!__builtin_islessequal(x, y) != (ordered && rank[i] <= rank[j]); \\\n"
+    "failed |= !!__builtin_islessgreater(x, y) != (ordered && rank[i] != rank[j]); \\\n"
+    "failed |= !!__builtin_isunordered(x, y) != !ordered; \\\n"
+    "} \\\n"
+    "} \\\n"
+    "\\\n"
+    "clear_flags(); \\\n"
+    "int sink = 0; \\\n"
+    "for (int j = 0; j < 15; j++) \\\n"
+    "{ \\\n"
+    "T y = values[j]; \\\n"
+    "sink += __builtin_isgreater(nan, y) + __builtin_isgreaterequal(y, nan) + __builtin_isless(nan, y) \\\n"
+    "+ __builtin_islessequal(y, nan) + __builtin_islessgreater(nan, y) + __builtin_isunordered(y, nan); \\\n"
+    "sink += FPC(nan) + __builtin_isnormal(nan); \\\n"
+    "} \\\n"
+    "failed |= sink != 15 * (CLS_NAN + 1); \\\n"
+    "failed |= read_flags() != 0; \\\n"
+    "\\\n"
+    "unsigned before = evaluations; \\\n"
+    "failed |= !__builtin_isgreater(NAME##_next(one), NAME##_next(zero)); \\\n"
+    "failed |= !__builtin_isless(NAME##_next(zero), NAME##_next(one)); \\\n"
+    "failed |= !__builtin_islessgreater(NAME##_next(zero), NAME##_next(one)); \\\n"
+    "failed |= !__builtin_isunordered(NAME##_next(nan), NAME##_next(one)); \\\n"
+    "failed |= !__builtin_isnormal(NAME##_next(one)); \\\n"
+    "failed |= FPC(NAME##_next(inf)) != CLS_INF; \\\n"
+    "failed |= evaluations != before + 10; \\\n"
+    "return failed; \\\n"
+    "}\n"
+    "DEFINE_TYPE_TEST(flt, float, __FLT_MIN__, __FLT_DENORM_MIN__, __FLT_MAX__)\n"
+    "DEFINE_TYPE_TEST(dbl, double, __DBL_MIN__, __DBL_DENORM_MIN__, __DBL_MAX__)\n"
+    "DEFINE_TYPE_TEST(ldbl, long double, __LDBL_MIN__, __LDBL_DENORM_MIN__, __LDBL_MAX__)\n"
+    "static int mixed_test(void)\n"
+    "{\n"
+    "int failed = 0;\n"
+    "volatile float f = 1.5f;\n"
+    "volatile double d = 2.5;\n"
+    "volatile long double l = 2.5L;\n"
+    "volatile double nan_d = 0.0;\n"
+    "nan_d = nan_d / nan_d;\n"
+    "failed |= !__builtin_isgreater(d, f) || __builtin_isless(d, f) || !__builtin_isless(f, l);\n"
+    "failed |= !__builtin_isgreaterequal(l, d) || !__builtin_islessequal(d, l) || __builtin_islessgreater(l, d);\n"
+    "failed |= !__builtin_isunordered(nan_d, f) || !__builtin_isunordered(f, nan_d) || __builtin_isgreater(nan_d, f);\n"
+    "failed |= sizeof(__builtin_isgreater(f, d)) != sizeof(int) || sizeof(FPC(f)) != sizeof(int) || sizeof(__builtin_isnormal(l)) != sizeof(int);\n"
+    "return failed;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "int failed = flt_test() | dbl_test() | ldbl_test() | mixed_test();\n"
+    "return failed;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("generic-float-builtins"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_generic_float_builtins_source));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("generic-float-builtins-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], forms[form], S8("-O0"),
+                        S8("-fverify-codegen"), S8("-o"), output, input, S8("-lm")};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("generic float builtins dialect={u32} mode={u32} form={u32}: {S8}"),
+                            dialect, mode, form, compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 command_line[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult run = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("generic float builtins dialect={u32} mode={u32} form={u32}: status={u32} timeout={u32}"),
+                                    dialect, mode, form, run.platform_status, (u32)run.timed_out));
+                        }
+                        BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if BUSTER_LINUX
+        String8 references[] = {S8("gcc"), S8("clang")};
+        String8 reference_dialects[] = {S8("-std=gnu17"), S8("-std=gnu2x")};
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("generic-float-builtins-reference"), S8(".exe"));
+                if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                {
+                    String8 command[] = {compiler, reference_dialects[dialect], S8("-O0"), S8("-nostdinc"), S8("-fno-fast-math"), input, S8("-o"), output, S8("-lm")};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                        (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                            .use_process_environment = true, .search_path = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult build = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !build.timed_out && build.result == PROCESS_RESULT_SUCCESS,
+                            BYTE_SLICE_TO_STRING(8, build.streams[STANDARD_STREAM_ERROR]));
+                        if (!build.timed_out && build.result == PROCESS_RESULT_SUCCESS)
+                        {
+                            String8 command_line[] = {output};
+                            ProcessSpawnResult executable = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, executable.handle != 0))
+                            {
+                                ProcessWaitResult run = os_process_wait_deadline(temporary.arena, executable, 30000000);
+                                BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("generic float builtins reference={S8} dialect={u32}: status={u32} timeout={u32}"),
+                                        references[reference], dialect, run.platform_status, (u32)run.timed_out));
+                            }
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A static x87 initializer is a constant expression over literals, and an
 // aggregate of them is one too.  These are the shapes musl's src/math needs:
 // `1/LDBL_EPSILON` in floorl.c and the coefficient tables in atanl.c.
@@ -43092,6 +43391,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
     BUSTER_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
     BUSTER_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
+    BUSTER_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
 
 
     {

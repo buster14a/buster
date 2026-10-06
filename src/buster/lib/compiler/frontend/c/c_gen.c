@@ -2434,6 +2434,10 @@ BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_isinf_sign"), S8("isinf_sign")},
         {S8("__builtin_isinf"), S8("isinf")},   {S8("__builtin_isinff"), S8("isinff")},
         {S8("__builtin_isfinite"), S8("isfinite")},
+        {S8("__builtin_isnormal"), S8("isnormal")},           {S8("__builtin_fpclassify"), S8("fpclassify")},
+        {S8("__builtin_isgreater"), S8("isgreater")},         {S8("__builtin_isgreaterequal"), S8("isgreaterequal")},
+        {S8("__builtin_isless"), S8("isless")},               {S8("__builtin_islessequal"), S8("islessequal")},
+        {S8("__builtin_islessgreater"), S8("islessgreater")}, {S8("__builtin_isunordered"), S8("isunordered")},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(mappings); index += 1)
     {
@@ -17839,58 +17843,369 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_builtin_call(CIntegerIrBuilder* bui
     return result;
 }
 
-// Read the sign in the original format: a floating conversion can quiet a
-// signaling NaN or raise overflow/underflow, neither of which signbit permits.
-BUSTER_C_INTERNAL IrValueId c_ir_emit_signbit_value(CIntegerIrBuilder* builder, CToken token, IrValueId value)
+// The stored bits of a floating value that signbit, isnormal, fpclassify and
+// the quiet comparisons read: a floating conversion or compare can quiet a
+// signaling NaN, raise overflow/underflow, or raise invalid on a quiet NaN,
+// and none of these builtins permits that. `top` is the word holding the sign
+// and exponent (the whole value for binary32/64, the x87 sign/exponent
+// halfword, or the binary128 high limb) and `low` the low 64-bit limb of a
+// wide format. The supported formats are little-endian.
+typedef struct CIrFloatBits CIrFloatBits;
+struct CIrFloatBits
+{
+    IrValueId top;
+    IrValueId low;
+    IrTypeId top_type;
+    IrTypeId low_type;
+    u32 width;
+};
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_word_load(CIntegerIrBuilder* builder, CToken token, IrValueId address, IrTypeId word_type, u32 index, IrSourceRange source)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId word_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, word_type);
+    IrValueId word_address = word_pointer_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, address, word_pointer_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId place = IR_VALUE_ID_INVALID;
+    if (word_address.value != IR_ID_UNDERLYING_INVALID)
+    {
+        if (index)
+        {
+            IrValueId index_value = c_ir_emit_integer_value_typed(builder, index, false, token, builder->s32_type);
+            place = index_value.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, word_address, index_value, source) : IR_VALUE_ID_INVALID;
+        }
+        else
+        {
+            place = c_ir_emit_dereference_place(builder, word_address, source);
+        }
+    }
+    if (place.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_emit_load_place_raw(builder, place, word_type, source);
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL CIrFloatBits c_ir_emit_float_bits(CIntegerIrBuilder* builder, CToken token, IrValueId value)
+{
+    CIrFloatBits result = {.top = IR_VALUE_ID_INVALID, .low = IR_VALUE_ID_INVALID};
     IrTypeId value_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
     IrType* type = ir_type_from_id(&builder->program->types, value_type);
     if (type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64 || type->bit_width == 80 || type->bit_width == 128))
     {
         IrSourceRange source = c_ir_token_source_range(builder, token);
         u32 width = type->bit_width;
-        CTypeKind bits_kind = width == 32 ? C_TYPE_UNSIGNED_INT : width == 80 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_LONG_LONG;
-        IrTypeId bits_type = c_ir_builder_scalar_type(builder, bits_kind);
+        CTypeKind top_kind = width == 32 ? C_TYPE_UNSIGNED_INT : width == 80 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_LONG_LONG;
+        IrTypeId top_type = c_ir_builder_scalar_type(builder, top_kind);
+        IrTypeId low_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_LONG_LONG);
         IrValueId slot = c_ir_emit_temporary(builder, value_type, source);
-        if (bits_type.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID &&
-            c_ir_emit_store_place(builder, slot, value_type, value, source))
+        if (top_type.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, slot, value_type, value, source))
         {
-            IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
             IrValueId address = c_ir_emit_address_of_place(builder, slot, value_type, source);
-            IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
-                                         ? c_ir_emit_cast(builder, address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
-            IrValueId bits_place = IR_VALUE_ID_INVALID;
-            if (bits_address.value != IR_ID_UNDERLYING_INVALID)
+            if (address.value != IR_ID_UNDERLYING_INVALID)
             {
-                // The supported formats are little-endian. The wide sign field
-                // starts at byte eight: the x87 sign/exponent or binary128 high limb.
-                if (width > 64)
+                // The wide sign field starts at byte eight: the x87
+                // sign/exponent halfword or the binary128 high limb.
+                result.top = c_ir_emit_float_word_load(builder, token, address, top_type, width == 80 ? 4u : width == 128 ? 1u : 0u, source);
+                result.low = width > 64 ? c_ir_emit_float_word_load(builder, token, address, low_type, 0, source) : IR_VALUE_ID_INVALID;
+                result.top_type = top_type;
+                result.low_type = low_type;
+                result.width = width;
+                if (width > 64 && result.low.value == IR_ID_UNDERLYING_INVALID)
                 {
-                    IrValueId index = c_ir_emit_integer_value_typed(builder, width == 80 ? 4u : 1u, false, token, builder->s32_type);
-                    if (index.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        bits_place = c_ir_emit_index_place(builder, bits_address, index, source);
-                    }
-                }
-                else
-                {
-                    bits_place = c_ir_emit_dereference_place(builder, bits_address, source);
-                }
-            }
-            IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
-            IrValueId shift = c_ir_emit_integer_value_typed(builder, width == 32 ? 31u : width == 80 ? 15u : 63u, false, token, bits_type);
-            if (bits.value != IR_ID_UNDERLYING_INVALID && shift.value != IR_ID_UNDERLYING_INVALID)
-            {
-                IrValueId sign = c_ir_emit_binary_value(builder, bits, shift, bits_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
-                if (sign.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    result = c_ir_emit_cast(builder, sign, builder->s32_type, source);
+                    result.top = IR_VALUE_ID_INVALID;
                 }
             }
         }
     }
     return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_signbit_value(CIntegerIrBuilder* builder, CToken token, IrValueId value)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    CIrFloatBits bits = c_ir_emit_float_bits(builder, token, value);
+    if (bits.top.value != IR_ID_UNDERLYING_INVALID)
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        IrValueId shift = c_ir_emit_integer_value_typed(builder, bits.width == 32 ? 31u : bits.width == 80 ? 15u : 63u, false, token, bits.top_type);
+        if (shift.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId sign = c_ir_emit_binary_value(builder, bits.top, shift, bits.top_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+            if (sign.value != IR_ID_UNDERLYING_INVALID)
+            {
+                result = c_ir_emit_cast(builder, sign, builder->s32_type, source);
+            }
+        }
+    }
+    return result;
+}
+
+// Logical negation of a bool value: the s32 conversion is compared to zero.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_bool_not(CIntegerIrBuilder* builder, CToken token, IrValueId flag, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId wide = flag.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, flag, builder->s32_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId zero = wide.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_integer_value_typed(builder, 0, false, token, builder->s32_type) : IR_VALUE_ID_INVALID;
+    if (zero.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_emit_binary_value(builder, wide, zero, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
+    }
+    return result;
+}
+
+// `word & mask` followed by an unsigned `operation` against `constant`, as a
+// bool. `mask` of zero skips the masking.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_word_test(CIntegerIrBuilder* builder, CToken token, IrValueId word, IrTypeId type, u64 mask, u64 constant,
+                                                IrBinaryOperation operation, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId masked = word;
+    if (mask)
+    {
+        IrValueId mask_value = c_ir_emit_integer_value_typed(builder, mask, false, token, type);
+        masked = mask_value.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, word, mask_value, type, IR_BINARY_INTEGER_BITWISE_AND, source) : IR_VALUE_ID_INVALID;
+    }
+    IrValueId constant_value = masked.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_integer_value_typed(builder, constant, false, token, type) : IR_VALUE_ID_INVALID;
+    if (constant_value.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_emit_binary_value(builder, masked, constant_value, builder->bool_type, operation, source);
+    }
+    return result;
+}
+
+// The biased exponent field is all ones (infinity or NaN) or all zeros
+// (zero or subnormal), as bools read from the stored bits.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_exponent_test(CIntegerIrBuilder* builder, CToken token, CIrFloatBits bits, bool maximum, IrSourceRange source)
+{
+    u32 shift_count = bits.width == 32 ? 23u : bits.width == 64 ? 52u : bits.width == 128 ? 48u : 0u;
+    u64 field = bits.width == 32 ? 0xffu : bits.width == 64 ? 0x7ffu : 0x7fffu;
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId shifted = bits.top;
+    if (shift_count)
+    {
+        IrValueId shift = c_ir_emit_integer_value_typed(builder, shift_count, false, token, bits.top_type);
+        shifted = shift.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, bits.top, shift, bits.top_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source) : IR_VALUE_ID_INVALID;
+    }
+    if (shifted.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_emit_word_test(builder, token, shifted, bits.top_type, field, maximum ? field : 0, IR_BINARY_INTEGER_EQUAL, source);
+    }
+    return result;
+}
+
+// The fraction (excluding x87's explicit integer bit) is zero: infinity rather
+// than NaN when the exponent is all ones, zero rather than subnormal when it
+// is all zeros.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_fraction_zero_test(CIntegerIrBuilder* builder, CToken token, CIrFloatBits bits, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    if (bits.width == 32 || bits.width == 64)
+    {
+        result = c_ir_emit_word_test(builder, token, bits.top, bits.top_type, bits.width == 32 ? 0x7fffffu : UINT64_C(0xfffffffffffff), 0, IR_BINARY_INTEGER_EQUAL, source);
+    }
+    else if (bits.width == 80)
+    {
+        IrValueId one = c_ir_emit_integer_value_typed(builder, 1, false, token, bits.low_type);
+        IrValueId shifted = one.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, bits.low, one, bits.low_type, IR_BINARY_SHIFT_LEFT, source) : IR_VALUE_ID_INVALID;
+        result = shifted.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_word_test(builder, token, shifted, bits.low_type, 0, 0, IR_BINARY_INTEGER_EQUAL, source) : IR_VALUE_ID_INVALID;
+    }
+    else
+    {
+        IrValueId mask = c_ir_emit_integer_value_typed(builder, UINT64_C(0xffffffffffff), false, token, bits.low_type);
+        IrValueId high = mask.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, bits.top, mask, bits.low_type, IR_BINARY_INTEGER_BITWISE_AND, source) : IR_VALUE_ID_INVALID;
+        IrValueId combined = high.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, high, bits.low, bits.low_type, IR_BINARY_INTEGER_BITWISE_OR, source) : IR_VALUE_ID_INVALID;
+        result = combined.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_word_test(builder, token, combined, bits.low_type, 0, 0, IR_BINARY_INTEGER_EQUAL, source) : IR_VALUE_ID_INVALID;
+    }
+    return result;
+}
+
+// NaN: all-ones exponent with a nonzero fraction, from the stored bits so no
+// floating compare runs on the value.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_nan_bits_test(CIntegerIrBuilder* builder, CToken token, CIrFloatBits bits, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId exponent = c_ir_emit_exponent_test(builder, token, bits, true, source);
+    IrValueId fraction_zero = exponent.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_fraction_zero_test(builder, token, bits, source) : IR_VALUE_ID_INVALID;
+    IrValueId fraction_nonzero = c_ir_emit_bool_not(builder, token, fraction_zero, source);
+    if (fraction_nonzero.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_emit_binary_value(builder, exponent, fraction_nonzero, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+    }
+    return result;
+}
+
+// A classification or comparison operand keeps its own floating format so a
+// subnormal float is not widened into a normal double. GCC and Clang reject
+// integer operands of these builtins, so they are refused here too, as are
+// formats without bit access (binary16).
+BUSTER_C_INTERNAL IrValueId c_ir_emit_classify_operand(CIntegerIrBuilder* builder, IrValueId value)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId value_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrType* type = ir_type_from_id(&builder->program->types, value_type);
+    if (type && type->kind == IR_TYPE_FLOAT)
+    {
+        result = type->bit_width == 32 || type->bit_width == 64 || type->bit_width == 80 || type->bit_width == 128 ? value : IR_VALUE_ID_INVALID;
+    }
+    return result;
+}
+
+// `condition ? when_true : when_false` over s32 values without a branch:
+// `when_false + condition * (when_true - when_false)`. Any invalid operand
+// makes the result invalid.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_select_s32(CIntegerIrBuilder* builder, IrValueId condition, IrValueId when_true, IrValueId when_false, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId flag = condition.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, condition, builder->s32_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId difference = flag.value != IR_ID_UNDERLYING_INVALID && when_true.value != IR_ID_UNDERLYING_INVALID && when_false.value != IR_ID_UNDERLYING_INVALID
+                               ? c_ir_emit_binary_value(builder, when_true, when_false, builder->s32_type, IR_BINARY_INTEGER_SUBTRACT, source) : IR_VALUE_ID_INVALID;
+    IrValueId scaled = difference.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, flag, difference, builder->s32_type, IR_BINARY_INTEGER_MULTIPLY, source) : IR_VALUE_ID_INVALID;
+    if (scaled.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_emit_binary_value(builder, when_false, scaled, builder->s32_type, IR_BINARY_INTEGER_ADD, source);
+    }
+    return result;
+}
+
+// `__builtin_isnormal` and `__builtin_fpclassify(nan, infinite, normal,
+// subnormal, zero, x)`: exponent and fraction tests on the stored bits, so no
+// floating compare or conversion touches the operand and no exception flag
+// can be raised, whatever the value.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_class_builtin(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    bool classify = string_equal(link_name, S8("fpclassify"));
+    if (argument_count == (classify ? 6u : 1u))
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        IrValueId value = c_ir_emit_classify_operand(builder, arguments[argument_count - 1]);
+        CIrFloatBits bits = value.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_float_bits(builder, token, value) : (CIrFloatBits){.top = IR_VALUE_ID_INVALID};
+        IrValueId zero_exponent = bits.top.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_exponent_test(builder, token, bits, false, source) : IR_VALUE_ID_INVALID;
+        IrValueId top_exponent = zero_exponent.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_exponent_test(builder, token, bits, true, source) : IR_VALUE_ID_INVALID;
+        if (top_exponent.value != IR_ID_UNDERLYING_INVALID && !classify)
+        {
+            IrValueId zero_flag = c_ir_emit_binary_value(builder, zero_exponent, top_exponent, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
+            IrValueId normal = zero_flag.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, zero_flag, builder->s32_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId one = normal.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_integer_value_typed(builder, 1, false, token, builder->s32_type) : IR_VALUE_ID_INVALID;
+            result = one.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, one, normal, builder->s32_type, IR_BINARY_INTEGER_SUBTRACT, source) : IR_VALUE_ID_INVALID;
+        }
+        else if (top_exponent.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId fraction_zero = c_ir_emit_fraction_zero_test(builder, token, bits, source);
+            IrValueId fraction_nonzero = c_ir_emit_bool_not(builder, token, fraction_zero, source);
+            // arguments: nan, infinite, normal, subnormal, zero. The fraction
+            // splits NaN from infinity under an all-ones exponent and zero
+            // from subnormal under an all-zeros one.
+            IrValueId special = c_ir_emit_select_s32(builder, fraction_nonzero, arguments[0], arguments[1], source);
+            IrValueId small = c_ir_emit_select_s32(builder, fraction_zero, arguments[4], arguments[3], source);
+            IrValueId low = c_ir_emit_select_s32(builder, zero_exponent, small, arguments[2], source);
+            result = c_ir_emit_select_s32(builder, top_exponent, special, low, source);
+        }
+    }
+    return result;
+}
+
+// The operand of a quiet comparison: itself when it is not a NaN and positive
+// zero when it is, chosen by an index into a two-element temporary so that no
+// floating compare ever sees a NaN. `unordered_out` is the NaN flag.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_quiet_operand(CIntegerIrBuilder* builder, CToken token, IrValueId value, IrValueId* unordered_out)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrTypeId value_type = builder->function->values[value.value].canonical_type;
+    CIrFloatBits bits = c_ir_emit_float_bits(builder, token, value);
+    IrValueId is_nan = bits.top.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_nan_bits_test(builder, token, bits, source) : IR_VALUE_ID_INVALID;
+    IrValueId zero_int = is_nan.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_integer_value_typed(builder, 0, false, token, builder->s32_type) : IR_VALUE_ID_INVALID;
+    IrValueId zero = zero_int.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, zero_int, value_type, source) : IR_VALUE_ID_INVALID;
+    IrTypeId pair_type = zero.value != IR_ID_UNDERLYING_INVALID ? c_ir_add_array_type(builder->program, builder->pointer_types, value_type, 2) : IR_TYPE_ID_INVALID;
+    IrValueId slot = pair_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_temporary(builder, pair_type, source) : IR_VALUE_ID_INVALID;
+    IrTypeId element_pointer_type = slot.value != IR_ID_UNDERLYING_INVALID ? c_ir_add_pointer_type(builder->program, builder->pointer_types, value_type) : IR_TYPE_ID_INVALID;
+    IrValueId address = element_pointer_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_address_of_place(builder, slot, pair_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId base = address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, address, element_pointer_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId one_int = base.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_integer_value_typed(builder, 1, false, token, builder->s32_type) : IR_VALUE_ID_INVALID;
+    IrValueId first = base.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, base, source) : IR_VALUE_ID_INVALID;
+    IrValueId second = one_int.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, base, one_int, source) : IR_VALUE_ID_INVALID;
+    IrValueId flag = second.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, is_nan, builder->s32_type, source) : IR_VALUE_ID_INVALID;
+    if (first.value != IR_ID_UNDERLYING_INVALID && second.value != IR_ID_UNDERLYING_INVALID && flag.value != IR_ID_UNDERLYING_INVALID &&
+        c_ir_emit_store_place(builder, first, value_type, value, source) && c_ir_emit_store_place(builder, second, value_type, zero, source))
+    {
+        IrValueId chosen = c_ir_emit_index_place(builder, base, flag, source);
+        result = chosen.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, chosen, value_type, source) : IR_VALUE_ID_INVALID;
+        *unordered_out = is_nan;
+    }
+    return result;
+}
+
+// The six quiet comparison builtins. The backends' float compares signal
+// invalid on a quiet NaN, so NaN-ness is decided from the stored bits and a NaN
+// operand is replaced by zero before any compare runs; the compare results are
+// then masked by the ordered flag. The sanitized operands widen exactly to the
+// wider of the two formats and use the IR float compares. `isunordered` is
+// purely the NaN flags; `islessgreater` is `x < y || x > y`.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_compare_builtin(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    if (argument_count == 2)
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        IrValueId left = c_ir_emit_classify_operand(builder, arguments[0]);
+        IrValueId right = c_ir_emit_classify_operand(builder, arguments[1]);
+        IrValueId left_nan = IR_VALUE_ID_INVALID;
+        IrValueId right_nan = IR_VALUE_ID_INVALID;
+        left = left.value != IR_ID_UNDERLYING_INVALID && right.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_quiet_operand(builder, token, left, &left_nan) : IR_VALUE_ID_INVALID;
+        right = left.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_quiet_operand(builder, token, right, &right_nan) : IR_VALUE_ID_INVALID;
+        if (left.value != IR_ID_UNDERLYING_INVALID && right.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId unordered = c_ir_emit_binary_value(builder, left_nan, right_nan, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
+            IrValueId flag = IR_VALUE_ID_INVALID;
+            if (string_equal(link_name, S8("isunordered")))
+            {
+                flag = unordered;
+            }
+            else
+            {
+                IrTypeId left_type = builder->function->values[left.value].canonical_type;
+                IrTypeId right_type = builder->function->values[right.value].canonical_type;
+                IrType* left_info = ir_type_from_id(&builder->program->types, left_type);
+                IrType* right_info = ir_type_from_id(&builder->program->types, right_type);
+                IrTypeId common = left_info->bit_width >= right_info->bit_width ? left_type : right_type;
+                left = c_ir_emit_cast(builder, left, common, source);
+                right = c_ir_emit_cast(builder, right, common, source);
+                IrValueId related = IR_VALUE_ID_INVALID;
+                if (left.value != IR_ID_UNDERLYING_INVALID && right.value != IR_ID_UNDERLYING_INVALID && string_equal(link_name, S8("islessgreater")))
+                {
+                    IrValueId less = c_ir_emit_binary_value(builder, left, right, builder->bool_type, IR_BINARY_FLOAT_LESS, source);
+                    IrValueId greater = c_ir_emit_binary_value(builder, left, right, builder->bool_type, IR_BINARY_FLOAT_GREATER, source);
+                    related = less.value != IR_ID_UNDERLYING_INVALID && greater.value != IR_ID_UNDERLYING_INVALID
+                                  ? c_ir_emit_binary_value(builder, less, greater, builder->bool_type, IR_BINARY_BOOLEAN_OR, source) : IR_VALUE_ID_INVALID;
+                }
+                else if (left.value != IR_ID_UNDERLYING_INVALID && right.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    IrBinaryOperation operation = string_equal(link_name, S8("isgreater"))        ? IR_BINARY_FLOAT_GREATER
+                                                  : string_equal(link_name, S8("isgreaterequal")) ? IR_BINARY_FLOAT_GREATER_EQUAL
+                                                  : string_equal(link_name, S8("isless"))         ? IR_BINARY_FLOAT_LESS
+                                                                                                 : IR_BINARY_FLOAT_LESS_EQUAL;
+                    related = c_ir_emit_binary_value(builder, left, right, builder->bool_type, operation, source);
+                }
+                // A NaN operand became zero above, so `related` is meaningless
+                // when `unordered` and is cleared by the ordered flag.
+                IrValueId ordered = c_ir_emit_bool_not(builder, token, unordered, source);
+                flag = related.value != IR_ID_UNDERLYING_INVALID && ordered.value != IR_ID_UNDERLYING_INVALID
+                           ? c_ir_emit_binary_value(builder, related, ordered, builder->bool_type, IR_BINARY_BOOLEAN_AND, source) : IR_VALUE_ID_INVALID;
+            }
+            result = flag.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, flag, builder->s32_type, source) : IR_VALUE_ID_INVALID;
+        }
+    }
+    return result;
+}
+
+// Names of the type-generic builtins that lower inline in this file and have
+// an `int` result: the quiet comparisons, isnormal and fpclassify.
+BUSTER_C_INTERNAL bool c_ir_math_builtin_is_generic_int(String8 link_name)
+{
+    return string_equal(link_name, S8("isgreater")) || string_equal(link_name, S8("isgreaterequal")) || string_equal(link_name, S8("isless")) ||
+           string_equal(link_name, S8("islessequal")) || string_equal(link_name, S8("islessgreater")) || string_equal(link_name, S8("isunordered")) ||
+           string_equal(link_name, S8("isnormal")) || string_equal(link_name, S8("fpclassify"));
 }
 
 // Infinity widens exactly into the classifier operand's format. Keep the
@@ -17957,6 +18272,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         return c_ir_emit_builtin_float_bits(builder, value_type, type->bit_width == 32 ? UINT64_C(0x7fc00000)
                                                                                        : UINT64_C(0x7ff8000000000000),
                                             source, S8("NAN"));
+    }
+    if (string_equal(link_name, S8("isnormal")) || string_equal(link_name, S8("fpclassify")))
+    {
+        return c_ir_emit_float_class_builtin(builder, token, link_name, arguments, argument_count);
+    }
+    if (c_ir_math_builtin_is_generic_int(link_name))
+    {
+        return c_ir_emit_float_compare_builtin(builder, token, link_name, arguments, argument_count);
     }
     if (string_equal(link_name, S8("signbit")) || string_equal(link_name, S8("signbitf")) || string_equal(link_name, S8("signbitl")))
     {
@@ -28724,7 +29047,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         }
         bool predicate = string_equal(math_link_name, S8("isnan")) || string_equal(math_link_name, S8("isnanf")) ||
                          string_equal(math_link_name, S8("isinf")) || string_equal(math_link_name, S8("isinff")) ||
-                         string_equal(math_link_name, S8("isinf_sign")) || string_equal(math_link_name, S8("isfinite"));
+                         string_equal(math_link_name, S8("isinf_sign")) || string_equal(math_link_name, S8("isfinite")) ||
+                         c_ir_math_builtin_is_generic_int(math_link_name);
         bool single = math_link_name.length && math_link_name.pointer[math_link_name.length - 1] == 'f';
         *type_out = predicate ? builder->s32_type : single ? builder->f32_type : builder->f64_type;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
