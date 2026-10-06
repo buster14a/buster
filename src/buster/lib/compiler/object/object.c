@@ -13688,7 +13688,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
                 continue;
             }
             s64 addend = source->addend;
-            if (source->kind == OBJECT_RELOCATION_X86_64_PC32 || source->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
+            if (source->kind == OBJECT_RELOCATION_X86_64_PC32 || source->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+                source->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
             {
                 addend += 4;
             }

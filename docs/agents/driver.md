@@ -24,6 +24,19 @@ destinations are explicitly refused. Write failures name the path and the OS
 error when supplied; native link failures identify the executable or PDB that
 failed. External GPU tools retain their own file-publication behavior.
 
+Publication (`file_publish_checked`, `file_publish_slices_checked` and
+`file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside
+the destination, closes it and renames it over the destination. It promises
+completion and atomic replacement, not crash durability: nothing calls
+`fsync(2)` or `FlushFileBuffers`, so after a power loss or kernel crash a
+just-published artifact may be missing, stale or empty, as with Clang and GCC
+objects. A process that observes a successful publication, including the
+build driver's self-host verification, sees the complete bytes; build systems
+recover from a crash by rebuilding from timestamps. Removing the per-artifact
+flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
+needs durability today; one that does should flush explicitly with
+`os_file_flush` rather than make every artifact pay for it.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
@@ -38,10 +51,10 @@ Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
 `-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
 nothing per unit and leave `CompilerDriverResult.object` unset.
 
-The registered `compiler_diagnostic_tests` include a desktop flush-failure
-cleanup regression. It injects one refusal after the real staging write, checks
-source mapping and native handle balance, old-or-absent destination bytes and
-a private directory inventory, then reuses the same invocation successfully
+The registered `compiler_diagnostic_tests` include a desktop close-failure
+cleanup regression. It injects one refusal after the real staging write and
+close, checks source mapping and native handle balance, old-or-absent
+destination bytes and a private directory inventory, then reuses the same invocation successfully
 against an independent literal preprocessing result. Close and staging deletion
 remain native operations. Android and iOS skip this desktop observation path
 explicitly; the existing portable write-failure tests still run. This is

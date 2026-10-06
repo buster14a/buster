@@ -3693,6 +3693,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_x64_tls_index_addends(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        RAW_OFFSET = 60,
+        RELOCATION_OFFSET = 68,
+        SYMBOL_OFFSET = 78,
+        STRING_OFFSET = 96,
+        INPUT_SIZE = 112,
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+    String8 names[] = {S8("__tls_index"), S8("__tls_plain")};
+    s32 stored_addends[] = {0, -8, 8, 4, INT32_MIN, INT32_MAX};
+    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+    {
+        ObjectRelocationKind expected_kind = name_index == 0 ? OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32
+                                                             : OBJECT_RELOCATION_X86_64_PC32;
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(stored_addends); addend_index += 1)
+        {
+            TemporalArena scope = arena_begin_temporal(arguments->arena);
+            // Independent regular COFF input: REL32 uses the byte after its
+            // four-byte field, so canonical A is signed inline B minus four.
+            u8 input[INPUT_SIZE] = {0};
+            object_test_coff_write_u16(input, 0, 0x8664);
+            object_test_coff_write_u16(input, 2, 1);
+            object_test_coff_write_u32(input, 8, SYMBOL_OFFSET);
+            object_test_coff_write_u32(input, 12, 1);
+            object_test_coff_write_name(input, 20, S8(".text"));
+            object_test_coff_write_u32(input, 36, 8);
+            object_test_coff_write_u32(input, 40, RAW_OFFSET);
+            object_test_coff_write_u32(input, 44, RELOCATION_OFFSET);
+            object_test_coff_write_u16(input, 52, 1);
+            object_test_coff_write_u32(input, 56, 0x60500020);
+            input[RAW_OFFSET] = 0x8b;
+            input[RAW_OFFSET + 1] = 0x05;
+            object_test_coff_write_u32(input, RAW_OFFSET + 2, (u32)stored_addends[addend_index]);
+            input[RAW_OFFSET + 6] = 0xc3;
+            input[RAW_OFFSET + 7] = 0x90;
+            object_test_coff_write_u32(input, RELOCATION_OFFSET, 2);
+            object_test_coff_write_u16(input, RELOCATION_OFFSET + 8, 4);
+            object_test_coff_write_u32(input, SYMBOL_OFFSET + 4, 4);
+            input[SYMBOL_OFFSET + 16] = 2;
+            object_test_coff_write_u32(input, STRING_OFFSET, 16);
+            object_test_coff_write_name(input, STRING_OFFSET + 4, names[name_index]);
+            u8 original[INPUT_SIZE];
+            memcpy(original, input, sizeof(input));
+            ObjectFile object = object_read(arguments->arena, (ByteSlice){.pointer = input, .length = sizeof(input)}, target);
+            s64 expected_addend = (s64)stored_addends[addend_index] - 4;
+            for (u32 cycle = 0; cycle < 3; cycle += 1)
+            {
+                bool valid = object.error == OBJECT_ERROR_NONE && object.relocations && object.relocation_count == 1 &&
+                             object.symbols && object.relocations[0].symbol < object.symbol_count;
+                if (BUSTER_REQUIRE(arguments, valid))
+                {
+                    ObjectRelocation* relocation = object.relocations;
+                    BUSTER_TEST(arguments, relocation->kind == expected_kind && relocation->offset == 2 &&
+                                               relocation->addend == expected_addend);
+                    BUSTER_STRING_TEST(arguments, object.symbols[relocation->symbol].name, names[name_index]);
+                    ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+                    u32 raw_offset = 0;
+                    u32 relocation_offset = 0;
+                    u16 relocation_count = 0;
+                    bool raw_valid = artifact.error == OBJECT_ERROR_NONE &&
+                                     object_test_coff_named_section(artifact.bytes, S8(".text"), &raw_offset, &relocation_offset,
+                                                                   &relocation_count, 0) &&
+                                     relocation_count == 1 && raw_offset <= artifact.bytes.length &&
+                                     8 <= artifact.bytes.length - raw_offset;
+                    if (BUSTER_REQUIRE(arguments, raw_valid))
+                    {
+                        s32 stored = 0;
+                        u32 site = 0;
+                        u16 type = 0;
+                        memcpy(&stored, artifact.bytes.pointer + raw_offset + 2, sizeof(stored));
+                        memcpy(&site, artifact.bytes.pointer + relocation_offset, sizeof(site));
+                        memcpy(&type, artifact.bytes.pointer + relocation_offset + 8, sizeof(type));
+                        BUSTER_TEST(arguments, stored == stored_addends[addend_index] && site == 2 && type == 4);
+                        BUSTER_TEST(arguments, artifact.bytes.pointer[raw_offset] == 0x8b &&
+                                                   artifact.bytes.pointer[raw_offset + 1] == 0x05 &&
+                                                   artifact.bytes.pointer[raw_offset + 6] == 0xc3 &&
+                                                   artifact.bytes.pointer[raw_offset + 7] == 0x90);
+                        object = object_read(arguments->arena, artifact.bytes, target);
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, memcmp(input, original, sizeof(input)) == 0);
+            arena_set_position(arguments->arena, scope.position);
+        }
+    }
+    return result;
+}
+
 #include <buster/tests/compiler/object/executable_test.c>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArguments* arguments)
@@ -3836,6 +3929,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    BUSTER_TEST_FIXTURE(arguments, object_test_coff_x64_tls_index_addends);
     UnitTestResult aarch64_printer = object_test_aarch64_printer_fields(arguments);
     result.test_count += aarch64_printer.test_count;
     result.succeeded_test_count += aarch64_printer.succeeded_test_count;

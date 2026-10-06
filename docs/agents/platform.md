@@ -363,7 +363,10 @@ Writes are synchronous descriptor transfers, without a userspace output buffer.
 Flush (`fsync`/`FlushFileBuffers`) is explicit and reports errors; ordinary
 artifact writes do not add a durability flush. A failed write can leave an
 empty, partial, or complete destination, and a close failure still fails the
-operation. Atomic old-or-new replacement remains the separate #83 contract.
+operation. Atomic old-or-new replacement remains the separate #83 contract:
+`file_publish_*` and `file_copy_checked` close a staging file and rename it
+without flushing either, so publication is atomic but not crash-durable (#2621;
+see [artifact publication](driver.md#compiler-output-streams)).
 Console printing retains its always-on failure wrapper.
 
 Registered file/diagnostic tests use `os_internal.h` scripts scoped to one
