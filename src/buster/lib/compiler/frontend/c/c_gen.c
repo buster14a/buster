@@ -27074,7 +27074,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
             {
                 type = c_ir_type_name_function_type(builder, type, parameters_open, parameters_close);
                 answered = true;
-                if (nested_group)
+                // A parameter whose type waits on a query leaves its request
+                // pending; nothing below may issue another one this attempt.
+                if (nested_group && !builder->queries->has_request)
                 {
                     index = pointer_index;
                     end = pointer_close;
@@ -27103,7 +27105,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
                     type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
                     pointer_count -= 1;
                 }
-                if (inner_suffix && type.value != IR_ID_UNDERLYING_INVALID)
+                if (inner_suffix && type.value != IR_ID_UNDERLYING_INVALID && !builder->queries->has_request)
                 {
                     type = c_ir_type_name_suffix(builder, type, pointer_index, pointer_close);
                 }
