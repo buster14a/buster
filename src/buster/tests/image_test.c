@@ -3161,6 +3161,38 @@ UnitTestResult image_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, pam_commented, sizeof(pam_commented) - 1u,
                                                      pam_rgb_expected, sizeof(pam_rgb_expected)));
 
+    // Plain PBM may carry whitespace-introduced trailing material after its
+    // raster; it is ignored rather than parsed as another image.
+    u8 const p1_white_expected[] = {255, 255, 255, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0\nignored"),
+                                                     p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0"), p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0 \n"), p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0 # note\nPX trailer"),
+                                                     p1_white_expected, sizeof(p1_white_expected)));
+    u8 p1_trailer[] = "P1\n1 1\n0\nignored";
+    ByteSlice p1_trailer_bytes = {.pointer = p1_trailer, .length = sizeof(p1_trailer) - 1u};
+    ImageProbeResult p1_trailer_probe = image_probe(p1_trailer_bytes, pnm_options);
+    BUSTER_TEST(arguments, p1_trailer_probe.status == IMAGE_DECODE_SUCCESS && !p1_trailer_probe.information.has_more_images);
+    // A frame limit counts only a real following image, never ignored text.
+    ImageDecodeOptions p1_one_frame = {.format_hint = IMAGE_FORMAT_PNM, .max_frames = 1};
+    ImageProbeResult p1_limited_probe = image_probe(p1_trailer_bytes, p1_one_frame);
+    BUSTER_TEST(arguments, p1_limited_probe.status == IMAGE_DECODE_SUCCESS);
+    // A following P1-P7 image is still reported, and non-whitespace trailers,
+    // missing samples and raw-format junk stay malformed.
+    u8 p1_concatenated[] = "P1\n1 1\n0\nP1\n1 1\n1\n";
+    ImageProbeResult p1_concatenated_probe = image_probe((ByteSlice){.pointer = p1_concatenated, .length = sizeof(p1_concatenated) - 1u}, pnm_options);
+    BUSTER_TEST(arguments, p1_concatenated_probe.status == IMAGE_DECODE_SUCCESS && p1_concatenated_probe.information.has_more_images);
+    u8 p1_glued[] = "P1\n1 1\n0x";
+    BUSTER_TEST(arguments, image_test_rejected_at_without_allocation(arguments->arena, (ByteSlice){.pointer = p1_glued, .length = sizeof(p1_glued) - 1u},
+                                                                      pnm_options, IMAGE_DECODE_MALFORMED, 8));
+    u8 p1_missing[] = "P1\n2 1\n0\nignored";
+    BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, (ByteSlice){.pointer = p1_missing, .length = sizeof(p1_missing) - 1u},
+                                                                   pnm_options, IMAGE_DECODE_MALFORMED));
+    u8 p2_trailer[] = "P2\n1 1\n255\n7\nignored";
+    BUSTER_TEST(arguments, image_test_rejected_at_without_allocation(arguments->arena, (ByteSlice){.pointer = p2_trailer, .length = sizeof(p2_trailer) - 1u},
+                                                                      pnm_options, IMAGE_DECODE_MALFORMED, 13));
+
     u8 p1_bad_digit[] = "P1\n2 1\n02\n";
     ByteSlice p1_bad_digit_bytes = {.pointer = p1_bad_digit, .length = sizeof(p1_bad_digit) - 1u};
     ImageProbeResult p1_bad_digit_probe = image_probe(p1_bad_digit_bytes, pnm_options);

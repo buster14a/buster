@@ -642,7 +642,7 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_binary_size(ImageDecodeContext* context, Imag
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool image_pnm_find_additional_image(ImageDecodeContext* context, u64 offset, bool* has_more_images)
+BUSTER_GLOBAL_LOCAL bool image_pnm_find_additional_image(ImageDecodeContext* context, u64 offset, bool plain_pbm, bool* has_more_images)
 {
     ImagePnmScanner scanner = {.context = context, .position = offset};
     bool result = has_more_images && image_pnm_skip_space_and_comments(&scanner);
@@ -654,11 +654,18 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_find_additional_image(ImageDecodeContext* con
                  context->encoded.pointer[scanner.position + 1u] >= '1' &&
                  context->encoded.pointer[scanner.position + 1u] <= '7' &&
                  image_pnm_space(context->encoded.pointer[scanner.position + 2u]);
+        // Plain PBM permits arbitrary material after the raster when it is
+        // introduced by whitespace (or a comment): it is ignored, not a frame.
+        if (!result && plain_pbm && scanner.position > offset)
+        {
+            has_more = false;
+            result = true;
+        }
         if (!result && context->status == IMAGE_DECODE_SUCCESS)
         {
             image_decode_error(context, IMAGE_DECODE_MALFORMED, scanner.position);
         }
-        if (result)
+        if (result && has_more)
         {
             result = image_decode_count_limit(context, IMAGE_EXCEEDED_LIMIT_FRAMES, 1, scanner.position);
         }
@@ -717,7 +724,7 @@ void image_pnm_process(ImageDecodeContext* context)
     if (valid)
     {
         bool has_more_images = false;
-        valid = image_pnm_find_additional_image(context, raster_end, &has_more_images);
+        valid = image_pnm_find_additional_image(context, raster_end, header.variant == 1, &has_more_images);
         if (valid)
         {
             context->information.has_more_images = has_more_images;
