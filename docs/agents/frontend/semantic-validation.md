@@ -245,7 +245,9 @@ uses the same reservation boundary and reports the requested bytes. A private
 tests-only initial function budget forces real growth with a small valid input;
 a synthetic query extent refuses its mapping before any oversized source walk.
 The attribute-role regression also forces its deep semantic spill reservation
-and checks recovery. Existing scratch-limit regressions cover checked plan refusal.
+and checks recovery. The frontend reservation fixture releases each complete
+preprocessed unit with `c_preprocess_release` before rewinding scratch, so the
+test-unit registry is unregistered and cannot retain destroyed arena pointers. Existing scratch-limit regressions cover checked plan refusal.
 The lexer diagnostic arena remains an optional optimization with a tested
 result-arena fallback; failure there retains the original lexical diagnostics.
 

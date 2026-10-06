@@ -1143,6 +1143,9 @@ struct CTypeParseFrame
     u32 shared_specifier_end;
     u32 mutation_mark;
     u32 definition_type_start;
+    // PARAMETER frames: the diagnostic count at entry, so a failed type
+    // specifier that said nothing can be named.
+    u32 diagnostic_start;
     u32 pending_index;
     u64 arena_mark;
     CTypeParseFrameKind kind;
@@ -1265,6 +1268,11 @@ struct CTypeParseMachine
     u32 mutation_count;
     u32 mutation_capacity;
     u32 mutation_type_limit;
+    // Parenthesized declarators being parsed for an aggregate member or a
+    // declaration that creates storage. A parameter whose type specifier fails
+    // inside one is reported there, because neither path has a later fallback
+    // that names it.
+    u32 member_declarator_depth;
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;

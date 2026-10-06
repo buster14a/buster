@@ -22,6 +22,8 @@
 // llvm_bc_plan_instruction_allocas reserves fixed local/ABI/bit-field storage
 // once per frame; llvm_bc_emit_function_body emits it after entry PHIs. Only
 // dynamic STACK_ALLOCATE records remain at their canonical instruction sites.
+// llvm_bc_plan_value_spills gives every non-place aggregate GEP base one entry
+// alloca, filled in llvm_bc_emit_instruction after the value's definition.
 // Test-only integer operand access lives at llvm_bitcode_test_integer_operand;
 // normal builds omit that private boundary entirely.
 
@@ -318,6 +320,12 @@ struct LlvmBcFunction
     u32 fixed_alloca_capacity;
     u32 fixed_alloca_cursor;
     u32 first_fixed_alloca_value_id;
+    // Array/record values used as INDEX/FIELD bases have no LLVM address.
+    // spill_value_ids maps such a canonical value to the entry alloca that
+    // receives it right after its definition (INVALID elsewhere); those
+    // allocas follow the cursor-consumed ones, starting at spill_alloca_first.
+    u32* spill_value_ids;
+    u32 spill_alloca_first;
     u32 first_local_value_id;
     u32 final_value_id;
     bool declaration;
@@ -3392,6 +3400,53 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_plan_instruction_allocas(LlvmBcContext* context,
     return record->fixed_alloca_count - first;
 }
 
+// An INDEX/FIELD whose base is an aggregate value (an array compound literal)
+// rather than a place needs an address. Native code gives that value a stack
+// slot; here each such value gets exactly one alloca, so every use shares one
+// object. The aggregate is stored into it where the value is defined.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_plan_value_spills(LlvmBcContext* context, LlvmBcFunction* record)
+{
+    IrFunction* function = record->function;
+    record->spill_alloca_first = record->fixed_alloca_count;
+    u32 value_count = function->value_count;
+    u8* defined = arena_allocate(context->arena, u8, value_count ? value_count : 1);
+    memset(defined, 0, value_count ? value_count : 1);
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        IrInstruction* instruction = function->instructions + index;
+        if (instruction->result.value < value_count && instruction->opcode != IR_OPCODE_ARGUMENT)
+        {
+            defined[instruction->result.value] = 1;
+        }
+    }
+    for (u32 index = 0; index < function->instruction_count && !llvm_bc_failed(context); index += 1)
+    {
+        IrInstruction* instruction = function->instructions + index;
+        if ((instruction->opcode == IR_OPCODE_INDEX || instruction->opcode == IR_OPCODE_FIELD) && instruction->operand_count >= 1 &&
+            instruction->operands[0].value < value_count)
+        {
+            u32 base = instruction->operands[0].value;
+            IrValue* value = function->values + base;
+            if (value->category != IR_VALUE_PLACE && record->value_type_ids[base] != context->pointer_type_id &&
+                record->spill_value_ids[base] == LLVM_BC_INVALID_ID)
+            {
+                IrType* type = llvm_bc_ir_type(context, value->canonical_type);
+                if (!type || !defined[base])
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM GEP base is not an address"), function,
+                                 0, instruction, IR_SYMBOL_ID_INVALID);
+                }
+                else
+                {
+                    record->spill_value_ids[base] = record->fixed_alloca_count;
+                    llvm_bc_plan_fixed_alloca(context, record, record->value_type_ids[base], type->layout.alignment ? type->layout.alignment : 1);
+                }
+            }
+        }
+    }
+    return !llvm_bc_failed(context);
+}
+
 static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record)
 {
     IrFunction* function = record->function;
@@ -3454,6 +3509,11 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
         record->instruction_plans = arena_allocate(context->arena, LlvmBcInstructionPlan, function->instruction_count ? function->instruction_count : 1);
         memset(record->instruction_plans, 0, (size_t)function->instruction_count * sizeof(*record->instruction_plans));
 
+        record->spill_value_ids = arena_allocate(context->arena, u32, value_count ? value_count : 1);
+        for (u32 index = 0; index < value_count; index += 1)
+        {
+            record->spill_value_ids[index] = LLVM_BC_INVALID_ID;
+        }
         record->first_local_value_id = context->module_value_count + context->constant_count;
         u8* argument_seen = arena_allocate(context->arena, u8, signature->parameter_count ? signature->parameter_count : 1);
         memset(argument_seen, 0, signature->parameter_count);
@@ -3509,6 +3569,10 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
             }
         }
 
+        if (!llvm_bc_plan_value_spills(context, record))
+        {
+            return false;
+        }
         u32 next_value_id = record->first_local_value_id + signature->parameter_count + hidden_result;
         IrCfgBlock const* entry_cfg = function->published_cfg->blocks + entry->id.value;
         if (next_value_id > UINT32_MAX - entry_cfg->parameter_count ||
@@ -3964,13 +4028,15 @@ static bool llvm_bc_emit_gep(LlvmBcContext* context, LlvmBcFunction* record, IrB
     }
     IrValueId base_id = instruction->operands[0];
     IrValue* base_value = function->values + base_id.value;
-    if (base_value->category != IR_VALUE_PLACE && llvm_bc_function_value_type_id(context, record, base_id) != context->pointer_type_id)
+    bool spilled = base_value->category != IR_VALUE_PLACE && llvm_bc_function_value_type_id(context, record, base_id) != context->pointer_type_id;
+    if (spilled && record->spill_value_ids[base_id.value] == LLVM_BC_INVALID_ID)
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM GEP base is not an address"), function, block,
                      instruction, IR_SYMBOL_ID_INVALID);
         return false;
     }
-    u32 base = llvm_bc_function_value_id(context, record, base_id);
+    u32 base = spilled ? record->first_fixed_alloca_value_id + record->spill_value_ids[base_id.value]
+                       : llvm_bc_function_value_id(context, record, base_id);
     if (base == LLVM_BC_INVALID_ID)
     {
         return false;
@@ -4867,6 +4933,14 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
                      block, instruction, instruction->symbol);
         return false;
     }
+    if (instruction->result.value != IR_ID_UNDERLYING_INVALID && record->spill_value_ids[instruction->result.value] != LLVM_BC_INVALID_ID)
+    {
+        IrValueId result = instruction->result;
+        IrType* type = llvm_bc_ir_type(context, function->values[result.value].canonical_type);
+        llvm_bc_abi_store(context, record->first_fixed_alloca_value_id + record->spill_value_ids[result.value],
+                          llvm_bc_function_value_id(context, record, result), llvm_bc_function_value_type_id(context, record, result),
+                          type->layout.alignment ? type->layout.alignment : 1, *current_value_id);
+    }
     if (context->stream.failed)
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_ENCODING, llvm_bc_s8("failed to write LLVM instruction record"), function, block, instruction,
@@ -4950,7 +5024,7 @@ static bool llvm_bc_emit_function_body(LlvmBcContext* context, LlvmBcFunction* r
             instruction_id.value = instruction_id.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
         }
     }
-    if (current_value_id != record->final_value_id || record->fixed_alloca_cursor != record->fixed_alloca_count)
+    if (current_value_id != record->final_value_id || record->fixed_alloca_cursor != record->spill_alloca_first)
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM function final value id does not match the plan"), function, 0,
                      0, function->symbol);
