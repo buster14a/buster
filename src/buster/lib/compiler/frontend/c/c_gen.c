@@ -3176,6 +3176,7 @@ struct CIntegerIrBuilder
     // initializer, which can follow its LOCAL event in a later block when the
     // initializer branches (`?:`, `&&`, `||`).
     bool ssa_declaration_initializer_store;
+    bool keep_debug_locals;
     Arena* arena;
     Arena* scratch_arena;
     Arena* temporary_arena;
@@ -5908,6 +5909,8 @@ struct CIrSsaLocal
     // a jump enters the scope past it, it dominates every later read. A later
     // write revokes it.
     bool declaration_definition;
+    // A named source local (not a parameter or temporary) that debug info describes.
+    bool debug_named;
 };
 
 typedef struct CIrSsaEvent CIrSsaEvent;
@@ -6481,6 +6484,40 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_places(CIntegerIrBuilder* builder, u8* 
     }
 }
 
+// Debug info describes a promoted named local by the one instruction that
+// defines its value, so keep every other named local in its frame slot, where
+// the debugger reads it for the whole function. A local qualifies for
+// promotion only when its sole write is the entry initializer and that
+// initializer is an instruction result no other local already names.
+BUSTER_C_INTERNAL void c_ir_ssa_classify_debug(CIntegerIrBuilder* builder, u8* memory)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    IrFunction* function = builder->function;
+    for (u32 index = 0; builder->keep_debug_locals && index < ssa->local_count; index += 1)
+    {
+        CIrSsaLocal* local = ssa->locals + index;
+        if (local->debug_named && !memory[index])
+        {
+            u32 initializer = local->first_event < ssa->event_count ? ssa->events[local->first_event].next_local : UINT32_MAX;
+            u32 value = initializer < ssa->event_count && local->single_entry_definition && ssa->events[initializer].opcode == IR_OPCODE_STORE
+                            ? ssa->events[initializer].value.value
+                            : UINT32_MAX;
+            IrInstructionId definition = value < function->value_count ? function->values[value].definition : IR_INSTRUCTION_ID_INVALID;
+            IrInstruction* row = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+            bool fresh = row && row->result.value == value && row->opcode != IR_OPCODE_LOAD && row->opcode != IR_OPCODE_ARGUMENT &&
+                         row->opcode != IR_OPCODE_LOCAL && row->canonical_local.value == IR_ID_UNDERLYING_INVALID;
+            if (fresh)
+            {
+                row->canonical_local = local->id;
+            }
+            else
+            {
+                memory[index] = 1;
+            }
+        }
+    }
+}
+
 BUSTER_C_INTERNAL void c_ir_ssa_classify_initialization(CIntegerIrBuilder* builder, u8* memory, u32* replacements,
                                                        CIrSsaParameter** parameter_by_value)
 {
@@ -6698,6 +6735,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_cfg(CIntegerIrBuilder* builder, u8** memo
         u8* memory = arena_allocate(builder->scratch_arena, u8, builder->direct_ssa->local_count);
         memset(memory, 0, builder->direct_ssa->local_count);
         c_ir_ssa_classify_places(builder, memory);
+        c_ir_ssa_classify_debug(builder, memory);
         u32* offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
         u32* cursor = arena_allocate(builder->scratch_arena, u32, block_count);
         u32* stamps = arena_allocate(builder->scratch_arena, u32, block_count);
@@ -7698,6 +7736,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
     if (direct_ssa)
     {
         c_ir_ssa_add_local(builder, place, type, local_id, c_ir_token_source_range(builder, name), false, entity.value + 1);
+        builder->direct_ssa->locals[builder->direct_ssa->local_count - 1u].debug_named =
+            entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL;
     }
     else
     {
@@ -58115,6 +58155,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         CIntegerIrBuilder builder = {
             .direct_ssa_enabled = direct_ssa_enabled,
             .ssa_declaration_shortcut_disabled = options.disable_declaration_shortcut,
+            .keep_debug_locals = options.pin_debug_locals,
             .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,

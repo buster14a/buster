@@ -216,6 +216,10 @@ struct CompilerDriverInvocation
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
+    // -fpinned-debug-locals: with -g, keep named scalar locals readable by pinning
+    // them in frame slots (see ir.h pin_debug_locals). Off by default so -g code
+    // stays identical to -g0 code.
+    bool enable_pinned_debug_locals;
     u32 fast_passes;
     bool measure_fast_passes;
     bool verify_codegen;

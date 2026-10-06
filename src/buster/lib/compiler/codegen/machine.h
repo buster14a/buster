@@ -1411,7 +1411,10 @@ struct MachineFunction
     // over disjoint lifetimes is only sound while this holds. Unknown,
     // manual, and structural-replay functions leave it false.
     bool returns_twice_absence_certified;
-    u8 reserved[3];
+    // Pinned debug locals: every frame object keeps storage of its own, so a
+    // debugger reading a dead local's slot never sees a later object's bytes.
+    bool distinct_frame_objects;
+    u8 reserved[2];
     // One flag byte per stack slot, or null. Volatile canonical lowering
     // taints every frame object it touches. Object identities do not change
     // during CFG/SSA/scheduling rewrites, so this immutable table is shared.

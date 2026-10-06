@@ -1172,6 +1172,22 @@ source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
 
+Plain `-g` keeps code identical to `-g0`, so a named scalar local survives only
+where its value is described by one defining instruction. Locals that are
+reassigned, copied from a parameter or another local, or conditionally
+initialized get an empty location list and show as `<optimized out>` (#2717
+stays partly open for this default path; the proper fix is per-definition
+ranges plus an alias table).
+
+`-fpinned-debug-locals` (with `-g`; `-fno-pinned-debug-locals` is the default
+and the last one wins) makes every named scalar readable. A local stays SSA only
+when its sole write is its entry initializer and that initializer is an
+instruction result no other local already names; every other named local keeps a
+frame slot that its location list covers for the whole function. The cost is
+code: the target does not promote the remaining memory locals into registers
+and FAST/QUALITY frame layout does not coalesce frame objects over disjoint
+lifetimes. The regression is `compiler_driver_test_debug_scalar_local_locations`.
+
 This default also applies when compiler-driver arguments are parsed for an
 embedding caller. The typed invocation API uses its `debug_info` field
 explicitly; a zero-initialized field disables debug output. Release/Debug

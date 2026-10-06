@@ -1724,6 +1724,10 @@ struct CIRLowerOptions
     // location and debug-model builders, which run only with debug output;
     // every other part of the program is unchanged.
     bool omit_debug_locals;
+    // Debug info is on and wants every named scalar local readable: keep a local
+    // in its frame slot unless its one write is the entry initializer and an
+    // instruction result names it (see IrProgram pin_debug_locals).
+    bool pin_debug_locals;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;

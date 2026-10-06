@@ -1623,7 +1623,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_dwarf_location_
 // the object's debug-section relocations so the assertion reaches the exact
 // value DIE's DW_AT_location list, not an unrelated location range.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_debug_local_location(ObjectFile* object, String8 function_name,
-                                                                                       u64 function_start, u64 function_end)
+                                                                                       String8 local_name, u64 function_start,
+                                                                                       u64 function_end)
 {
     bool result = false;
     ByteSlice info = object ? object->sections[OBJECT_SECTION_DEBUG_INFO].data : (ByteSlice){0};
@@ -1664,25 +1665,29 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_debug_local_loc
         {
             continue;
         }
-        u8 child_abbrev = info.pointer[cursor++];
-        if (child_abbrev != COMPILER_DRIVER_DWARF_ABBREV_VARIABLE && child_abbrev != COMPILER_DRIVER_DWARF_ABBREV_PARAMETER)
+        // Walk the function's leading parameter and variable children; every
+        // one carries name, file, line, type and location attributes.
+        while (!result && cursor < info.length &&
+               (info.pointer[cursor] == COMPILER_DRIVER_DWARF_ABBREV_VARIABLE || info.pointer[cursor] == COMPILER_DRIVER_DWARF_ABBREV_PARAMETER))
         {
-            continue;
-        }
-        u32 child_name_offset = 0;
-        if (!compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &child_name_offset) ||
-            !compiler_driver_test_dwarf_advance(info, &cursor, 4) ||
-            !string_equal(compiler_driver_test_dwarf_string(strings, child_name_offset), S8("value")) ||
-            !compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) ||
-            !compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) ||
-            !compiler_driver_test_dwarf_advance(info, &cursor, 4))
-        {
-            continue;
-        }
-        u32 location_offset = 0;
-        if (compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &location_offset))
-        {
-            result = compiler_driver_test_dwarf_location_list(locations, location_offset, function_start, function_end);
+            cursor += 1;
+            u32 child_name_offset = 0;
+            u32 location_offset = 0;
+            bool child_valid = compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &child_name_offset) &&
+                               compiler_driver_test_dwarf_advance(info, &cursor, 4) &&
+                               compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) &&
+                               compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) &&
+                               compiler_driver_test_dwarf_advance(info, &cursor, 4) &&
+                               compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &location_offset) &&
+                               compiler_driver_test_dwarf_advance(info, &cursor, 4);
+            if (!child_valid)
+            {
+                break;
+            }
+            if (string_equal(compiler_driver_test_dwarf_string(strings, child_name_offset), local_name))
+            {
+                result = compiler_driver_test_dwarf_location_list(locations, location_offset, function_start, function_end);
+            }
         }
     }
     return result;
@@ -5679,6 +5684,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_global_relocations
     return result;
 }
 
+// Scalar locals that are reassigned, copied from a parameter, widened or built
+// with -fno-frontend-ssa once got an empty DWARF location list in every
+// allocator mode, so a debugger showed <optimized out> at every line. Each
+// named local below must now carry a location list with at least one range
+// inside its function, read back through the object's own debug sections.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("int sink;\n"
+                        "int g(int x) { return x + 100; }\n"
+                        "int copies(int v)\n"
+                        "{\n"
+                        "    int a = v * 2;\n"
+                        "    int b = v;\n"
+                        "    int c = g(v);\n"
+                        "    int d = 5;\n"
+                        "    int e = v + c;\n"
+                        "    long long w = (long long)v << 40;\n"
+                        "    sink = a + b + c + d + e + (int)(w >> 40);\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int reassigned(int v)\n"
+                        "{\n"
+                        "    int once = v * 2;\n"
+                        "    int twice = v * 3;\n"
+                        "    sink = once + twice;\n"
+                        "    twice = twice + 1;\n"
+                        "    sink = once + twice;\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int looped(int n)\n"
+                        "{\n"
+                        "    int total = 0;\n"
+                        "    int i;\n"
+                        "    for (i = 0; i < n; i += 1) { total += i; }\n"
+                        "    return total;\n"
+                        "}\n");
+    String8 path = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    typedef struct DebugScalarLocalCase DebugScalarLocalCase;
+    struct DebugScalarLocalCase
+    {
+        String8 function;
+        String8 locals[6];
+    };
+    static DebugScalarLocalCase const cases[] = {
+        {S8_INITIALIZER("copies"), {S8_INITIALIZER("v"), S8_INITIALIZER("a"), S8_INITIALIZER("b"), S8_INITIALIZER("c"), S8_INITIALIZER("d"), S8_INITIALIZER("w")}},
+        {S8_INITIALIZER("reassigned"), {S8_INITIALIZER("v"), S8_INITIALIZER("once"), S8_INITIALIZER("twice")}},
+        {S8_INITIALIZER("looped"), {S8_INITIALIZER("n"), S8_INITIALIZER("total"), S8_INITIALIZER("i")}},
+    };
+    String8 const allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"),
+                                  S8("-fregister-allocator=quality")};
+    String8 const frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            String8 output = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals"), S8(".o"));
+            String8 command[] = {S8("-c"), S8("-g"), S8("-fpinned-debug-locals"), S8("-target"), S8("x86_64-unknown-linux-gnu"), allocators[allocator], frontends[frontend],
+                                 S8("-o"), output, path};
+            CompilerDriverResult built = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            String8 label = string_format(temporary.arena, S8("{S8} {S8}: {S8}"), allocators[allocator], frontends[frontend], built.diagnostic);
+            BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, label);
+            for (u32 case_index = 0; built.has_object && case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                DebugScalarLocalCase const* test_case = cases + case_index;
+                ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&built.object, test_case->function);
+                BUSTER_TEST_RAW(arguments, symbol != 0, label);
+                for (u32 local = 0; symbol && local < BUSTER_ARRAY_LENGTH(test_case->locals) && test_case->locals[local].length; local += 1)
+                {
+                    String8 description = string_format(temporary.arena, S8("{S8} {S8}.{S8}"), label, test_case->function,
+                                                        test_case->locals[local]);
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_debug_local_location(&built.object, test_case->function,
+                                                                                         test_case->locals[local], symbol->value,
+                                                                                         symbol->value + symbol->size), description);
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // The default and -g0 must omit debug payloads in the serialized artifact,
 // while -g opts in and the final debug option wins for every native format.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_options(UnitTestArguments* arguments)
@@ -9261,7 +9351,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
                         }
                     }
                     BUSTER_TEST(arguments, found);
-                    bool local_location = symbol && compiler_driver_test_debug_local_location(&compiled.object, test_case->symbol,
+                    bool local_location = symbol && compiler_driver_test_debug_local_location(&compiled.object, test_case->symbol, S8("value"),
                                                                                                 symbol->value, symbol->value + symbol->size);
                     BUSTER_TEST(arguments, local_location);
                     if (found)
@@ -24223,6 +24313,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_options);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_scalar_local_locations);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);

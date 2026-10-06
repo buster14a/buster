@@ -7243,6 +7243,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         result.function.stack_slot_count = selector.stack_slots.total_count;
         result.function.nonvolatile_memory_certified = nonvolatile_memory;
         result.function.returns_twice_absence_certified = returns_twice_free;
+        result.function.distinct_frame_objects = program->pin_debug_locals;
         machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
         result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
         machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);

@@ -1934,6 +1934,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_target_local_promotion = string_equal(argument, S8("-fno-target-local-promotion"));
             continue;
         }
+        if (string_equal(argument, S8("-fno-pinned-debug-locals")) || string_equal(argument, S8("-fpinned-debug-locals")))
+        {
+            invocation.enable_pinned_debug_locals = string_equal(argument, S8("-fpinned-debug-locals"));
+            continue;
+        }
         if (string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")))
         {
             common_storage_requested = string_equal(argument, S8("-fcommon"));
@@ -4704,7 +4709,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
-                                                                    .omit_debug_locals = !invocation.debug_info});
+                                                                    .omit_debug_locals = !invocation.debug_info,
+                                                                    .pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -4725,7 +4731,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_IR);
     IrModule* module = &lowered.program->modules[0];
     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
-    lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
+    lowered.program->pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals;
+    // A register cell written in place has no frame copy the debugger can follow
+    // between allocator moves, so pinned locals are not promoted into registers.
+    lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
     WORK_LEDGER_PHASE(PREPARE);
