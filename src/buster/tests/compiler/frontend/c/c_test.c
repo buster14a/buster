@@ -11352,6 +11352,174 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_microsoft_anonymous(Unit
     return result;
 }
 
+// Repeated designators exceed the number of storage slots, but only their
+// final captured values initialize those slots. Ordered side effects are a
+// Buster policy; independent compilers check only the side-effect-free values.
+BUSTER_GLOBAL_LOCAL String8 const c_test_initializer_override_source = S8_INITIALIZER(
+    "struct S { int a, b, c; }; union U { long long a; short b; };\n"
+    "struct Bits { unsigned : 3; unsigned a : 3; unsigned : 0; unsigned b : 3; };\n"
+    "struct Volatile { volatile int a; int b; };\n"
+    "static struct S static_s = {.a = 1, .b = 2, .a = 3, .a = 4};\n"
+    "static int static_a[3] = {1, 2, [0] = 3, [0] = 4};\n"
+    "static union U static_u = {.a = 0x10101, .b = 2};\n"
+    "#ifdef CHECK_ORDER\n"
+    "static int sequence; static int step(int v) { sequence = sequence * 10 + v; return v; }\n"
+    "#endif\n"
+    "int main(void) {\n"
+    "struct S s = {.a = 1, .b = 2, .a = 3, .a = 4};\n"
+    "int a[3] = {1, 2, [0] = 3, [0] = 4};\n"
+    "union U u = {.a = 0x10101, .b = 2};\n"
+    "struct S t = (struct S){.c = 9, .a = 3, .b = 5, .a = 7, 8};\n"
+    "int *p = (int[3]){[2] = 9, [0] = 3, 5, [0] = 7, 8};\n"
+    "union U v = (union U){.b = 3, .a = 11, .b = 4};\n"
+    "union U repeated = {.b = 1, .b = 2, .b = 3};\n"
+    "struct Bits bits = {1, 2, .a = 3, .a = 4};\n"
+    "struct Volatile qualified = {.a = 1, .a = 2, 3};\n"
+    "if (s.a != 4 || s.b != 2 || s.c || a[0] != 4 || a[1] != 2 || a[2] || u.b != 2) return 1;\n"
+    "if (t.a != 7 || t.b != 8 || t.c != 9 || p[0] != 7 || p[1] != 8 || p[2] != 9 || v.b != 4) return 2;\n"
+    "if (static_s.a != s.a || static_s.b != s.b || static_s.c != s.c || static_a[0] != a[0] || static_a[1] != a[1] || static_u.b != u.b) return 3;\n"
+    "if (repeated.b != 3 || bits.a != 4 || bits.b != 2 || qualified.a != 2 || qualified.b != 3) return 6;\n"
+    "#ifdef CHECK_ORDER\n"
+    "struct S effects = {.a = step(1), .a = step(2), .b = step(3), .a = step(4)};\n"
+    "if (sequence != 1234 || effects.a != 4 || effects.b != 3 || effects.c) return 4;\n"
+    "sequence = 0; union U union_effects = {.a = step(1), .b = step(2), .a = step(3)};\n"
+    "if (sequence != 123 || union_effects.a != 3) return 5;\n"
+    "#endif\n"
+    "return 0; }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_overrides(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    String8 controls[] = {
+        S8("int main(void) { union U { int a, b; } u = {1, 2}; return u.a; }"),
+        S8("int main(void) { struct S { int a; } s = {.a = 1, .a = 2, 3}; return s.a; }"),
+        S8("int main(void) { int a[1] = {[0] = 1, [1] = 2}; return a[0]; }"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 row = 0; row <= BUSTER_ARRAY_LENGTH(controls); row += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 source = row ? controls[row - 1] : c_test_initializer_override_source;
+                Target target = targets[target_index];
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                if (!syntax.diagnostic_count)
+                {
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("initializer-overrides.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (row)
+                    {
+                        BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified);
+                    }
+                    else if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count))
+                    {
+                        BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                        u32 volatile_stores = 0;
+                        IrModule* module = lowered.program->modules;
+                        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                        {
+                            IrFunction* function = module->functions + function_index;
+                            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + instruction_index;
+                                volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                            }
+                        }
+                        BUSTER_TEST(arguments, volatile_stores != 0);
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, row != 0);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 input = buster_test_temporary_path(arguments->arena, S8("initializer-overrides"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_initializer_override_source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("initializer-overrides-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-DCHECK_ORDER=1"), modes[mode],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("initializer overrides {S8} form={u32}: status={u32} timeout={u32}"),
+                                modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        String8 compilers[] = {S8("gcc"), S8("clang")};
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(compilers); reference += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 compiler = executable_resolve_in_path(temporary.arena, compilers[reference]);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("initializer-overrides-reference"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+            {
+                String8 command[] = {compiler, S8("-std=c17"), S8("-nostdinc"), S8("-o"), output, input};
+                ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true, .capture = ((u64)1 << STANDARD_STREAM_ERROR)});
+                if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                {
+                    ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                    BUSTER_TEST_RAW(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS,
+                        BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]));
+                    if (!compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+#endif
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_union_initializer(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -48337,6 +48505,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
     C_TEST_FIXTURE(arguments, c_test_identifier_list_function_definitions);
     C_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
+    C_TEST_FIXTURE(arguments, c_test_initializer_overrides);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);

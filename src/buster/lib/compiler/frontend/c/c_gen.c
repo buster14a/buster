@@ -114,6 +114,8 @@
 //   CIrLowerFrameKind                             lowering-machine frame kinds
 //   c_ir_emit_initializer_capture                 exact constructor types and
 //                                                 qualified subobject stores
+//   c_ir_lower_compound_literal_step              ordered evaluation and final
+//                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_cleanup_*                                __attribute__((cleanup))
@@ -29680,26 +29682,35 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        IrValueId value = c_ir_decay_array(builder, machine->child_result.value, frame->as.compound_literal_machine.child_type,
+        IrTypeId capture_type = frame->as.compound_literal_machine.child_type;
+        IrType* capture_type_value = ir_type_from_id(&builder->program->types, capture_type);
+        if (capture_type_value && capture_type_value->is_volatile && !capture_type_value->is_atomic)
+        {
+            // Capture an rvalue; volatile belongs to the destination place.
+            // The shared capture owner emits the qualified storage access.
+            capture_type = capture_type_value->unqualified_type;
+        }
+        IrValueId value = c_ir_decay_array(builder, machine->child_result.value, capture_type,
                                            frame->as.compound_literal_machine.source);
-        value = c_ir_emit_cast(builder, value, frame->as.compound_literal_machine.child_type, frame->as.compound_literal_machine.source);
+        value = c_ir_emit_cast(builder, value, capture_type, frame->as.compound_literal_machine.source);
         if (value.value == IR_ID_UNDERLYING_INVALID)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
         u32 field_index = frame->as.compound_literal_machine.field_index;
-        if (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR))
+        if (type && type->kind == IR_TYPE_UNION)
         {
-            frame->as.compound_literal_machine.operands[field_index] = value;
+            frame->as.compound_literal_machine.operands[0] = value;
+            frame->as.compound_literal_machine.fields[0] = field_index;
+            frame->as.compound_literal_machine.operand_count = 1;
         }
         else
         {
-            frame->as.compound_literal_machine.operands[frame->as.compound_literal_machine.operand_count] = value;
-            frame->as.compound_literal_machine.fields[frame->as.compound_literal_machine.operand_count] = field_index;
+            frame->as.compound_literal_machine.operands[field_index] = value;
+            frame->as.compound_literal_machine.operand_count += !frame->as.compound_literal_machine.initialized[field_index];
         }
         frame->as.compound_literal_machine.initialized[field_index] = true;
-        frame->as.compound_literal_machine.operand_count += 1;
         frame->as.compound_literal_machine.next_field = field_index + 1;
         frame->as.compound_literal_machine.index = frame->as.compound_literal_machine.item_end + 1;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
@@ -29891,6 +29902,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     while (index < close)
     {
         u32 field_index = c_ir_compound_literal_positional_field(type, next_field);
+        bool member_designator = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT);
         if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
         {
             u32 designator_close = c_ir_matching_delimiter_cached(builder, index, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
@@ -29939,7 +29951,10 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             }
             index += 3;
         }
-        if (field_index >= slot_count || initialized[field_index])
+        // A later designator replaces a captured value without discarding its
+        // already-emitted evaluation. A union retains only the last member;
+        // a second positional item is still an excess initializer.
+        if (field_index >= slot_count || (type->kind == IR_TYPE_UNION && operand_count && !member_designator))
         {
             goto c_ir_compound_literal_failed;
         }
@@ -30008,17 +30023,18 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
                 {
                     goto c_ir_compound_literal_failed;
                 }
-                if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+                if (type->kind == IR_TYPE_UNION)
                 {
-                    operands[field_index] = string_value;
+                    operands[0] = string_value;
+                    fields[0] = field_index;
+                    operand_count = 1;
                 }
                 else
                 {
-                    operands[operand_count] = string_value;
-                    fields[operand_count] = field_index;
+                    operands[field_index] = string_value;
+                    operand_count += !initialized[field_index];
                 }
                 initialized[field_index] = true;
-                operand_count += 1;
                 next_field = field_index + 1;
                 index = end + 1;
                 continue;
@@ -30065,17 +30081,17 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     {
         for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
         {
-            if (initialized[field_index])
+            if (!initialized[field_index])
             {
-                continue;
+                operands[field_index] = c_ir_emit_zero_value(builder, type->fields[field_index].type, builder->preprocess.tokens[open]);
+                if (operands[field_index].value == IR_ID_UNDERLYING_INVALID)
+                {
+                    goto c_ir_compound_literal_failed;
+                }
             }
-            operands[operand_count] = c_ir_emit_zero_value(builder, type->fields[field_index].type, builder->preprocess.tokens[open]);
-            if (operands[operand_count].value == IR_ID_UNDERLYING_INVALID)
-            {
-                goto c_ir_compound_literal_failed;
-            }
-            fields[operand_count++] = field_index;
+            fields[field_index] = field_index;
         }
+        operand_count = type->field_count;
     }
     if (type->kind == IR_TYPE_UNION && operand_count > 1)
     {
