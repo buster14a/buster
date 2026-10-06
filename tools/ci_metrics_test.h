@@ -107,6 +107,20 @@ BUSTER_GLOBAL_LOCAL int cm_inventory_tests(void)
     }
     else ++failures;
     cm_store_free(&store); free(page1); free(page2); free(duplicate); free(unfinished);
+    CmTransport progress = {0};
+    const char *saved = "{\"schema\":\"buster-ci-history-progress-v1\",\"sweep_before\":\"2026-10-01T00:00:00Z\","
+        "\"sweep_page\":1,\"replace\":0,\"receipts\":[{\"run_id\":7,\"attempt\":1,\"complete\":true}],\"pending\":[8]}";
+    failures += cm_test_check(cm_progress_parse(&progress, saved) && cm_receipt_known(&progress, 7, 1) &&
+        !cm_receipt_known(&progress, 7, 2) && progress.pending_count == 1, "persisted progress preserves attempts and late-finalization IDs");
+    failures += cm_test_check(cm_pending_add(&progress, 8) && progress.pending_count == 1,
+        "duplicate pending events do not multiply reconciliation work");
+    CmOutputs output = {0};
+    int exported = cm_progress_output(&progress, &output, "2026-10-06T12:00:00Z");
+    CmTransport restored = {0};
+    failures += cm_test_check(exported && output.count == 1 && cm_progress_parse(&restored, output.files[0].content) &&
+        cm_receipt_known(&restored, 7, 1) && restored.pending[0] == 8,
+        "bounded progress export/import resumes the same discovery cursor");
+    cm_outputs_free(&output);
     const char *workflow = "name: Fixture\njobs:\n  test:\n    steps:\n"
         "      - name: Machine specifications\n"
         "        uses: buster14a/buster/.github/actions/machine-specifications@" CM_REPORTER "\n"

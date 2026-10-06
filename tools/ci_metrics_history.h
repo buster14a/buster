@@ -11,6 +11,61 @@ BUSTER_GLOBAL_LOCAL int cm_day(char out[11], time_t instant)
     int valid = gmtime_r(&instant, &utc) != NULL && strftime(out, 11, "%Y-%m-%d", &utc) == 10;
     return valid;
 }
+BUSTER_GLOBAL_LOCAL int cm_progress_parse(CmTransport *t, const char *text)
+{
+    CmJson j = cm_json_parse(text, strlen(text));
+    const char *cursor = cm_get(&j, 1, "sweep_before");
+    uint64_t page = cm_number(&j, 1, "sweep_page"), replace = cm_number(&j, 1, "replace");
+    int valid = j.valid && cm_equal(cm_get(&j, 1, "schema"), "buster-ci-history-progress-v1") &&
+        cm_time(cursor) >= 0 && page > 0 && page <= 10 && replace < CM_RUN_CACHE;
+    unsigned receipts = cm_member(&j, 1, "receipts"), pending = cm_member(&j, 1, "pending");
+    valid = valid && receipts && pending && j.tokens[receipts].kind == 'a' && j.tokens[pending].kind == 'a';
+    t->run_count = 0; t->pending_count = 0;
+    for (unsigned entry = valid ? j.tokens[receipts].child : 0; valid && entry; entry = j.tokens[entry].next)
+    {
+        uint64_t id = cm_number(&j, entry, "run_id"), attempt = cm_number(&j, entry, "attempt");
+        const char *complete = cm_get(&j, entry, "complete");
+        valid = id && attempt && attempt <= CM_MAX_ATTEMPTS && t->run_count < CM_RUN_CACHE &&
+            (cm_equal(complete, "true") || cm_equal(complete, "false"));
+        for (unsigned i = 0; valid && i < t->run_count; ++i) valid = t->run_cache[i].id != id;
+        if (valid) t->run_cache[t->run_count++] = (CmRunReceipt){id, attempt, cm_equal(complete, "true")};
+    }
+    for (unsigned entry = valid ? j.tokens[pending].child : 0; valid && entry; entry = j.tokens[entry].next)
+    {
+        uint64_t id = 0;
+        valid = cm_unsigned(cm_value(&j, entry), &id) && id && t->pending_count < CM_PENDING;
+        for (unsigned i = 0; valid && i < t->pending_count; ++i) valid = t->pending[i] != id;
+        if (valid) t->pending[t->pending_count++] = id;
+    }
+    if (valid)
+    {
+        cm_copy(t->sweep_before, sizeof(t->sweep_before), cursor);
+        t->sweep_page = (unsigned)page; t->run_replace = (unsigned)replace;
+    }
+    cm_json_free(&j);
+    return valid;
+}
+BUSTER_GLOBAL_LOCAL int cm_progress_output(CmTransport *t, CmOutputs *out, const char *observed)
+{
+    FILE *file = tmpfile();
+    int result = file != NULL;
+    if (file)
+    {
+        fputs("{\"schema\":\"buster-ci-history-progress-v1\",\"sweep_before\":", file);
+        cm_quote(file, t->sweep_before[0] ? t->sweep_before : observed);
+        fprintf(file, ",\"sweep_page\":%u,\"replace\":%u,\"receipts\":[", t->sweep_page ? t->sweep_page : 1, t->run_replace);
+        for (unsigned i = 0; i < t->run_count; ++i)
+        {
+            if (i) fputc(',', file);
+            fprintf(file, "{\"run_id\":%" PRIu64 ",\"attempt\":%" PRIu64 ",\"complete\":%s}",
+                t->run_cache[i].id, t->run_cache[i].attempt, t->run_cache[i].complete ? "true" : "false");
+        }
+        fputs("],\"pending\":[", file);
+        for (unsigned i = 0; i < t->pending_count; ++i) { if (i) fputc(',', file); fprintf(file, "%" PRIu64, t->pending[i]); }
+        fputs("]}\n", file); result = cm_output(out, "history/progress.json", file);
+    }
+    return result;
+}
 BUSTER_GLOBAL_LOCAL int cm_history_load(CmTransport *t, CmStore *s, unsigned days)
 {
     int valid = cm_data_head(t);
@@ -24,6 +79,10 @@ BUSTER_GLOBAL_LOCAL int cm_history_load(CmTransport *t, CmStore *s, unsigned day
         cm_json_free(&j);
     }
     free(manifest);
+    char *progress = valid ? cm_data_read(t, "history/progress.json", &available) : NULL;
+    if (progress) valid = cm_progress_parse(t, progress);
+    else if (available < 0) valid = 0;
+    free(progress);
     time_t now = time(NULL);
     for (unsigned day = days; valid && day > 0; --day)
     {
@@ -119,12 +178,19 @@ BUSTER_GLOBAL_LOCAL int cm_make_manifest(CmTransport *t, CmStore *s, CmOutputs *
     int result = file != NULL;
     if (file)
     {
+        struct rusage resources = {0}; getrusage(RUSAGE_SELF, &resources);
         fputs("{\"schema\":\"buster-ci-history-manifest-v1\",\"watermark\":", file); cm_quote(file, observed);
         fputs(",\"collector_revision\":", file); cm_quote(file, t->revision);
+        fputs(",\"producer_run_id\":", file); cm_quote(file, getenv("GITHUB_RUN_ID") ? getenv("GITHUB_RUN_ID") : "");
+        fputs(",\"producer_run_attempt\":", file); cm_quote(file, getenv("GITHUB_RUN_ATTEMPT") ? getenv("GITHUB_RUN_ATTEMPT") : "");
+        fputs(",\"sweep_before\":", file); cm_quote(file, t->sweep_before);
         fprintf(file, ",\"policy\":\"" CM_POLICY "\",\"gaps\":%u,\"incomplete_runs\":%u,"
             "\"requests\":%u,\"read_retries\":%u,\"api_failures\":%u,\"history_days_read\":30,"
+            "\"pending_runs\":%u,\"run_cache_bound\":%u,\"sweep_page\":%u,"
+            "\"collection_wall_seconds\":%.3f,\"native_peak_rss_kib\":%ld,"
             "\"row_bound\":%u,\"series_bound\":%u,\"retention\":\"raw shards retained indefinitely; bounded derived reports\"}\n",
-            s->gaps, s->incomplete_runs, t->requests, t->retries, t->failures, CM_ROWS, CM_SERIES);
+            s->gaps, s->incomplete_runs, t->requests, t->retries, t->failures, t->pending_count, CM_RUN_CACHE,
+            t->sweep_page, cm_clock() - t->collection_started, resources.ru_maxrss, CM_ROWS, CM_SERIES);
         result = cm_output(out, "manifest.json", file);
     }
     return result;
@@ -211,15 +277,20 @@ BUSTER_GLOBAL_LOCAL int cm_publish_stage(CmTransport *t, const char *directory)
         char expected_head[41], expected_tree[41];
         cm_copy(expected_head, sizeof(expected_head), cm_get(&plan, 1, "expected_head"));
         cm_copy(expected_tree, sizeof(expected_tree), cm_get(&plan, 1, "expected_tree"));
-        valid = (!expected_head[0] || cm_sha(expected_head)) && (!expected_tree[0] || cm_sha(expected_tree)) &&
-            cm_data_head(t) && cm_equal(expected_head, t->head) && cm_equal(expected_tree, t->tree);
+        valid = (!expected_head[0] || cm_sha(expected_head)) && (!expected_tree[0] || cm_sha(expected_tree)) && cm_data_head(t);
+        int lease = valid && cm_equal(expected_head, t->head) && cm_equal(expected_tree, t->tree);
+        int identical = valid && t->data_exists, newer = !t->data_exists;
         int available = 0;
         char *previous_manifest = valid ? cm_data_read(t, "manifest.json", &available) : NULL;
         if (previous_manifest)
         {
             CmJson m = cm_json_parse(previous_manifest, strlen(previous_manifest));
-            valid = m.valid && cm_equal(cm_get(&m, 1, "schema"), "buster-ci-history-manifest-v1") &&
-                cm_time(cm_get(&plan, 1, "observed_at")) > cm_time(cm_get(&m, 1, "watermark"));
+            valid = m.valid && cm_equal(cm_get(&m, 1, "schema"), "buster-ci-history-manifest-v1");
+            newer = valid && cm_time(cm_get(&plan, 1, "observed_at")) > cm_time(cm_get(&m, 1, "watermark"));
+            identical = identical && valid && cm_equal(cm_get(&plan, 1, "observed_at"), cm_get(&m, 1, "watermark")) &&
+                cm_equal(cm_get(&plan, 1, "collector_revision"), cm_get(&m, 1, "collector_revision")) &&
+                cm_equal(cm_get(&plan, 1, "producer_run_id"), cm_get(&m, 1, "producer_run_id")) &&
+                cm_equal(cm_get(&plan, 1, "producer_run_attempt"), cm_get(&m, 1, "producer_run_attempt"));
             cm_json_free(&m);
         }
         else if (t->data_exists) valid = 0;
@@ -243,6 +314,15 @@ BUSTER_GLOBAL_LOCAL int cm_publish_stage(CmTransport *t, const char *directory)
                 if (prior) valid = valid && strlen(content) >= strlen(prior) && strncmp(content, prior, strlen(prior)) == 0;
                 free(prior);
             }
+            if (valid && cm_equal(path, "history/progress.json"))
+            {
+                CmTransport progress = {0}; valid = cm_progress_parse(&progress, content);
+            }
+            if (valid && identical)
+            {
+                char *prior = cm_data_read(t, path, &available);
+                identical = available == 1 && prior && cm_equal(content, prior); free(prior);
+            }
             if (valid)
             {
                 char *safe_path = strdup(path);
@@ -251,7 +331,8 @@ BUSTER_GLOBAL_LOCAL int cm_publish_stage(CmTransport *t, const char *directory)
             }
             if (!valid) free(content);
         }
-        if (valid) valid = cm_publish(t, out.files, out.count, cm_get(&plan, 1, "observed_at"));
+        if (valid) valid = identical ? out.count > 0 : lease && newer &&
+            cm_publish(t, out.files, out.count, cm_get(&plan, 1, "observed_at"));
     }
     cm_outputs_free(&out); cm_json_free(&plan); free(text);
     return valid;

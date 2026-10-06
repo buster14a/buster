@@ -30,6 +30,7 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
 {
     int result = 2, valid = argc >= 2;
     const char *mode = valid ? argv[1] : "", *directory = "", *input = "", *event = "", *revision = "";
+    const char *job_filter = "", *os_filter = "", *cpu_filter = "", *branch_filter = "";
     uint64_t selected_run = 0, selected_job = 0, days = 2, max_runs = 100, expected_machine = 0;
     int64_t since = -1, until = -1;
     for (int i = 2; valid && i < argc; i += 2)
@@ -41,6 +42,10 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
             if (cm_equal(key, "--out")) directory = value;
             else if (cm_equal(key, "--input")) input = value;
             else if (cm_equal(key, "--event")) event = value;
+            else if (cm_equal(key, "--job-key")) job_filter = value;
+            else if (cm_equal(key, "--os")) os_filter = value;
+            else if (cm_equal(key, "--cpu")) cpu_filter = value;
+            else if (cm_equal(key, "--branch")) branch_filter = value;
             else if (cm_equal(key, "--revision")) { revision = value; valid = cm_sha(value); }
             else if (cm_equal(key, "--since")) { since = cm_time(value); valid = since >= 0; }
             else if (cm_equal(key, "--until")) { until = cm_time(value); valid = until >= 0; }
@@ -55,7 +60,7 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
     if (valid && cm_equal(mode, "--self-test") && argc == 2) result = cm_self_test();
     else if (valid && directory[0])
     {
-        CmTransport transport = {0}; transport.deadline = cm_clock() + 300;
+        CmTransport transport = {0}; transport.collection_started = cm_clock(); transport.deadline = cm_clock() + 300;
         cm_copy(transport.revision, sizeof(transport.revision), getenv("GITHUB_SHA"));
         valid = cm_sha(transport.revision);
         time_t now = time(NULL); struct tm utc; gmtime_r(&now, &utc);
@@ -64,7 +69,8 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
         {
             valid = cm_publish_stage(&transport, directory);
             result = valid ? 0 : 2;
-            printf("CI_HISTORY_PUBLICATION status=%s data_head=%s\n", valid ? "published" : "failed", transport.head);
+            printf("CI_HISTORY_PUBLICATION status=%s data_head=%s wall_seconds=%.3f api_requests=%u\n",
+                valid ? "published-or-idempotent" : "failed", transport.head, cm_clock() - transport.collection_started, transport.requests);
         }
         else if (valid && (cm_equal(mode, "collect") || cm_equal(mode, "report")))
         {
@@ -76,14 +82,16 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
             {
                 valid = cm_history_load(&transport, &store, 30);
                 unsigned checkpoint = store.count;
+                transport.request_limit = CM_REQUESTS - 200;
                 if (valid) complete = selected_run ? cm_collect_run(&collection, selected_run) :
                     cm_collect_recent(&collection, (unsigned)days, (unsigned)max_runs);
                 if (selected_job && collection.executions != 1) { complete = 0; ++store.gaps; }
                 if (expected_machine && collection.machine_verified < expected_machine) { complete = 0; ++store.gaps; }
-                transport.deadline = cm_clock() + 300;
+                transport.request_limit = CM_REQUESTS; transport.deadline = cm_clock() + 300;
                 CmOutputs outputs = {0};
                 if (valid) valid = cm_history_append(&transport, &store, &outputs, checkpoint, observed);
-                if (valid) valid = cm_reports(&transport, &store, &outputs, observed, event, revision, since, until);
+                if (valid) valid = cm_progress_output(&transport, &outputs, observed);
+                if (valid) valid = cm_reports(&transport, &store, &outputs, observed, event, revision, since, until, job_filter, os_filter, cpu_filter, branch_filter);
                 if (valid) valid = cm_make_manifest(&transport, &store, &outputs, observed);
                 if (valid)
                 {

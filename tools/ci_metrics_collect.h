@@ -511,27 +511,102 @@ BUSTER_GLOBAL_LOCAL int cm_collect_run(CmCollection *c, uint64_t id)
     cm_json_free(&run);
     return valid;
 }
+BUSTER_GLOBAL_LOCAL int cm_receipt_known(CmTransport *t, uint64_t id, uint64_t attempt)
+{
+    int result = 0;
+    for (unsigned i = 0; i < t->run_count && !result; ++i)
+        result = t->run_cache[i].id == id && t->run_cache[i].attempt == attempt && t->run_cache[i].complete;
+    return result;
+}
+BUSTER_GLOBAL_LOCAL void cm_receipt_record(CmTransport *t, uint64_t id, uint64_t attempt, int complete)
+{
+    unsigned found = t->run_count;
+    for (unsigned i = 0; i < t->run_count; ++i) if (t->run_cache[i].id == id) found = i;
+    if (found == t->run_count)
+    {
+        if (t->run_count < CM_RUN_CACHE) ++t->run_count;
+        else { found = t->run_replace; t->run_replace = (t->run_replace + 1) % CM_RUN_CACHE; }
+    }
+    t->run_cache[found] = (CmRunReceipt){id, attempt, complete};
+}
+BUSTER_GLOBAL_LOCAL int cm_pending_add(CmTransport *t, uint64_t id)
+{
+    int found = 0;
+    for (unsigned i = 0; i < t->pending_count; ++i) found |= t->pending[i] == id;
+    int result = found || t->pending_count < CM_PENDING;
+    if (result && !found) t->pending[t->pending_count++] = id;
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int cm_batch_budget(CmTransport *t)
+{
+    int result = t->requests + 10 < (t->request_limit ? t->request_limit : CM_REQUESTS) &&
+        cm_clock() + 35 < t->deadline;
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int cm_discovered_run(CmCollection *c, const CmJson *runs, unsigned run, unsigned *new_runs, unsigned max_runs)
+{
+    CmTransport *t = c->transport;
+    uint64_t id = cm_number(runs, run, "id"), attempt = cm_number(runs, run, "run_attempt");
+    int valid = id && attempt && attempt <= CM_MAX_ATTEMPTS;
+    if (valid && !cm_receipt_known(t, id, attempt))
+    {
+        if (cm_equal(cm_get(runs, run, "status"), "completed"))
+        {
+            valid = *new_runs < max_runs && cm_batch_budget(t);
+            if (valid)
+            {
+                ++*new_runs;
+                int complete = cm_collect_run(c, id);
+                cm_receipt_record(t, id, attempt, complete);
+                if (!complete) valid = cm_pending_add(t, id);
+            }
+        }
+        else valid = cm_pending_add(t, id);
+    }
+    return valid;
+}
 BUSTER_GLOBAL_LOCAL int cm_collect_recent(CmCollection *c, unsigned days, unsigned max_runs)
 {
+    CmTransport *t = c->transport;
+    char endpoint[512];
+    unsigned new_runs = 0;
+    int valid = 1;
+    // Pending IDs survive late finalization, failed API reads and old-run reruns.
+    uint64_t pending[CM_PENDING]; unsigned pending_count = t->pending_count;
+    memcpy(pending, t->pending, pending_count * sizeof(*pending)); t->pending_count = 0;
+    for (unsigned i = 0; i < pending_count; ++i)
+    {
+        int ok = cm_batch_budget(t) && new_runs < max_runs;
+        if (ok)
+        {
+            snprintf(endpoint, sizeof(endpoint), "actions/runs/%" PRIu64, pending[i]);
+            CmJson run = cm_api_json(t, endpoint, "GET", NULL, NULL);
+            ok = run.valid && cm_number(&run, 1, "id") == pending[i];
+            if (ok) ok = cm_discovered_run(c, &run, 1, &new_runs, max_runs);
+            else ++c->store->gaps;
+            if (!cm_equal(cm_get(&run, 1, "status"), "completed")) ok = 0;
+            cm_json_free(&run);
+        }
+        if (!ok) valid &= cm_pending_add(t, pending[i]);
+    }
     time_t since = time(NULL) - (time_t)days * 86400;
     struct tm utc; gmtime_r(&since, &utc);
     char stamp[32]; strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
-    char endpoint[512];
+    uint64_t seen[1000], total = UINT64_MAX;
     unsigned count = 0;
-    uint64_t seen[1000];
-    int valid = 1;
-    uint64_t total = UINT64_MAX;
-    for (unsigned page = 1; valid && count < total && count < max_runs; ++page)
+    int recent_complete = 1;
+    for (unsigned page = 1; valid && recent_complete && count < total && page <= 10; ++page)
     {
-        snprintf(endpoint, sizeof(endpoint), "actions/runs?status=completed&created=%%3E%%3D%s&per_page=100&page=%u", stamp, page);
-        CmJson runs = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
+        snprintf(endpoint, sizeof(endpoint), "actions/runs?created=%%3E%%3D%s&per_page=100&page=%u", stamp, page);
+        CmJson runs = cm_api_json(t, endpoint, "GET", NULL, NULL);
         unsigned array = cm_member(&runs, 1, "workflow_runs");
         uint64_t declared = cm_number(&runs, 1, "total_count");
-        valid = runs.valid && array && runs.tokens[array].kind == 'a' && declared <= 1000;
-        if (total != UINT64_MAX && total != declared) { ++c->store->gaps; valid = 0; }
-        total = declared;
+        valid = runs.valid && array && runs.tokens[array].kind == 'a';
+        // GitHub caps filtered run search at 1000. The persisted reverse sweep
+        // covers records outside this recent query, without abandoning a cursor.
+        total = declared < 1000 ? declared : 1000;
         unsigned chunk = 0;
-        for (unsigned run = valid ? runs.tokens[array].child : 0; valid && run && count < max_runs; run = runs.tokens[run].next)
+        for (unsigned run = valid ? runs.tokens[array].child : 0; valid && recent_complete && run; run = runs.tokens[run].next)
         {
             uint64_t id = cm_number(&runs, run, "id");
             valid = id && count < 1000 && ++chunk <= 100;
@@ -539,16 +614,45 @@ BUSTER_GLOBAL_LOCAL int cm_collect_recent(CmCollection *c, unsigned days, unsign
             if (valid)
             {
                 seen[count++] = id;
-                // All terminal workflows, including failures/cancellations; never dispatch workloads.
-                if (!cm_equal(cm_get(&runs, run, "name"), "Hosted CI timing history"))
-                    cm_collect_run(c, id);
-                if (cm_clock() >= c->transport->deadline) valid = 0;
+                recent_complete = cm_discovered_run(c, &runs, run, &new_runs, max_runs);
             }
         }
-        if (count < total && count < max_runs && chunk != 100) valid = 0;
+        if (recent_complete && count < total && chunk != 100) valid = 0;
         cm_json_free(&runs);
     }
-    if (!valid || count < total) ++c->store->gaps;
-    return valid && count >= total;
+    if (!recent_complete) ++c->store->gaps;
+    // One bounded reverse page per batch discovers missed events and old reruns.
+    // Pending work is persisted before advancing beyond its creation timestamp.
+    if (valid && cm_batch_budget(t) && new_runs < max_runs)
+    {
+        if (!t->sweep_before[0]) cm_copy(t->sweep_before, sizeof(t->sweep_before), c->observed);
+        snprintf(endpoint, sizeof(endpoint), "actions/runs?created=%%3C%%3D%s&per_page=100&page=%u", t->sweep_before, t->sweep_page ? t->sweep_page : 1);
+        CmJson runs = cm_api_json(t, endpoint, "GET", NULL, NULL);
+        unsigned array = cm_member(&runs, 1, "workflow_runs");
+        int sweep_ok = runs.valid && array && runs.tokens[array].kind == 'a';
+        unsigned chunk = 0;
+        char oldest[32]; cm_copy(oldest, sizeof(oldest), t->sweep_before);
+        for (unsigned run = sweep_ok ? runs.tokens[array].child : 0; sweep_ok && run; run = runs.tokens[run].next)
+        {
+            const char *created = cm_get(&runs, run, "created_at");
+            sweep_ok = ++chunk <= 100 && cm_time(created) >= 0 &&
+                cm_discovered_run(c, &runs, run, &new_runs, max_runs);
+            if (sweep_ok && cm_time(created) < cm_time(oldest)) cm_copy(oldest, sizeof(oldest), created);
+        }
+        if (sweep_ok)
+        {
+            if (chunk < 100) { cm_copy(t->sweep_before, sizeof(t->sweep_before), c->observed); t->sweep_page = 1; }
+            else if (cm_equal(oldest, t->sweep_before))
+            {
+                if (t->sweep_page < 10) ++t->sweep_page;
+                else { ++c->store->gaps; sweep_ok = 0; }
+            }
+            else { cm_copy(t->sweep_before, sizeof(t->sweep_before), oldest); t->sweep_page = 1; }
+        }
+        else ++c->store->gaps;
+        cm_json_free(&runs);
+    }
+    if (!valid) ++c->store->gaps;
+    return valid && recent_complete;
 }
 #endif

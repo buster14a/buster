@@ -15,6 +15,10 @@
 #define CM_REQUESTS 600u
 typedef struct CmResponse CmResponse;
 struct CmResponse { const char *path, *method, *content; int success, missing; };
+#define CM_RUN_CACHE 4096u
+#define CM_PENDING 64u
+typedef struct CmRunReceipt CmRunReceipt;
+struct CmRunReceipt { uint64_t id, attempt; int complete; };
 typedef struct CmTransport CmTransport;
 struct CmTransport
 {
@@ -25,6 +29,11 @@ struct CmTransport
     // Explicit synthetic read fixtures; production leaves this pointer null.
     const CmResponse *fixture;
     unsigned fixture_count, fixture_cursor;
+    unsigned request_limit, run_count, run_replace, pending_count, sweep_page;
+    double collection_started;
+    CmRunReceipt run_cache[CM_RUN_CACHE];
+    uint64_t pending[CM_PENDING];
+    char sweep_before[32];
 };
 BUSTER_GLOBAL_LOCAL double cm_clock(void)
 {
@@ -132,7 +141,7 @@ BUSTER_GLOBAL_LOCAL int cm_api(CmTransport *t, const char *path, const char *met
     unsigned attempts = cm_equal(method, "GET") ? 3 : 1;
     for (unsigned attempt = 0; allowed && attempt < attempts && !result; ++attempt)
     {
-        if (t->requests >= CM_REQUESTS || cm_clock() >= t->deadline) allowed = 0;
+        if (t->requests >= (t->request_limit ? t->request_limit : CM_REQUESTS) || cm_clock() >= t->deadline) allowed = 0;
         else
         {
             free(*output); *output = NULL;
@@ -315,7 +324,7 @@ BUSTER_GLOBAL_LOCAL int cm_publish(CmTransport *t, CmFile *files, unsigned count
                     CmJson ref = cm_api_json(t, t->data_exists ? "git/refs/heads/" CM_BRANCH : "git/refs",
                         t->data_exists ? "PATCH" : "POST", payload, NULL);
                     valid = payload && ref.valid && cm_equal(cm_get(&ref, cm_member(&ref, 1, "object"), "sha"), sha);
-                    if (valid) { cm_copy(t->head, sizeof(t->head), sha); cm_copy(t->tree, sizeof(t->tree), new_tree); }
+                    if (valid) { cm_copy(t->head, sizeof(t->head), sha); cm_copy(t->tree, sizeof(t->tree), new_tree); t->data_exists = 1; }
                     cm_json_free(&ref); free(payload);
                 }
                 fclose(body);

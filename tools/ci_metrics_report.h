@@ -11,6 +11,8 @@ typedef struct CmOutputs CmOutputs;
 struct CmOutputs { CmFile files[CM_FILES]; unsigned count; };
 typedef struct CmSeries CmSeries;
 struct CmSeries { const CmRow *representative; uint64_t hash; unsigned samples, raw, missing; };
+typedef struct CmShift CmShift;
+struct CmShift { unsigned series, frequency; double seconds, percent; int percent_available; const char *state; };
 BUSTER_GLOBAL_LOCAL const unsigned cm_series_fields[] =
 {
     CM_WORKFLOW, CM_JOB_KEY, CM_MATRIX, CM_INVOCATION, CM_NAME, CM_LABELS, CM_EVENT, CM_HEAD_BRANCH,
@@ -108,10 +110,21 @@ BUSTER_GLOBAL_LOCAL void cm_window(FILE *f, const char *name, const CmRow *const
     if (!n) fputs("unavailable", f);
     fputs(".\n\n", f);
 }
+BUSTER_GLOBAL_LOCAL void cm_selector_row(FILE *file, const CmSeries *series)
+{
+    const CmRow *r = series->representative;
+    fputs("| ", file); cm_escape(file, r->s[CM_NAME], 0); fputs(" / ", file); cm_escape(file, r->s[CM_MATRIX], 0);
+    fputs(" | ", file); cm_escape(file, r->s[CM_OS][0] ? r->s[CM_OS] : "unknown OS", 0);
+    fputs(" / ", file); cm_escape(file, r->s[CM_CPU][0] ? r->s[CM_CPU] : "unknown CPU", 0);
+    fputs(" | ", file); cm_escape(file, r->s[CM_EVENT], 0); fputs(" / ", file); cm_escape(file, r->s[CM_HEAD_BRANCH], 0);
+    fprintf(file, " | %u | %u | [series](series-%016" PRIx64 ".md) |\n", series->samples, series->missing, series->hash);
+}
 BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *out, const char *observed,
-    const char *event_filter, const char *revision_filter, int64_t since, int64_t until)
+    const char *event_filter, const char *revision_filter, int64_t since, int64_t until,
+    const char *job_filter, const char *os_filter, const char *cpu_filter, const char *branch_filter)
 {
     CmSeries series[CM_SERIES]; memset(series, 0, sizeof(series));
+    CmShift shifts[CM_SERIES]; unsigned shift_count = 0;
     unsigned count = 0, excluded = 0, missing_hardware = 0, costs_missing = 0, aliases = 0, failed = 0;
     uint64_t runner_seconds = 0, waste_seconds = 0;
     const CmRow **ordered = calloc(store->count + 1, sizeof(*ordered));
@@ -124,6 +137,10 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
         int64_t start = cm_time(r->s[CM_STARTED]);
         if (r->active && (!event_filter[0] || cm_equal(event_filter, r->s[CM_EVENT])) &&
             (!revision_filter[0] || cm_equal(revision_filter, r->s[CM_TESTED_SHA])) &&
+            (!job_filter[0] || cm_equal(job_filter, r->s[CM_JOB_KEY])) &&
+            (!os_filter[0] || cm_equal(os_filter, r->s[CM_OS])) &&
+            (!cpu_filter[0] || cm_equal(cpu_filter, r->s[CM_CPU])) &&
+            (!branch_filter[0] || cm_equal(branch_filter, r->s[CM_HEAD_BRANCH])) &&
             (since < 0 || start >= since) && (until < 0 || start < until))
         {
             ordered[n++] = r;
@@ -160,7 +177,8 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
     }
     if (valid) cm_order(ordered, scratch, n);
     FILE *index = valid ? tmpfile() : NULL, *csv = valid ? tmpfile() : NULL, *json = valid ? tmpfile() : NULL;
-    valid = valid && index && csv && json;
+    FILE *all = valid ? tmpfile() : NULL;
+    valid = valid && index && csv && json && all;
     if (valid)
     {
         fputs("# Hosted CI timing history\n\n", index);
@@ -176,8 +194,13 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
             "Raw history is retained separately from these bounded derived reports.\n\n", CM_ROWS, CM_SERIES, excluded);
         fputs("[JSON export](recent.jsonl) · [CSV export](recent.csv) · [Collector policy](https://github.com/" CM_REPO
             "/blob/main/docs/ci-timing-history.md)\n\n", index);
-        fputs("Default trusted-main view: select rows with event push and branch main below. PR/queue/manual rows retain their own events and origins. "
-            "Use the native report command for explicit revision/date/event filters; no candidate chooses the published policy.\n\n", index);
+        fputs("Default view: trusted main push observations only. [All events, PRs and queues](all.md). "
+            "The coverage totals and exports above include all selected events; the selector below filters main. "
+            "Native report filters select job, OS, CPU, branch, revision and UTC date range.\n\n", index);
+        fputs("# All hosted CI cohorts\n\n[Trusted main](index.md) · [JSON](recent.jsonl) · [CSV](recent.csv)\n\n"
+            "PR, queue, manual and main contexts retain distinct histories. Unknown context remains explicit.\n\n"
+            "| Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |\n"
+            "|---|---|---|---:|---:|---|\n", all);
         fputs("| Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |\n"
               "|---|---|---|---:|---:|---|\n", index);
         fputs("run_id,job_id,association_attempt,origin_job_id,original_attempt,api_elapsed_seconds", csv);
@@ -251,13 +274,13 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
         valid = valid && report;
         if (valid)
         {
-            fputs("| ", index); cm_escape(index, r->s[CM_NAME], 0); fputs(" / ", index); cm_escape(index, r->s[CM_MATRIX], 0);
-            fputs(" | ", index); cm_escape(index, r->s[CM_OS][0] ? r->s[CM_OS] : "unknown OS", 0);
-            fputs(" / ", index); cm_escape(index, r->s[CM_CPU][0] ? r->s[CM_CPU] : "unknown CPU", 0);
-            fputs(" | ", index); cm_escape(index, r->s[CM_EVENT], 0); fputs(" / ", index); cm_escape(index, r->s[CM_HEAD_BRANCH], 0);
-            fprintf(index, " | %u | %u | [series](series-%016" PRIx64 ".md) |\n", series[k].samples, series[k].missing, series[k].hash);
+            cm_selector_row(all, &series[k]);
+            if (cm_equal(r->s[CM_EVENT], "push") && cm_equal(r->s[CM_HEAD_BRANCH], "main")) cm_selector_row(index, &series[k]);
+            if (trailing.baseline.n && trailing.candidate.n)
+                shifts[shift_count++] = (CmShift){k, candidate_count, trailing.seconds, trailing.percent,
+                    trailing.percent_available, trailing.state};
             fputs("# ", report); cm_escape(report, r->s[CM_NAME], 0); fputs("\n\n", report);
-            fputs("[All series](index.md) · [JSON](recent.jsonl) · [CSV](recent.csv)\n\n", report);
+            fputs("[Trusted main](index.md) · [All series](all.md) · [JSON](recent.jsonl) · [CSV](recent.csv)\n\n", report);
             fprintf(report, "Policy %s; refresh ", CM_POLICY); cm_escape(report, observed, 0);
             fputs(". Cohort fields and missing values:\n\n| Field | Value |\n|---|---|\n", report);
             for (unsigned a = 0; a < sizeof(cm_series_fields) / sizeof(cm_series_fields[0]); ++a)
@@ -314,10 +337,46 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
     }
     if (valid)
     {
-        valid = cm_output(out, "reports/index.md", index); index = NULL;
+        for (unsigned i = 1; i < shift_count; ++i)
+        {
+            CmShift current = shifts[i]; unsigned p = i;
+            while (p && fabs(shifts[p - 1].seconds) < fabs(current.seconds))
+            { shifts[p] = shifts[p - 1]; --p; }
+            shifts[p] = current;
+        }
+        fputs("\n## Largest observed main time changes\n\n"
+            "Ordered by absolute median seconds per physical execution; candidate frequency is shown separately. "
+            "These descriptive differences include improvements and slowdowns. Missing context is not a qualified signal, "
+            "and no required-CI critical-path impact is inferred.\n\n"
+            "| Series | Median change s | Change % | Candidate executions | State |\n|---|---:|---:|---:|---|\n", index);
+        for (unsigned i = 0, shown = 0; i < shift_count && shown < 20; ++i)
+        {
+            const CmShift *shift = &shifts[i]; const CmSeries *cohort = &series[shift->series];
+            const CmRow *r = cohort->representative;
+            if (cm_equal(r->s[CM_EVENT], "push") && cm_equal(r->s[CM_HEAD_BRANCH], "main"))
+            {
+                ++shown; fprintf(index, "| [history](series-%016" PRIx64 ".md) ", cohort->hash);
+                cm_escape(index, r->s[CM_NAME], 0); fprintf(index, " | %+.1f | ", shift->seconds);
+                if (shift->percent_available) fprintf(index, "%+.1f", shift->percent); else fputs("unavailable", index);
+                fprintf(index, " | %u | ", shift->frequency); cm_escape(index, shift->state, 0); fputs(" |\n", index);
+            }
+        }
+        const char *latest = "";
+        for (unsigned i = 0; i < n; ++i)
+            if (cm_time(ordered[i]->s[CM_COMPLETED]) > cm_time(latest)) latest = ordered[i]->s[CM_COMPLETED];
+        fputs("\nLast selected execution completed: ", index); cm_escape(index, latest[0] ? latest : "unavailable", 0);
+        int64_t lag = cm_time(observed) - cm_time(latest);
+        if (latest[0] && lag >= 0) fprintf(index, "; collection lag %" PRId64 " s", lag);
+        else fputs("; collection lag unavailable", index);
+        fprintf(index, ". Pending runs: %u; reverse-sweep cursor ", t->pending_count);
+        cm_escape(index, t->sweep_before[0] ? t->sweep_before : "not started", 0);
+        fputs(". The cursor measures discovery progress, not evidence of complete historical coverage.\n", index);
+        valid = cm_output(out, "reports/all.md", all); all = NULL;
+        valid &= cm_output(out, "reports/index.md", index); index = NULL;
         valid &= cm_output(out, "reports/recent.csv", csv); csv = NULL;
         valid &= cm_output(out, "reports/recent.jsonl", json); json = NULL;
     }
+    if (all) fclose(all);
     if (index) fclose(index);
     if (csv) fclose(csv);
     if (json) fclose(json);
