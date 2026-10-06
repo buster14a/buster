@@ -1134,7 +1134,8 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_difference(zen5_features, zen4_features),
                                                      target_cpu_features_from_array((TargetCpuFeature const[]){
                                                          TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT,
-                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_PREFETCHI}, 4)));
+                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_MOVDIRI,
+                                                         TARGET_CPU_FEATURE_X86_PREFETCHI}, 5)));
     BUSTER_TEST(arguments, !target_cpu_features_contains(zen5_features, TARGET_CPU_FEATURE_X86_AVX512FP16));
     TargetCpuFeatures tigerlake_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_TIGERLAKE);
     BUSTER_TEST(arguments, target_cpu_features_contains(tigerlake_features, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT));
@@ -1146,7 +1147,8 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
                                                          TARGET_CPU_FEATURE_X86_CLWB,
                                                          TARGET_CPU_FEATURE_X86_SGX,
                                                          TARGET_CPU_FEATURE_X86_SHSTK,
-                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B}, 5)));
+                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B,
+                                                         TARGET_CPU_FEATURE_X86_MOVDIRI}, 6)));
     TargetCpuFeatures zen1_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_1);
     TargetCpuFeatures zen2_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_2);
     TargetCpuFeatures zen3_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_3);
