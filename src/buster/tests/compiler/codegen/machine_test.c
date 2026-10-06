@@ -11961,7 +11961,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                           (u32)selected.failed_opcode));
             BUSTER_TEST(arguments, selected.machine_instructions >= selected.selected_typed_instructions / 4);
             BUSTER_TEST_RAW(arguments, machine_encoded[name_index].valid, supported_names[name_index]);
-            BUSTER_TEST_RAW(arguments, machine_encoded[name_index].byte_count > 8, supported_names[name_index]);
+            // FAST encodes `narrow` as push/mov/mov/leave/ret, exactly eight bytes.
+            BUSTER_TEST_RAW(arguments, machine_encoded[name_index].byte_count >= 8, supported_names[name_index]);
             // The prologue shape is fixed: push rbp; mov rbp, rsp.
             BUSTER_TEST(arguments, !machine_encoded[name_index].valid ||
                                        (machine_encoded[name_index].bytes[0] == 0x55 && machine_encoded[name_index].bytes[1] == 0x48 &&

@@ -1416,6 +1416,35 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_in
                     break;
                 }
             }
+            // FAST and QUALITY keep the dying input in a register: the private
+            // image is a register copy, published to the output's frame slot
+            // and read back from that same slot.
+            for (u64 offset = symbol->value; offset + 3u * sizeof(u32) <= function_end && !result; offset += sizeof(u32))
+            {
+                u32 copy = 0;
+                memcpy(&copy, text.pointer + offset, sizeof(copy));
+                if ((copy & UINT32_C(0x7fe0ffe0)) != UINT32_C(0x2a0003e0)) continue;
+                u32 image_register = copy & 31u;
+                u64 store_offset = function_end;
+                u32 store = 0;
+                for (u64 cursor = offset + sizeof(u32); cursor + sizeof(u32) <= function_end && store_offset == function_end; cursor += sizeof(u32))
+                {
+                    u32 row = 0;
+                    memcpy(&row, text.pointer + cursor, sizeof(row));
+                    if ((row & UINT32_C(0xbfc00000)) == UINT32_C(0xb9000000) && ((row >> 5) & 31u) == 28u && (row & 31u) == image_register)
+                    {
+                        store_offset = cursor;
+                        store = row;
+                    }
+                }
+                for (u64 cursor = store_offset + sizeof(u32); cursor + sizeof(u32) <= function_end && !result; cursor += sizeof(u32))
+                {
+                    u32 row = 0;
+                    memcpy(&row, text.pointer + cursor, sizeof(row));
+                    result = (row & UINT32_C(0xbfc00000)) == UINT32_C(0xb9400000) && ((row >> 5) & 31u) == 28u &&
+                             (row >> 30) == (store >> 30) && ((row >> 10) & 0xfffu) == ((store >> 10) & 0xfffu);
+                }
+            }
         }
     }
 
