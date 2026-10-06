@@ -1,0 +1,63 @@
+name: 9700X compiler benchmark request
+
+# Every push to main completes this run, and only that completion starts the
+# compiler comparison in 9700x-direct-bench.yml from main (#2752): the pushed
+# commit against its first parent (or, after a merge burst, the nearest
+# measured first-parent ancestor), after it landed, so merging never waits
+# for the 9700X. The request job is a marker: it runs on a hosted runner,
+# checks out nothing, executes no repository content and holds no capability.
+# The bench workflow re-reads the run, the commit and main from GitHub's
+# records.
+#
+# The announce job (#2803) makes the wait visible: while both benchmark
+# variables are set it creates the queued "9700X compiler benchmark" check on
+# the pushed commit before the bench run exists, because that run may wait in
+# the main comparison's concurrency group or be displaced by a newer commit.
+# It runs main's own check writer (this push is main) with checks: write
+# only, never fails this run, and so never decides whether the bench starts.
+on:
+  push:
+    branches: [main]
+
+# Zero token capabilities are stricter than the repository-wide static
+# read-only policy marker retained for common workflow tooling: contents: read
+permissions: {}
+
+concurrency:
+  group: buster-9700x-compiler-request-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  request:
+    name: Record the compiler benchmark request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Record the request
+        shell: bash
+        run: echo 'A 9700X compiler comparison of this main commit was requested; see the 9700X direct workload benchmark workflow.'
+
+  announce:
+    name: Show the queued compiler benchmark check
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      checks: write
+    timeout-minutes: 3
+    continue-on-error: true
+    steps:
+      - name: Check out the trusted check writer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Create the queued check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.run_id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.run_attempt }}
+        run: python3 -B tools/bench_direct/compiler_github.py announce

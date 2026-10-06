@@ -38,6 +38,11 @@ such an output; the containment check runs before recursive deletion.
 `--no-benchmark` keeps profile generation, the final build, section
 inspection, and correctness validation while omitting the comparison matrix.
 
+`--jobs N` is the worker budget (default 2). `--build-lanes N` (default 1,
+at most `--jobs`) builds that many trees at once and gives each tree build
+`--jobs / lanes` Ninja jobs; the final `test_all` keeps the whole budget. See
+[Build lanes](#build-lanes).
+
 The workflow builds these controlled Release variants with the same Clang,
 LLD, source tree, native target, tests, unity setting, and frame-pointer
 policy:
@@ -115,6 +120,72 @@ output root). The workflow:
 - writes the final paths, hashes, validation status, and benchmark status to
   `summary.txt`.
 
+## Phase accounting
+
+Every evidence-labelled child process is one phase: the three toolchain
+identity probes, `configure` and `build` for each of the seven trees, `train`
+and `merge` per profile, `inspect` and `test` for the production compiler, and
+`benchmark` and `compare` per comparison (31 phases, or 23 with
+`--no-benchmark`). Each `<label>.status.txt` records the monotonic
+`duration_us` and the child's CPU time and peak RSS as reported by the wait
+(`wait4` covers waited-for descendants; peak RSS is the largest single
+process, not the sum of overlapping ones).
+
+`evidence/phases.tsv` (`BUSTER_PGO_PHASES_V1`) and `evidence/phases.md` are
+rewritten after every phase with the start offset, wall time, outcome
+(`passed`, `failed`, `timed_out` or `cancelled`), CPU and peak RSS of each
+phase, so a failed, timed-out or cancelled run keeps every phase that
+finished. Each phase has a fixed slot, the first column, in the canonical
+order above. The Markdown form adds the run identity (revision, tree,
+toolchain hashes, `--jobs`, requested and admitted build lanes, benchmark
+settings, visible host threads and memory) and per-kind totals, which can sum
+past 100% when lanes overlap; the workflow appends it to the Actions step
+summary even when an earlier step fails. Host facts describe the visible
+machine, not effective runner limits (#2758). The run fails unless every
+expected phase was recorded, and only then marks the ledger `complete=1`.
+Logs carry a `PRODUCTION_PROFILE_PHASE start slot=<n>` line and a
+`PRODUCTION_PROFILE_PHASE <done>/<expected> end slot=<n>` line per phase.
+
+Hosted phase timings are diagnostic: they locate the dominant operations but
+do not validate a performance change (#2761).
+
+## Build lanes
+
+The phase ledger showed that every tree's `ide` target is one unity compile
+followed by one link: at `-j2` each build used about one core (CPU/wall
+0.98), so the seven builds ran as a serial chain of single-core work and
+dominated the job (#2790). The trees are independent apart from profile use:
+
+| Task | Steps, in order |
+|---|---|
+| ThinLTO chain | `instrumented-lto` build, `train-lto` + merge + seal, `pgo-lto` build |
+| non-LTO chain | `instrumented` build, `train-no-lto` + merge + seal, `pgo` build |
+| `release`, `lto`, `g0` | one build each |
+
+With `--build-lanes N`, that many lanes of the persistent gang admit these
+tasks longest first. A PGO-use build is always the step after its own seal, so
+it can never configure against a missing or other-mode profile. Admission is
+bounded by `--jobs`, by one lane per 4 GiB of physical memory (a tree build
+peaked at 2.4–2.9 GiB in one process), by the task count, and to one lane in
+single-threaded drivers such as the TCC bootstrap. With more than one lane,
+tree, training and merge output is captured into `evidence/` instead of
+interleaving in the log.
+
+Each lane owns its arena and its trees' directories; spawning is serialized
+so a child never inherits another child's pipes. The two training runs never
+overlap each other: `bench_throughput` rebuilds the shared
+`build/throughput-tools/throughput` binary on every invocation and
+`--cpu auto` pins every run to the same CPU. A training may overlap the other
+lane's tree build. The first failing task stops
+admission and terminates every in-flight child's process group; those phases
+are recorded as `cancelled`, the run fails, and the ledger keeps every
+recorded phase. Phases keep fixed ledger slots, so the evidence order is the
+same however lanes interleave.
+
+Only preparation overlaps. Section inspection, `test_all` and every timed
+comparison start after all lanes have joined and run one at a time, so
+benchmark samples are never taken alongside a build or training run.
+
 For a longer measurement use `--benchmark-profile ci` or
 `--benchmark-profile full` and increase `--pairs`. Keep training unchanged so
 profiles from separate runs have the same declared workload contract.
@@ -126,5 +197,9 @@ profiles from separate runs have the same declared workload contract.
 ```
 
 This checks strict integer parsing, output containment, command option
-validation, training fingerprint stability, and debug-section detection
-without performing expensive compiler builds.
+validation, training fingerprint stability, debug-section detection, and the
+phase ledger's slot ordering, failure/timeout/cancellation retention and
+per-kind totals, lane admission bounds, and the lane scheduler itself (slot
+placement, failure stopping admission, and, in threaded drivers, a failing
+lane terminating another lane's in-flight child) without performing expensive
+compiler builds.

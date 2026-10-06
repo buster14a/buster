@@ -58,6 +58,37 @@ UnitTestResult hash_tests(UnitTestArguments* arguments)
         sha256_add(&state, "abc", 3);
         sha256_finish_hex(&state, digest);
         BUSTER_STRING_TEST(arguments, string_from_pointer(digest), S8("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+        // NIST FIPS 180-4 / CAVS messages of 448 and 896 bits: every split,
+        // raw digest output and the one-shot helper.
+        String8 nist[] = {
+            S8("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            S8("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"),
+        };
+        String8 nist_expected[] = {
+            S8("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
+            S8("cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1"),
+        };
+        for (u32 vector = 0; vector < BUSTER_ARRAY_LENGTH(nist); vector += 1)
+        {
+            for (u64 split = 0; split <= nist[vector].length; split += 1)
+            {
+                sha256_init(&state);
+                sha256_add(&state, nist[vector].pointer, split);
+                sha256_add(&state, nist[vector].pointer + split, nist[vector].length - split);
+                sha256_finish_hex(&state, digest);
+                BUSTER_STRING_TEST(arguments, string_from_pointer(digest), nist_expected[vector]);
+            }
+            u8 raw[SHA256_DIGEST_SIZE];
+            char8 hex[SHA256_HEX_CAPACITY];
+            sha256_bytes(nist[vector].pointer, nist[vector].length, raw);
+            for (u32 i = 0; i < SHA256_DIGEST_SIZE; i += 1)
+            {
+                hex[i * 2] = "0123456789abcdef"[raw[i] >> 4];
+                hex[i * 2 + 1] = "0123456789abcdef"[raw[i] & 15];
+            }
+            hex[64] = 0;
+            BUSTER_STRING_TEST(arguments, string_from_pointer(hex), nist_expected[vector]);
+        }
         sha256_init(&state);
         u8 chunk[1000];
         memset(chunk, 'a', sizeof(chunk));

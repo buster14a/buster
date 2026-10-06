@@ -3,6 +3,8 @@
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 launcher=${BUSTER_IOS_TEST_LAUNCHER:-$repo_root/ios/launch_simulator.sh}
+python3 "$repo_root/ios/lifecycle_capture_test.py" -v
+python3 "$repo_root/ios/lifecycle_capture_bridge_test.py" -v
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 cleanup() {
@@ -142,7 +144,7 @@ run_case() {
             success) expected_probe='outcome=success status=0 native_status=0 capture_status=0' ;;
             reject) expected_probe='outcome=command-failure status=70 native_status=70 capture_status=0' ;;
             native-124) expected_probe='outcome=command-failure status=124 native_status=124 capture_status=0' ;;
-            timeout) expected_probe='outcome=timeout status=124 native_status=unavailable capture_status=0' ;;
+            timeout) expected_probe='outcome=timeout status=124 native_status=143 capture_status=0' ;;
             large) expected_probe='outcome=command-failure status=71 native_status=71 capture_status=0' ;;
         esac
         for probe in process-table unified-log crash-reports; do
