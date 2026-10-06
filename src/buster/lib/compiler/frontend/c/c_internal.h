@@ -1198,14 +1198,20 @@ struct CTypeLayoutCache
 #define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
 #define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
 #define C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION 16u
+#define C_PARSE_EXPRESSION_QUERY_FLAG_MASK (C_PARSE_EXPRESSION_QUERY_VALID | C_PARSE_EXPRESSION_QUERY_CHECKED | \
+    C_PARSE_EXPRESSION_QUERY_RUNTIME | C_PARSE_EXPRESSION_QUERY_CONSTANT | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)
+// The flags live in their own zeroed byte column so a body clears one byte per
+// token and an empty or mode-incompatible probe never touches the payload.
+BUSTER_CT_CHECK(C_PARSE_EXPRESSION_QUERY_FLAG_MASK <= UINT8_MAX);
 
+// Payload of one memo slot; meaningful only while the slot's flag byte is
+// nonzero, so it is never cleared. Publication writes it before the flags.
 typedef struct CParseExpressionQuery CParseExpressionQuery;
 struct CParseExpressionQuery
 {
     u32 end;
     CScopeId scope;
     CTypeId type;
-    u32 flags;
 };
 
 typedef enum CConstantEvaluationMode
@@ -1222,6 +1228,7 @@ typedef enum CConstantEvaluationMode
 struct CTypeParseMachine
 {
     CParseExpressionQuery* expression_queries;
+    u8* expression_query_flags;
     CParseResult* expression_query_result;
     CToken const* expression_query_tokens;
     u32 expression_query_start;

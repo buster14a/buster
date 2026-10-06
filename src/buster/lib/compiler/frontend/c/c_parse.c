@@ -5633,6 +5633,31 @@ BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, C
 }
 
 
+// The per-body expression memo: a zeroed flag byte per token gates a
+// payload that is written only on publication. A probe reads the payload
+// only when the stored flags are compatible with the requested mode; it
+// returns the stored flags on a hit and zero otherwise.
+BUSTER_GLOBAL_LOCAL u32 c_parse_expression_query_lookup(CTypeParseMachine const* machine, CParseResult const* result, u32 slot, u32 end,
+                                                        CScopeId scope, u32 flags)
+{
+    u32 stored = slot != UINT32_MAX ? machine->expression_query_flags[slot] : 0u;
+    bool hit = (stored & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
+                   (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
+               (stored & flags) == flags;
+    if (hit)
+    {
+        CParseExpressionQuery const* query = machine->expression_queries + slot;
+        hit = query->end == end && query->scope.value == scope.value && query->type.value < result->type_count;
+    }
+    return hit ? stored : 0u;
+}
+
+BUSTER_GLOBAL_LOCAL void c_parse_expression_query_publish(CTypeParseMachine* machine, u32 slot, u32 end, CScopeId scope, CTypeId type, u32 flags)
+{
+    machine->expression_queries[slot] = (CParseExpressionQuery){.end = end, .scope = scope, .type = type};
+    machine->expression_query_flags[slot] = (u8)flags;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -5738,21 +5763,19 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 task_count -= 1;
                 continue;
             }
-            CParseExpressionQuery* query = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
+            u32 slot = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
                 machine->expression_query_result == result && machine->expression_query_tokens == preprocess.tokens &&
                 task->start >= machine->expression_query_start && task->end <= machine->expression_query_end
-                    ? machine->expression_queries + task->start - machine->expression_query_start : 0;
+                    ? task->start - machine->expression_query_start : UINT32_MAX;
             u32 flags = C_PARSE_EXPRESSION_QUERY_VALID |
                 (machine->validate_expression_constraints ? C_PARSE_EXPRESSION_QUERY_CHECKED : 0u) |
                 (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
                 (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
-            if (query && query->end == task->end && query->scope.value == scope.value &&
-                (query->flags & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
-                (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
-                (query->flags & flags) == flags && query->type.value < result->type_count)
+            u32 stored = c_parse_expression_query_lookup(machine, result, slot, task->end, scope, flags);
+            if (stored)
             {
-                last = query->type;
-                nonplace_projection = (query->flags & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
+                last = machine->expression_queries[slot].type;
+                nonplace_projection = (stored & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
                 task_count -= 1;
                 continue;
             }
@@ -6468,16 +6491,13 @@ BUSTER_GLOBAL_LOCAL bool c_parse_literal_query_machine_only;
 BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                           CScopeId scope, u32 start, u32 end, u32 flags, CTypeId* type_out)
 {
-    CParseExpressionQuery* query = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
+    u32 slot = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
         machine->expression_query_result == result && machine->expression_query_tokens == preprocess.tokens &&
         start >= machine->expression_query_start && end <= machine->expression_query_end
-            ? machine->expression_queries + start - machine->expression_query_start : 0;
+            ? start - machine->expression_query_start : UINT32_MAX;
     machine->mutation_type_limit = result->type_count;
-    CTypeId type = query && query->end == end && query->scope.value == scope.value &&
-                           (query->flags & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
-                (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
-                           (query->flags & flags) == flags && query->type.value < result->type_count
-                       ? query->type
+    CTypeId type = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags)
+                       ? machine->expression_queries[slot].type
                        : c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, start, end);
     bool valid = type.value < result->type_count;
     machine->result_type = valid ? type : C_TYPE_ID_INVALID;
@@ -6496,10 +6516,10 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
     WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_ROOTS, 1);
     machine->result_nonplace_projection = false;
     c_parse_type_identity_prepare(machine, arena, preprocess, result, scope, start, end);
-    CParseExpressionQuery* query = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
+    u32 slot = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
         machine->expression_query_result == result && machine->expression_query_tokens == preprocess.tokens && !machine->frame_count &&
         start >= machine->expression_query_start && start < end && end <= machine->expression_query_end
-            ? machine->expression_queries + start - machine->expression_query_start : 0;
+            ? start - machine->expression_query_start : UINT32_MAX;
     u32 flags = C_PARSE_EXPRESSION_QUERY_VALID |
         (machine->validate_expression_constraints ? C_PARSE_EXPRESSION_QUERY_CHECKED : 0u) |
         (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
@@ -6516,22 +6536,20 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
 #if BUSTER_INCLUDE_TESTS
     literal &= !c_parse_literal_query_machine_only;
 #endif
-    if (query && query->end == end && query->scope.value == scope.value &&
-        (query->flags & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
-                (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
-        (query->flags & flags) == flags && query->type.value < result->type_count)
+    u32 stored = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags);
+    if (stored)
     {
         WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_CACHE_HITS, 1);
-        *type_out = query->type;
-        machine->result_nonplace_projection = (query->flags & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
+        *type_out = machine->expression_queries[slot].type;
+        machine->result_nonplace_projection = (stored & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
         valid = true;
     }
     else if (literal)
     {
         WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_LITERAL_ANSWERS, 1);
         valid = c_parse_expression_literal_query(machine, arena, preprocess, result, scope, start, end, flags, type_out);
-        if (query && valid && !machine->expression_constraint.length)
-            *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out, .flags = flags};
+        if (slot != UINT32_MAX && valid && !machine->expression_constraint.length)
+            c_parse_expression_query_publish(machine, slot, end, scope, *type_out, flags);
     }
     else
     {
@@ -6564,9 +6582,9 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         {
             *type_out = machine->result_type;
         }
-        if (query && valid && !machine->expression_constraint.length && result->diagnostic_count == checkpoint.diagnostic_count)
-            *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out,
-                .flags = flags | (machine->result_nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u)};
+        if (slot != UINT32_MAX && valid && !machine->expression_constraint.length && result->diagnostic_count == checkpoint.diagnostic_count)
+            c_parse_expression_query_publish(machine, slot, end, scope, *type_out,
+                flags | (machine->result_nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
     }
     return valid;
 }
@@ -6610,13 +6628,13 @@ CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessRes
     };
     if (cached.value != C_ID_UNDERLYING_INVALID)
     {
-        machine.expression_queries = arena_allocate_zeroed(scratch, CParseExpressionQuery, end - start);
+        machine.expression_queries = arena_allocate(scratch, CParseExpressionQuery, end - start);
+        machine.expression_query_flags = arena_allocate_zeroed(scratch, u8, end - start);
         machine.expression_query_result = result;
         machine.expression_query_tokens = preprocess.tokens;
         machine.expression_query_start = start;
         machine.expression_query_end = end;
-        machine.expression_queries[0] = (CParseExpressionQuery){
-            .end = end, .type = cached, .flags = C_PARSE_EXPRESSION_QUERY_VALID | C_PARSE_EXPRESSION_QUERY_CHECKED};
+        c_parse_expression_query_publish(&machine, 0, end, (CScopeId){0}, cached, C_PARSE_EXPRESSION_QUERY_VALID | C_PARSE_EXPRESSION_QUERY_CHECKED);
     }
     if (nested)
     {
@@ -6648,7 +6666,7 @@ CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessRes
     {
         report.published_end = machine.expression_queries[0].end;
         report.published_type = machine.expression_queries[0].type;
-        report.published_flags = machine.expression_queries[0].flags;
+        report.published_flags = machine.expression_query_flags[0];
     }
     return report;
 }
@@ -29213,7 +29231,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         machine->expression_query_result = result;
         machine->expression_query_tokens = preprocess.tokens;
         machine->expression_queries = arena_allocate(machine->scratch_arena, CParseExpressionQuery, declaration->body_token_count);
-        memset(machine->expression_queries, 0, sizeof(*machine->expression_queries) * declaration->body_token_count);
+        machine->expression_query_flags = arena_allocate(machine->scratch_arena, u8, declaration->body_token_count);
+        memset(machine->expression_query_flags, 0, declaration->body_token_count);
         u8* skipped = arena_allocate(machine->scratch_arena, u8, declaration->body_token_count);
         memset(skipped, 0, declaration->body_token_count);
         // Every family asks c_parse_scope_for_token about this body's tokens
@@ -29257,6 +29276,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         c_parse_validate_statement_expressions(machine, result, preprocess, declaration, skipped, &diagnostic);
         machine->runtime_expression_constraints = false;
         machine->expression_queries = 0;
+        machine->expression_query_flags = 0;
         machine->expression_query_result = 0;
         machine->expression_query_tokens = 0;
         if (body_scope_index)
