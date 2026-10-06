@@ -412,7 +412,7 @@ class MainCIReuseTests(unittest.TestCase):
     def test_desktop_cache_only_workflow_boundary(self):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         desktop = text.split('\n  test:\n', 1)[1].split('\n  native:\n', 1)[0]
-        self.assertIn('needs: [lint, reuse]', desktop)
+        self.assertIn('needs: [queue_lint, reuse]', desktop)
         for name in reuse.VALIDATION_STEPS:
             block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             condition = next(line for line in block.splitlines() if line.startswith('        if:'))
