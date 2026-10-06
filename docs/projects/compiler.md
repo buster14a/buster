@@ -18,13 +18,33 @@ contract; this page does not maintain a second copy of command-line flags.
 | `compiler.c` | Preprocess, parse, analyze and lower the active C frontend. | [Frontend guide](../agents/frontend.md) and its topic guides. |
 | `compiler.gnu-callback-storage` | GNU-dialect function-pointer storage through `void *` on native Linux/macOS; strict-C and other target restrictions remain explicit. | [Calls contract](../agents/frontend/calls.md#gnu-callback-storage-through-void-pointers) and [pinned evidence](../capability-portfolios/callback-storage.md). |
 | `compiler.artifacts` | Compile, assemble and link through the headless driver; reusable toolchain modules have their own boundaries. | [Driver guide](../agents/driver.md) and [source map](../agents/project.md). |
+| `compiler.hot-reload-demo` | Opt-in trusted-module Linux x86-64 counter consumer: edit/rebuild/reload at explicit safe points with host-owned state. | [Runnable workflow and support contract](../../tools/hot_replace_probe/README.md). Application dispatch stays outside compiler internals. |
 | `compiler.wasm64` | Direct core Wasm64 output. | [Wasm64 contract](../../WASM64.md). |
 | `compiler.llvm-bitcode` | Direct binary LLVM bitcode output. | [Bitcode contract](../../LLVM_BITCODE.md). |
+| `compiler.ir-oracle` | Test-only bounded canonical IR interpreter and isolated native comparison. | [Executable-semantics boundary](../canonical-ir-oracle.md). |
 
 These are navigation entries, not an exhaustive language or target-support matrix.
 The target/ABI/mode and limitations in each detailed contract remain decisive.
 External GPU tool orchestration is not direct C-to-GPU code generation, and a
 produced object is not executed-semantics evidence.
+
+## JIT runtime admission
+
+The reusable [object JIT](../../src/buster/lib/compiler/jit/jit.h) links
+host-native text/data with explicit host bindings. It has no initializer or
+finalizer execution protocol, so a nonempty INIT_ARRAY or FINI_ARRAY returns
+`JIT_ERROR_INIT_FINI_UNSUPPORTED` before scratch/image allocation. Section size
+includes both stored bytes and virtual extent. Zero-size arrays without
+relocations remain inert placeholders; relocations in an empty array are
+invalid input, while ordinary debug-only relocations remain ignored.
+
+Registered `jit_tests` check direct and serialized native-format objects with
+legitimate function-pointer entries, malformed relocation controls, zero-size
+placeholders and normal text/data symbol lookup. The trusted hot-reload
+consumer independently refuses constructor/destructor-bearing modules through
+its existing module-state policy; its lifecycle self-test covers both cases.
+Linking and releasing a JIT mapping do not execute runtime initialization or
+finalization.
 
 ## Validation and work
 
@@ -32,6 +52,14 @@ Use the existing [test/CI guide](../agents/testing.md), focused regression cases
 and applicable self-host/target gates. Keep source revision, configuration,
 commands, actual results and unavailable execution legs on the relevant PR or
 evidence report; this catalogue does not turn historical passes into current ones.
+
+The canonical DWARF v4 writer measures the location lists reached through
+function scopes before allocating their storage. It preserves unavailable gaps,
+empty lists and repeated scope references, and refuses location expressions or
+`.debug_loc` offsets that exceed the format's two-byte and four-byte fields. The existing
+[DWARF tests](../../src/buster/tests/compiler/dwarf/dwarf_test.c) cover the encoded
+model boundaries; external DWARF consumers and debugger observations remain
+separate validation gates.
 
 [#309](https://github.com/buster14a/buster/issues/309) owns the specialized backend
 capability/conformance catalogue. Extend that work rather than implementing a

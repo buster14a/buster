@@ -171,6 +171,10 @@ BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // the entity that ends before the operand. `*cursor` starts at zero.
 BUSTER_C_EXTERN bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
                                                u32* count_out);
+// A final member expression uses its declaring aggregate's placement
+// alignment; every lookup and layout query operates on a protected model.
+BUSTER_C_EXTERN bool c_semantic_alignof_member(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                u32 start, u32 end, u32* alignment);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
 // The GNU layout attributes the frontend implements, as the parser spells
 // them. `__has_attribute` answers from these same predicates so the query
@@ -195,6 +199,8 @@ BUSTER_C_EXTERN bool c_ir_control_substatement_position(CPreprocessResult const*
 // The cold half of c_ir_named_label_at: the full proof, reached only for a
 // token that already looks like `<identifier> :`.
 BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
+// Exclude member colons after c_ir_named_label_at proves a label shape.
+BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
 // Whether a named label starts at `index`. Both loops that size and fill a
 // body's label table ask this of every body token, so the necessary condition
 // — an identifier followed by a colon — is inline and the proof stays out of
@@ -500,7 +506,7 @@ BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
 // AAPCS64    The same placement, but every bit-field's container -- named,
 //            unnamed or zero-width -- raises the record's alignment (AAPCS64
 //            10.1.8). AArch64 Linux, Android, UEFI and bare metal; not Darwin.
-// MICROSOFT  The Windows rule, for the MSVC and MinGW environments alike: a
+// MICROSOFT  The Windows (MSVC) rule; MinGW triples are rejected (#1492): a
 //            bit-field occupies a storage unit of its declared type's size,
 //            and the next one shares it only while its declared type has the
 //            same size and its bits still fit. A zero-width bit-field matters
@@ -772,6 +778,7 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONSTEXPR,
     C_SYMBOL_WELL_KNOWN_CONST,
     C_SYMBOL_WELL_KNOWN_ATOMIC,
+    C_SYMBOL_WELL_KNOWN_VA_OPT,
     C_SYMBOL_WELL_KNOWN_COUNT,
 } CSymbolWellKnown;
 
@@ -1024,6 +1031,7 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_INDIRECTION,
     C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
     C_PARSE_EXPRESSION_TYPE_COMPLEX_PART,
+    C_PARSE_EXPRESSION_TYPE_SUBSCRIPT,
 } CParseExpressionTypeOperation;
 
 typedef enum CTypeParseFrameKind
@@ -1036,6 +1044,8 @@ typedef enum CTypeParseFrameKind
     C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT,
     C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
     C_TYPE_PARSE_FRAME_PARENTHESIZED,
+    C_TYPE_PARSE_FRAME_FUNCTION_SUFFIX,
+    C_TYPE_PARSE_FRAME_PARAMETER_GROUP,
     C_TYPE_PARSE_FRAME_PARAMETER,
 } CTypeParseFrameKind;
 
@@ -1047,6 +1057,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_PARAMETERS,
     C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
     C_TYPE_PARSE_STAGE_FINISH,
+    C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
 
 struct CTypeMutation
@@ -1061,6 +1072,7 @@ struct CParseExpressionTypeTask
     u32 end;
     u32 split;
     u32 colon;
+    u32 trailing_subscript_plus_one;
     CTypeId left_type;
     CParseExpressionTypeOperation operation;
     u8 state;
@@ -1130,6 +1142,9 @@ struct CTypeParseFrame
     u32 shared_specifier_end;
     u32 mutation_mark;
     u32 definition_type_start;
+    // PARAMETER frames: the diagnostic count at entry, so a failed type
+    // specifier that said nothing can be named.
+    u32 diagnostic_start;
     u32 pending_index;
     u64 arena_mark;
     CTypeParseFrameKind kind;
@@ -1151,6 +1166,8 @@ struct CTypeParseFrame
     // single declarator carries is scanned separately and belongs to that
     // member alone.
     bool is_packed;
+    // Query-local category fact for a GNU imaginary projection of a real value.
+    bool expression_nonplace_projection;
 };
 
 typedef struct CTypeLayoutCache CTypeLayoutCache;
@@ -1183,14 +1200,21 @@ struct CTypeLayoutCache
 #define C_PARSE_EXPRESSION_QUERY_CHECKED 2u
 #define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
 #define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
+#define C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION 16u
+#define C_PARSE_EXPRESSION_QUERY_FLAG_MASK (C_PARSE_EXPRESSION_QUERY_VALID | C_PARSE_EXPRESSION_QUERY_CHECKED | \
+    C_PARSE_EXPRESSION_QUERY_RUNTIME | C_PARSE_EXPRESSION_QUERY_CONSTANT | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)
+// The flags live in their own zeroed byte column so a body clears one byte per
+// token and an empty or mode-incompatible probe never touches the payload.
+BUSTER_CT_CHECK(C_PARSE_EXPRESSION_QUERY_FLAG_MASK <= UINT8_MAX);
 
+// Payload of one memo slot; meaningful only while the slot's flag byte is
+// nonzero, so it is never cleared. Publication writes it before the flags.
 typedef struct CParseExpressionQuery CParseExpressionQuery;
 struct CParseExpressionQuery
 {
     u32 end;
     CScopeId scope;
     CTypeId type;
-    u32 flags;
 };
 
 typedef enum CConstantEvaluationMode
@@ -1207,6 +1231,7 @@ typedef enum CConstantEvaluationMode
 struct CTypeParseMachine
 {
     CParseExpressionQuery* expression_queries;
+    u8* expression_query_flags;
     CParseResult* expression_query_result;
     CToken const* expression_query_tokens;
     u32 expression_query_start;
@@ -1242,15 +1267,26 @@ struct CTypeParseMachine
     u32 mutation_count;
     u32 mutation_capacity;
     u32 mutation_type_limit;
+    // Parenthesized declarators being parsed for an aggregate member or a
+    // declaration that creates storage. A parameter whose type specifier fails
+    // inside one is reported there, because neither path has a later fallback
+    // that names it.
+    u32 member_declarator_depth;
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
+    // Constexpr initializers keep NORMAL's type-name grammar, but reject
+    // signed arithmetic overflow before a cast can hide its wrapped bits.
+    bool reject_signed_constant_overflow;
     bool result_valid;
+    bool result_nonplace_projection;
     bool failed;
     bool semantic_constant_queries;
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool type_identity_queries_active;
+    // Only the private fallback for failed ENUM sizeof expression leaves.
+    bool enum_sizeof_expression_query;
     // How many GNU `_Alignof(object)` evaluations of an object's alignment
     // records enclose this one, and whether one of them hit
     // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_parse_alignof_object_alignment.
@@ -1268,6 +1304,7 @@ struct CParsePromotedMemberWork
 };
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
+BUSTER_C_EXTERN String8 c_semantic_asm_clobber_name(Target target, String8 clobber);
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint);
 
 BUSTER_C_EXTERN void c_parse_index_declarations(CParseResult* result, Arena* arena);
@@ -1294,6 +1331,10 @@ struct CIrConstantValue
     u64 integer_high;
     f64 floating;
     CIrConstantValueKind kind;
+    // Set only on the value a function identifier folds to, which is already
+    // its decayed pointer. Unary `&` accepts exactly that value, so `&f` is
+    // `f`; every operator result clears it, keeping `&(rvalue)` refused.
+    bool function_designator;
 };
 
 BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
@@ -1358,6 +1399,8 @@ BUSTER_C_EXTERN bool c_semantic_asm_vector_operand(IrType* type);
 BUSTER_C_EXTERN bool c_semantic_asm_x87_operand(IrType* type);
 
 BUSTER_C_EXTERN bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_out);
+
+BUSTER_C_EXTERN u64 c_semantic_asm_register_alternative(String8 text, bool output);
 
 BUSTER_C_EXTERN u64 c_semantic_asm_bound_register(Target target, String8 label);
 

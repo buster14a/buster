@@ -1,0 +1,17 @@
+TEST_FIXTURE_START_V1 kind=fixture module=compiler_driver_tests fixture=compiler_driver_test_wasm_string_records index=66
+WASM_STRING_LOOKUP width=4 modules=3 strings=6 probes=24 bound=24
+WASM_STRING_LOOKUP width=4 modules=3 strings=24 probes=138 bound=144
+WASM_STRING_LOOKUP width=4 modules=3 strings=96 probes=738 bound=768
+WASM_STRING_LOOKUP width=8 modules=3 strings=6 probes=24 bound=24
+WASM_STRING_LOOKUP width=8 modules=3 strings=24 probes=138 bound=144
+WASM_STRING_LOOKUP width=8 modules=3 strings=96 probes=738 bound=768
+TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=compiler_driver_test_wasm_string_records index=66 arena_slot=0 start=4648 end=4648 retained_bytes=0 high_water=4648 peak_bytes=0 after=4648 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=compiler_driver_test_wasm_string_records index=66 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=342557 peak_bytes=342429 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=compiler_driver_test_wasm_string_records index=66 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=360 peak_bytes=296 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_TIMING_V1 kind=fixture module=compiler_driver_tests fixture=compiler_driver_test_wasm_string_records index=66 duration_ns=588946 measurement=inclusive-wall status=completed
+object.error == OBJECT_ERROR_NONE && local_dynamic_count != 0 && dtp_offset_count >= 2 failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2483/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:14724
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2483/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:14765
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2483/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:14765
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2483/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:14765
+TEST_MODULE_TIMING index=54 module=compiler_driver_tests duration_ns=105097016791 passed=56329 failed=4 assertions=56333 status=fail
+[56329/56333] Unit tests (1 of 57 modules selected)
