@@ -10382,9 +10382,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.variable_memory_encoding_tables == 9);
     // Every fixed-shape template row prewarm allots must be one the
     // metadata authority accepted; a refused row would silently keep the
-    // slower metadata lane for its shape.
-    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1486,
-                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1486 (rows: {u32})"), exact_map.fixed_template_rows));
+    // slower metadata lane for its shape. The vpermt2d variant of the
+    // VPERMT2B family adds sixteen rows, one per mask-source GPR.
+    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1502,
+                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1502 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);
