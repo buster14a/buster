@@ -7,7 +7,8 @@ the only jobs there that complete the check. It reads this run's evidence
 artifact through the API as data (a size-bounded zip; nothing in it is
 executed), re-checks the receipt against the identities authorization produced
 in the same attempt, requires the observed host to be the approved Zen 5 host,
-re-derives validity from the lab's own summary.json, and completes the
+re-derives validity from the lab's own summary.json and the throughput
+corpus's own summary.json and metadata.json (#2761), and completes the
 attempt's check run named check_name(mode) with external ID attempt_marker(...)
 on the head. The checks are report-only; nothing gates merging on them.
 
@@ -56,7 +57,8 @@ from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
                              owned_checks, parse_chain, run_url)
 from compiler_receipt import (DECIMAL, IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
-                              check_name, classify, host_problem, number, range_label, regression_policy, render)
+                              check_name, classify, classify_throughput, host_problem, number, range_label,
+                              regression_policy, render, THROUGHPUT_PROFILE, throughput_digest)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
@@ -69,8 +71,15 @@ def artifact_name(head: str, attempt: str) -> str:
 
 
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
-           policy_value: str) -> tuple[str, str, list[str]]:
-    """(conclusion, title, reasons) for one attempt; never consults the verdict's direction."""
+           policy_value: str, throughput: object = None, require_throughput: bool = True) -> tuple[str, str, list[str]]:
+    """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
+
+    throughput is {"summary": ..., "metadata": ...} from the evidence artifact.
+    A receipt from before the corpus leg (#2761) has no throughput_profile;
+    only publication-only recovery of such a past attempt passes
+    require_throughput=False, and a receipt that names the profile is always
+    checked against it.
+    """
     reasons: list[str] = []
     conclusion, title = "failure", "Not benchmarked"
     policy, problem = regression_policy(policy_value)
@@ -103,6 +112,12 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
             reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
         elif not reasons and state == "measured":
             reasons.extend(classify(summary, receipt.get("binaries")))
+            if require_throughput or "throughput_profile" in receipt:
+                corpus = throughput if isinstance(throughput, dict) else {}
+                if receipt.get("throughput_profile") != THROUGHPUT_PROFILE:
+                    reasons.append("receipt throughput profile is not the frozen corpus profile")
+                reasons.extend(classify_throughput(corpus.get("summary"), corpus.get("metadata"),
+                                                   receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -117,14 +132,15 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     return conclusion, title, reasons
 
 
-def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str, dict]:
-    """(receipt, summary, problem, artifact row) from this run's one evidence artifact."""
+def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str, dict, dict]:
+    """(receipt, summary, problem, artifact row, throughput) from this run's one evidence artifact."""
     listing = api.request(f"/actions/runs/{run_id}/artifacts?" + urllib.parse.urlencode({"name": name, "per_page": 10}))
     rows = [row for row in listing.get("artifacts", []) if isinstance(row, dict) and row.get("name") == name] \
         if isinstance(listing, dict) else []
     receipt = summary = None
     problem = ""
     artifact: dict = {}
+    throughput: dict = {}
     if len(rows) != 1:
         problem = f"expected one evidence artifact {name}, found {len(rows)}"
     elif rows[0].get("expired") or type(rows[0].get("size_in_bytes")) is not int or \
@@ -135,7 +151,7 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
         with zipfile.ZipFile(io.BytesIO(api.download(rows[0]["archive_download_url"]))) as archive:
             members = {info.filename: info for info in archive.infolist()}
             values = []
-            for member in ("receipt.json", "lab/summary.json"):
+            for member in ("receipt.json", "lab/summary.json", "throughput/summary.json", "throughput/metadata.json"):
                 info = members.get(member)
                 value = None
                 if info is not None and info.file_size <= MEMBER_LIMIT:
@@ -144,8 +160,9 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
                     except ValueError:
                         value = None
                 values.append(value)
-            receipt, summary = values
-    return receipt, summary, problem, artifact
+            receipt, summary = values[:2]
+            throughput = {"summary": values[2], "metadata": values[3]}
+    return receipt, summary, problem, artifact, throughput
 
 
 def queue_delay(api: Api, run_id: str, attempt: str, mode: str) -> object:
@@ -325,8 +342,9 @@ def main() -> int:
         notes.extend(problems)
         receipt = summary = None
         artifact: dict = {}
+        throughput: dict = {}
         if authorized:
-            receipt, summary, problem, artifact = read_evidence(api, run_id, artifact_name(head, attempt))
+            receipt, summary, problem, artifact, throughput = read_evidence(api, run_id, artifact_name(head, attempt))
             if problem:
                 notes.append(problem)
             if recover:
@@ -334,13 +352,16 @@ def main() -> int:
                 notes.extend(problems)
                 authorized = not problems
         conclusion, title, reasons = decide(expected, authorized, compare_result, receipt, summary,
-                                            get("BQ_REGRESSION_POLICY"))
+                                            get("BQ_REGRESSION_POLICY"), throughput, not recover)
         shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
         # The authorized range, never the host's own account of it.
         shown.pop("coverage", None)
         if mode == "main" and expected.get("range"):
             shown["coverage"] = {"first_parent": expected.get("first_parent"), "range": expected.get("range")}
         shown["reasons"] = reasons
+        # The corpus as its own retained summary says, never the host's digest.
+        if isinstance(throughput.get("summary"), dict):
+            shown["throughput"] = throughput_digest(throughput["summary"])
         if isinstance(shown.get("timings"), dict):
             shown["timings"] = dict(shown["timings"], queue_delay_seconds=queue_delay(api, run_id, attempt, mode))
         workflow_url = run_url(repository, run_id, attempt)

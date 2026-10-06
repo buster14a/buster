@@ -12,6 +12,9 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 
 #if BUSTER_INCLUDE_TESTS
+// Calling-thread requested association-list bytes; excludes other type-machine
+// scratch and never includes the small local list.
+BUSTER_F_DECL u64 c_test_generic_association_scratch_bytes(void);
 BUSTER_F_DECL CTypeId c_test_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);

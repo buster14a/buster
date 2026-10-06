@@ -17,12 +17,19 @@ Two modes measure the same way and differ only in what they compare:
            branch, on request and without merging (#2769)
 Each mode publishes its own check name and marker.
 
+Both modes also run THROUGHPUT_PROFILE (#2761): the predeclared native
+throughput corpus of `./build.sh bench_throughput` on the same two compilers,
+so the corpus has a Zen 5 route. Its evidence must be complete and bound to
+the measured binaries; its regressions, like the self-host verdict, are
+reported and never decide.
+
 Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
     attempt_marker                                         one attempt's check (#2803)
     PROFILE                                                frozen profile
     APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
+    THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -64,6 +71,25 @@ PROFILE = {
     "warmups": 1,
     "profile_steps": [],
     "corpus": "not included in compiler-compare-v1",
+}
+# The throughput corpus run after the self-host comparison (#2761), frozen per
+# name like PROFILE. The harness is tools/throughput at the base revision (a
+# main commit), built by its own build.c command; `arguments` follow the
+# baseline/candidate/output/ids that compiler_compare supplies.
+THROUGHPUT_SCHEMA = 2
+THROUGHPUT_PROFILE = {
+    "name": "throughput-corpus-v1",
+    "workload": "bench_throughput run: the predeclared default CI corpus under every allocator mode, "
+                "paired, two rounds, with its regression guard",
+    "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
+    "arguments": ["--profile", "ci", "--mode", "all", "--pairs", "20", "--warmups", "2", "--timeout", "120",
+                  "--cpu", "2"],
+    "workloads": ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow",
+                  "backend_pressure"],
+    "pairs_per_round": 20,
+    "rounds": 2,
+    "warmups": 2,
+    "cpu": 2,
 }
 # A wall-time CI needs at least six complete pairs (uarch_lab sign_test_rank).
 MIN_PAIRS = 6
@@ -187,6 +213,54 @@ def classify(summary: object, binaries: object) -> list[str]:
     return reasons
 
 
+def classify_throughput(summary: object, metadata: object, binaries: object) -> list[str]:
+    """Reasons the corpus evidence is not a complete run of THROUGHPUT_PROFILE on these binaries."""
+    reasons: list[str] = []
+    summary = summary if isinstance(summary, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    binaries = binaries if isinstance(binaries, dict) else {}
+    if not summary:
+        reasons.append("throughput summary.json is missing or not an object")
+    if not metadata:
+        reasons.append("throughput metadata.json is missing or not an object")
+    if summary and (summary.get("schema") != THROUGHPUT_SCHEMA or summary.get("valid") is not True
+                    or summary.get("guard_enabled") is not True):
+        reasons.append("throughput summary is not a valid guarded schema-2 comparison")
+    profile = THROUGHPUT_PROFILE
+    planned = {"schema": THROUGHPUT_SCHEMA, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
+               "rounds": profile["rounds"], "warmups": profile["warmups"], "cpu": profile["cpu"],
+               "workloads": profile["workloads"]}
+    for key, value in planned.items():
+        if metadata and metadata.get(key) != value:
+            reasons.append(f"throughput {key} {metadata.get(key)!r} is not the profile's {value!r}")
+    provenance = metadata.get("compiler_provenance")
+    provenance = provenance if isinstance(provenance, list) and len(provenance) == 2 else [{}, {}]
+    for role, row in zip(("baseline", "candidate"), provenance):
+        recorded = binaries.get(role) if isinstance(binaries.get(role), dict) else {}
+        digest = row.get("sha256") if isinstance(row, dict) else None
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or digest != recorded.get("sha256"):
+            reasons.append(f"throughput {role} compiler is not the measured {role} binary")
+    comparisons = summary.get("comparisons")
+    names = [row.get("name") for row in comparisons if isinstance(row, dict)] if isinstance(comparisons, list) else []
+    covered = {name.split("/", 1)[0] for name in names if isinstance(name, str)}
+    if summary and not set(profile["workloads"]) <= covered:
+        reasons.append(f"throughput comparisons cover {sorted(covered)}, not every profile workload")
+    for key in ("confirmed_regressions", "inconclusive_cases"):
+        if summary and type(summary.get(key)) is not int:
+            reasons.append(f"throughput summary has no integer {key}")
+    return reasons
+
+
+def throughput_digest(summary: object) -> dict:
+    """The report's view of a corpus summary: counts and each case's decision."""
+    summary = summary if isinstance(summary, dict) else {}
+    comparisons = summary.get("comparisons") if isinstance(summary.get("comparisons"), list) else []
+    return {"valid": summary.get("valid"), "confirmed_regressions": summary.get("confirmed_regressions"),
+            "inconclusive_cases": summary.get("inconclusive_cases"),
+            "cases": [{"name": row.get("name"), "decision": row.get("decision")}
+                      for row in comparisons if isinstance(row, dict)]}
+
+
 def number(value: object, form: str) -> str:
     return form % value if isinstance(value, (int, float)) and not isinstance(value, bool) else "NA"
 
@@ -228,10 +302,21 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         lines.append("")
     timings = timings if isinstance(timings, dict) else {}
     builds = timings.get("build_seconds") if isinstance(timings.get("build_seconds"), dict) else {}
-    lines.append("Host time: builds %s s, measurement %s s, total %s s; queue delay before the host job %s s." % (
+    lines.append("Host time: builds %s s, measurement %s s, corpus %s s, total %s s; queue delay before the host "
+                 "job %s s." % (
         " + ".join(number(builds.get(key), "%.0f") for key in ("baseline", "candidate", "closure")),
-        number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("total_seconds"), "%.0f"),
+        number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("throughput_seconds"), "%.0f"),
+        number(timings.get("total_seconds"), "%.0f"),
         number(timings.get("queue_delay_seconds"), "%.0f")))
+    corpus = receipt.get("throughput") if isinstance(receipt, dict) else None
+    if isinstance(corpus, dict):
+        cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
+        flagged = [f"{row.get('name')}: {row.get('decision')}" for row in cases if isinstance(row, dict)
+                   and row.get("decision") != "no substantial regression detected"]
+        lines += ["", f"Throughput corpus `{THROUGHPUT_PROFILE['name']}`: {len(cases)} cases, "
+                  f"{corpus.get('confirmed_regressions', 'NA')} confirmed regressions, "
+                  f"{corpus.get('inconclusive_cases', 'NA')} inconclusive (report-only)."
+                  + (" " + "; ".join(flagged) + "." if flagged else "")]
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),
