@@ -4,6 +4,7 @@
 // ui_slider_component_test.c runs this module against the real UI front doors.
 #include <buster/tests/ui_slider_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/string.h>
 #include <buster/lib/ui_builder.h>
 #include <buster/tests/ui_test_internal.h>
 
