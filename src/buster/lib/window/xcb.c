@@ -117,9 +117,12 @@ BUSTER_GLOBAL_LOCAL WmWindowHandle* wm_x11_window_from_ic(WmHandle* handle, xcb_
 
 BUSTER_GLOBAL_LOCAL u32 wm_x11_window_event_mask(WmHandle* handle)
 {
+    // XIM synchronization selects the flags of forwarded protocol events, not
+    // additional core subscriptions. Providers may use a complement mask.
+    // X11 EventMask bits 25..31 are reserved and must remain zero.
     u32 result = XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
                  XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_BUTTON_MOTION | XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-                 XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE | handle->xim_forward_event_mask | handle->xim_synchronous_event_mask;
+                 XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE | (handle->xim_forward_event_mask & BUSTER_X11_CORE_EVENT_MASK);
     return result;
 }
 
