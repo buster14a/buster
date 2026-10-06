@@ -8948,6 +8948,106 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operands(UnitTestArg
 // The runtime check below is the only reader of this program; it is compiled
 // only where the check runs, so other targets do not see an unused constant.
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+// Compound assignment on `_Atomic` objects (#1387). The expected values are
+// what E1 = E1 op E2 gives: the operation runs in the usual-arithmetic common
+// type and the result is converted to E1's type once. Each CHECK compares both
+// the expression's value and the stored value.
+BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_assignment_program = S8_INITIALIZER(
+    "#define CHECK(type, init, op, rhs, expected) do { _Atomic type x = (init); type r = (x op (rhs)); \\\n"
+    "    if (r != (type)(expected) || (type)x != (type)(expected)) return __LINE__; } while (0)\n"
+    "int main(void)\n"
+    "{\n"
+    "    CHECK(int, 5, -=, 0.5, 4);\n"
+    "    CHECK(int, 9, +=, 2.5, 11);\n"
+    "    CHECK(int, 9, -=, 2.5, 6);\n"
+    "    CHECK(int, 9, *=, 0.5, 4);\n"
+    "    CHECK(int, 9, /=, 0.5, 18);\n"
+    "    CHECK(int, 9, *=, 3, 27);\n"
+    "    CHECK(int, 9, /=, -1, -9);\n"
+    "    CHECK(int, 9, %=, 7, 2);\n"
+    "    CHECK(int, 9, <<=, 3, 72);\n"
+    "    CHECK(int, -9, >>=, 1, -5);\n"
+    "    CHECK(int, 9, +=, 3, 12);\n"
+    "    CHECK(int, 9, ^=, 7, 14);\n"
+    "    CHECK(unsigned, 9, *=, -1, 4294967287u);\n"
+    "    CHECK(unsigned, 9, /=, -1, 0);\n"
+    "    CHECK(unsigned, 9, -=, 2.5, 6);\n"
+    "    CHECK(long, 9, *=, 2.5, 22);\n"
+    "    CHECK(long, 9, <<=, 40, 9L << 40);\n"
+    "    CHECK(short, 9, *=, 3, 27);\n"
+    "    CHECK(short, 9, -=, 0.5, 8);\n"
+    "    CHECK(signed char, 9, <<=, 7, -128);\n"
+    "    CHECK(unsigned char, 9, *=, -1, 247);\n"
+    "    CHECK(unsigned char, 9, /=, 2.5, 3);\n"
+    "    CHECK(_Bool, 1, +=, 3, 1);\n"
+    "    CHECK(_Bool, 1, +=, -1, 0);\n"
+    "    CHECK(_Bool, 1, -=, 1, 0);\n"
+    "    CHECK(_Bool, 1, *=, 0.5, 1);\n"
+    "    CHECK(_Bool, 1, /=, 3, 0);\n"
+    "    CHECK(_Bool, 1, %=, 3, 1);\n"
+    "    CHECK(_Bool, 1, <<=, 3, 1);\n"
+    "    CHECK(_Bool, 1, >>=, 3, 0);\n"
+    "    CHECK(_Bool, 1, &=, 2, 0);\n"
+    "    CHECK(_Bool, 0, |=, 2, 1);\n"
+    "    CHECK(_Bool, 1, ^=, 3, 1);\n"
+    "    CHECK(float, 9, /=, 2.5, 3.6f);\n"
+    "    CHECK(float, 9, *=, 2.5, 22.5f);\n"
+    "    CHECK(float, 9, -=, 3, 6);\n"
+    "    CHECK(double, 9, /=, 7, 9.0 / 7);\n"
+    "    CHECK(double, 9, +=, 0.5, 9.5);\n"
+    "    {\n"
+    "        _Atomic float f = 16777216.0f;\n"
+    "        f += 1.00000001;\n"
+    "        if (f != 16777218.0f) return __LINE__;\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_assignment_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("atomic-compound-assignment"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_compound_assignment_program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-compound-assignment-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("atomic compound assignment {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("atomic compound assignment runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+#endif
+
+// The runtime check below is the only reader of this program; it is compiled
+// only where the check runs, so other targets do not see an unused constant.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 // The same shapes as a program: none of the unreachable arms runs, so every
 // function returns what Clang's build of it returns, under each allocator
 // and frontend form with canonical IR and machine code verified.
@@ -44214,6 +44314,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_alignof_object);
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
+    C_TEST_FIXTURE(arguments, c_test_atomic_compound_assignment_runtime);
     C_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
     C_TEST_FIXTURE(arguments, c_test_attribute_call_roles);
     C_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
