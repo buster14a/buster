@@ -37708,6 +37708,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArgum
 // aggregates is sized by the whole array, never by the pointer it decays to
 // (#2713). The array type of `n` maps after the bound's first attempt, so the
 // bound waits for it instead of folding sizeof(pointer).
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 const c_test_local_array_sizeof_bound_source = S8_INITIALIZER(
     "typedef struct { int a[4]; } S;\n"
     "typedef struct { char c; short s; int i; double d; } R;\n"
@@ -37745,6 +37746,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_local_array_sizeof_bound_source = S8_IN
     "    if (nested()) return 10;\n"
     "    return 0;\n"
     "}\n");
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitTestArguments* arguments)
 {
