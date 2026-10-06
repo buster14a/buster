@@ -1,5 +1,13 @@
 # GPU toolchain acceptance
 
+The `spirv-direct-vulkan1.2` profile compiles
+`src/buster/tests/compiler/spirv/fixtures/direct_transform.c` through Buster's direct canonical C backend and
+validates the resulting SPIR-V 1.5 module with the admitted `spirv-val` under
+Vulkan 1.2. It preserves the header-only malformed module control and additionally
+requires rejection of the independently accepted module after changing its
+uint buffer `ArrayStride` from 4 to 1. See the [direct compute contract](spirv-compute.md).
+The hosted profile does not dispatch work to a physical GPU.
+
 `build/build test_gpu_toolchains` runs pinned source fixtures through the real
 `ide cc` GPU driver, then submits its artifacts to external consumers. The
 native C harness lives in `tools/gpu_toolchains.c`, included by `build.c`. It

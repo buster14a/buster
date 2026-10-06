@@ -53,14 +53,14 @@ buster_bootstrap_snapshot()
     local -a dependency_paths=()
     : >"$output_file"
     while IFS= read -r dependency; do
-        case "$dependency" in
-        ../*|*/../*)
-            printf 'error: unsafe bootstrap dependency path: %s\n' "$dependency" >&2
-            return 1
-            ;;
-        esac
         dependency_path=$dependency
         if [[ $dependency != /* ]]; then
+            case "$dependency" in
+            ../*|*/../*)
+                printf 'error: unsafe bootstrap dependency path: %s\n' "$dependency" >&2
+                return 1
+                ;;
+            esac
             dependency_path="$repository_root/$dependency"
         fi
         if [[ ! -f $dependency_path ]]; then
@@ -124,9 +124,9 @@ buster_bootstrap_manifest_valid()
             artifact_hash=$digest
             saw_artifact=1
         elif [[ $kind == dependency && -n $value && -n $digest && -z $extra && $saw_artifact == 1 && $saw_end == 0 ]]; then
-            case "$value" in ../*|*/../*) valid=0; break ;; esac
             dependency_path=$value
             if [[ $value != /* ]]; then
+                case "$value" in ../*|*/../*) valid=0; break ;; esac
                 dependency_path="$repository_root/$value"
             fi
             printf '%s\n' "$value" >>"$dependency_list"

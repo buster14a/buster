@@ -70,10 +70,40 @@ The fixtures write fixed paths that the tool refuses to reuse, so `build.c`
 deletes `build/throughput-tool-tests` (or `build/throughput-tool-tests-sanitized`)
 before every self-test run. When you run `throughput-tests OUTPUT_DIRECTORY`
 directly, pass an absent or empty directory. If a child exit-code check fails,
-it prints the exit code, signal, timeout, launch error and wall time, followed by
+it prints the exit code, signal, timeout, launch error, POSIX launch stage and wall time, followed by
 the end of the child's log. It also keeps the whole log as `LOG.line-N` under the
 test root, which the harness artifacts upload. The desktop matrix also retains
 these parent diagnostics and the child-log tail in `combinations.log`.
+
+Source-to-object admission failures additionally name the first failed predicate,
+the attempted command, and the original process result, including launch stage.
+The private process group's raw PID/PGID is not returned by this result API.
+If the workload-admission success fixture unexpectedly fails, it prints the
+original nested command, log, metrics and artifact file identities before a
+later self-test clears the root. Text is limited to 65,536 bytes per file and
+reports truncation; binaries are identified by SHA-256 and size. This bounded
+console packet helps diagnose the failed invocation. It does not replace the
+full original files in a harness artifact or establish a historical failure's
+cause. Admission predicates, deadlines and exit codes remain unchanged.
+
+POSIX launch failures preserve the failing setup/exec stage and errno through
+a small close-on-exec error pipe. Child reporting uses no allocation or buffered
+stdio, and parent reads are nonblocking after the waited child exits. A missing
+executable, denied executable, invalid format or missing working directory now
+reports a launch error; a program that successfully starts and exits 125 remains
+a normal child result. The native self-test checks all four refusals, the valid
+exit 125 control and repeated descriptor cleanup. This diagnoses a refusal; it
+does not explain an unreproduced transient OS error or retry the invocation.
+
+Group setup accepts `setpgid(0,0)`'s `EPERM` only when a fresh `getpgrp()` equals
+the child's own `getpid()`, proving the required private-group postcondition.
+Another group or any other error remains a launch failure with its captured
+errno. The native self-test exercises actual session-leader `EPERM`, ordinary
+group creation, an already private group's synthetic redundant refusal, and
+wrong-group/other-error refusals in two directly owned children with two-second
+deadlines and descriptor census. `THROUGHPUT_GROUP_POSTCONDITION` records these
+kernel witnesses. This does not establish the historical macOS refusal's cause;
+those incidents did not retain the failed child's group state.
 
 The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure
 and three-second child deadline. It restores the saved limit only after
@@ -486,7 +516,7 @@ The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
 | `simplify_passes`, `simplify_block_visits`, `simplify_empty_block_visits`, `simplify_parameter_visits`, `simplify_incoming_visits` | Fixed-point sweeps and visited blocks/parameters/incoming rows, including revisits and the initial active-block census. Empty-block visits are a subset of block visits. |
 | `value_scratch_bytes`, `value_clear_bytes`, `replacement_rows` | Value-count-sized table allocation requests, explicit memset bytes for those tables, and identity-map initialization rows. These exclude block-sized scratch, restoration tails, and sparse slots. |
 | `initialization_work_visits`, `live_work_visits` | Values popped from the definite-initialization and live-parameter queues. |
-| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the three value compaction passes and final instruction/operand/incoming remapping. |
+| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the fused dense numbering/root copy and alias resolution passes, and final instruction/operand/incoming remapping. |
 
 These share the existing saturation, calling-thread and failed-attempt rules.
 They do not add timers, histograms, per-function storage or a reporting switch.
@@ -778,6 +808,9 @@ A completed run seals the six primary machine-readable evidence files with
 SHA-256 in `complete.txt`. Comparison rechecks the seal, strict row counts,
 unique pair slots/order positions, numeric validity, invariant workload units
 and repeat output hashes, then regenerates `summary.json` and `summary.md`.
+Each telemetry replay must match its own timing variant's output bytes/hash
+and source bytes/lines/functions. Different variants may emit different artifacts;
+a zero function count remains valid when that denominator is unavailable.
 These two reports are derived outputs, not retained evidence: comparison removes
 old reports before validation and discards newly written reports on validation
 or stream failure. A failed replay therefore cannot reuse an earlier verdict or

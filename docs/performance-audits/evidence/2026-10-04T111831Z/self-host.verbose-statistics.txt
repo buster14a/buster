@@ -1,0 +1,14 @@
+CODEGEN_ALLOCATOR reloads=203606 spills=222559 boundary_spills=107408 boundary_reloads=24569 boundary_copies=87 copies=195322 rematerializations=54993 pins=0 splits=0 scheduled=0 schedule_kept=0
+CODEGEN cpu=znver4 vector_bits=512 functions=5657 instructions=1425857 values=1199216 stack_value_bytes=4723344 stack_frame_bytes=4723344 max_stack_frame_bytes=383880 code_bytes=16096400 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=123 allocator=fast fallback_functions=0
+CODEGEN_EMIT machine_code_in_place=16054163 machine_code_copied=0
+CODEGEN_ENCODER exact_attempts=1824010 exact_successes=1824010 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=88914
+C_TYPE_LAYOUT solves=143 pass_solves=141 pass_state_types=10687750 pass_attempts=776484 agenda_solves=2 agenda_types=4 agenda_attempts=4 agenda_edges=2 agenda_notifications=2 agenda_pushes=6 agenda_fallbacks=0
+IR_FAST functions=5657 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2729184 retained_bound=19233656 compact_ns=0 instructions_before=1627306 instructions_after=1425857
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1627306 changes=10792
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=3280302 changes=190444
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1627306 changes=137371
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=104472 changes=0
+IR_FRONTEND_SSA functions=5356 locals=50504 reads=183509 writes=81648 parameters_created=500552 parameters_removed=466774 temporaries=13557 fallback_locals=2441
+IR_LOCAL_PROMOTION candidates=34465 promoted=208 loads_removed=620 stores_removed=380 parameters_inserted=1432 parameters_removed=1278 uninitialized=0 barriers=8 instructions_before=1628514 instructions_after=1627306 values_before=1401339 values_after=1400665
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=18 block_visits=4052 parameter_visits=2655 incoming_visits=6037
