@@ -4131,6 +4131,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations(UnitTestA
     return result;
 }
 
+// GNU local labels (#2845): `__label__` scopes label names to the declaring
+// block, so a statement-expression macro defines its labels once per
+// expansion, an inner block may redeclare a label, and the enclosing body's
+// label of the same name stays distinct. Uses outside the declaring block do
+// not see the label. -E keeps the declaration as spelled.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_labels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 spelled = S8("int f(void) { { __label__ l; goto l; l: ; } return 0; }\n");
+    for (u32 preserve = 0; preserve < 2; preserve += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, spelled,
+                                                (CPreprocessOptions){.target = target_native,
+                                                                     .data_layout = target_data_layout(target_native),
+                                                                     .dialect = C_PREPROCESS_DIALECT_GNU17,
+                                                                     .preserve_spellings = preserve != 0});
+        u32 keywords = 0;
+        u32 plain_labels = 0;
+        for (u64 index = 0; index < tokens.token_count; index += 1)
+        {
+            String8 spelling = tokens.tokens[index].kind == C_TOKEN_IDENTIFIER ? c_token_spelling(tokens.spelling_base, tokens.tokens[index]) : (String8){0};
+            keywords += string_equal(spelling, S8("__label__"));
+            plain_labels += string_equal(spelling, S8("l"));
+        }
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, keywords == (preserve ? 1u : 0u) && plain_labels == (preserve ? 3u : 0u));
+        c_test_scratch_end(temporary);
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 text = S8("#define PICK(a, b) ({ __label__ out, done; int r_ = (a); if (r_ > (b)) goto out; r_ = (b); goto done; out: ; done: r_; })\n"
+                      "static int loop(int x) { __label__ top; int n = 0; top: n++; if (n < 3) goto top; return n + x; }\n"
+                      "static int nest(void) { int n = 0; { __label__ a; { __label__ a; goto a; n += 100; a: n += 1; } goto a; n += 1000; a: n += 10; }\n"
+                      " goto a; n += 10000; a: return n; }\n"
+                      "static int value(int v) { void *p = ({ __label__ k; k: &&k; }); int l = 1; { __label__ l; goto l; l: v += l && p; }\n"
+                      " { __label__ k, j; goto j; k: v += 100; j: v++; } { __label__ y; __asm__ goto(\"\" : : : : y); y: v++; } return v; }\n"
+                      "int main(void) { int a = PICK(3, 7); int b = PICK(9, 2); int c = PICK(a, b) + PICK(1, 1);\n"
+                      " return a != 7 || b != 9 || c != 10 || loop(1) != 4 || nest() != 11 || value(0) != 3; }\n");
+    String8 outside = S8("int main(void) { { __label__ l; l: ; } goto l; return 0; }\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("local-labels"), S8(".c"));
+    String8 outside_source = buster_test_temporary_path(arguments->arena, S8("local-labels-outside"), S8(".c"));
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=quality")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)) &&
+                                      file_write(outside_source, BUSTER_SLICE_TO_BYTE_SLICE(outside))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("local-labels-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), allocators[allocator], S8("-fverify-codegen"), S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = allocator != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                           string_format(temporary.arena, S8("local labels {S8}: {S8}"), allocators[allocator], compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                           (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 output = buster_test_temporary_path(temporary.arena, S8("local-labels-outside"), S8(".o"));
+        String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-c"), S8("-o"), output, outside_source};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+        BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE);
+        c_test_scratch_end(temporary);
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -46730,6 +46810,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
+    C_TEST_FIXTURE(arguments, c_test_local_labels);
     C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
     C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_static_aggregates);

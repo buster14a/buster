@@ -350,6 +350,24 @@ C99/C11/C17; hosted Linux x86-64 also requires GCC and Clang to compile and
 execute the same self-checking source. These are registered validation paths,
 not claims that a local compiler or external performance host was run.
 
+## GNU local labels
+
+`__label__ a, b;` at the start of a block scopes those label names to the
+block (GCC "Local Labels"), so statement-expression macros can define labels
+once per expansion. Lowering keys a function's labels by spelling, so the
+final preprocessing pass `c_preprocess_rename_local_labels` (beside
+`c_preprocess_respell_identifiers`) respells each declared name's label uses
+inside the block -- definitions after a statement boundary, `goto`, unary
+`&&`, and `asm goto` label lists -- to a translation-unit-unique identifier,
+and turns the declaration into empty statements. Ordinary identifiers of the
+same spelling keep theirs. Inner declarations are processed first, so a nested
+redeclaration shadows the outer one. Malformed and file-scope declarations are
+left untouched for the parser to diagnose. Only units that intern `__label__`
+enter the pass. The driver sets `CPreprocessOptions.preserve_spellings` for
+`-E`, which keeps the source spelling. `c_test_local_labels` covers both token
+forms, macro expansions, shadowing, label addresses, `asm goto` and a rejected
+use outside the block.
+
 ## Lexer diagnostic reservation failure
 
 Diagnostic rows allocate lazily. If their worst case does not fit scratch and
