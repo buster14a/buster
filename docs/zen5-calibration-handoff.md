@@ -44,9 +44,10 @@ binary, root, host/profile or output-oracle change requires a new plan and job.
 
 ## Service producer
 
-The served `zen5-calibration-v1` recipe (`tools/bench_service/zen5_recipe.c`,
-described in `tools/bench_service/README.md`) is the producer; it has not yet
-run on the physical 9700X. It
+The `zen5-calibration-v1` recipe was served by the benchmark service, which
+is removed (#2708); it never ran on the physical 9700X and nothing currently
+produces these bundles. The remainder of this section records what that
+producer emitted, as the input contract for `tools/zen5_aa_evaluator.py`. It
 builds the five trusted subjects serially, writes this plan in the canonical
 `freeze` form before any timed child, publishes a durable plan manifest, and
 emits `immutable.json`, `same-root-rebuild.json` and `cross-root.json` under
@@ -169,8 +170,7 @@ receipts. The worker's terminal hook (`bq_worker_before_terminal`) validates
 the zen5 manifest (`bq_worker_result_validate`) and journals `BQ_RESULT_BIND`.
 The RESULT reply then reports the manifest digest, and `bq_export_snapshot`
 writes it at offset 112 and the SHA-256 of `bq_recipe_profile` at offset 608.
-`bq_test_zen5_served_binding` (`tools/bench_service/tests.c`) checks this end to
-end on the recipe self-test's result tree. An attempt without these receipts,
+An attempt without these receipts,
 or with digests that differ from them, is `invalid`.
 
 The confirmatory set is fixed in advance by the protocol's

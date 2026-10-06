@@ -420,7 +420,7 @@ BUSTER_GLOBAL_LOCAL ID3DBlob* d3d12_compile_shader(const char* source, const cha
                 .pointer = (char8*)ID3D10Blob_GetBufferPointer(errors),
                 .length = ID3D10Blob_GetBufferSize(errors),
             };
-            string_print(S8("D3DCompile failed: {S8}\n"), message);
+            string_print_error(S8("D3DCompile failed: {S8}\n"), message);
         }
         BUSTER_D3D12_RELEASE(result);
     }
@@ -537,7 +537,7 @@ BUSTER_GLOBAL_LOCAL bool d3d12_create_rect_pipeline(RenderingHandle* rendering)
     else if (errors)
     {
         String8 message = {.pointer = (char8*)ID3D10Blob_GetBufferPointer(errors), .length = ID3D10Blob_GetBufferSize(errors)};
-        string_print(S8("D3D12SerializeRootSignature failed: {S8}\n"), message);
+        string_print_error(S8("D3D12SerializeRootSignature failed: {S8}\n"), message);
     }
     BUSTER_D3D12_RELEASE(signature);
     BUSTER_D3D12_RELEASE(errors);
@@ -635,7 +635,7 @@ BUSTER_GLOBAL_LOCAL bool d3d12_create_blur_pipeline(RenderingHandle* rendering)
     else if (errors)
     {
         String8 message = {.pointer = (char8*)ID3D10Blob_GetBufferPointer(errors), .length = ID3D10Blob_GetBufferSize(errors)};
-        string_print(S8("D3D12 blur root signature creation failed: {S8}\n"), message);
+        string_print_error(S8("D3D12 blur root signature creation failed: {S8}\n"), message);
     }
     BUSTER_D3D12_RELEASE(signature);
     BUSTER_D3D12_RELEASE(errors);
@@ -655,7 +655,7 @@ RenderingHandle* rendering_initialize(Arena* arena)
     bool debug_layer_enabled = false;
     UINT factory_flags = 0;
     bool libraries_loaded = d3d12_load_libraries(&rendering_handle);
-    string_print(S8("DirectX 12 rendering initialization: libraries_loaded={u32}, validation={u32}\n"), (u32)libraries_loaded, (u32)enable_validation);
+    BUSTER_RENDERING_TRACE(S8("DirectX 12 rendering initialization: libraries_loaded={u32}, validation={u32}\n"), (u32)libraries_loaded, (u32)enable_validation);
 #if BUSTER_D3D12_HAS_SDK_LAYERS
     if (libraries_loaded && enable_validation && rendering_handle.d3d12_get_debug_interface)
     {
@@ -684,17 +684,17 @@ RenderingHandle* rendering_initialize(Arena* arena)
             debug_layer_enabled = true;
             factory_flags |= DXGI_CREATE_FACTORY_DEBUG;
         }
-        string_print(S8("DirectX 12 debug layer: D3D12GetDebugInterface={u64:x}, enabled={u32}, gpu_validation={u32}, queue_validation={u32}\n"),
+        BUSTER_RENDERING_TRACE(S8("DirectX 12 debug layer: D3D12GetDebugInterface={u64:x}, enabled={u32}, gpu_validation={u32}, queue_validation={u32}\n"),
                      (u64)(u32)debug_interface_result, (u32)debug_layer_enabled, (u32)gpu_based_validation_enabled, (u32)synchronized_queue_validation_enabled);
     }
     else if (libraries_loaded && enable_validation)
     {
-        string_print(S8("DirectX 12 debug layer unavailable; continuing without validation\n"));
+        string_print_error(S8("DirectX 12 debug layer unavailable; continuing without validation\n"));
     }
 #else
     if (libraries_loaded && enable_validation)
     {
-        string_print(S8("DirectX 12 SDK layer headers unavailable; continuing without validation\n"));
+        string_print_error(S8("DirectX 12 SDK layer headers unavailable; continuing without validation\n"));
     }
 #endif
 
@@ -702,7 +702,7 @@ RenderingHandle* rendering_initialize(Arena* arena)
     if (libraries_loaded)
     {
         create_factory_result = rendering_handle.create_dxgi_factory2(factory_flags, &IID_IDXGIFactory4, (void**)&rendering_handle.factory);
-        string_print(S8("DirectX 12 rendering initialization: CreateDXGIFactory2={u64:x}\n"), (u64)(u32)create_factory_result);
+        BUSTER_RENDERING_TRACE(S8("DirectX 12 rendering initialization: CreateDXGIFactory2={u64:x}\n"), (u64)(u32)create_factory_result);
     }
 
     if (libraries_loaded && d3d12_ok(create_factory_result))
@@ -721,12 +721,12 @@ RenderingHandle* rendering_initialize(Arena* arena)
             HRESULT create_device_result = hardware_adapter ? rendering_handle.d3d12_create_device((IUnknown*)adapter, D3D_FEATURE_LEVEL_11_0,
                                                                                                    &IID_ID3D12Device, (void**)&rendering_handle.device)
                                                             : E_FAIL;
-            string_print(S8("DirectX 12 adapter {u32}: flags={u32}, hardware={u32}, D3D12CreateDevice={u64:x}\n"), adapter_index, (u32)adapter_desc.Flags,
+            BUSTER_RENDERING_TRACE(S8("DirectX 12 adapter {u32}: flags={u32}, hardware={u32}, D3D12CreateDevice={u64:x}\n"), adapter_index, (u32)adapter_desc.Flags,
                          (u32)hardware_adapter, (u64)(u32)create_device_result);
             if (hardware_adapter && d3d12_ok(create_device_result))
             {
                 rendering_handle.adapter = adapter;
-                string_print(S8("DirectX 12 adapter {u32}: selected\n"), adapter_index);
+                BUSTER_RENDERING_TRACE(S8("DirectX 12 adapter {u32}: selected\n"), adapter_index);
             }
             else
             {
@@ -738,7 +738,7 @@ RenderingHandle* rendering_initialize(Arena* arena)
         {
             HRESULT default_device_result =
                 rendering_handle.d3d12_create_device(0, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void**)&rendering_handle.device);
-            string_print(S8("DirectX 12 default adapter D3D12CreateDevice={u64:x}\n"), (u64)(u32)default_device_result);
+            BUSTER_RENDERING_TRACE(S8("DirectX 12 default adapter D3D12CreateDevice={u64:x}\n"), (u64)(u32)default_device_result);
         }
 
         if (rendering_handle.device)
@@ -771,7 +771,7 @@ RenderingHandle* rendering_initialize(Arena* arena)
                     ID3D12Device_CreateCommandList(rendering_handle.device, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, rendering_handle.upload_command_allocator, 0,
                                                    &IID_ID3D12GraphicsCommandList, (void**)&rendering_handle.upload_command_list);
             }
-            string_print(
+            BUSTER_RENDERING_TRACE(
                 S8("DirectX 12 device objects: queue={u64:x}, srv_heap={u64:x}, fence={u64:x}, upload_allocator={u64:x}, upload_command_list={u64:x}\n"),
                 (u64)(u32)create_queue_result, (u64)(u32)create_srv_heap_result, (u64)(u32)create_fence_result, (u64)(u32)create_upload_allocator_result,
                 (u64)(u32)create_upload_command_list_result);
@@ -786,7 +786,7 @@ RenderingHandle* rendering_initialize(Arena* arena)
                 ID3D12GraphicsCommandList_Close(rendering_handle.upload_command_list);
                 bool rect_pipeline_created = d3d12_create_rect_pipeline(&rendering_handle);
                 bool blur_pipeline_created = d3d12_create_blur_pipeline(&rendering_handle);
-                string_print(S8("DirectX 12 device objects: fence_event={u64:x}, srv_descriptor_size={u32}, rect_pipeline_created={u32}, blur_pipeline_created={u32}\n"),
+                BUSTER_RENDERING_TRACE(S8("DirectX 12 device objects: fence_event={u64:x}, srv_descriptor_size={u32}, rect_pipeline_created={u32}, blur_pipeline_created={u32}\n"),
                              (u64)(UINT_PTR)rendering_handle.fence_event, rendering_handle.srv_descriptor_size, (u32)rect_pipeline_created,
                              (u32)blur_pipeline_created);
                 if (rendering_handle.fence_event && rect_pipeline_created && blur_pipeline_created)
@@ -799,11 +799,11 @@ RenderingHandle* rendering_initialize(Arena* arena)
 
     if (!result)
     {
-        string_print(S8("DirectX 12 rendering initialization failed\n"));
+        string_print_error(S8("DirectX 12 rendering initialization failed\n"));
     }
     else
     {
-        string_print(S8("DirectX 12 rendering initialization succeeded: device={u64:x}, queue={u64:x}, factory={u64:x}\n"),
+        BUSTER_RENDERING_TRACE(S8("DirectX 12 rendering initialization succeeded: device={u64:x}, queue={u64:x}, factory={u64:x}\n"),
                      (u64)(UINT_PTR)rendering_handle.device, (u64)(UINT_PTR)rendering_handle.queue, (u64)(UINT_PTR)rendering_handle.factory);
     }
     return result;
@@ -929,7 +929,7 @@ BUSTER_GLOBAL_LOCAL bool d3d12_blur_resources_ensure(RenderingHandle* rendering,
         if (!d3d12_ok(capture_result) || !d3d12_ok(horizontal_result))
         {
             d3d12_blur_frame_destroy(frame);
-            string_print(S8("DirectX 12 blur target creation failed: capture={u64:x}, horizontal={u64:x}, size={u32}x{u32}\n"),
+            string_print_error(S8("DirectX 12 blur target creation failed: capture={u64:x}, horizontal={u64:x}, size={u32}x{u32}\n"),
                          (u64)(u32)capture_result, (u64)(u32)horizontal_result, half_width, half_height);
             return false;
         }
@@ -1122,11 +1122,11 @@ BUSTER_GLOBAL_LOCAL void d3d12_swapchain_recreate(RenderingHandle* rendering, Re
     GetClientRect(window->hwnd, &client_rect);
     u32 width = (u32)(client_rect.right - client_rect.left);
     u32 height = (u32)(client_rect.bottom - client_rect.top);
-    string_print(S8("DirectX 12 render target recreate: hwnd={u64:x}, client={u32}x{u32}, presentable={u32}\n"), (u64)(UINT_PTR)window->hwnd, width, height,
+    BUSTER_RENDERING_TRACE(S8("DirectX 12 render target recreate: hwnd={u64:x}, client={u32}x{u32}, presentable={u32}\n"), (u64)(UINT_PTR)window->hwnd, width, height,
                  (u32)(window->swapchain != 0));
     if (!width || !height)
     {
-        string_print(S8("DirectX 12 render target recreate skipped: zero-sized client\n"));
+        BUSTER_RENDERING_TRACE(S8("DirectX 12 render target recreate skipped: zero-sized client\n"));
         return;
     }
     d3d12_flush(rendering);
@@ -1142,7 +1142,7 @@ BUSTER_GLOBAL_LOCAL void d3d12_swapchain_recreate(RenderingHandle* rendering, Re
     if (window->swapchain)
     {
         HRESULT resize_result = IDXGISwapChain3_ResizeBuffers(window->swapchain, window->frame_count, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
-        string_print(S8("DirectX 12 swapchain resize: ResizeBuffers={u64:x}, client={u32}x{u32}, buffers={u32}\n"), (u64)(u32)resize_result, width, height,
+        BUSTER_RENDERING_TRACE(S8("DirectX 12 swapchain resize: ResizeBuffers={u64:x}, client={u32}x{u32}, buffers={u32}\n"), (u64)(u32)resize_result, width, height,
                      window->frame_count);
         if (!d3d12_ok(resize_result))
         {
@@ -1166,7 +1166,7 @@ BUSTER_GLOBAL_LOCAL void d3d12_swapchain_recreate(RenderingHandle* rendering, Re
             }
             else
             {
-                string_print(S8("DirectX 12 swapchain back buffer lookup failed: buffer={u32}\n"), i);
+                string_print_error(S8("DirectX 12 swapchain back buffer lookup failed: buffer={u32}\n"), i);
             }
         }
     }
@@ -1196,7 +1196,7 @@ BUSTER_GLOBAL_LOCAL void d3d12_swapchain_recreate(RenderingHandle* rendering, Re
                                                      &clear_value, &IID_ID3D12Resource, (void**)&window->render_targets[i]);
             if (!d3d12_ok(create_render_target_result))
             {
-                string_print(S8("DirectX 12 offscreen render target creation failed: CreateCommittedResource={u64:x}, client={u32}x{u32}, target={u32}\n"),
+                string_print_error(S8("DirectX 12 offscreen render target creation failed: CreateCommittedResource={u64:x}, client={u32}x{u32}, target={u32}\n"),
                              (u64)(u32)create_render_target_result, width, height, i);
                 os_fail();
             }
@@ -1243,7 +1243,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     GetClientRect(result->hwnd, &client_rect);
     result->width = (u32)(client_rect.right - client_rect.left);
     result->height = (u32)(client_rect.bottom - client_rect.top);
-    string_print(S8("DirectX 12 render window initialization: hwnd={u64:x}, client={u32}x{u32}, buffers={u32}\n"), (u64)(UINT_PTR)result->hwnd, result->width,
+    BUSTER_RENDERING_TRACE(S8("DirectX 12 render window initialization: hwnd={u64:x}, client={u32}x{u32}, buffers={u32}\n"), (u64)(UINT_PTR)result->hwnd, result->width,
                  result->height, result->frame_count);
 
     DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {
@@ -1278,7 +1278,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 
     bool presentable = d3d12_ok(create_swapchain_result) && d3d12_ok(query_swapchain_result);
     bool presentation_unavailable = create_swapchain_result == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
-    string_print(S8("DirectX 12 swapchain attempt: CreateSwapChainForHwnd={u64:x}, QueryInterface(IDXGISwapChain3)={u64:x}, CreateDescriptorHeap(RTV)={u64:x}, "
+    BUSTER_RENDERING_TRACE(S8("DirectX 12 swapchain attempt: CreateSwapChainForHwnd={u64:x}, QueryInterface(IDXGISwapChain3)={u64:x}, CreateDescriptorHeap(RTV)={u64:x}, "
                     "presentable={u32}, presentation_unavailable={u32}\n"),
                  (u64)(u32)create_swapchain_result, (u64)(u32)query_swapchain_result, (u64)(u32)create_rtv_heap_result, (u32)presentable,
                  (u32)presentation_unavailable);
@@ -1291,7 +1291,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
         }
         else
         {
-            string_print(
+            string_print_error(
                 S8("DirectX 12 presentation swapchain unavailable: CreateSwapChainForHwnd={u64:x}; using offscreen render targets for CI/window smoke test\n"),
                 (u64)(u32)create_swapchain_result);
         }
@@ -1302,7 +1302,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 
     if ((!presentable && !presentation_unavailable) || !d3d12_ok(create_rtv_heap_result))
     {
-        string_print(S8("DirectX 12 swapchain creation failed: CreateSwapChainForHwnd={u64:x}, QueryInterface(IDXGISwapChain3)={u64:x}, "
+        string_print_error(S8("DirectX 12 swapchain creation failed: CreateSwapChainForHwnd={u64:x}, QueryInterface(IDXGISwapChain3)={u64:x}, "
                         "CreateDescriptorHeap(RTV)={u64:x}, hwnd={u64:x}, client={u32}x{u32}, buffers={u32}\n"),
                      (u64)(u32)create_swapchain_result, (u64)(u32)query_swapchain_result, (u64)(u32)create_rtv_heap_result, (u64)(UINT_PTR)result->hwnd,
                      result->width, result->height, result->frame_count);
@@ -1327,7 +1327,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             create_command_list_result = ID3D12Device_CreateCommandList(rendering->device, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, frame->command_allocator,
                                                                         rendering->rect_pipeline, &IID_ID3D12GraphicsCommandList, (void**)&frame->command_list);
         }
-        string_print(S8("DirectX 12 frame resources {u32}: command_allocator={u64:x}, command_list={u64:x}\n"), frame_index,
+        BUSTER_RENDERING_TRACE(S8("DirectX 12 frame resources {u32}: command_allocator={u64:x}, command_list={u64:x}\n"), frame_index,
                      (u64)(u32)create_command_allocator_result, (u64)(u32)create_command_list_result);
         if (!d3d12_ok(create_command_allocator_result) || !d3d12_ok(create_command_list_result))
         {
@@ -1347,7 +1347,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
                                               frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].index_buffer.cpu);
         rendering_command_stream_begin(frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
     }
-    string_print(S8("DirectX 12 render window initialization succeeded: hwnd={u64:x}, presentable={u32}, frame_count={u32}, rtv_descriptor_size={u32}\n"),
+    BUSTER_RENDERING_TRACE(S8("DirectX 12 render window initialization succeeded: hwnd={u64:x}, presentable={u32}, frame_count={u32}, rtv_descriptor_size={u32}\n"),
                  (u64)(UINT_PTR)result->hwnd, (u32)(result->swapchain != 0), result->frame_count, result->rtv_descriptor_size);
     return result;
 }
@@ -1510,7 +1510,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
     u32 height = (u32)(client_rect.bottom - client_rect.top);
     if (d3d12_frame_begin_log_count < 3)
     {
-        string_print(S8("DirectX 12 frame begin {u32}: hwnd={u64:x}, client={u32}x{u32}, stored={u32}x{u32}, presentable={u32}, frame_index={u32}\n"),
+        BUSTER_RENDERING_TRACE(S8("DirectX 12 frame begin {u32}: hwnd={u64:x}, client={u32}x{u32}, stored={u32}x{u32}, presentable={u32}, frame_index={u32}\n"),
                      d3d12_frame_begin_log_count, (u64)(UINT_PTR)window->hwnd, width, height, window->width, window->height, (u32)(window->swapchain != 0),
                      window->frame_index);
         d3d12_frame_begin_log_count += 1;
@@ -1553,7 +1553,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     ID3D12Resource* render_target = window->render_targets[window->frame_index];
     if (d3d12_frame_end_log_count < 3)
     {
-        string_print(S8("DirectX 12 frame end {u32}: presentable={u32}, frame_index={u32}, render_target={u64:x}, vertex0={u32}, fence={u64}\n"),
+        BUSTER_RENDERING_TRACE(S8("DirectX 12 frame end {u32}: presentable={u32}, frame_index={u32}, render_target={u64:x}, vertex0={u32}, fence={u64}\n"),
                      d3d12_frame_end_log_count, (u32)(window->swapchain != 0), window->frame_index, (u64)(UINT_PTR)render_target,
                      frame->pipeline_instantiations[0].vertex_buffer.count, frame->fence_value);
         d3d12_frame_end_log_count += 1;
@@ -1760,7 +1760,7 @@ RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandS
 
 void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
-    string_print(S8("DirectX 12 render window deinitialize: hwnd={u64:x}, presentable={u32}, frame_count={u32}\n"), (u64)(UINT_PTR)window->hwnd,
+    BUSTER_RENDERING_TRACE(S8("DirectX 12 render window deinitialize: hwnd={u64:x}, presentable={u32}, frame_count={u32}\n"), (u64)(UINT_PTR)window->hwnd,
                  (u32)(window->swapchain != 0), window->frame_count);
     d3d12_flush(rendering);
     for (u32 frame_index = 0; frame_index < window->frame_count; frame_index += 1)
@@ -1791,7 +1791,7 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
 
 void rendering_deinitialize(RenderingHandle* rendering)
 {
-    string_print(S8("DirectX 12 rendering deinitialize: texture_count={u32}, next_fence={u64}\n"), rendering->texture_count, rendering->next_fence_value);
+    BUSTER_RENDERING_TRACE(S8("DirectX 12 rendering deinitialize: texture_count={u32}, next_fence={u64}\n"), rendering->texture_count, rendering->next_fence_value);
     d3d12_flush(rendering);
     for (u32 i = 0; i < rendering->texture_count; i += 1)
     {
