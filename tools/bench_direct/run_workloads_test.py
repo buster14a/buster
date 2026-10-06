@@ -401,6 +401,50 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertIn("compiler printed 3000000 bytes; at most 4096 kept, 2000 shown", out)
         self.assertNotIn("INCOMPLETE", out)
 
+    def test_changed_or_deleted_executable_invalidates_the_series(self) -> None:
+        delete = '#include <unistd.h>\nint main(void) { unlink("../program"); return 0; }\n'
+        replace = ('#include <fcntl.h>\n#include <unistd.h>\nint main(void) { unlink("../program");\n'
+                   '  int fd = open("../program", O_WRONLY | O_CREAT, 0755); if (fd >= 0) { write(fd, "x", 1); close(fd); }\n'
+                   '  return 0; }\n')
+        for label, source, current in (("delete", delete, "missing"), ("replace", replace, None)):
+            with self.subTest(label=label):
+                shutil.rmtree(self.root / "work", ignore_errors=True)
+                head = self.commit({f"benchmarks/9700x/{label}.c": source})
+                result = self.run_harness(head)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("executable sha256 changed from ", result.stdout)
+                if current:
+                    self.assertIn(f" to {current}", result.stdout)
+                self.assertIn("INVALID, NOT A COMPLETE MEASUREMENT", result.stdout)
+                self.assertIn("1 of 11 planned runs completed", result.stdout)
+                self.assertNotIn("Wall over", result.stdout)
+                self.base = head
+
+    def test_source_changed_after_compilation_is_invalid(self) -> None:
+        import run_workloads
+        head = self.commit({"benchmarks/9700x/aa_ok.c": PASSING})
+        real = run_workloads.compile_bounded
+
+        def compile_then_edit(command, cwd):
+            result = real(command, cwd)
+            (self.repository / "benchmarks/9700x/aa_ok.c").write_text(PASSING + "/* edited */\n", encoding="utf-8")
+            return result
+
+        status, out = self.run_in_process(head, patch.object(run_workloads, "compile_bounded", compile_then_edit))
+        self.assertEqual(status, 1, out)
+        self.assertIn("source sha256 changed from ", out)
+        self.assertIn("after compilation", out)
+        self.assertNotIn("Wall over", out)
+
+    def test_matching_identities_are_reported(self) -> None:
+        import hashlib
+        result = self.run_harness(self.commit({"benchmarks/9700x/sort_check.c": PASSING}))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        digest = hashlib.sha256((self.root / "work" / "sort_check" / "program").read_bytes()).hexdigest()
+        self.assertIn(f"executable sha256 `{digest}`", result.stdout)
+        self.assertIn(f"source sha256 `{hashlib.sha256(PASSING.encode()).hexdigest()}`", result.stdout)
+        self.assertIn("Validity: all 11 planned runs", result.stdout)
+
     def test_every_run_starts_without_predecessor_files(self) -> None:
         marker = ('#include <stdio.h>\nint main(void) { FILE* f = fopen("marker", "rb"); int existed = f != 0;\n'
                   '  if (f) fclose(f); else { f = fopen("marker", "wb"); if (f) fclose(f); }\n'

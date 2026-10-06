@@ -13,6 +13,12 @@ bytes per run; files a run writes are bounded separately (SCRATCH_FILE_LIMIT per
 file, SCRATCH_TOTAL_LIMIT per run directory) and a violation invalidates the run
 (#2936).
 
+The source and executable digests are taken before the first run. The
+executable is re-hashed after every run (outside the timed interval, which also
+keeps it in the page cache) and the source once more at the end; a change marks
+the affected runs invalid, stops further runs and reports both identities
+(#2941). This detects changes by the same account; it does not prevent them.
+
 A workload may bring one input file, `<name>.data` beside `<name>.c`, of at
 most DATA_LIMIT bytes (#2769). It is copied read-only into the run directory
 as `input.data` into a fresh directory for every warmup and sample, and its
@@ -222,6 +228,14 @@ def run_once(program: Path, scratch: Path, cpu: int) -> dict:
     }
 
 
+def file_sha(path: Path) -> str:
+    """SHA-256 of a file, or `missing` when it cannot be read."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "missing"
+
+
 def scratch_bytes(directory: Path) -> int:
     """Total size of the regular files under a run directory."""
     total = 0
@@ -420,13 +434,23 @@ def main() -> int:
             data = data_path(arguments.candidate, name)
             data_bytes = data.read_bytes() if data.is_file() else None
             data_sha = hashlib.sha256(data_bytes).hexdigest() if data_bytes is not None else ""
+            stage = "hashing the executable"
+            source_sha = hashlib.sha256(source_bytes).hexdigest()
+            program_sha = file_sha(program)
             stage = "measurement"
             for index in range(WARMUPS + SAMPLES):
                 rows.append(run_sample(program, scratch, arguments.cpu, index, data_bytes))
+                # Outside the timed interval; this also keeps the executable in the page cache.
+                current = file_sha(program)
+                if current != program_sha:
+                    rows[-1]["invalid"] = f"executable sha256 changed from {program_sha} to {current}"
+                    break
             stage = "reporting"
-            section, passed = render(
-                name, hashlib.sha256(source_bytes).hexdigest(),
-                hashlib.sha256(program.read_bytes()).hexdigest(), rows, data_sha)
+            source_now = file_sha(source)
+            if source_now != source_sha:
+                for row in rows:
+                    row.setdefault("invalid", f"source sha256 changed from {source_sha} to {source_now} after compilation")
+            section, passed = render(name, source_sha, program_sha, rows, data_sha)
             publish(section)
             if not passed:
                 failures.append(f"{name}: a run exited nonzero, was signalled, timed out or invalidated its input")
