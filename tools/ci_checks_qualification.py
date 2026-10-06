@@ -122,6 +122,10 @@ SELECTED_TOOL_ROLES = {
 # The #2120 cohorts froze policy v1/partition v2 evidence, including the old
 # full-runtime sanitized-debug owner. Read them only through that frozen view;
 # #2657's current policy v2/partition v3 never redefines archived samples.
+# The #2120 split cohorts froze three check owners per split platform. This
+# is a property of archived evidence, not of the current github_ci_time
+# layout, so it never follows the current (#2657) split shards.
+COHORT_SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
 coverage_tools = SimpleNamespace(
     COVERAGE_POLICY_VERSION=_coverage_core.HISTORICAL_COVERAGE_POLICY_VERSION,
     COVERAGE_PARTITION_VERSION=_coverage_core.HISTORICAL_COVERAGE_PARTITION_VERSION,
@@ -155,7 +159,7 @@ def record(root, reference):
 
 def role(name):
     result = name
-    for shard in github.HISTORICAL_SPLIT_CHECK_SHARDS:
+    for shard in COHORT_SPLIT_CHECK_SHARDS:
         if name.endswith(" " + shard):
             result = name.rsplit(" ", 1)[0] + " checks"
     return result
@@ -195,7 +199,7 @@ def cohort(campaign):
 def _cohort_desktop(variant):
     split_platforms = ("Linux x86-64", "Linux AArch64", "Windows x86-64") if variant == "split-overlap" else ()
     return tuple(f"{platform} {shard}" for platform in github.PLATFORMS
-                 for shard in (("release",) + github.HISTORICAL_SPLIT_CHECK_SHARDS
+                 for shard in (("release",) + COHORT_SPLIT_CHECK_SHARDS
                                if platform in split_platforms else github.COMBINATION_SHARDS))
 
 
