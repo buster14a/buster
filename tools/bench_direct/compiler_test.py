@@ -39,14 +39,14 @@ def summary(outcome: str = "slower") -> dict:
 
 BINARIES = {"baseline": {"sha256": A256}, "candidate": {"sha256": B256}}
 HOST = {"hostname": "benchpress", "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor"}
-EXPECTED = {"mode": "queue", "repository": "buster14a/buster", "ref": "refs/heads/gh-readonly-queue/main/pr-7-" + "f" * 40,
+EXPECTED = {"mode": "main", "repository": "buster14a/buster", "ref": "refs/heads/main",
             "pull": "7", "pull_head": "c" * 40, "base": "b" * 40, "base_tree": "e" * 40, "head": "a" * 40,
             "head_tree": "d" * 40, "trusted_revision": "9" * 40, "request_run_id": "91", "run_id": "92",
             "run_attempt": "1"}
 
 
 def receipt(state: str = "measured") -> dict:
-    return {"schema": compiler_receipt.RECEIPT_SCHEMA, "mode": "queue", "state": state, "reasons": [],
+    return {"schema": compiler_receipt.RECEIPT_SCHEMA, "mode": "main", "state": state, "reasons": [],
             "host": dict(HOST), "identity": dict(EXPECTED), "profile": copy.deepcopy(compiler_receipt.PROFILE),
             "binaries": copy.deepcopy(BINARIES), "timings": {"build_seconds": {"baseline": 60.0}}}
 
@@ -97,9 +97,9 @@ class ReceiptTest(unittest.TestCase):
         self.assertTrue(compiler_receipt.host_problem({}))
 
     def test_marker_binds_exact_head(self) -> None:
-        self.assertEqual(compiler_receipt.check_marker("a" * 40), "buster-9700x-compiler-bench-v1:" + "a" * 40)
+        self.assertEqual(compiler_receipt.check_marker("a" * 40), "buster-9700x-compiler-main-v1:" + "a" * 40)
         self.assertEqual(compiler_receipt.check_marker("a" * 40, "pull"), "buster-9700x-compiler-pr-v1:" + "a" * 40)
-        self.assertNotEqual(compiler_receipt.check_name("pull"), compiler_receipt.check_name("queue"))
+        self.assertNotEqual(compiler_receipt.check_name("pull"), compiler_receipt.check_name("main"))
         with self.assertRaises(ValueError):
             compiler_receipt.check_marker("main")
 
@@ -248,9 +248,9 @@ class HarnessTest(unittest.TestCase):
         self.directory.cleanup()
 
     def run_harness(self, live: object, cpu: str = HOST["cpu_model"], **change) -> tuple[int, dict, Path]:
-        values = {"mode": "queue", "candidate": str(self.repo), "lab": str(self.lab), "work": str(self.root / "work"),
+        values = {"mode": "main", "candidate": str(self.repo), "lab": str(self.lab), "work": str(self.root / "work"),
                   "evidence": str(self.root / "evidence"), "summary": str(self.root / "step.md"),
-                  "repository": "buster14a/buster", "ref": "refs/heads/gh-readonly-queue/main/pr-7-" + "f" * 40,
+                  "repository": "buster14a/buster", "ref": "refs/heads/main",
                   "pull": "7", "pull-head": self.pull_head, "base": self.base, "base-tree": self.trees[1],
                   "head": self.head, "head-tree": self.trees[0], "trusted-revision": "9" * 40,
                   "request-run-id": "91", "run-id": "92", "run-attempt": "1"}
@@ -290,8 +290,8 @@ class HarnessTest(unittest.TestCase):
         expected = dict(result["identity"])
         summary = json.loads((evidence / "lab" / "summary.json").read_text())
         self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "")[0], "success")
-        # A queue publisher never accepts a pull-mode receipt.
-        self.assertEqual(compiler_publish.decide(dict(expected, mode="queue"), True, "success", result, summary, "")[0],
+        # A main-mode publisher never accepts a pull-mode receipt.
+        self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "")[0],
                          "failure")
 
     def test_other_hardware_is_never_measured_as_zen5(self) -> None:
@@ -300,8 +300,25 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("not the approved Zen 5 host", " ".join(result["reasons"]))
         self.assertEqual(result["timings"]["build_seconds"], {})
 
-    def test_replaced_group_is_superseded_without_building(self) -> None:
-        code, result, _ = self.run_harness("")
+    def test_main_commit_is_measured_after_main_moves_on(self) -> None:
+        code, result, _ = self.run_harness("f" * 40)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+
+    def test_direct_push_is_its_own_pull_head(self) -> None:
+        # pull_head's only parent is base: a single-parent commit on main.
+        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        code, result, _ = self.run_harness(self.pull_head, head=self.pull_head, pull="0", **{"head-tree": pull_tree})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["identity"]["pull_head"], self.pull_head)
+
+    def test_moved_pull_request_is_superseded_without_building(self) -> None:
+        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        code, result, _ = self.run_harness("", mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                           **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"]), (0, "superseded"))
         self.assertEqual(result["timings"]["build_seconds"], {})
 
