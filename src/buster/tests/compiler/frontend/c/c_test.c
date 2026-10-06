@@ -9148,7 +9148,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_assignment_program = S8
     "    CHECK(unsigned, 9, /=, -1, 0);\n"
     "    CHECK(unsigned, 9, -=, 2.5, 6);\n"
     "    CHECK(long, 9, *=, 2.5, 22);\n"
-    "    CHECK(long, 9, <<=, 40, 9L << 40);\n"
+    "    CHECK(long long, 9, <<=, 40, 9LL << 40);\n"
     "    CHECK(short, 9, *=, 3, 27);\n"
     "    CHECK(short, 9, -=, 0.5, 8);\n"
     "    CHECK(signed char, 9, <<=, 7, -128);\n"
@@ -43435,10 +43435,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArgum
 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 const c_test_offsetof_address_static_initializer_runtime_source = S8_INITIALIZER(
-    "typedef unsigned long size_t;\n"
+    "typedef __typeof__(sizeof 0) size_t;\n"
     "struct N { int a, v; };\n"
     "struct I { char pad[3]; int arr[5]; };\n"
-    "struct O { long z; struct I inner; };\n"
+    "struct O { long long z; struct I inner; };\n"
     "long g = (long)&((struct N*)0)->v;\n"
     "unsigned long g2 = (unsigned long)&((struct N*)0)->v;\n"
     "size_t g3 = (size_t)&((struct O*)0)->inner.arr[2];\n"
