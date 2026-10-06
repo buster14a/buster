@@ -64,8 +64,10 @@ OS multi-lane assertions.
 
 The `primary` process owns the frontend module on Windows x86-64, and the
 driver module on other platforms. Keeping the driver primary on ARM is
-supported by its recorded 308/205-second payload split; moving its frontend
+supported as a hypothesis by its recorded 308/205-second payload split; moving its frontend
 to the primary process would give a less balanced 150/363-second split.
+Those payloads were recorded at the serial four-worker quota; each partition
+receives two workers, so the projections do not predict candidate latency.
 `rest` owns every other enabled module. `primary_module` in the plan records
 the exact selected anchor. Inventories retain canonical module indices,
 audit ownership, and every enabled module exactly once.

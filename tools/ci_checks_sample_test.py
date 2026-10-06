@@ -138,10 +138,8 @@ class SampleTests(unittest.TestCase):
         inventory_path.write_bytes(mismatched_inventory)
         observation["inventory_sha256"] = hashlib.sha256(mismatched_inventory).hexdigest()
         observation_path.write_text(json.dumps(observation) + "\n")
-        with tempfile.TemporaryDirectory(dir=self.root) as directory:
-            broken = sample.desktop(self.root, {key: value for key, value in item.items() if key != "tests"}, condition, Path(directory), 0)
-            with self.assertRaisesRegex(ValueError, "independent inventory"):
-                self.validate(broken, condition)
+        with self.assertRaisesRegex(ValueError, "independent inventory primary"):
+            self.validate(generated, condition)
         log_path.write_text("\n".join(lines[1:]) + "\n")
         observation["log_sha256"] = hashlib.sha256(log_path.read_bytes()).hexdigest()
         observation_path.write_text(json.dumps(observation) + "\n")
