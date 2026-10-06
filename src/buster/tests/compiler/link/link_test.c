@@ -6842,6 +6842,36 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                               .entry_symbol = S8("main"),
                                                                           });
     BUSTER_TEST(arguments, a64_pe_executable.error == LINK_ERROR_NONE);
+    {
+        // Regression (#2724): the PE64 PDB identity builder must reject a debug
+        // module whose code range leaves the image's .text, as UEFI does.
+        // One minimal record: length 2 covering only its kind (S_END-like, no payload).
+        u8 codeview_symbols[4] = {0x02, 0x00, 0x06, 0x00};
+        ObjectDebugModule debug_module = {
+            .name = S8("module.c"),
+            .code_offset = 0,
+            .code_size = sizeof(a64_pe_code),
+            .symbols_size = sizeof(codeview_symbols),
+        };
+        ObjectFile debug_object = a64_pe_object;
+        debug_object.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(codeview_symbols);
+        debug_object.debug_modules = &debug_module;
+        debug_object.debug_module_count = 1;
+        NativeExecutableLinkOptions debug_options = {.entry_symbol = S8("main"), .debug_info = true};
+        NativeExecutableLinkResult valid = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, valid.error == LINK_ERROR_NONE && valid.pdb.length != 0);
+        debug_module.code_offset = 1 << 20;
+        NativeExecutableLinkResult outside_offset = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, outside_offset.error == LINK_ERROR_OBJECT_WRITE);
+        debug_module.code_offset = 0;
+        debug_module.code_size = 1 << 20;
+        NativeExecutableLinkResult outside_size = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, outside_size.error == LINK_ERROR_OBJECT_WRITE);
+        debug_module.code_size = sizeof(a64_pe_code);
+        debug_module.name = (String8){.length = 4};
+        NativeExecutableLinkResult null_name = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, null_name.error == LINK_ERROR_OBJECT_WRITE);
+    }
     u32 a64_pdata_rva = 0;
     u32 a64_pdata_raw = 0;
     u32 a64_xdata_rva = 0;
