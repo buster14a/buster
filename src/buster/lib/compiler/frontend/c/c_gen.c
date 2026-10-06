@@ -27047,13 +27047,21 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
             bool has_parameter_list = parameters_open < end && parameters_close + 1 == end &&
                                       c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_PARENTHESIS);
             bool nested_group = pointer_index < pointer_close && c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
-            if (has_parameter_list && (nested_group || (pointer_count && pointer_index == pointer_close)))
+            // `int (*[3])()` writes array suffixes after the pointer chain and
+            // inside the group: they wrap the pointer the chain produced.
+            bool group_arrays = pointer_count && pointer_index < pointer_close &&
+                                c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_LEFT_BRACKET);
+            if (has_parameter_list && (nested_group || (pointer_count && (pointer_index == pointer_close || group_arrays))))
             {
                 type = c_ir_type_name_function_type(builder, type, parameters_open, parameters_close);
                 while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
                 {
                     type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
                     pointer_count -= 1;
+                }
+                if (group_arrays && type.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    type = c_ir_type_name_suffix(builder, type, pointer_index, pointer_close);
                 }
                 answered = true;
                 if (nested_group)
@@ -27064,7 +27072,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
                     descend = true;
                 }
             }
-            else if (pointer_count && pointer_index == pointer_close && parameters_open < end &&
+            else if (pointer_count && (pointer_index == pointer_close || group_arrays) && parameters_open < end &&
                      c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_BRACKET))
             {
                 type = c_ir_type_name_suffix(builder, type, parameters_open, end);
@@ -27072,6 +27080,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
                 {
                     type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
                     pointer_count -= 1;
+                }
+                if (group_arrays && type.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    type = c_ir_type_name_suffix(builder, type, pointer_index, pointer_close);
                 }
                 answered = true;
             }
