@@ -64,6 +64,10 @@ struct CTestMemberAlignmentQuery
 BUSTER_F_DECL CTestMemberAlignmentQuery c_test_member_alignment_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                               CScopeId scope, u32 start, u32 end);
 
+// Member rows c_parse_member_type examined on this thread, and the name indexes
+// it built for wide aggregates.
+BUSTER_F_DECL void c_test_member_lookup_counts(u64* visits, u64* builds);
+
 // Promoted-member searches on this thread, and how many needed a per-type table.
 BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 

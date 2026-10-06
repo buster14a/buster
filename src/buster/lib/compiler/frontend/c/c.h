@@ -1460,6 +1460,7 @@ typedef struct CStringLiteralMemo CStringLiteralMemo;
 // sizeof/_Alignof/offsetof answers semantic analysis computes before any IR
 // exists. Counts of actual operations, not timings; see
 // docs/agents/frontend/layout.md for each field's exact meaning.
+typedef struct CMemberLookup CMemberLookup;
 typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
 struct CTypeLayoutStatistics
 {
@@ -1543,6 +1544,11 @@ struct CParseResult
     // by-value operand copy keeps counting into the same record. Null for
     // hand-built results, which then count nothing.
     CTypeLayoutStatistics* type_layout_statistics;
+    // Name index of wide aggregates for c_parse_member_type (CMemberLookup in
+    // c_internal.h). Outside the checkpointed body too: entries are validated
+    // against the live rows on every use, so a rollback or a by-value copy may
+    // keep sharing it. Null for hand-built results, which scan.
+    CMemberLookup* member_lookup;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
     // zero the operating system already supplied; c_parse_identifier_use_index

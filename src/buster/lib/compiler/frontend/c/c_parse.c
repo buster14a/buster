@@ -1327,6 +1327,12 @@ BUSTER_C_SHARED void c_type_parse_rollback(CTypeParseMachine* machine, CParseRes
     WORK_LEDGER_RECORD(SNAPSHOT_ROLLBACKS, 1);
     CType* checkpoint_types = checkpoint->types;
     u32 checkpoint_type_count = checkpoint->type_count;
+    if (checkpoint->member_lookup)
+    {
+        // Types and member rows come back by value below; no name index built
+        // before this point may be trusted after it.
+        checkpoint->member_lookup->generation += 1;
+    }
     *result = *checkpoint;
     while (machine->mutation_count > mutation_mark)
     {
@@ -4322,6 +4328,162 @@ BUSTER_C_INTERNAL bool c_parse_member_named(CMember const* member, u32 symbol, S
     return symbol && member->symbol ? member->symbol == symbol : string_equal(member->name, name);
 }
 
+#if BUSTER_INCLUDE_TESTS
+// Member rows c_parse_member_type examined, and name indexes built.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_member_lookup_counts[2];
+
+void c_test_member_lookup_counts(u64* visits, u64* builds)
+{
+    *visits = c_parse_member_lookup_counts[0];
+    *builds = c_parse_member_lookup_counts[1];
+}
+#define C_PARSE_MEMBER_LOOKUP_VISIT() (c_parse_member_lookup_counts[0] += 1)
+#else
+#define C_PARSE_MEMBER_LOOKUP_VISIT() ((void)0)
+#endif
+
+// The built name index of `type`, whose record is `value`, or null when the
+// caller must scan: no index storage, a symbol-less query, a narrow record, or
+// a member whose name has no symbol (name equality then needs spellings).
+BUSTER_C_INTERNAL CMemberIndexEntry const* c_parse_member_index(CParseResult* result, CTypeId type, CType const* value, u32 symbol)
+{
+    CMemberIndexEntry const* built = 0;
+    CMemberLookup* lookup = result->member_lookup;
+    if (lookup && symbol && value->member_count >= C_MEMBER_INDEX_MIN_MEMBERS && result->arena && type.value < result->type_count &&
+        (u64)value->member_start + value->member_count <= result->member_count)
+    {
+        if (type.value >= lookup->capacity)
+        {
+            u32 capacity = BUSTER_MAX(result->type_capacity, type.value + 1);
+            CMemberIndexEntry* entries = arena_allocate_zeroed(result->arena, CMemberIndexEntry, capacity);
+            if (lookup->entries)
+            {
+                memcpy(entries, lookup->entries, sizeof(*entries) * lookup->capacity);
+            }
+            lookup->entries = entries;
+            lookup->capacity = capacity;
+        }
+        CMemberIndexEntry* entry = lookup->entries + type.value;
+        if (entry->state == C_MEMBER_INDEX_ABSENT || entry->generation != lookup->generation || entry->member_start != value->member_start ||
+            entry->member_count != value->member_count)
+        {
+            CMember const* members = result->members + value->member_start;
+            u32 count = value->member_count;
+            bool symbols = true;
+            for (u32 index = 0; symbols && index < count; index += 1)
+            {
+                symbols = !members[index].name.length || members[index].symbol;
+            }
+            *entry = (CMemberIndexEntry){
+                .member_start = value->member_start,
+                .member_count = count,
+                .generation = lookup->generation,
+                .state = symbols ? C_MEMBER_INDEX_BUILT : C_MEMBER_INDEX_UNAVAILABLE,
+            };
+            if (symbols)
+            {
+                u32 bits = 1;
+                while (bits < 31 && ((u32)1 << bits) < count * 2u)
+                {
+                    bits += 1;
+                }
+                entry->shift = 32 - bits;
+                entry->heads = arena_allocate_zeroed(result->arena, u32, (u64)1 << bits);
+                entry->next = arena_allocate(result->arena, u32, count);
+                entry->unnamed = arena_allocate(result->arena, u32, count);
+                for (u32 position = count; position > 0; position -= 1)
+                {
+                    u32 index = position - 1;
+                    entry->next[index] = 0;
+                    if (members[index].name.length)
+                    {
+                        u32 bucket = (members[index].symbol * 0x9E3779B1u) >> entry->shift;
+                        entry->next[index] = entry->heads[bucket];
+                        entry->heads[bucket] = index + 1;
+                    }
+                    else
+                    {
+                        entry->unnamed[entry->unnamed_count++] = index;
+                    }
+                }
+                // Filled back to front; the walk wants member order.
+                for (u32 low = 0, high = entry->unnamed_count; low + 1 < high; low += 1, high -= 1)
+                {
+                    u32 swap = entry->unnamed[low];
+                    entry->unnamed[low] = entry->unnamed[high - 1];
+                    entry->unnamed[high - 1] = swap;
+                }
+#if BUSTER_INCLUDE_TESTS
+                c_parse_member_lookup_counts[1] += 1;
+#endif
+            }
+        }
+        if (entry->state == C_MEMBER_INDEX_BUILT)
+        {
+            built = entry;
+        }
+    }
+    return built;
+}
+
+// The first chain entry at or after `chain` whose live member row carries `symbol`.
+BUSTER_C_INTERNAL u32 c_parse_member_chain_match(CMemberCursor const* cursor, u32 chain)
+{
+    while (chain && cursor->result->members[cursor->member_start + chain - 1].symbol != cursor->symbol)
+    {
+        chain = cursor->entry->next[chain - 1];
+    }
+    return chain;
+}
+
+BUSTER_C_INTERNAL CMemberCursor c_parse_member_cursor(CParseResult* result, CTypeId type, CType const* value, u32 symbol)
+{
+    CMemberCursor cursor = {
+        .result = result,
+        .entry = c_parse_member_index(result, type, value, symbol),
+        .member_start = value->member_start,
+        .member_count = value->member_count,
+        .symbol = symbol,
+    };
+    if (cursor.entry)
+    {
+        cursor.chain = c_parse_member_chain_match(&cursor, cursor.entry->heads[(symbol * 0x9E3779B1u) >> cursor.entry->shift]);
+    }
+    return cursor;
+}
+
+// The next member offset to examine; false once the search has visited all it
+// needs to.
+BUSTER_C_INTERNAL bool c_parse_member_cursor_next(CMemberCursor* cursor, u32* member_offset)
+{
+    bool more = true;
+    if (!cursor->entry)
+    {
+        more = cursor->position < cursor->member_count;
+        *member_offset = cursor->position;
+        cursor->position += 1;
+    }
+    else if (cursor->chain)
+    {
+        *member_offset = cursor->chain - 1;
+        cursor->chain = c_parse_member_chain_match(cursor, cursor->entry->next[*member_offset]);
+    }
+    else if (cursor->position < cursor->entry->unnamed_count)
+    {
+        *member_offset = cursor->entry->unnamed[cursor->position];
+        cursor->position += 1;
+    }
+    else
+    {
+        more = false;
+    }
+    if (more)
+    {
+        C_PARSE_MEMBER_LOOKUP_VISIT();
+    }
+    return more;
+}
+
 // `symbol` is the id the member-name token carries, 0 when it has none.
 BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, u32 symbol, String8 name, u32* bit_width_out,
                                                CTypeId* aggregate_out, u32* member_out)
@@ -4338,7 +4500,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
     }
     value = result->types[type.value];
     bool promoted = false;
-    for (u32 index = 0; index < value.member_count && field_type.value == C_ID_UNDERLYING_INVALID; index += 1)
+    CMemberCursor cursor = c_parse_member_cursor(result, type, &value, symbol);
+    u32 index = 0;
+    while (field_type.value == C_ID_UNDERLYING_INVALID && c_parse_member_cursor_next(&cursor, &index))
     {
         CMember member = result->members[value.member_start + index];
         if (c_parse_member_named(&member, symbol, name))
@@ -4378,7 +4542,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
         {
             CTypeId candidate_id = work[work_index++];
             CType* candidate = &result->types[candidate_id.value];
-            for (u32 field_index = 0; field_index < candidate->member_count; field_index += 1)
+            CMemberCursor candidate_cursor = c_parse_member_cursor(result, candidate_id, candidate, symbol);
+            u32 field_index = 0;
+            while (c_parse_member_cursor_next(&candidate_cursor, &field_index))
             {
                 CMember* member = &result->members[candidate->member_start + field_index];
                 if (c_parse_member_named(member, symbol, name))
@@ -8474,7 +8640,9 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
         {
             continue;
         }
-        for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+        CMemberCursor cursor = c_parse_member_cursor(result, type_id, type, symbol);
+        u32 field_index = 0;
+        while (c_parse_member_cursor_next(&cursor, &field_index))
         {
             CMember* field = result->members + type->member_start + field_index;
             if (c_parse_member_named(field, symbol, name))
@@ -29816,6 +29984,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens);
     result.type_layout_statistics = arena_allocate(arena, CTypeLayoutStatistics, 1);
     *result.type_layout_statistics = (CTypeLayoutStatistics){0};
+    result.member_lookup = arena_allocate(arena, CMemberLookup, 1);
+    *result.member_lookup = (CMemberLookup){0};
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
     result.identifier_use_by_token_plus_one = arena_allocate_zeroed(arena, u32, result.identifier_use_by_token_capacity);
     result.token_classes = arena_allocate_zeroed(arena, u8, result.identifier_use_by_token_capacity);
