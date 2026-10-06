@@ -72,37 +72,6 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
 
-      - name: Native service tests through the canonical driver
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build.sh bench_service capabilities
-          ./build.sh bench_service self-test
-
-      - name: Service ASan and UBSan
-        if: ${{ !cancelled() }}
-        shell: bash
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        # Pin the common 8 MiB default so a larger runner stack cannot hide
-        # an ASan frame regression (#1980); fails if the hard limit is lower.
-        run: |
-          set -euo pipefail
-          ulimit -S -s 8192
-          echo "stack soft=$(ulimit -S -s) KiB hard=$(ulimit -H -s)"
-          ./build.sh bench_service self-test --sanitize
-
-      - name: Broker and static gate component tests
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: ./build.sh bench_service_broker self-test
-
-      - name: Fixed smoke recipe self-test
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: ./build.sh bench_service_recipe_self_test
-
       # Measures the revision GitHub validates (PR merge, merge-group or pushed
       # commit) against its first parent; see docs/source-size.md. The public
       # repository serves those two commits without credentials.

@@ -2261,7 +2261,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_parameter_edge_target(u32 const* old_to
     return split != UINT32_MAX ? split : old_to_new[destination_block];
 }
 
-bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function)
+bool machine_function_split_parameter_edges_with_canonical_map(Arena* arena, MachineFunction* function,
+                                                                u32** canonical_entries, u32 canonical_count)
 {
     bool result = function && function->target && function->target->unconditional_branch_opcode != MACHINE_OPCODE_INVALID;
     u32 split_count = 0;
@@ -2287,12 +2288,13 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
             u32 new_block_count = (u32)new_block_count64;
             u32 new_instruction_count = (u32)new_instruction_count64;
             u32 new_edge_count = (u32)new_edge_count64;
-            // Publishable storage precedes all temporary maps. No index or
-            // remapping array survives this pass, including on a failed remap.
+            // Publishable storage precedes all temporary maps. Only the caller's
+            // canonical projection survives; the edge/index scratch is reclaimed.
             MachineInstruction* instructions = arena_allocate(arena, MachineInstruction, new_instruction_count);
             MachineBlock* blocks = arena_allocate(arena, MachineBlock, new_block_count);
             MachineEdge* edges = arena_allocate(arena, MachineEdge, new_edge_count);
             MachineSwitchCase* switch_cases = arena_allocate(arena, MachineSwitchCase, function->switch_case_count);
+            u32* projected_entries = canonical_entries ? arena_allocate(arena, u32, canonical_count) : 0;
             MachineInlineAssembly* inline_assemblies = function->inline_assemblies;
             MachineInlineAssemblyRelocation* inline_assembly_relocations = function->inline_assembly_relocations;
             result = (!function->inline_assembly_count || function->inline_assemblies) &&
@@ -2356,6 +2358,19 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                     if (machine_function_parameter_edge_needs_split(function, function->edges + edge_index))
                     {
                         split_blocks[edge_index] = block_cursor++;
+                    }
+                }
+            }
+            if (canonical_entries)
+            {
+                result = result && canonical_count <= old_block_count;
+                for (u32 canonical_block = 0; result && canonical_block < canonical_count; canonical_block += 1)
+                {
+                    u32 old_block = *canonical_entries ? (*canonical_entries)[canonical_block] : canonical_block;
+                    result = old_block < old_block_count;
+                    if (result)
+                    {
+                        projected_entries[canonical_block] = old_to_new[old_block];
                     }
                 }
             }
@@ -2559,10 +2574,20 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                 function->switch_cases = switch_cases;
                 function->inline_assemblies = inline_assemblies;
                 function->inline_assembly_relocations = inline_assembly_relocations;
+                if (canonical_entries)
+                {
+                    *canonical_entries = projected_entries;
+                }
             }
             arena_set_position(arena, scratch_position);
         }
     }
+    return result;
+}
+
+bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function)
+{
+    bool result = machine_function_split_parameter_edges_with_canonical_map(arena, function, 0, 0);
     return result;
 }
 
