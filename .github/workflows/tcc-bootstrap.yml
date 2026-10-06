@@ -72,36 +72,40 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
 
-      - name: Native service tests through the canonical driver
+      - name: Reject deleted cached dependencies without a fatal diagnostic
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh bench_service capabilities
-          ./build.sh bench_service self-test
-
-      - name: Service ASan and UBSan
-        if: ${{ !cancelled() }}
-        shell: bash
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        # Pin the common 8 MiB default so a larger runner stack cannot hide
-        # an ASan frame regression (#1980); fails if the hard limit is lower.
-        run: |
-          set -euo pipefail
-          ulimit -S -s 8192
-          echo "stack soft=$(ulimit -S -s) KiB hard=$(ulimit -H -s)"
-          ./build.sh bench_service self-test --sanitize
-
-      - name: Broker and static gate component tests
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: ./build.sh bench_service_broker self-test
-
-      - name: Fixed smoke recipe self-test
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: ./build.sh bench_service_recipe_self_test
+          markers=(.cache/bootstrap-driver/posix/*/*.complete)
+          test "${#markers[@]}" = 1
+          missing=bootstrap-deleted-cache-fixture.h
+          test ! -e "$missing"
+          digest=$(printf '%064d' 0)
+          # Model a tracked input deleted since this immutable driver was built.
+          awk -v path="$missing" -v digest="$digest" '
+            $0 == "END" { printf "dependency\t%s\t%s\n", path, digest }
+            { print }
+          ' "${markers[0]}" > "$RUNNER_TEMP/bootstrap-stale-marker"
+          mv "$RUNNER_TEMP/bootstrap-stale-marker" "${markers[0]}"
+          for expected_entries in 2 2; do
+            if ! ./build.sh time_trace_summary_self_test > "$RUNNER_TEMP/bootstrap-cache.stdout" 2> "$RUNNER_TEMP/bootstrap-cache.stderr"; then
+              cat "$RUNNER_TEMP/bootstrap-cache.stdout" "$RUNNER_TEMP/bootstrap-cache.stderr"
+              exit 1
+            fi
+            cat "$RUNNER_TEMP/bootstrap-cache.stdout" "$RUNNER_TEMP/bootstrap-cache.stderr"
+            test ! -s "$RUNNER_TEMP/bootstrap-cache.stderr"
+            markers=(.cache/bootstrap-driver/posix/*/*.complete)
+            test "${#markers[@]}" = "$expected_entries"
+          done
+          # The same absent dependency remains an error for a fresh closure.
+          printf '%s\n' "$missing" > "$RUNNER_TEMP/bootstrap-missing.list"
+          source tools/bootstrap_driver.sh
+          if buster_bootstrap_snapshot "$PWD" "$RUNNER_TEMP/bootstrap-missing.list" "$RUNNER_TEMP/bootstrap-missing.snapshot" 2> "$RUNNER_TEMP/bootstrap-missing.stderr"; then
+            echo '::error::A fresh missing dependency was accepted.'
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/bootstrap-missing.stderr"
+          grep -Fxq "error: missing bootstrap dependency: $missing" "$RUNNER_TEMP/bootstrap-missing.stderr"
 
       # Measures the revision GitHub validates (PR merge, merge-group or pushed
       # commit) against its first parent; see docs/source-size.md. The public

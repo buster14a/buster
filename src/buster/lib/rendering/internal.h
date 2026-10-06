@@ -14,6 +14,18 @@
 #include <buster/lib/shaders/blur_shared.h>
 #include <buster/lib/shaders/paths.h>
 
+// Success-path and expected-rejection traces are opt-in (--verbose=), like the
+// launch and open notes in os.c; stdout stays the program's own output.
+// Genuine failures use string_print_error and are always reported on stderr.
+#define BUSTER_RENDERING_TRACE(...)                                                                                                                       \
+    do                                                                                                                                                    \
+    {                                                                                                                                                     \
+        if (program_flag_get(PROGRAM_FLAG_VERBOSE))                                                                                                       \
+        {                                                                                                                                                 \
+            string_print(__VA_ARGS__);                                                                                                                    \
+        }                                                                                                                                                 \
+    } while (0)
+
 #ifndef BUSTER_USE_SLANG_SHADERS
 #define BUSTER_USE_SLANG_SHADERS 0
 #endif
