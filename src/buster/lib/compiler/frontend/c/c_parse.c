@@ -2114,6 +2114,11 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                                                                             String8* syntax_error, u32* syntax_token, u32* member_alignment);
 BUSTER_C_INTERNAL u32 c_parse_type_member_alignment_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                            CScopeId scope, u32 start, u32 end);
+// An unresolved CMember.bit_width holding this value was evaluated at its
+// declaration and already reported (negative, or wider than the field).
+#define C_PARSE_BIT_WIDTH_DIAGNOSED UINT32_MAX
+BUSTER_C_INTERNAL String8 c_parse_bit_field_width_message(Arena* arena, CPreprocessResult preprocess, CParseResult* result, String8 name, CTypeId type_id,
+                                                          CIntegerConstant width);
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
 BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end);
 
@@ -12872,6 +12877,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     bool bit_width_resolved = false;
     u32 bit_width_token_start = 0;
     u32 bit_width_token_count = 0;
+    CIntegerConstant unrepresentable_width = {0};
     if (declarator < frame->declarator_end && c_token_is_punctuator(&preprocess.tokens[declarator], C_PUNCTUATOR_COLON))
     {
         declarator += 1;
@@ -12935,6 +12941,10 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             {
                 bit_width = (u32)constant.magnitude;
                 bit_width_resolved = true;
+            }
+            else if (constant.valid)
+            {
+                unrepresentable_width = constant;
             }
         }
         is_bit_field = true;
@@ -13048,6 +13058,22 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         .bit_width_resolved = bit_width_resolved,
         .has_incomplete_type = has_incomplete_type,
     };
+    // A constant the width field cannot hold -- negative, or wider than 32
+    // bits -- exists only here, in the mode a declaration evaluates in. Report
+    // it now and mark the member so no later reader evaluates it again.
+    if (unrepresentable_width.valid)
+    {
+        String8 width_message = c_parse_bit_field_width_message(result->arena, preprocess, result, c_token_spelling(preprocess.spelling_base, name),
+                                                                declarator_type, unrepresentable_width);
+        if (width_message.length)
+        {
+            CSourceLocation location = !name.length && bit_width_token_start < preprocess.token_count
+                ? c_preprocess_token_location(&preprocess, preprocess.tokens[bit_width_token_start])
+                : c_preprocess_token_location(&preprocess, name);
+            c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, width_message);
+            result->members[result->member_count - 1].bit_width = C_PARSE_BIT_WIDTH_DIAGNOSED;
+        }
+    }
     frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     if (frame->declarator_end + 1 == frame->end)
@@ -27415,48 +27441,60 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
     BUSTER_UNUSED(arena);
 }
 
-// This diagnostic-only fallback has no declaration-dependent operands. The
-// TYPE reader normally requires a declaration-point model; limiting its input
-// to literals, integer builtin type words and constant-expression operators
-// makes later bindings and completed tags irrelevant here. Its syntax walk
-// still decides whether those tokens form an integer constant expression.
-BUSTER_C_INTERNAL bool c_parse_bit_field_width_literal_expression(CPreprocessResult preprocess, u32 start, u32 end)
+// The diagnostic text for one evaluated bit-field width, empty when the width
+// is acceptable. A member declaration evaluates its width once (CMember.bit_width);
+// a width that does not fit that field -- negative or wider than 32 bits --
+// is reported from the declaration with the constant it evaluated, since no
+// reader re-evaluates it in the mode the declaration used.
+BUSTER_C_INTERNAL String8 c_parse_bit_field_width_message(Arena* arena, CPreprocessResult preprocess, CParseResult* result, String8 name, CTypeId type_id,
+                                                          CIntegerConstant width)
 {
-    bool supported = start < end && end <= preprocess.token_count;
-    for (u32 index = start; supported && index < end; index += 1)
+    String8 message = {0};
+    if (!width.valid)
     {
-        CToken token = preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER)
+        message = S8("bit-field width is not an integer constant expression");
+    }
+    else if (width.is_negative)
+    {
+        String8 field = name.length ? string_format(arena, S8("bit-field '{S8}'"), name) : S8("unnamed bit-field");
+        String8 magnitude = width.magnitude_high
+            ? string_format(arena, S8("-({u64} * 2^64 + {u64})"), width.magnitude_high, width.magnitude)
+            : string_format(arena, S8("-{u64}"), width.magnitude);
+        message = string_format(arena, S8("{S8} has negative width ({S8})"), field, magnitude);
+    }
+    else if (!width.magnitude && !width.magnitude_high && name.length)
+    {
+        message = string_format(arena, S8("named bit-field '{S8}' has zero width"), name);
+    }
+    else if (type_id.value < result->type_count)
+    {
+        CType type = result->types[type_id.value];
+        if (type.kind == C_TYPE_ENUM && type.element_type.value < result->type_count)
         {
-            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-            supported = string_equal(spelling, S8("_Bool")) || string_equal(spelling, S8("char")) ||
-                        string_equal(spelling, S8("short")) || string_equal(spelling, S8("int")) ||
-                        string_equal(spelling, S8("long")) || string_equal(spelling, S8("signed")) ||
-                        string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__signed__")) ||
-                        string_equal(spelling, S8("unsigned")) || string_equal(spelling, S8("__int128"));
+            type = result->types[type.element_type.value];
         }
-        else if (token.kind == C_TOKEN_PUNCTUATOR)
+        IrTypeKind ir_kind = IR_TYPE_VOID;
+        u32 type_bits = 0;
+        u32 type_alignment = 0;
+        bool type_signed = false;
+        bool scalar = c_ir_scalar_type_properties(preprocess.target, type.kind, &ir_kind, &type_bits, &type_signed, &type_alignment) &&
+                      (ir_kind == IR_TYPE_INTEGER || ir_kind == IR_TYPE_BOOLEAN);
+        // _Bool stores in a byte, but a C bit-field may hold only
+        // its one value bit. Other widths follow the target type.
+        if (type.kind == C_TYPE_BOOL)
         {
-            u64 operators = C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_PLUS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_MINUS) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_STAR) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_SLASH) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_PERCENT) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_TILDE) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_EXCLAMATION) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_AMPERSAND) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_PIPE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_CARET) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_SHIFT_LEFT) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_SHIFT_RIGHT) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_LESS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LESS_EQUAL) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_GREATER) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_GREATER_EQUAL) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_EQUAL) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_NOT_EQUAL) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_AMPERSAND_AMPERSAND) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_PIPE_PIPE) |
-                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_QUESTION) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_COLON);
-            supported = (operators & C_PUNCTUATOR_BIT(token.punctuator)) != 0;
+            type_bits = 1;
         }
-        else
+        if (scalar && (width.magnitude_high || width.magnitude > type_bits))
         {
-            supported = token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL;
+            String8 field = name.length ? string_format(arena, S8("bit-field '{S8}'"), name) : S8("unnamed bit-field");
+            String8 magnitude = width.magnitude_high
+                ? string_format(arena, S8("{u64} * 2^64 + {u64}"), width.magnitude_high, width.magnitude)
+                : string_format(arena, S8("{u64}"), width.magnitude);
+            message = string_format(arena, S8("width of {S8} ({S8} bits) exceeds the width of its type ({u32} bits)"), field, magnitude, type_bits);
         }
     }
-    return supported;
+    return message;
 }
 
 // C17 6.7.2.1p13: the members of an anonymous struct or union are members of
@@ -27634,64 +27672,14 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
             // A resolved width is authoritative; only a width the member
             // step could not fold is evaluated again, to diagnose it.
             CIntegerConstant width = {.magnitude = member.bit_width, .valid = member.bit_width_resolved};
-            if (!member.bit_width_resolved && member.bit_width_token_count)
+            bool declared = !member.bit_width_resolved && member.bit_width == C_PARSE_BIT_WIDTH_DIAGNOSED;
+            if (!member.bit_width_resolved && member.bit_width_token_count && !declared)
             {
                 CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, member.bit_width_token_start);
                 width = c_parse_typed_integer_constant(machine, machine->scratch_arena, preprocess, result, scope,
                                                        member.bit_width_token_start, member.bit_width_token_start + member.bit_width_token_count);
-                if (!width.valid && c_parse_bit_field_width_literal_expression(preprocess, member.bit_width_token_start,
-                                                                               member.bit_width_token_start + member.bit_width_token_count))
-                {
-                    width = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope,
-                                                          member.bit_width_token_start, member.bit_width_token_start + member.bit_width_token_count);
-                }
             }
-            String8 width_message = {0};
-            if (!width.valid)
-            {
-                width_message = S8("bit-field width is not an integer constant expression");
-            }
-            else if (width.is_negative)
-            {
-                String8 field = member.name.length ? string_format(arena, S8("bit-field '{S8}'"), member.name) : S8("unnamed bit-field");
-                String8 magnitude = width.magnitude_high
-                    ? string_format(arena, S8("-({u64} * 2^64 + {u64})"), width.magnitude_high, width.magnitude)
-                    : string_format(arena, S8("-{u64}"), width.magnitude);
-                width_message = string_format(arena, S8("{S8} has negative width ({S8})"), field, magnitude);
-            }
-            else if (!width.magnitude && !width.magnitude_high && member.name.length)
-            {
-                width_message = string_format(arena, S8("named bit-field '{S8}' has zero width"), member.name);
-            }
-            else if (member.type.value < result->type_count)
-            {
-                CType type = result->types[member.type.value];
-                if (type.kind == C_TYPE_ENUM && type.element_type.value < result->type_count)
-                {
-                    type = result->types[type.element_type.value];
-                }
-                IrTypeKind ir_kind = IR_TYPE_VOID;
-                u32 type_bits = 0;
-                u32 type_alignment = 0;
-                bool type_signed = false;
-                bool scalar = c_ir_scalar_type_properties(preprocess.target, type.kind, &ir_kind, &type_bits, &type_signed, &type_alignment) &&
-                              (ir_kind == IR_TYPE_INTEGER || ir_kind == IR_TYPE_BOOLEAN);
-                // _Bool stores in a byte, but a C bit-field may hold only
-                // its one value bit. Other widths follow the target type.
-                if (type.kind == C_TYPE_BOOL)
-                {
-                    type_bits = 1;
-                }
-                if (scalar && (width.magnitude_high || width.magnitude > type_bits))
-                {
-                    String8 field = member.name.length ? string_format(arena, S8("bit-field '{S8}'"), member.name) : S8("unnamed bit-field");
-                    String8 magnitude = width.magnitude_high
-                        ? string_format(arena, S8("{u64} * 2^64 + {u64}"), width.magnitude_high, width.magnitude)
-                        : string_format(arena, S8("{u64}"), width.magnitude);
-                    width_message = string_format(arena, S8("width of {S8} ({S8} bits) exceeds the width of its type ({u32} bits)"),
-                                                  field, magnitude, type_bits);
-                }
-            }
+            String8 width_message = declared ? (String8){0} : c_parse_bit_field_width_message(arena, preprocess, result, member.name, member.type, width);
             if (width_message.length)
             {
                 CSourceLocation location = !member.name.length && member.bit_width_token_start < preprocess.token_count

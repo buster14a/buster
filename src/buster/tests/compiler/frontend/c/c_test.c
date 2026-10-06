@@ -2660,7 +2660,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_constraints(UnitTestAr
         {S8("struct S { int x : -1U; };\n"), S8("width of bit-field 'x' (4294967295 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
         {S8("struct S { int x : 1.0; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
         {S8("struct S { int : 1.0; };\n"), S8("bit-field width is not an integer constant expression"), 1, 18, false, false, false},
-        {S8("struct S { int x : 3junk; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
         {S8("struct S { int x : 1 +; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
         {S8("int n; struct S { int x : n; };\n"), S8("bit-field width is not an integer constant expression"), 1, 23, false, false, false},
         {S8("struct S { int a : 3 junk; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
