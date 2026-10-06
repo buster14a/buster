@@ -18343,7 +18343,7 @@ BUSTER_C_INTERNAL bool c_parse_scope_cursor_lookup(CParseResult* result, CScopeI
         CEntityId entity = cursor->by_symbol[symbol];
         if (entity.value == C_ID_UNDERLYING_INVALID)
         {
-            entity = result->binding_scope.value == 0 ? result->binding_by_symbol[symbol]
+            entity = result->binding_by_symbol && result->binding_scope.value == 0 ? result->binding_by_symbol[symbol]
                                                       : c_parse_lookup_entity_in_scope_chain(result, (CScopeId){.value = 0}, symbol, name);
         }
         *found = entity;
