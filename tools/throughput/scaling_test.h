@@ -166,6 +166,19 @@ static void test_topology(char const* root)
         CHECK(tp_cpu_set_parse("3", &set) && tp_topology_read(broken, &set, topology) == EILSEQ);
         CHECK(tp_cpu_set_parse("4", &set) && tp_topology_read(broken, &set, topology) == EILSEQ);
         CHECK(tp_cpu_set_parse("9", &set) && tp_topology_read(broken, &set, topology) == ENOENT);
+        /* A housekeeping exclusion takes the whole core, siblings included. */
+        TpCpuSet siblings;
+        CHECK(tp_topology_siblings(smt, 5, &siblings) == 0 && siblings.count == 2 && tp_cpu_set_has(&siblings, 1) &&
+              tp_cpu_set_has(&siblings, 5));
+        CHECK(tp_topology_siblings(flat, 2, &siblings) == 0 && siblings.count == 1 && tp_cpu_set_has(&siblings, 2));
+        CHECK(tp_topology_siblings(broken, 2, &siblings) == EILSEQ && siblings.count == 0);
+        CHECK(tp_topology_siblings(broken, 3, &siblings) == EILSEQ);
+        CHECK(tp_topology_siblings(broken, 9, &siblings) == ENOENT);
+        TpCpuSet pool;
+        CHECK(tp_cpu_set_parse("0-3", &pool));
+        tp_cpu_set_remove(&pool, 2);
+        tp_cpu_set_remove(&pool, 2);
+        CHECK(pool.count == 3 && !tp_cpu_set_has(&pool, 2));
     }
     free(topology);
 }
@@ -261,6 +274,15 @@ static void test_scale_options(void)
     CHECK(!tp_options(12, shape, &config));
     char* run[] = {"throughput", "run", "--cpu-set", "0", "--no-guard", NULL};
     CHECK(!tp_options(5, run, &config));
+    char* exclude[] = {"throughput", "scale", "--compiler", "ide", "--output", "out", "--cpu-set", "auto", "--workers", "1",
+                       "--exclude-core", "3", NULL};
+    CHECK(tp_options(12, exclude, &config) && config.scale_exclude_core == 3);
+    CHECK(tp_options(10, valid, &config) && config.scale_exclude_core == -1);
+    char* exclude_range[] = {"throughput", "scale", "--compiler", "ide", "--output", "out", "--cpu-set", "auto", "--workers", "1",
+                             "--exclude-core", "1024", NULL};
+    CHECK(!tp_options(12, exclude_range, &config));
+    char* exclude_run[] = {"throughput", "run", "--exclude-core", "0", "--no-guard", NULL};
+    CHECK(!tp_options(5, exclude_run, &config));
 }
 
 #ifdef __linux__
@@ -285,6 +307,7 @@ typedef struct TestScaleRun
     char const* timeout;
     char const* budget;
     int allow_smt, pinned;
+    char const* exclude;
 } TestScaleRun;
 
 static TpProcess test_scale_run(TestScaleRun options, char const* output, char const* log)
@@ -307,6 +330,7 @@ static TpProcess test_scale_run(TestScaleRun options, char const* output, char c
     if (options.shape) { command[argc++] = "--shape"; command[argc++] = (char*)options.shape; }
     if (options.budget) { command[argc++] = "--max-rss-mib"; command[argc++] = (char*)options.budget; }
     if (options.allow_smt) command[argc++] = "--allow-smt";
+    if (options.exclude) { command[argc++] = "--exclude-core"; command[argc++] = (char*)options.exclude; }
     command[argc] = NULL;
     if (options.fault) setenv("TP_TEST_SCALE_FAULT", options.fault, 1);
     else unsetenv("TP_TEST_SCALE_FAULT");
@@ -357,7 +381,7 @@ static void test_scale(char const* executable, char const* root)
     char const* workers = found == 2 ? "1,2" : "1";
     char output[TP_PATH_CAP], log[TP_PATH_CAP];
     CHECK(tp_path(output, root, "scale-valid") && tp_path(log, root, "scale.log"));
-    TestScaleRun valid = {executable, NULL, cpu_list, workers, separate, NULL, NULL, NULL, 0, 1};
+    TestScaleRun valid = {executable, NULL, cpu_list, workers, separate, NULL, NULL, NULL, 0, 1, NULL};
     TpProcess result = test_scale_run(valid, output, log);
     CHECK_CHILD_EXIT(result, 0, log);
     CHECK(test_file_contains(output, "scaling.json", "\"status\":\"valid\"") &&
@@ -402,7 +426,33 @@ static void test_scale(char const* executable, char const* root)
         result = test_scale_run(refused, output, log);
         CHECK_CHILD_EXIT(result, 0, log);
         CHECK(test_file_contains(output, "scaling.csv", "equal,4,2,smt,"));
+        /* A housekeeping core leaves the set before placement and is recorded. */
+        char first[32], expected[96];
+        snprintf(first, sizeof(first), "%u", cpus[0]);
+        snprintf(expected, sizeof(expected), "\"excluded_cpus\":\"%u\",", cpus[0]);
+        TestScaleRun housekeeping = valid;
+        housekeeping.workers = "1";
+        housekeeping.shape = "equal";
+        housekeeping.exclude = first;
+        CHECK(tp_path(output, root, "scale-housekeeping"));
+        result = test_scale_run(housekeeping, output, log);
+        CHECK_CHILD_EXIT(result, 0, log);
+        char remaining[96];
+        snprintf(remaining, sizeof(remaining), "\"cpu_set\":\"%u\",", cpus[1]);
+        CHECK(test_file_contains(output, "scaling-metadata.json", expected) &&
+              test_file_contains(output, "scaling-metadata.json", remaining));
+        /* Two workers no longer fit once one of the two cores is excluded. */
+        housekeeping.workers = "1,2";
+        CHECK(tp_path(output, root, "scale-housekeeping-full"));
+        result = test_scale_run(housekeeping, output, log);
+        CHECK_CHILD_EXIT(result, 2, log);
     }
+    /* The housekeeping CPU must be in the requested set. */
+    TestScaleRun stray = valid;
+    stray.exclude = "1023";
+    CHECK(tp_path(output, root, "scale-housekeeping-stray"));
+    result = test_scale_run(stray, output, log);
+    CHECK_CHILD_EXIT(result, 2, log);
     fault.fault = "sleep";
     fault.timeout = "1";
     test_scale_fault(fault, root, "scale-timeout", "timeout=1");

@@ -74,7 +74,7 @@ typedef struct TpScaleRun
     TpScalePoint* points;
     unsigned series_count, point_count, max_workers;
     char root[TP_PATH_CAP], samples[TP_PATH_CAP], compiler[TP_PATH_CAP], compiler_hash[65];
-    char cpu_text[TP_CPU_SET_TEXT_CAP], reason[512];
+    char cpu_text[TP_CPU_SET_TEXT_CAP], excluded_text[TP_CPU_SET_TEXT_CAP], reason[512];
     FILE* csv;
     FILE* commands;
 } TpScaleRun;
@@ -501,6 +501,8 @@ static int tp_scale_metadata(TpScaleRun* run)
                 config->seed, config->scale, config->scale_repeats, config->warmups, config->timeout, config->scale_max_rss_mib);
         fputs("\"cpu_set\":", file);
         tp_json_string(file, run->cpu_text);
+        fputs(",\"excluded_cpus\":", file);
+        tp_json_string(file, run->excluded_text);
         fputs(",\"cpu_set_permitted\":true,\"topology_root\":", file);
         tp_json_string(file, config->topology_root ? config->topology_root : TP_TOPOLOGY_ROOT);
         fprintf(file, ",\"logical_cpus\":%u,\"physical_cores\":%u,\"smt_siblings_in_set\":%u,\"allow_smt\":%s,\"topology\":[",
@@ -559,10 +561,11 @@ static int tp_scale_summary(TpScaleRun* run, int valid)
         fprintf(json, ",\"alpha\":%.17g,\"decision\":\"report-only\",\"series\":[", TP_SCALE_ALPHA);
         if (markdown)
         {
-            fprintf(markdown, "# Multi-TU scaling (report only)\n\nCompiler `%s` (sha256 `%s`); CPU set `%s`; "
+            fprintf(markdown, "# Multi-TU scaling (report only)\n\nCompiler `%s` (sha256 `%s`); CPU set `%s`%s%s%s; "
                     "%u logical CPUs on %u physical cores. Wall is the exec-to-exit median; the interval is the %.0f%% "
                     "order-statistic median interval. CPU is user+system. RSS: %s.\n",
-                    run->compiler, run->compiler_hash, run->cpu_text, run->topology->count, run->topology->physical_cores,
+                    run->compiler, run->compiler_hash, run->cpu_text, run->excluded_text[0] ? " (housekeeping core `" : "",
+                    run->excluded_text, run->excluded_text[0] ? "` excluded)" : "", run->topology->count, run->topology->physical_cores,
                     (1.0 - TP_SCALE_ALPHA) * 100.0, TP_SCALE_RSS_SCOPE);
         }
         for (unsigned s = 0; valid && s < run->series_count; ++s)
@@ -677,6 +680,22 @@ static int tp_scale(TpConfig const* config)
     {
         error = !strcmp(config->cpu_set, "auto") ? tp_cpu_set_allowed(&run->requested) :
                 tp_cpu_set_parse(config->cpu_set, &run->requested) ? 0 : EINVAL;
+        /* A housekeeping core leaves the set whole, siblings included, before
+         * any check: it must be in the requested set, and the rest must not
+         * become empty. */
+        if (!error && config->scale_exclude_core >= 0)
+        {
+            TpCpuSet excluded;
+            unsigned cpu = (unsigned)config->scale_exclude_core;
+            error = tp_cpu_set_has(&run->requested, cpu) ? 0 : EINVAL;
+            if (!error) error = tp_topology_siblings(config->topology_root ? config->topology_root : TP_TOPOLOGY_ROOT, cpu, &excluded);
+            for (unsigned c = 0; c < TP_MAX_CPUS && !error; ++c)
+                if (tp_cpu_set_has(&excluded, c)) tp_cpu_set_remove(&run->requested, c);
+            if (!error && (!run->requested.count || !tp_cpu_set_format(&excluded, run->excluded_text, sizeof(run->excluded_text))))
+                error = EINVAL;
+            if (error) tp_error("--exclude-core %u is not in --cpu-set %s, has no readable siblings, or leaves no CPU",
+                                cpu, config->cpu_set);
+        }
         if (!error) error = tp_cpu_set_permitted(&run->requested);
         ok = !error && tp_cpu_set_format(&run->requested, run->cpu_text, sizeof(run->cpu_text));
         if (!ok) tp_error("--cpu-set %s is unsupported here or not entirely inside the permitted affinity mask; it is never narrowed: %s",

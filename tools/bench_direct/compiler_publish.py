@@ -8,7 +8,9 @@ artifact through the API as data (a size-bounded zip; nothing in it is
 executed), re-checks the receipt against the identities authorization produced
 in the same attempt, requires the observed host to be the approved Zen 5 host,
 re-derives validity from the lab's own summary.json and the throughput
-corpus's own summary.json and metadata.json (#2761), and completes the
+corpus's own summary.json and metadata.json (#2761), and, when the receipt
+names the scaling profile (#424), each scaling bundle's own scaling.json and
+scaling-metadata.json, and completes the
 attempt's check run named check_name(mode) with external ID attempt_marker(...)
 on the head. The checks are report-only; nothing gates merging on them.
 
@@ -57,8 +59,9 @@ from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
                              owned_checks, parse_chain, run_url)
 from compiler_receipt import (DECIMAL, IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
-                              check_name, classify, classify_throughput, host_problem, number, range_label,
-                              regression_policy, render, THROUGHPUT_PROFILE, throughput_digest)
+                              check_name, classify, classify_scaling, classify_throughput, host_problem, number,
+                              range_label, regression_policy, render, SCALING_PROFILE, scaling_digest,
+                              THROUGHPUT_PROFILE, throughput_digest)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
@@ -74,7 +77,9 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
            policy_value: str, throughput: object = None, require_throughput: bool = True) -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
 
-    throughput is {"summary": ..., "metadata": ...} from the evidence artifact.
+    throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}
+    from the evidence artifact. Scaling is checked whenever the receipt names
+    its profile; only a pull request that asked for it has one.
     A receipt from before the corpus leg (#2761) has no throughput_profile;
     only publication-only recovery of such a past attempt passes
     require_throughput=False, and a receipt that names the profile is always
@@ -118,6 +123,11 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append("receipt throughput profile is not the frozen corpus profile")
                 reasons.extend(classify_throughput(corpus.get("summary"), corpus.get("metadata"),
                                                    receipt.get("binaries")))
+            if "scaling_profile" in receipt:
+                corpus = throughput if isinstance(throughput, dict) else {}
+                if receipt.get("scaling_profile") != SCALING_PROFILE:
+                    reasons.append("receipt scaling profile is not the frozen scaling profile")
+                reasons.extend(classify_scaling(corpus.get("scaling"), receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -179,7 +189,10 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
                 aliases.add(alias)
                 members[info.filename] = info
             values = []
-            for member in ("receipt.json", "lab/summary.json", "throughput/summary.json", "throughput/metadata.json"):
+            scaling = [f"scaling/{name}/{leaf}" for name in SCALING_PROFILE["series"]
+                       for leaf in ("scaling.json", "scaling-metadata.json")]
+            for member in ("receipt.json", "lab/summary.json", "throughput/summary.json", "throughput/metadata.json",
+                           *scaling):
                 info = members.get(member) if not problem else None
                 value = None
                 if info is not None and info.file_size <= MEMBER_LIMIT:
@@ -191,7 +204,9 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
                         value = None
                 values.append(value)
             receipt, summary = values[:2]
-            throughput = {"summary": values[2], "metadata": values[3]}
+            throughput = {"summary": values[2], "metadata": values[3],
+                          "scaling": {name: {"summary": values[4 + 2 * index], "metadata": values[5 + 2 * index]}
+                                      for index, name in enumerate(SCALING_PROFILE["series"])}}
     return receipt, summary, problem, artifact, throughput
 
 
@@ -392,6 +407,9 @@ def main() -> int:
         # The corpus as its own retained summary says, never the host's digest.
         if isinstance(throughput.get("summary"), dict):
             shown["throughput"] = throughput_digest(throughput["summary"])
+        # Scaling likewise comes from the retained bundles, never the host's digest.
+        if isinstance(receipt, dict) and "scaling_profile" in receipt:
+            shown["scaling"] = scaling_digest(throughput.get("scaling"))
         if isinstance(shown.get("timings"), dict):
             shown["timings"] = dict(shown["timings"], queue_delay_seconds=queue_delay(api, run_id, attempt, mode))
         workflow_url = run_url(repository, run_id, attempt)
