@@ -7,7 +7,7 @@ lowercase commit SHA. Mutable branches/tags, unlisted paths and unapproved
 revisions fail. Local and container references require a separate policy
 decision before use; approved same-commit references are listed below.
 
-The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
+The `Workflow lint` job runs the checker and `tools/ci_job_environment_test.py` before
 actionlint. The checker now lives under `tools/` because the Forgejo workflows
 and their script directory were removed. Its allowlist preserves existing revisions and records staged migrations; an
 older pin remains approved only while at least one reviewed workflow still uses it.
@@ -91,7 +91,7 @@ still fail CI.
    including runtime requirements, authentication handling and post-job cleanup.
 2. Update workflow literals and `APPROVED` in the checker together. Record
    the action path, full commit, tag/date and compatibility changes here.
-3. Run `python3 tools/check_action_pins.py`, `python3 tests/action_pins_test.py`
+3. Run `python3 tools/check_action_pins.py`, `python3 tools/ci_job_environment_test.py`
    and `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.
    Mutable references and unapproved SHAs must still fail.
 4. Validate the submitted revision on the affected GitHub jobs before claiming
@@ -153,7 +153,7 @@ published site. See [Pages setup and acceptance](github-pages.md).
 
 ## Machine specifications collector
 
-Every executing job starts with `buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283`.
+Every executing job starts with `buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768`.
 This repository-owned C collector is frozen independently of candidate checkouts.
 It receives only the configured runner and matrix index; it receives no token,
 secret, candidate code, or publication authority. Its compiler bootstrap uses the

@@ -596,7 +596,7 @@ capacity is not fabricated from commit capacity; inaccessible fields stay
 unknown. Dynamic or absent facts never become inferred zeroes. Unknown and
 partial fields are visible diagnostics, with safe escaping in all outputs.
 
-`tools/check_action_pins.py` and `tests/action_pins_test.py` enforce startup order,
+`tools/check_action_pins.py` and `tools/ci_job_environment_test.py` enforce startup order,
 exact implementation/pin identity, runnerless semantics and actual-checkout
 reporting for future jobs. Add the startup step and immediate checkout identity
 steps whenever adding an executing job. Do not add conditions or error suppression

@@ -30,7 +30,7 @@ jobs:
       BUSTER_GPU_TEST_SPIRV_VAL: /usr/bin/spirv-val
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -47,7 +47,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
           source-directory: .
@@ -87,7 +87,7 @@ jobs:
           "$RUNNER_TEMP/buster-build" test_gpu_toolchains --ide build/Debug/ide --out "$RUNNER_TEMP/gpu-evidence" --profile spirv-dxc-2025.07 --profile ptx-llvm18-cuda12.4 --profile amdgcn-llvm18 --profile dxil-dxc-2025.07 --profile spirv-direct-vulkan1.2
       - name: Retain machine records in existing evidence
         if: ${{ !cancelled() }}
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: retain
           retention-directory: ${{ runner.temp }}/gpu-evidence
@@ -115,7 +115,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           requested-runner: >-
             ${{ vars.GPU_METAL_RUNNER }}
@@ -123,7 +123,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
           source-directory: .
@@ -138,7 +138,7 @@ jobs:
           "$RUNNER_TEMP/buster-build" test_gpu_toolchains --ide build/Debug/ide --out "$RUNNER_TEMP/gpu-evidence" --profile metal-xcode16.4
       - name: Retain machine records in existing evidence
         if: ${{ !cancelled() }}
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: retain
           retention-directory: ${{ runner.temp }}/gpu-evidence

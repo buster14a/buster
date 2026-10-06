@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           requested-runner: >-
             macos-26
@@ -51,7 +51,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
           source-directory: .
@@ -68,7 +68,7 @@ jobs:
           /bin/bash ios/launch_diagnostics_simulator_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-native-probes.log"
       - name: Retain machine records in existing evidence
         if: ${{ !cancelled() }}
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: retain
           retention-directory: ${{ runner.temp }}
@@ -93,7 +93,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           requested-runner: >-
             ${{ matrix.os }}
@@ -102,7 +102,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
           source-directory: .
@@ -183,7 +183,7 @@ jobs:
           printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nLifecycle suites: **%s**. Android status suite: **%s**. Android summary suite: **%s**.\n\nReproduce: `python3 ios/gnu_timeout_test.py -v`, `python3 ios/monitor_workflow_test.py -v`, `python3 ios/hosted_signing_budget_test.py`, `bash ios/install_lifecycle_test.sh`, `/bin/bash ios/launch_diagnostics_mock_test.sh`, `bash tests/mobile_ci_scripts_test.sh`, `bash android/payload_deadline_policy_test.sh`, `bash android/run_tests_test.sh`, and `python3 android/ci_summary_test.py -v` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" "$ANDROID_SUMMARY_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain machine records in existing evidence
         if: ${{ !cancelled() }}
-        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: retain
           retention-directory: ${{ runner.temp }}

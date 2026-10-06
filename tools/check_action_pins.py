@@ -14,11 +14,11 @@ import re
 import sys
 
 
-MACHINE_REPORTER_REFERENCE = "buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283"
-MACHINE_REPORTER_BLOBS = {".github/actions/machine-specifications/action.yml":"ca7b8666a9cc5fedc1189fd09cc666863f90571a","tools/machine_specifications.c":"78592d143dfaff77f3bdfb9d59bbc01884b66dc0"}
+MACHINE_REPORTER_REFERENCE = "buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768"
+MACHINE_REPORTER_BLOBS = {".github/actions/machine-specifications/action.yml":"ca7b8666a9cc5fedc1189fd09cc666863f90571a","tools/machine_specifications.c":"db34702e5adb3ddce3ab9c0dc0d93a4ef21c81ff"}
 
 APPROVED = {
-    "buster14a/buster/.github/actions/machine-specifications": {"6f2ab3357f1e0f359fbf9f40621906171c026283"},
+    "buster14a/buster/.github/actions/machine-specifications": {"a36422384d0334a53d4be73bc306b97ccdba4768"},
     "actions/upload-pages-artifact": {"fc324d3547104276b827a68afc52ff2a11cc49c9"},
     "actions/deploy-pages": {"368f82528645a54fb793d4d04e342629a3f51346"},
     "actions/checkout": {"11bd71901bbe5b1630ceea73d27597364c9af683"},
