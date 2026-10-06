@@ -3451,10 +3451,25 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // the column arithmetic does not hold; they keep the single space, which is
 // also what a hand-built result with no recovery map degrades to for every
 // token.
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup)
+//
+// The effective #pragma pack state is also a fact the stream carries: the
+// preprocessor consumes every pragma, so a later compile of this text would
+// lay records out naturally. With emit_pack_pragmas, a `#pragma pack(N)` (or
+// `#pragma pack()` for natural alignment) line is written before the first
+// token under each recorded pack change, mirroring GCC and Clang, whose -E
+// output keeps the pragma. Assembly sources pass false: the text feeds an
+// assembler, where the line would be a syntax error.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup,
+                                                            bool emit_pack_pragmas)
 {
-    enum { compiler_driver_preprocess_line_gap_cap = 8 };
+    enum
+    {
+        compiler_driver_preprocess_line_gap_cap = 8,
+        compiler_driver_preprocess_pack_line_capacity = 32,
+    };
     u64 capacity = 2;
+    u32 pack_change_count = emit_pack_pragmas ? preprocess.pack_change_count : 0;
+    capacity += (u64)pack_change_count * compiler_driver_preprocess_pack_line_capacity;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         if (preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
@@ -3469,6 +3484,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     u32 previous_end_column = 0;
     CToken previous_token = {0};
     String8 previous_spelling = {0};
+    u32 next_pack_change = 0;
+    bool at_line_start = false;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -3478,7 +3495,44 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
         }
         CSourceLocation location = c_preprocess_token_location(&preprocess, token);
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        if (length)
+        bool pack_pending = false;
+        u32 pack_alignment = 0;
+        while (next_pack_change < pack_change_count && preprocess.pack_changes[next_pack_change].token_index <= index)
+        {
+            pack_pending = true;
+            pack_alignment = preprocess.pack_changes[next_pack_change].alignment;
+            next_pack_change += 1;
+        }
+        if (pack_pending)
+        {
+            if (length)
+            {
+                if (previous_token.punctuator == C_PUNCTUATOR_BACKSLASH)
+                {
+                    text[length++] = ' ';
+                }
+                text[length++] = '\n';
+            }
+            memcpy(text + length, "#pragma pack(", 13);
+            length += 13;
+            if (pack_alignment)
+            {
+                char8 digits[10];
+                u32 digit_count = 0;
+                for (u32 rest = pack_alignment; rest; rest /= 10)
+                {
+                    digits[digit_count++] = (char8)('0' + rest % 10);
+                }
+                while (digit_count)
+                {
+                    text[length++] = digits[--digit_count];
+                }
+            }
+            text[length++] = ')';
+            text[length++] = '\n';
+            at_line_start = true;
+        }
+        if (length && !at_line_start)
         {
             if (location.file != previous_file || location.line < previous_line)
             {
@@ -3513,6 +3567,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
         }
         memcpy(text + length, spelling.pointer, spelling.length);
         length += spelling.length;
+        at_line_start = false;
         previous_line = location.line;
         previous_file = location.file;
         previous_end_column = location.column + (u32)spelling.length;
@@ -4401,7 +4456,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     {
         compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
     }
-    String8 source = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
+    String8 source = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0, false);
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = source;
@@ -4560,7 +4615,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
-        result.output = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
+        result.output = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0, true);
         if (invocation.output_path.length)
         {
             compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);

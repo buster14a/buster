@@ -478,7 +478,7 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnostic compiler_driver_preprocessed_assembly_dia
     CSourceLocation location = {0};
     if (diagnostic.primary.has_range)
     {
-        compiler_driver_preprocess_text(arena, *preprocess, diagnostic.primary.range.offset, &location);
+        compiler_driver_preprocess_text(arena, *preprocess, diagnostic.primary.range.offset, &location, false);
     }
     if (location.line)
     {

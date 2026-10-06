@@ -851,6 +851,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitT
     return result;
 }
 
+// -E output must keep the effective #pragma pack state, so compiling the .i
+// lays records out as compiling the source does (#1342). The header pops back
+// to natural alignment and then leaves pack(2) open into the main file.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_pack_state(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 header_path = buster_test_temporary_path(arguments->arena, S8("pack-state"), S8(".h"));
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("pack-state"), S8(".c"));
+    String8 preprocessed_path = buster_test_temporary_path(arguments->arena, S8("pack-state"), S8(".i"));
+    String8 object_path = buster_test_temporary_path(arguments->arena, S8("pack-state"), S8(".o"));
+    String8 header = S8("#pragma pack(push, 1)\nstruct P { char c; int i; };\n#pragma pack(pop)\n"
+                        "struct Q { char c; int i; };\n#pragma pack(2)\n");
+    String8 source = string_format(arguments->arena,
+                                   S8("#include \"{S8}\"\n"
+                                      "struct R {{ char c; int i; }};\n"
+                                      "_Static_assert(sizeof(struct P) == 5, \"P\");\n"
+                                      "_Static_assert(sizeof(struct Q) == 8, \"Q\");\n"
+                                      "_Static_assert(sizeof(struct R) == 6, \"R\");\n"
+                                      "int main(void) {{ return 0; }}\n"),
+                                   header_path);
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = 1, .search_path = 1};
+    bool written = file_write(header_path, BUSTER_SLICE_TO_BYTE_SLICE(header)) && file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        String8 direct[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-c"), source_path, S8("-o"), object_path};
+        ProcessSpawnResult direct_child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(direct), (SliceString8){0}, (SliceString8){0}, capture);
+        if (BUSTER_REQUIRE(arguments, direct_child.handle != 0))
+        {
+            ProcessWaitResult compiled = os_process_wait_deadline(arguments->arena, direct_child, 30000000);
+            BUSTER_TEST(arguments, !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS);
+        }
+        String8 preprocess[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), source_path};
+        ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess), (SliceString8){0}, (SliceString8){0}, capture);
+        if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawned, 30000000);
+            String8 output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+            BUSTER_TEST(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, string_first_sequence(output, S8("#pragma pack(1)\nstruct P")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(output, S8("#pragma pack()\nstruct Q")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(output, S8("#pragma pack(2)\nstruct R")) != BUSTER_STRING_NO_MATCH);
+            if (BUSTER_REQUIRE(arguments, file_write(preprocessed_path, waited.streams[STANDARD_STREAM_OUTPUT])))
+            {
+                String8 round_trip[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-c"), preprocessed_path, S8("-o"), object_path};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(round_trip), (SliceString8){0}, (SliceString8){0}, capture);
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult round = os_process_wait_deadline(arguments->arena, child, 30000000);
+                    BUSTER_TEST(arguments, !round.timed_out && round.result == PROCESS_RESULT_SUCCESS);
+                    BUSTER_TEST(arguments, round.streams[STANDARD_STREAM_ERROR].length == 0);
+                }
+            }
+        }
+    }
+    (void)os_file_delete(header_path);
+    (void)os_file_delete(source_path);
+    (void)os_file_delete(preprocessed_path);
+    (void)os_file_delete(object_path);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_response_file_write(Arena* arena, String8 root, String8 name, String8 content, String8* argument)
 {
@@ -23514,6 +23580,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frontend_reservation_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_pack_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
