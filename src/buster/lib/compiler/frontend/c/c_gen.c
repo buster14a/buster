@@ -2181,6 +2181,18 @@ struct CIrLabelIndex
     u32 slot_mask;
 };
 
+// The label differences of one static object's byte image, `bytes` through
+// `bytes + byte_count`, with object-relative offsets.
+typedef struct CIrLabelDifferenceSink CIrLabelDifferenceSink;
+struct CIrLabelDifferenceSink
+{
+    u8* bytes;
+    u64 byte_count;
+    IrGlobalLabelDifference* records;
+    u32 count;
+    u32 capacity;
+};
+
 typedef struct CIrConstantOperator CIrConstantOperator;
 struct CIrConstantOperator
 {
@@ -3213,6 +3225,9 @@ struct CIntegerIrBuilder
     // constant probes decline unsupported address conversions without a
     // diagnostic; the initializer supplies its source token, biased by one.
     u32 static_initializer_token_plus_one;
+    // Collects `&&label - &&base` leaves while a static object's own byte
+    // image is folded; null everywhere else, which rejects such a leaf.
+    CIrLabelDifferenceSink* label_differences;
     // Set by c_ir_construction_refused; see there.
     bool construction_refused;
     // The CDiagnosticKind `failure_message` deserves, biased by one so a
@@ -17778,7 +17793,7 @@ BUSTER_C_SHARED bool c_ir_declaration_initializer_range(CPreprocessResult prepro
 BUSTER_C_INTERNAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal* initializer)
 {
     bool valid = false;
-    if (type && initializer)
+    if (type && initializer && !initializer->label_difference_count)
     {
         if (type->kind == IR_TYPE_POINTER)
         {
@@ -44702,6 +44717,8 @@ BUSTER_C_INTERNAL bool c_ir_initializer_relocation_index_publish(CIrInitializerR
     return published;
 }
 
+BUSTER_C_INTERNAL void c_ir_label_difference_clear(CIntegerIrBuilder* builder, u8* slot, u64 size);
+
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_clear_subobject(CIntegerIrBuilder* builder, u8* bytes, u64 byte_count, u64 offset, u64 size,
                                                                     u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count,
                                                                     CIrInitializerRelocationExtent* extent, CIrInitializerRelocationIndex* relocation_index)
@@ -44711,6 +44728,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_clear_subobject(CIntegerIrBuild
     if (valid)
     {
         memset(bytes + offset, 0, (size_t)size);
+        c_ir_label_difference_clear(builder, bytes + offset, size);
         if (relocations && relocation_count && *relocation_count)
         {
             u64 relocation_start = relocation_base + offset;
@@ -44838,6 +44856,165 @@ BUSTER_C_INTERNAL bool c_ir_label_address_expression(CIntegerIrBuilder* builder,
     if (label_index_out) *label_index_out = start + 1;
     if (cast_type_out) *cast_type_out = cast_type;
     return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_fail(CIntegerIrBuilder* builder, String8 message, u32 token);
+
+// One operand of a label difference: `&&label` under any parentheses and
+// casts to an integer type or to a pointer to bytes, so the subtraction
+// counts bytes as GCC's `&&b - &&a` and `(long)&&b - (long)&&a` both do.
+BUSTER_C_INTERNAL bool c_ir_label_difference_operand(CIntegerIrBuilder* builder, u32 start, u32 end, u32* label_index_out)
+{
+    CToken* tokens = builder->preprocess.tokens;
+    bool stripping = true;
+    while (stripping && start + 2 < end && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        stripping = false;
+        if (close == end - 1)
+        {
+            start += 1;
+            end -= 1;
+            stripping = true;
+        }
+        else if (close > start + 1 && close < end)
+        {
+            IrType* cast = ir_type_from_id(&builder->program->types, c_ir_type_name(builder, start + 1, close));
+            IrType* element = cast && cast->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, cast->element_type) : 0;
+            if ((cast && c_ir_constant_type_is_integer(cast)) || (element && (element->kind == IR_TYPE_VOID || element->layout.size == 1)))
+            {
+                start = close + 1;
+                stripping = true;
+            }
+        }
+    }
+    bool label = start + 2 == end && c_ir_label_address_prefix(builder, start, start) && tokens[start + 1].kind == C_TOKEN_IDENTIFIER;
+    if (label)
+    {
+        *label_index_out = start + 1;
+    }
+    return label;
+}
+
+// `&&label - &&base`, each operand as c_ir_label_difference_operand reads it,
+// optionally parenthesized or cast to an integer type as a whole. The range is
+// short and almost never contains `&&`, which is tested first.
+BUSTER_C_INTERNAL bool c_ir_label_difference_expression(CIntegerIrBuilder* builder, u32 start, u32 end, u32* label_index_out, u32* base_index_out)
+{
+    CToken* tokens = builder->preprocess.tokens;
+    bool candidate = false;
+    for (u32 index = start; !candidate && index < end; index += 1)
+    {
+        candidate = c_token_is_punctuator(&tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND);
+    }
+    bool stripping = candidate;
+    while (stripping && start + 2 < end && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        stripping = false;
+        if (close == end - 1)
+        {
+            start += 1;
+            end -= 1;
+            stripping = true;
+        }
+        else if (close > start + 1 && close < end)
+        {
+            // Only a cast of the whole parenthesized difference comes off
+            // here; one that covers just the first operand belongs to it.
+            IrType* cast = c_token_is_punctuator(&tokens[close + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                                   c_ir_matching_delimiter(builder->preprocess, close + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                           C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1
+                               ? ir_type_from_id(&builder->program->types, c_ir_type_name(builder, start + 1, close))
+                               : 0;
+            if (cast && c_ir_constant_type_is_integer(cast))
+            {
+                start = close + 1;
+                stripping = true;
+            }
+        }
+    }
+    bool difference = false;
+    u32 depth = 0;
+    for (u32 index = start; candidate && !difference && index < end; index += 1)
+    {
+        depth += c_token_is_punctuator(&tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        depth -= depth && c_token_is_punctuator(&tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (!depth && index > start && c_token_is_punctuator(&tokens[index], C_PUNCTUATOR_MINUS))
+        {
+            difference = c_ir_label_difference_operand(builder, start, index, label_index_out) &&
+                         c_ir_label_difference_operand(builder, index + 1, end, base_index_out);
+        }
+    }
+    return difference;
+}
+
+// Drops the recorded differences a subobject clear at `slot` overwrites.
+BUSTER_C_INTERNAL void c_ir_label_difference_clear(CIntegerIrBuilder* builder, u8* slot, u64 size)
+{
+    CIrLabelDifferenceSink* sink = builder->label_differences;
+    if (sink && sink->count && slot >= sink->bytes && (u64)(slot - sink->bytes) <= sink->byte_count)
+    {
+        u64 begin = (u64)(slot - sink->bytes);
+        u64 end = size > sink->byte_count - begin ? sink->byte_count : begin + size;
+        u32 kept = 0;
+        for (u32 index = 0; index < sink->count; index += 1)
+        {
+            IrGlobalLabelDifference difference = sink->records[index];
+            if (difference.offset >= end || difference.offset + difference.size <= begin)
+            {
+                sink->records[kept++] = difference;
+            }
+        }
+        sink->count = kept;
+    }
+}
+
+// Records `&&label - &&base` for the `size`-byte integer at `slot`, which must
+// lie in the static object being folded; the slot stays zero until the
+// backend places the function's blocks.
+BUSTER_C_INTERNAL bool c_ir_label_difference_record(CIntegerIrBuilder* builder, u8* slot, u64 size, u32 label_index, u32 base_index, u32 location)
+{
+    CIrLabelDifferenceSink* sink = builder->label_differences;
+    CToken* tokens = builder->preprocess.tokens;
+    char8 const* spelling_base = builder->preprocess.spelling_base;
+    CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(spelling_base, tokens[label_index])) : 0;
+    CIrLabel* base = builder->function ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(spelling_base, tokens[base_index])) : 0;
+    bool inside = sink && slot >= sink->bytes && (u64)(slot - sink->bytes) <= sink->byte_count && size <= sink->byte_count - (u64)(slot - sink->bytes);
+    bool recorded = false;
+    if (!label || !base)
+    {
+        c_ir_constant_initializer_fail(builder, S8("a label difference in static storage must name labels of the defining function"), location);
+    }
+    else if (!inside || (size != 1 && size != 2 && size != 4 && size != 8))
+    {
+        c_ir_constant_initializer_fail(builder, S8("a label difference must directly initialize a static integer of at most 64 bits"), location);
+    }
+    else
+    {
+        c_ir_label_difference_clear(builder, slot, size);
+        if (sink->count == sink->capacity)
+        {
+            u32 capacity = sink->capacity ? sink->capacity * 2 : 8;
+            IrGlobalLabelDifference* records = arena_allocate(builder->arena, IrGlobalLabelDifference, capacity);
+            if (sink->count)
+            {
+                memcpy(records, sink->records, sizeof(*records) * sink->count);
+            }
+            sink->records = records;
+            sink->capacity = capacity;
+        }
+        memset(slot, 0, (size_t)size);
+        sink->records[sink->count++] = (IrGlobalLabelDifference){
+            .symbol = builder->function->symbol,
+            .label_block = label->block,
+            .base_block = base->block,
+            .size = (u32)size,
+            .offset = (u64)(slot - sink->bytes),
+        };
+        recorded = true;
+    }
+    return recorded;
 }
 
 BUSTER_C_INTERNAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* builder, IrTypeId destination_type, u32 start, u32 end, u64* value_out)
@@ -45176,6 +45353,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     return false;
                 }
                 c_ir_ext80_store_bytes(bytes + task.offset, significand, exponent_sign);
+                continue;
+            }
+            u32 difference_label = 0;
+            u32 difference_base = 0;
+            if (c_ir_constant_type_is_integer(type) && c_ir_label_difference_expression(builder, task.start, task.end, &difference_label, &difference_base))
+            {
+                if (task.is_bit_field ||
+                    !c_ir_label_difference_record(builder, bytes + task.offset, type->layout.size, difference_label, difference_base, task.start))
+                {
+                    return false;
+                }
                 continue;
             }
             CIrConstantValue evaluated = {0};
@@ -49575,7 +49763,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
                 continue;
             }
             IrType* type = ir_type_from_id(&builder->program->types, global->type);
-            if ((!is_constexpr && !global->is_read_only) || !type || type->is_volatile || type->is_atomic)
+            if ((!is_constexpr && !global->is_read_only) || !type || type->is_volatile || type->is_atomic || global->label_difference_count)
             {
                 return false;
             }
@@ -53322,6 +53510,24 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
         // and every other wide-float initializer shape stay rejected.
         return c_ir_ext80_global_literal(builder, declaration, type, start, end, global);
     }
+    u32 difference_label = 0;
+    u32 difference_base = 0;
+    if (c_ir_constant_type_is_integer(type) && c_ir_label_difference_expression(builder, start, end, &difference_label, &difference_base))
+    {
+        u8* bytes = arena_allocate_zeroed(arena, u8, type->layout.size);
+        CIrLabelDifferenceSink differences = {.bytes = bytes, .byte_count = type->layout.size};
+        builder->label_differences = &differences;
+        bool recorded = c_ir_label_difference_record(builder, bytes, type->layout.size, difference_label, difference_base, start);
+        builder->label_differences = 0;
+        if (recorded)
+        {
+            global->bytes = (ByteSlice){.pointer = bytes, .length = type->layout.size};
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+            global->label_differences = differences.records;
+            global->label_difference_count = differences.count;
+        }
+        return recorded;
+    }
     if (type->kind == IR_TYPE_POINTER)
     {
         if (c_ir_global_string_pointer_initializer(builder, type, start, end, global))
@@ -53625,11 +53831,16 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
         IrGlobalRelocation* relocations = arena_allocate(arena, IrGlobalRelocation, relocation_capacity);
         u32 relocation_count = 0;
         memset(bytes, 0, type->layout.size);
-        if (!c_ir_constant_initializer_bytes(builder, start, end, global->type, bytes, type->layout.size, relocations, &relocation_count, relocation_capacity))
+        CIrLabelDifferenceSink differences = {.bytes = bytes, .byte_count = type->layout.size};
+        builder->label_differences = &differences;
+        bool folded = c_ir_constant_initializer_bytes(builder, start, end, global->type, bytes, type->layout.size, relocations, &relocation_count,
+                                                      relocation_capacity);
+        builder->label_differences = 0;
+        if (!folded)
         {
             return false;
         }
-        if (c_ir_global_canonicalize_zero_bytes(global, bytes, type->layout.size, relocation_count))
+        if (!differences.count && c_ir_global_canonicalize_zero_bytes(global, bytes, type->layout.size, relocation_count))
         {
             return true;
         }
@@ -53640,6 +53851,8 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
         global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
         global->relocations = relocations;
         global->relocation_count = relocation_count;
+        global->label_differences = differences.records;
+        global->label_difference_count = differences.count;
         return true;
     }
     if (type->kind == IR_TYPE_ARRAY && c_ir_tokens_are_string_literals(preprocess, start, end))
@@ -53757,9 +53970,12 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
 BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
 {
     u32 previous_initializer = builder->static_initializer_token_plus_one;
+    CIrLabelDifferenceSink* previous_differences = builder->label_differences;
     builder->static_initializer_token_plus_one = 0;
+    builder->label_differences = 0;
     bool result = c_ir_global_initializer_impl(builder, declaration, type, global);
     builder->static_initializer_token_plus_one = previous_initializer;
+    builder->label_differences = previous_differences;
     return result;
 }
 

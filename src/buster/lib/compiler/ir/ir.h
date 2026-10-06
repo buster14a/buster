@@ -595,11 +595,28 @@ struct IrGlobalRelocation
     u8 reserved[3];
 };
 
+// A GNU label difference in a static initializer: `&&label - &&base`, both
+// labels of the function `symbol`, stored as a `size`-byte two's-complement
+// integer at `offset`. Unlike a relocation it is a link-time constant that no
+// object relocation can express on every target, so the backend that places
+// the function's blocks writes the value into the data image; the bytes it
+// overwrites are zero. A global carrying any is never a compile-time constant.
+typedef struct IrGlobalLabelDifference IrGlobalLabelDifference;
+struct IrGlobalLabelDifference
+{
+    IrSymbolId symbol;
+    IrBlockId label_block;
+    IrBlockId base_block;
+    u32 size;
+    u64 offset;
+};
+
 typedef struct IrGlobal IrGlobal;
 struct IrGlobal
 {
     ByteSlice bytes;
     IrGlobalRelocation* relocations;
+    IrGlobalLabelDifference* label_differences;
     IrSymbolId symbol;
     IrSymbolId initializer_symbol;
     IrTypeId type;
@@ -607,6 +624,7 @@ struct IrGlobal
     s64 initializer_addend;
     u64 initializer_bits;
     u32 relocation_count;
+    u32 label_difference_count;
     u32 alignment;
     IrGlobalInitializerKind initializer_kind;
     bool initializer_is_negative;
@@ -871,6 +889,10 @@ struct IrModule
     // without walking the global table; the count is zero for every
     // translation unit without such an initializer, which is nearly all.
     u32 label_address_relocation_count;
+    // How many label differences across `globals` (IrGlobalLabelDifference),
+    // counted the same way so a backend skips block-offset bookkeeping when
+    // there are none.
+    u32 label_difference_count;
     bool local_promotion_complete;
     IrLocalPromotionStatistics local_promotion;
     bool fast_complete;

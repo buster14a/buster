@@ -4728,6 +4728,7 @@ IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
     {
         module->label_address_relocation_count += global.relocations[relocation_index].is_label_address ? 1 : 0;
     }
+    module->label_difference_count += global.label_difference_count;
     return result;
 }
 
@@ -5403,6 +5404,33 @@ BUSTER_GLOBAL_LOCAL bool ir_validate_unordered_relocations_overlap_free(IrProgra
     return overlap_free;
 }
 
+// Each label difference names two blocks of one lowered function and a whole
+// power-of-two integer slot of a byte image, still zero, for the backend to
+// fill once the blocks are placed.
+BUSTER_GLOBAL_LOCAL bool ir_validate_label_differences(IrProgram* program, IrModule* module, IrGlobal* global, IrType* type,
+                                                       IrLabelOwnerIndex* label_owners)
+{
+    bool valid = global->label_differences && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer &&
+                 global->bytes.length == type->layout.size;
+    for (u32 index = 0; valid && index < global->label_difference_count; index += 1)
+    {
+        IrGlobalLabelDifference* difference = global->label_differences + index;
+        IrSymbol* owner_symbol = ir_symbol_from_id(&program->symbols, difference->symbol);
+        IrFunction* owner = owner_symbol && owner_symbol->kind == IR_SYMBOL_FUNCTION && owner_symbol->is_definition
+                                ? ir_module_function_for_symbol(program, module, label_owners, difference->symbol)
+                                : 0;
+        u32 size = difference->size;
+        valid = owner && owner->state == IR_FUNCTION_LOWERED && difference->label_block.value < owner->block_count &&
+                difference->base_block.value < owner->block_count && (size == 1 || size == 2 || size == 4 || size == 8) &&
+                difference->offset <= global->bytes.length && size <= global->bytes.length - difference->offset;
+        for (u32 byte = 0; valid && byte < size; byte += 1)
+        {
+            valid = global->bytes.pointer[difference->offset + byte] == 0;
+        }
+    }
+    return valid;
+}
+
 // One global's alignment, initializer, and relocation table. Nothing here names
 // a function, a block or an instruction, so the caller keeps the invalid ids the
 // module-level result already carries and only the error kind travels back.
@@ -5519,6 +5547,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
             }
             if (error == IR_VALIDATION_NONE && !ordered &&
                 !ir_validate_unordered_relocations_overlap_free(program, global, pointer_size, largest_offset))
+            {
+                error = IR_VALIDATION_OPERATION;
+            }
+            if (error == IR_VALIDATION_NONE && global->label_difference_count &&
+                !ir_validate_label_differences(program, module, global, type, label_owners))
             {
                 error = IR_VALIDATION_OPERATION;
             }
