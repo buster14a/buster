@@ -15374,7 +15374,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     // multiple canonical forms.  The first variant is the fixed/default path;
     // callers can extend this switch without changing MachineInstruction.
     u32 variant_index = 0;
-    if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 39 ||
+    if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 39 || sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 41 ||
         sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 42)
     {
         variant_index = payload < sequence->variant_count ? payload : UINT32_MAX;
