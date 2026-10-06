@@ -8,6 +8,8 @@
 // machine_test_sparse_local_state compares sparse and row-based local discovery.
 // machine_test_source_scan_writers carries source-authority brace state per body;
 // machine_test_source_writer_guards pins its sanitized token/guard classifications.
+// machine_test_condition_bindings checks exact-key/condition joins and valid
+// neighboring-key mutations without altering the published backend plans.
 // machine_test_x64_variadic_workspace checks reused rows across ABI shape changes.
 
 #include <buster/tests/compiler/codegen/machine_test.h>
@@ -15,6 +17,7 @@
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/assembly.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
@@ -206,8 +209,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_traffic(UnitTestArgument
     }
     return result;
 }
-// Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
-// bounded producer comparison also checks every byte outside the instruction.
+// Retained exact identities must also agree with the intended condition.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_condition_bindings(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineX64ConditionBindingAudit before = machine_x64_test_condition_binding_audit();
+    BUSTER_TEST_RAW(arguments, before.checked_bindings == 57,
+                    string_format(arguments->arena, S8("condition bindings checked: {u32}, expected 57"), before.checked_bindings));
+    BUSTER_TEST_RAW(arguments, before.mismatched_bindings == 0,
+                    string_format(arguments->arena, S8("condition bindings mismatched: {u32}"), before.mismatched_bindings));
+
+    // Both neighboring keys retain their real, valid snapshot hashes. This
+    // catches semantic misbinding that ordinary stale-key checking accepts.
+    BUSTER_TEST(arguments, machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_EQUAL,
+                                                                  10249u, UINT64_C(0x5b6e3cd6eb63b76c)));
+    BUSTER_TEST(arguments, machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_NOT_EQUAL,
+                                                                  10251u, UINT64_C(0x4d8e220c403f8696)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_EQUAL,
+                                                                   10251u, UINT64_C(0x4d8e220c403f8696)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_NOT_EQUAL,
+                                                                   10249u, UINT64_C(0x5b6e3cd6eb63b76c)));
+    BUSTER_TEST(arguments, machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_EQUAL,
+                                                                  10265u, UINT64_C(0x261b81212af08017)));
+    BUSTER_TEST(arguments, machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_NOT_EQUAL,
+                                                                  10267u, UINT64_C(0x99647caf50cf7fff)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_EQUAL,
+                                                                   10267u, UINT64_C(0x99647caf50cf7fff)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_NOT_EQUAL,
+                                                                   10265u, UINT64_C(0x261b81212af08017)));
+    BUSTER_TEST(arguments, machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_PARITY,
+                                                                  10647u, UINT64_C(0x65dc8e342334f3cb)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_NOT_PARITY,
+                                                                   10647u, UINT64_C(0x65dc8e342334f3cb)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_JUMP, BUSTER_X86_CONDITION_EQUAL,
+                                                                   10265u, UINT64_C(0x261b81212af08017)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_MOVE, BUSTER_X86_CONDITION_EQUAL,
+                                                                   10265u, UINT64_C(0x261b81212af08017)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_COUNT, BUSTER_X86_CONDITION_EQUAL,
+                                                                   10265u, UINT64_C(0x261b81212af08017)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_COUNT,
+                                                                   10265u, UINT64_C(0x261b81212af08017)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_EQUAL,
+                                                                   10265u, UINT64_C(0x261b81212af08016)));
+    BUSTER_TEST(arguments, !machine_x64_test_condition_form_agrees(BUSTER_X86_CONDITION_FAMILY_SET, BUSTER_X86_CONDITION_EQUAL,
+                                                                   UINT32_MAX, UINT64_C(0x261b81212af08017)));
+    MachineX64ConditionBindingAudit after = machine_x64_test_condition_binding_audit();
+    BUSTER_TEST(arguments, after.checked_bindings == before.checked_bindings && after.mismatched_bindings == before.mismatched_bindings);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -10103,6 +10153,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_condition_bindings);
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_frame_chunk);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);

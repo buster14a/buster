@@ -291,14 +291,17 @@ runner because that box is the CI wall-time gate and its PE rows already run
 under wine on Linux. GitHub CI runs it on all four of its Unix runners, which
 is what makes the ELF and Mach-O rows execute natively at both x86-64 and
 AArch64; those images carry no wine, so their PE rows stay on the oracle.
-The combination matrix shares one multi-config build tree across configurations
-when their configure-time policy matches. Clang omits unsanitized Debug because
-sanitized Debug provides the stronger coverage; it builds and runs unsanitized
-Release plus sanitized Debug and Release. Non-Apple Clang configurations use
-dedicated trees because their fuzz-runtime policy differs, while AppleClang's
-two sanitized configurations share one cross-config Ninja graph. GCC and Zig
-compile unsanitized Debug only and do not execute it; MSVC does the same on
-Windows. Only optimized, unsanitized Clang/AppleClang builds use the requested
+The combination matrix gives every configuration its own single-configuration
+tree. Clang omits unsanitized Debug because sanitized Debug provides the
+stronger build coverage; it builds and runs unsanitized Release and the
+checks-enabled sanitized Release, and compiles and links sanitized Debug
+without running it (#2657, see the
+[sanitizer execution policy](../ci-combination-shards.md#sanitizer-execution-policy-2657)).
+Where libFuzzer exists, the unsanitized and sanitized Release trees are the
+fuzz-enabled builds. GCC and Zig compile unsanitized Debug only and do not
+execute it; MSVC does the same on Windows. For a local sanitized Debug test
+run use `./build.sh generate --sanitize` and `./build.sh build -t test_all`.
+Only optimized, unsanitized Clang/AppleClang builds use the requested
 unity build; every other build uses split translation units. TCC is retained
 only as the bootstrap compiler for `build.c` and is omitted from all
 application/compiler combinations.
@@ -324,15 +327,16 @@ work, use every CPU instead of one each (#892 measured macOS arm64 checks at
 compile-only trees). A matrix without test trees, or one whose concurrent
 self-host worker would then exceed the CPU budget, keeps the one-job-per-tree
 allocation (`matrix_superbuild_allocate_jobs`). With two or more test trees and
-no self-host worker (the hosted checks shards), test phases are serialized:
-each test tree keeps its share as the inner Ninja quota but runs its tests with
-the whole CPU budget, one tree at a time in declaration order (sanitized Debug
-first). The superbuild makes each tree's test target wait for the previous test
-tree's, and the phase plan records that edge as `after`. Builds are not
-serialized, so a test phase can still overlap the remaining compiles; that
-deliberately extends the bounded overlap above to the sanitized Release build
-(up to about twice the CPU count in nominal workers for its duration) in
-exchange for no idle CPUs during the long sanitized Debug test tail. Sanitized
+no self-host worker, test phases are serialized: each test tree keeps its
+share as the inner Ninja quota but runs its tests with the whole CPU budget,
+one tree at a time in declaration order. The superbuild makes each tree's test
+target wait for the previous test tree's, and the phase plan records that edge
+as `after`. Builds are not serialized, so a test phase can still overlap the
+remaining compiles (up to about twice the CPU count in nominal workers) in
+exchange for no idle CPUs during a long sanitized test tail. Before #2657 this
+applied to the grouped hosted checks shards (sanitized Debug and Release
+tests); since #2657 every hosted desktop shard has at most one test tree, so
+serialization remains only for multi-test-tree local selections. Sanitized
 Clang CI trees run `test_all` through the isolated-process runner
 (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a four-worker quota into two
 two-worker processes and runs the ordinary invocation below four. Larger hosts retain the weighted
