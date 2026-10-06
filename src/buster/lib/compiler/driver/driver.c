@@ -1483,6 +1483,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             compiler_driver_argument_error(arena, &invocation, S8("unsupported debug option: {S8}"), argument);
             break;
         }
+        if (string_equal(argument, S8("-dM")))
+        {
+            invocation.dump_macros = true;
+            continue;
+        }
         if (string_equal(argument, S8("-nostdinc")))
         {
             invocation.no_standard_includes = true;
@@ -2217,6 +2222,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.action != COMPILER_DRIVER_ACTION_PREPROCESS && invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.dump_macros && invocation.has_gpu_target && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for a GPU target"), S8("-dM"));
     }
     compiler_driver_validate_spirv_invocation(&invocation);
     // Only the x86-64 Linux writer places a position-independent image. The
@@ -4385,6 +4394,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .assembly_comment_lines = true,
+                                                    .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     file_map_unmap(source_file);
     String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, diagnostics, &preprocess, preprocess.diagnostics,
@@ -4400,7 +4410,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     {
         compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
     }
-    String8 source = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
+    String8 source = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ? c_preprocess_detail(preprocess)->macro_dump
+                                                                                                      : compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = source;
@@ -4477,6 +4488,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                     .omit_spelled_bytes = invocation.omit_spelled_bytes,
+                                                    .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of
@@ -4500,7 +4512,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
-        result.output = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
+        result.output = invocation.dump_macros ? c_preprocess_detail(preprocess)->macro_dump : compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
         if (invocation.output_path.length)
         {
             compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);

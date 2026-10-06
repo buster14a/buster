@@ -24232,6 +24232,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverResult preprocess = compiler_driver_execute_invocation(arguments->arena, preprocess_invocation);
     BUSTER_TEST(arguments, preprocess.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(preprocess.output, S8("int answer = 37 ;")) != BUSTER_STRING_NO_MATCH);
+    // `-E -dM` lists the macros alive at the end of preprocessing: predefines,
+    // command-line and source definitions, function-like parameter lists, and
+    // neither undefined macros nor the dynamic builtins. Without -E the option
+    // is ignored, as GCC does.
+    {
+        TemporalArena dump_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* dump_arena = dump_temporary.arena;
+        String8 dump_source_path = buster_test_temporary_path(dump_arena, S8("buster-driver-dump-macros"), S8(".c"));
+        String8 dump_source = S8("#define OBJ 1 + 2\n#define FUN(a, b) a*b\n#define VAR(a, ...) a __VA_ARGS__\n#define NAMED(a, rest...) rest\n"
+                                 "#define EMPTY\n#define GONE 3\n#undef GONE\nint x = __LINE__;\n");
+        BUSTER_TEST(arguments, file_write(dump_source_path, (ByteSlice){.pointer = (u8*)dump_source.pointer, .length = dump_source.length}));
+        String8 dump_command_line[] = {S8("-E"), S8("-dM"), S8("-DCLI=9"), dump_source_path};
+        CompilerDriverResult dump = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dump_command_line)));
+        BUSTER_TEST(arguments, dump.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("#define __STDC__ 1\n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("#define CLI 9\n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("#define OBJ 1 + 2\n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("#define FUN(a,b) a*b\n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("#define VAR(a,...) a __VA_ARGS__\n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("#define NAMED(a,rest...) rest\n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("#define EMPTY \n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("GONE")) == BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("__LINE__")) == BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("__FILE__")) == BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("__COUNTER__")) == BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dump.output, S8("int x")) == BUSTER_STRING_NO_MATCH);
+        // The order is stable: a second run is byte-identical.
+        CompilerDriverResult dump_again = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dump_command_line)));
+        BUSTER_TEST(arguments, string_equal(dump.output, dump_again.output));
+        String8 dump_without_preprocess[] = {S8("-dM"), S8("-fsyntax-only"), dump_source_path};
+        CompilerDriverInvocation dump_syntax = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dump_without_preprocess));
+        BUSTER_TEST(arguments, dump_syntax.error == COMPILER_DRIVER_ERROR_NONE);
+        scratch_end(dump_temporary);
+    }
     // `-D` values: an `=` with nothing after it is an empty replacement list --
     // the spelling a build uses to switch a decoration off -- while the form
     // with no `=` at all is the one that means `1`.

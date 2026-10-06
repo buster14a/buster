@@ -155,6 +155,9 @@ struct CompilerDriverInvocation
     // other preprocessed count is still gathered. The cc command sets it when
     // it prints neither report.
     bool omit_spelled_bytes;
+    // `-dM`: with -E, print the macros defined at the end of preprocessing as
+    // `#define` lines instead of the preprocessed text. Ignored without -E.
+    bool dump_macros;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
     String8 gpu_architecture;
