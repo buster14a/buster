@@ -1,0 +1,74 @@
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'docs/**'
+      - 'LICENSES/**'
+      - 'AGENTS.md'
+      - 'PROJECTS.md'
+      - 'README.md'
+      - 'THIRD_PARTY_NOTICES.md'
+      - 'tools/pages_test.py'
+      - 'tools/check_action_pins.py'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    paths:
+      - 'site/**'
+      - 'docs/**'
+      - 'LICENSES/**'
+      - 'AGENTS.md'
+      - 'PROJECTS.md'
+      - 'README.md'
+      - 'THIRD_PARTY_NOTICES.md'
+      - 'tools/pages_test.py'
+      - 'tools/check_action_pins.py'
+      - '.github/workflows/pages.yml'
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Pages validation and artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Validate site and deployment boundaries
+        run: python3 tools/pages_test.py -v
+      - name: Check approved action pins
+        run: python3 tools/check_action_pins.py .github/workflows/pages.yml
+      - name: Package static site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+          retention-days: 1
+
+  deploy:
+    name: Deploy GitHub Pages
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy validated artifact
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

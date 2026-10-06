@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Queue/runner-assignment tests for tools/github_ci_time.py (#1805) and the
 macOS runner demand of auxiliary workflows (#1825)."""
+import argparse
+import copy
 from datetime import datetime, timezone
 import io
 from pathlib import Path
@@ -12,13 +14,14 @@ from unittest import mock
 import urllib.parse
 
 import github_ci_time
+import merge_queue_admission as admission
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ChecksLayoutCLITests(unittest.TestCase):
-    def test_gate_cli_keeps_the_combined_default_and_accepts_explicit_split(self):
-        for arguments, expected in (([], "combined"), (["--checks-layout", "combined"], "combined"),
+    def test_gate_cli_uses_the_split_default_and_keeps_explicit_layouts(self):
+        for arguments, expected in (([], "split"), (["--checks-layout", "combined"], "combined"),
                                     (["--checks-layout", "split"], "split")):
             with self.subTest(arguments=arguments):
                 with mock.patch.object(sys, "argv", ["github_ci_time.py", "require-jobs", *arguments]), \
@@ -26,6 +29,37 @@ class ChecksLayoutCLITests(unittest.TestCase):
                         mock.patch.object(sys, "stdout", io.StringIO()):
                     self.assertEqual(github_ci_time.main(), 0)
                 self.assertEqual(gate.call_args.args[0].checks_layout, expected)
+
+    def test_only_exact_manual_combined_refs_override_the_split_default(self):
+        branches = ("codex/ci-checks-combined-overlap", "codex/ci-checks-combined-all-builds",
+                    "codex/2120-evidence-v2-combined-overlap", "codex/2120-evidence-v2-combined-all-builds")
+        self.assertEqual(github_ci_time.COMBINED_QUALIFICATION_BRANCHES, branches)
+        self.assertEqual(len(github_ci_time.combination_jobs()), 29)
+        self.assertEqual(len(github_ci_time.HISTORICAL_SPLIT_COMBINATION_JOBS), 27)
+        self.assertEqual(len(github_ci_time.combination_jobs("combined")), 21)
+        for branch in branches:
+            for event in ("pull_request", "push", "merge_group", "workflow_dispatch"):
+                with self.subTest(event=event, branch=branch):
+                    expected = "combined" if event == "workflow_dispatch" else "split"
+                    self.assertEqual(github_ci_time.checks_layout_for_run(
+                        {"event": event, "head_branch": branch}, "refs/heads/" + branch), expected)
+            for foreign in ("refs/heads/" + branch, branch + "-extra", "other/" + branch):
+                with self.subTest(foreign=foreign):
+                    self.assertEqual(github_ci_time.checks_layout_for_run(
+                        {"event": "workflow_dispatch", "head_branch": foreign}, "refs/heads/" + foreign), "split")
+            for ref in (None, "refs/tags/" + branch):
+                self.assertEqual(github_ci_time.checks_layout_for_run(
+                    {"event": "workflow_dispatch", "head_branch": branch}, ref), "split")
+            with self.assertRaisesRegex(ValueError, "API branch"):
+                github_ci_time.checks_layout_for_run(
+                    {"event": "workflow_dispatch", "head_branch": "main"}, "refs/heads/" + branch)
+        for branch in (None, "main", "v1.0", "codex/ci-checks-split-overlap",
+                       "codex/2120-evidence-v2-split-overlap"):
+            self.assertEqual(github_ci_time.checks_layout_for_run(
+                {"event": "workflow_dispatch", "head_branch": branch}), "split")
+        for event in (None, "schedule", "repository_dispatch"):
+            with self.assertRaisesRegex(ValueError, "unsupported CI event"):
+                github_ci_time.checks_layout_for_run({"event": event})
 
     def test_unknown_layout_cannot_relax_the_inventory_gate(self):
         for layout in ("all", "mixed", "sanitized-debug", ""):
@@ -39,6 +73,152 @@ class ChecksLayoutCLITests(unittest.TestCase):
                         github_ci_time.main()
                 self.assertEqual(failure.exception.code, 2)
                 gate.assert_not_called()
+
+
+class ReconciledInventoryTests(unittest.TestCase):
+    """#2388: replay the hosted row shape without relaxing workload proof."""
+
+    RUN = 37027518864
+    HEAD = "f466463ea852ef00478ef1aa5f56bfe9f8a6a7fb"
+
+    def setUp(self):
+        self.run = {"id": self.RUN, "run_attempt": 1, "head_sha": self.HEAD,
+                    "path": ".github/workflows/ci.yml", "event": "merge_group"}
+        self.jobs = []
+        for index, name in enumerate(github_ci_time.combination_jobs()):
+            self.jobs.append({"id": 1000 + index, "name": name, "run_id": self.RUN,
+                              "run_attempt": 1, "head_sha": self.HEAD,
+                              "status": "in_progress" if name == "CI complete" else "completed",
+                              "conclusion": None if name == "CI complete" else "success",
+                              "steps": [{"name": step, "status": "completed", "conclusion": "success"}
+                                        for step in github_ci_time._required_job_steps(name)]})
+        self.checks = []
+        for identity, (name, prefix) in zip((110906094381, 110906108065),
+                                          github_ci_time.RECONCILED_CHECK_MARKERS.items()):
+            self.jobs.append({"id": identity, "name": name, "run_id": self.RUN,
+                              "run_attempt": 1, "head_sha": self.HEAD, "status": "in_progress",
+                              "conclusion": None, "steps": [], "labels": [], "runner_id": None})
+            self.checks.append({"id": identity, "name": name, "head_sha": self.HEAD,
+                                "app": {"id": 15368}, "external_id": prefix + self.HEAD,
+                                "status": "in_progress", "conclusion": None})
+
+    def gate(self, jobs=None, checks=None):
+        jobs = self.jobs if jobs is None else jobs
+        checks = self.checks if checks is None else checks
+        def reply(repository, path, token, **kwargs):
+            if path == f"actions/runs/{self.RUN}":
+                return self.run
+            if path.startswith(f"actions/runs/{self.RUN}/jobs?"):
+                return {"total_count": len(jobs), "jobs": jobs}
+            if path.startswith(f"commits/{self.HEAD}/check-runs?"):
+                return {"total_count": len(checks), "check_runs": checks}
+            if path.startswith("check-runs/") and "/annotations" in path:
+                return []
+            raise AssertionError(path)
+        arguments = argparse.Namespace(repository="buster14a/buster", run_id=self.RUN, run_attempt=1,
+                                       checks_layout="split", event_name=None, event_path=None)
+        with mock.patch.object(github_ci_time, "api_get", side_effect=reply), \
+                mock.patch.object(github_ci_time.time, "sleep"):
+            result = github_ci_time.require_jobs(arguments)
+        return result
+
+    def test_metadata_contract_matches_existing_trusted_publisher(self):
+        self.assertEqual(github_ci_time.GITHUB_ACTIONS_APP_ID, admission.GITHUB_ACTIONS_APP_ID)
+        self.assertEqual(github_ci_time.RECONCILED_CHECK_MARKERS,
+                         {admission.CONTEXT: admission.SCHEMA + ":",
+                          admission.RETIREMENT_CONTEXT: admission.RETIREMENT_MARKER + ":"})
+
+    def test_pending_success_and_failed_metadata_are_retained_outside_workloads(self):
+        for status, conclusion in (("in_progress", None), ("completed", "success"),
+                                   ("completed", "failure"), ("completed", "cancelled")):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.setUp()
+                for row in self.jobs[-2:] + self.checks:
+                    row.update(status=status, conclusion=conclusion)
+                result = self.gate()
+                self.assertTrue(result["success"], result["errors"])
+                self.assertEqual(len(result["jobs"]), len(github_ci_time.combination_jobs()))
+                self.assertEqual([record["job"] for record in result["reconciled_checks"]], self.jobs[-2:])
+                self.assertEqual([record["check"] for record in result["reconciled_checks"]], self.checks)
+                self.assertEqual(result["job_metadata"]["snapshot_attempts"], 1)
+
+    def test_no_name_or_empty_step_exemption_without_unique_provenance(self):
+        changes = (("id", 1), ("name", "Unknown admission"), ("head_sha", "b" * 40),
+                   ("app", {"id": 1}), ("external_id", "unproved"),
+                   ("external_id", github_ci_time.RECONCILED_CHECK_MARKERS["Main integration admission"] + "b" * 40))
+        for field, value in changes:
+            with self.subTest(field=field, value=value):
+                checks = copy.deepcopy(self.checks)
+                checks[0][field] = value
+                self.assertFalse(self.gate(checks=checks)["success"])
+        for checks in ([], self.checks + [copy.deepcopy(self.checks[0])],
+                       self.checks + [dict(self.checks[0], id=9999)]):
+            self.assertFalse(self.gate(checks=checks)["success"])
+
+    def test_unrelated_check_rows_cannot_hide_omissions_with_duplicate_or_malformed_ids(self):
+        duplicate = self.checks + [{"id": 9998, "name": "Other first"},
+                                   {"id": 9998, "name": "Other second"}]
+        self.assertFalse(self.gate(checks=duplicate)["success"])
+        for identity in (None, True, "9998", {"bad": 1}, 0, -1):
+            with self.subTest(identity=identity):
+                self.assertFalse(self.gate(checks=self.checks + [{"id": identity, "name": "Other"}])["success"])
+        self.assertTrue(self.gate(checks=self.checks + [{"id": 9998, "name": "Other"}])["success"])
+
+    def test_wrong_run_attempt_execution_and_duplicate_rows_remain_failures(self):
+        for field, value in (("id", None), ("id", True), ("id", {"bad": 1}),
+                             ("run_id", 1), ("head_sha", "b" * 40), ("run_attempt", 2),
+                             ("run_attempt", True), ("steps", [{"name": "Executed"}]), ("runner_id", 42)):
+            with self.subTest(field=field, value=value):
+                jobs = copy.deepcopy(self.jobs)
+                jobs[-2][field] = value
+                self.assertFalse(self.gate(jobs=jobs)["success"])
+        for duplicate in (copy.deepcopy(self.jobs[-2]), dict(self.jobs[-2], id=9999),
+                          dict(self.jobs[0], id=self.jobs[-2]["id"])):
+            self.assertFalse(self.gate(jobs=self.jobs + [duplicate])["success"])
+
+    def test_missing_unknown_failed_workloads_and_required_steps_remain_failures(self):
+        controls = [self.jobs[1:], self.jobs + [dict(self.jobs[0], name="Unknown workload", id=9999)]]
+        for field, value in (("conclusion", "failure"), ("run_attempt", 2), ("steps", [])):
+            jobs = copy.deepcopy(self.jobs)
+            jobs[0][field] = value
+            controls.append(jobs)
+        for jobs in controls:
+            self.assertFalse(self.gate(jobs=jobs)["success"])
+
+    def test_partial_moving_or_excessive_check_snapshots_are_refused(self):
+        first = {"total_count": 2, "check_runs": self.checks[:1]}
+        cases = ((first, {"total_count": 2, "check_runs": []}),
+                 ({"total_count": 200, "check_runs": [{}] * 100},
+                  {"total_count": 150, "check_runs": [{}] * 50}),
+                 (first, {"total_count": 3, "check_runs": self.checks[1:]}),
+                 ({"total_count": 1001, "check_runs": self.checks},),
+                 ({"total_count": True, "check_runs": self.checks},))
+        for pages in cases:
+            with self.subTest(pages=pages):
+                with mock.patch.object(github_ci_time, "api_get", side_effect=pages):
+                    with self.assertRaises(ValueError):
+                        github_ci_time._gate_reconciled_checks(
+                            "buster14a/buster", self.HEAD, None, github_ci_time.time.monotonic() + 30, [])
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[
+                {"total_count": 101, "check_runs": [{}] * 100},
+                {"total_count": 101, "check_runs": [{}]}]) as read:
+            self.assertEqual(len(github_ci_time._gate_reconciled_checks(
+                "buster14a/buster", self.HEAD, None, github_ci_time.time.monotonic() + 30, [])), 101)
+            self.assertEqual(read.call_count, 2)
+        with mock.patch.object(github_ci_time, "api_get") as read:
+            with self.assertRaises(ValueError):
+                github_ci_time._gate_reconciled_checks(
+                    "buster14a/buster", self.HEAD, None, github_ci_time.time.monotonic() - 1, [])
+            read.assert_not_called()
+
+    def test_api_failure_has_no_proof_and_retries_within_existing_snapshot_budget(self):
+        with mock.patch.object(github_ci_time, "_gate_reconciled_checks",
+                               side_effect=ValueError("check read unresolved")):
+            result = self.gate()
+        self.assertFalse(result["success"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
+        self.assertEqual(result["reconciled_checks"], [])
+        self.assertTrue(any("check read unresolved" in error for error in result["errors"]))
 
 
 class QueueTimingTests(unittest.TestCase):
@@ -187,6 +367,40 @@ class MacosRunnerDemandTests(unittest.TestCase):
         self.assertIn("  merge_group:\n    types: [checks_requested]\n", text)
         self.assertIn("        runner: ${{ fromJSON(github.event_name == 'merge_group' && '[\"ubuntu-26.04\"]' "
                       "|| '[\"ubuntu-26.04\", \"macos-26\"]') }}\n", text)
+
+
+class AnalyzerCampaignTimingTests(unittest.TestCase):
+    # tests/ci_tools_test.py is pinned byte-for-byte by the frozen
+    # native-retirement support declaration, so #2683 reuses its sample
+    # builder here instead of adding the case there.
+    @staticmethod
+    def current_sample():
+        sys.path.insert(0, str(ROOT / "tests"))
+        try:
+            import ci_tools_test
+        finally:
+            sys.path.remove(str(ROOT / "tests"))
+        return ci_tools_test.TimingTests().current_sample()
+
+    def test_candidate_only_and_historical_analyzer_steps_remain_distinct(self):
+        old = "Compare reference analysis and aggregate all module shards"
+        new = "Analyze candidate and aggregate all module shards"
+        run = self.current_sample()
+        analyzer = next(job for job in run["jobs"] if job["name"] == "Clang analyzer shards")
+        campaign = next(step for step in analyzer["steps"] if step["name"] == old)
+        campaign["name"] = new
+        campaign.update(started_at=analyzer["started_at"], completed_at=analyzer["completed_at"])
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertIn(new, sample["step_seconds"]["Clang analyzer shards"])
+        self.assertNotIn(old, sample["step_seconds"]["Clang analyzer shards"])
+        for name in (old, new):
+            duplicate = copy.deepcopy(run)
+            job = next(job for job in duplicate["jobs"] if job["name"] == "Clang analyzer shards")
+            job["steps"].append(dict(campaign, name=name))
+            self.assertIsNone(github_ci_time.measure(duplicate)[0])
+        campaign["conclusion"] = "failure"
+        self.assertIsNone(github_ci_time.measure(run)[0])
 
 
 if __name__ == "__main__":

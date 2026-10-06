@@ -115,6 +115,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_imported_function_data_pc32(UnitTest
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_runtime_array_admission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u8 text[] = {0xb8, 42, 0, 0, 0, 0xc3, 0, 0};
+#if BUSTER_CPU_ARCH_AARCH64
+    u32 instructions[] = {0x52800540, 0xd65f03c0};
+    memcpy(text, instructions, sizeof(instructions));
+#endif
+    u64 data_value = 17;
+    u8 entry[OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+    ObjectSection sections[OBJECT_SECTION_FINI_ARRAY + 1] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sections); index += 1)
+    {
+        sections[index].kind = (ObjectSectionKind)index;
+        sections[index].name = object_section_name_for_kind((ObjectSectionKind)index);
+        sections[index].alignment = object_section_default_alignment((ObjectSectionKind)index);
+    }
+    sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(text);
+    sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = (u8*)&data_value, .length = sizeof(data_value)};
+    ObjectSymbol symbols[] = {
+        {.name = S8("jit_lifecycle_entry"), .size = sizeof(text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("jit_lifecycle_data"), .size = sizeof(data_value), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+    };
+    ObjectFile object = jit_test_object(sections, BUSTER_ARRAY_LENGTH(sections));
+    object.symbols = symbols;
+    object.symbol_count = BUSTER_ARRAY_LENGTH(symbols);
+    ObjectRelocation relocation = {.symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+    object.relocations = &relocation;
+    object.relocation_count = 1;
+
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        u32 kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+        sections[kind].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(entry);
+        relocation.section = kind;
+        // A real function symbol and ABSOLUTE64 array entry must not be
+        // mistaken for ignorable metadata just because code/data would link.
+        JitProgram denied = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, denied.error == JIT_ERROR_INIT_FINI_UNSUPPORTED);
+        BUSTER_TEST(arguments, !denied.allocation_base && !denied.allocation_size && !denied.auxiliary_allocation_base &&
+                                   !denied.auxiliary_allocation_size && !denied.executable_size);
+        for (u32 index = 0; index < OBJECT_SECTION_COUNT; index += 1)
+        {
+            BUSTER_TEST(arguments, !denied.section_addresses[index] && !denied.section_sizes[index]);
+        }
+        jit_program_release(&denied);
+
+        ObjectArtifact artifact = object_write(arguments->arena, &object, object_format_for_target(object.target));
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.pointer && artifact.bytes.length))
+        {
+            ObjectFile parsed = object_read(arguments->arena, artifact.bytes, object.target);
+            if (BUSTER_REQUIRE(arguments, parsed.error == OBJECT_ERROR_NONE && parsed.section_count > kind))
+            {
+                BUSTER_TEST(arguments, parsed.sections[kind].kind == (ObjectSectionKind)kind && parsed.sections[kind].data.length == sizeof(entry));
+                BUSTER_TEST(arguments, parsed.relocation_count == 1 && parsed.relocations[0].section == kind &&
+                                           parsed.relocations[0].kind == OBJECT_RELOCATION_ABSOLUTE64);
+                JitProgram serialized = jit_link_object(&parsed, (JitOptions){0});
+                BUSTER_TEST(arguments, serialized.error == JIT_ERROR_INIT_FINI_UNSUPPORTED);
+                BUSTER_TEST(arguments, !serialized.allocation_base && !serialized.allocation_size &&
+                                           !serialized.auxiliary_allocation_base && !serialized.auxiliary_allocation_size && !serialized.executable_size);
+                jit_program_release(&serialized);
+            }
+        }
+
+        // Malformed array relocations still cannot yield a supported image.
+        relocation.symbol = UINT32_MAX;
+        relocation.kind = OBJECT_RELOCATION_COUNT;
+        denied = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, denied.error == JIT_ERROR_INIT_FINI_UNSUPPORTED && !denied.allocation_base);
+        jit_program_release(&denied);
+
+        // Virtual extent counts as runtime requirements even with no bytes.
+        sections[kind].data = (ByteSlice){0};
+        sections[kind].virtual_size = sizeof(entry);
+        denied = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, denied.error == JIT_ERROR_INIT_FINI_UNSUPPORTED && !denied.allocation_base);
+        jit_program_release(&denied);
+
+        // Zero-size arrays with relocations are malformed rather than inert.
+        sections[kind].virtual_size = 0;
+        denied = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, denied.error == JIT_ERROR_INVALID_INPUT && !denied.allocation_base);
+        jit_program_release(&denied);
+        relocation.symbol = 0;
+        relocation.kind = OBJECT_RELOCATION_ABSOLUTE64;
+    }
+
+#if !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
+    // Both empty arrays are inert; ordinary text/data remain loaded and their
+    // public symbols keep the expected bytes. Apple uses the native fixture's
+    // one permitted executable image below for this same positive control.
+    object.relocation_count = 0;
+    JitProgram admitted = jit_link_object(&object, (JitOptions){0});
+    if (BUSTER_REQUIRE(arguments, admitted.error == JIT_ERROR_NONE))
+    {
+        void* function = jit_program_symbol(&admitted, symbols[0].name);
+        void* data = jit_program_symbol(&admitted, symbols[1].name);
+        BUSTER_TEST(arguments, function && data);
+        if (function && data)
+        {
+            BUSTER_TEST(arguments, memcmp(function, text, sizeof(text)) == 0 && memcmp(data, &data_value, sizeof(data_value)) == 0);
+        }
+        BUSTER_TEST(arguments, !admitted.section_addresses[OBJECT_SECTION_INIT_ARRAY] && !admitted.section_addresses[OBJECT_SECTION_FINI_ARRAY]);
+    }
+    jit_program_release(&admitted);
+#endif
+    return result;
+}
+
 UnitTestResult jit_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -669,6 +778,8 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
 #endif
 #endif
 
+    BUSTER_TEST_FIXTURE(arguments, jit_test_runtime_array_admission);
+
     u8 tls_byte = 1;
     ObjectSection tls_section = {
         .name = S8(".tdata"),
@@ -748,6 +859,7 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     }
     BUSTER_STRING_TEST(arguments, jit_error_string((JitError)JIT_ERROR_COUNT), S8("unknown JIT error"));
     BUSTER_STRING_TEST(arguments, jit_error_string(JIT_ERROR_EXTERNAL_DATA), S8("external data relocation is unsupported for this JIT target"));
+    BUSTER_STRING_TEST(arguments, jit_error_string(JIT_ERROR_INIT_FINI_UNSUPPORTED), S8("runtime initializer/finalizer arrays are not supported by the JIT"));
 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
     u8 native_text[48] = {0};
@@ -817,6 +929,8 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
             .kind = OBJECT_SECTION_DEBUG_INFO,
             .alignment = 1,
         },
+        {.name = S8(".init_array"), .kind = OBJECT_SECTION_INIT_ARRAY, .alignment = OBJECT_INITIALIZER_ENTRY_SIZE},
+        {.name = S8(".fini_array"), .kind = OBJECT_SECTION_FINI_ARRAY, .alignment = OBJECT_INITIALIZER_ENTRY_SIZE},
 #endif
     };
     ObjectSymbol native_symbols[] = {
@@ -1055,6 +1169,39 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     }
     jit_program_release(&native_program);
     BUSTER_TEST(arguments, !native_program.allocation_base && !native_program.auxiliary_allocation_base && !native_program.object);
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX
+    // Serialized ELF retains explicit PLT32 references. The JIT must bind
+    // an imported call through its existing thunk and a defined call locally.
+    native_relocations[0].kind = OBJECT_RELOCATION_X86_64_PLT32;
+    native_relocations[1].kind = OBJECT_RELOCATION_X86_64_PLT32;
+    ObjectArtifact plt32_elf = object_write(arguments->arena, &native_object, OBJECT_FORMAT_ELF64);
+    ObjectFile plt32_object = object_read(arguments->arena, plt32_elf.bytes, native_object.target);
+    bool plt32_ready = plt32_elf.error == OBJECT_ERROR_NONE && plt32_object.error == OBJECT_ERROR_NONE &&
+                       plt32_object.relocation_count == 4 &&
+                       plt32_object.relocations[0].kind == OBJECT_RELOCATION_X86_64_PLT32 &&
+                       plt32_object.relocations[1].kind == OBJECT_RELOCATION_X86_64_PLT32;
+    BUSTER_TEST(arguments, plt32_ready);
+    if (plt32_ready)
+    {
+        JitProgram plt32_program = jit_link_object(&plt32_object, (JitOptions){.bindings = &native_binding, .binding_count = 1});
+        BUSTER_TEST(arguments, plt32_program.error == JIT_ERROR_NONE);
+        if (plt32_program.error == JIT_ERROR_NONE)
+        {
+            void* import_address = jit_program_symbol(&plt32_program, native_symbols[1].name);
+            void* internal_address = jit_program_symbol(&plt32_program, native_symbols[3].name);
+            JitTestFunction* call_import = 0;
+            JitTestFunction* call_internal = 0;
+            memcpy(&call_import, &import_address, sizeof(call_import));
+            memcpy(&call_internal, &internal_address, sizeof(call_internal));
+            BUSTER_TEST(arguments, call_import && call_import() == 73);
+            BUSTER_TEST(arguments, call_internal && call_internal() == 42);
+        }
+        jit_program_release(&plt32_program);
+        BUSTER_TEST(arguments, !plt32_program.allocation_base && !plt32_program.auxiliary_allocation_base && !plt32_program.object);
+    }
+    native_relocations[0].kind = OBJECT_RELOCATION_X86_64_PC32;
+    native_relocations[1].kind = OBJECT_RELOCATION_X86_64_PC32;
+#endif
 #endif
 
     return result;

@@ -8,6 +8,34 @@ directory before regenerating it; otherwise the running compiler and its
 outputs can disappear and be reported as compiler failures. Reuse the
 configured tree with `build` for ordinary rebuilds.
 
+Concurrent sessions that build, test or profile use separate source worktrees
+and session-owned build and output paths. A separate build directory inside a
+shared checkout still reads source that another session can edit. Follow the
+[parallel-session setup](workflow.md#parallel-sessions-on-one-machine); keep
+`build/` inside that isolated worktree for the micro-architecture lab, whose
+workload includes `build/generated`. No live-use lock protects `generate`:
+coordination and isolation are required before removing or regenerating a tree.
+
+`generate` only deletes a directory it can prove is disposable
+(`generate_build_directory_verdict` in `build.c`), so a mistyped
+`--build-directory` cannot erase a checkout. The target must be missing, an
+empty directory, a tree carrying the `.buster-build-tree` marker that every
+generation writes, a CMake tree whose `CMakeCache.txt` has
+`CMAKE_HOME_DIRECTORY` equal to this repository (compared by real path), or
+anything inside the repository's ignored `build/` directory. Whatever the
+contents, it refuses the repository root, any ancestor of it (including `/`),
+the home directory, `.git`, `.github`, `cmake`, `docs`, `src`, `tests` and
+`tools` and anything inside them, and a path that is not a directory. Links and
+`.`/`..` are resolved first. A refusal prints the reason, deletes nothing and
+exits nonzero, as does a removal that cannot finish, so `generate` never
+configures on top of a half-deleted tree. Every internal caller (the
+combination matrix, `test_mode_matrix`, self-host, the x86-64 completion census)
+goes through the same check. To reuse a directory that is none of these, empty
+or remove it yourself. `remove_path_recursive` removes through the library's
+iterative, link-safe `os_directory_delete` and reports failure.
+`generate_guard_self_test` covers the guard with sentinel trees and runs in the
+combination-matrix preflight.
+
 ## Self-hosting — reproduce first
 
 All contributors—humans and coding agents—should reproduce the current
@@ -78,13 +106,6 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
-The separately installed Benchpress recipe driver is compiled from the
-reviewed `build.c` with Clang and checked for a nonexecutable `GNU_STACK`
-header. Its transient unit keeps `MemoryDenyWriteExecute=yes`; the TCC
-bootstrap executable lacks that header and cannot spawn stages there. This
-installed artifact is reviewed by digest and is never a local-bootstrap
-substitute. See the [broker installation contract](../../tools/bench_service/deploy/SYSTEMD_BROKER.md).
-
 Because every hosted driver is Clang-built, the `Workflow lint` job in
 `.github/workflows/ci.yml` also runs the Ubuntu image's GCC over `build.c` with
 `-Wall -Werror -fsyntax-only` and the driver's usual flags. It covers only the
@@ -101,13 +122,8 @@ commit below, records `tcc -v`, removes
 the local bootstrap cache, and runs `./build.sh time_trace_summary_self_test`
 twice to prove both cold publication and warm reuse. This check does not select
 the dedicated benchmark runner or require privileged installation.
-The same hosted check runs native service tests, their ASan/UBSan variant, and
-the fixed smoke recipe self-test through this TCC-built driver. It also builds
-the broker and both static gates and runs their component regressions with
-`bench_service_broker self-test`. These use
-temporary fixtures and do not provision or qualify the benchmark host. It also
-runs the [source-size report and change ratchet](../source-size.md) on the
-validated merge revision against its first parent.
+It also runs the [source-size report and change ratchet](../source-size.md) on
+the validated merge revision against its first parent.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
@@ -157,25 +173,13 @@ retire it once no supported native producer uses upstream Clang older than
 add diagnostic flags for it through `CFLAGS` in workflows or reproduction
 steps: artifact fan-out's provenance capture rejects a nonempty `CFLAGS`.
 
-The Linux fixed `bench_service_recipe` publishes private frozen-tree receipts
-after each successful base-build and candidate-build cleanup. The files
-`validate-buster-v1.base-build.inventory` and
-`validate-buster-v1.candidate-build.inventory` contain complete bounded node
-identities, modes and owners, executable SHA-256 digests, exact recipe
-job/token/revisions, boot ID and scan-completion monotonic time. The source
-publishes each receipt without replacement and syncs its file and result
-directory before reporting that stage successful; a scan, identity, capacity
-or publication failure prevents the next stage from launching. These private
-result files are conserved by the existing BQ bundle index. A separate 64 MiB
-serialized-file limit applies in addition to node, depth, path and hashing
-limits; overflow fails the recipe. These are source-owned statements, while
-the external stage observer records its own inventory and timing independently.
-The build and result descriptors are pinned at preparation, before the stages
-create anything, so every tree walk (locking, receipts, temporary sweeps and
-syncs) reads a fresh open file of the same inode rather than a dup: btrfs
-(Linux 6.5+) never lists entries created after a directory's open file, and a
-consumed offset hides them everywhere (`BENCH_SERVICE_RECIPE_PINNED_WALK_TEST`).
-A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
+Optional Clang-family warnings (`CLANG_GNU_FAMILY_OPTIONAL_WARNING_CANDIDATES`,
+enabled by `BUSTER_CHECK_OPTIONAL_WARNINGS`) are probed with
+`buster_filter_supported_c_flags`. Results are keyed by compiler
+ID|version|path, and a changed signature re-probes every candidate (each
+`BUSTER_HAS_C_FLAG_*` entry is dropped first), so an in-place compiler upgrade
+does not need `./build.sh generate`; `tools/native_target_compatibility_test.py`
+covers this behavior.
 
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)
@@ -209,7 +213,7 @@ header that defines functions must be included before the test region, as
 Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
-`test_timing_summary_self_test`, `musl_directory_self_test`,
+`test_timing_summary_self_test`, `musl_directory_self_test`, `generate_guard_self_test`,
 `compiler_discovery_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
@@ -370,15 +374,12 @@ stage and its command line. Every other run waits indefinitely, because their
 cost scales with what they are given.
 The fixed-point pair continues to use the default FAST allocator, and the
 existing non-Windows machine stage continues to compile and run its benchmark
-with `-fregister-allocator=mir-stack`. That stage is followed by a canonical
-compile-only gate: the stage-2 compiler builds `ide-stage2-none` with
-`-fregister-allocator=none`. It does not run that output because the regression
-this gate protects against is a canonical argument-capture crash while
-compiling `ide.c`; launching a second benchmark would add CI work without
-covering that path. NONE is the only allocator stage here that reaches the
-canonical emission path; QUALITY exercises the same machine path already
-covered by FAST/MIR_STACK and is covered by focused/all-mode tests, so another
-full unity compile would add CI cost without distinct self-host coverage.
+with `-fregister-allocator=mir-stack`. The stage-2 compiler also builds
+`ide-stage2-none` with the retained `-fregister-allocator=none` spelling; this
+is now a MIR_STACK compatibility gate, not direct-emitter coverage. It remains
+compile-only because running a duplicate MIR_STACK benchmark adds no distinct
+coverage. QUALITY is covered by focused/all-mode tests, so another full unity
+compile would add CI cost without distinct self-host coverage.
 CI Release builds use `-O2`; local Release builds retain the toolchain default.
 Local builds make the optimized tree profilable, which CMake's defaults do not:
 `BUSTER_DEBUG_INFO` emits debug information in the configurations that carry no
@@ -397,6 +398,19 @@ code generation but cost 0.065% of instructions on a unity self-compile
 (29.5037 G -> 29.5227 G) with no wall-clock difference above run-to-run noise
 and no change to the parser benchmark. CI opts out of both because it profiles
 nothing and pays the compile time.
+
+For a trusted performance compiler, configure that session's idle tree with
+`./build.sh generate --cc clang --no-include-tests`, then build `ide` in
+Release. The ordinary local default includes tests; that enables
+`BUSTER_IR_TRANSFORM_CHECKS` even in Release. Preserve the default tests-on
+configuration for correctness work, and keep sanitized, instrumented and
+explicit transform-verification builds separate from performance comparisons.
+When freezing a performance binary, retain its source revision, binary hash,
+`CMakeCache.txt` and `compile_commands.json`; check
+`BUSTER_INCLUDE_TESTS:BOOL=OFF` in that binary's saved cache. The
+[benchmark recipe](benchmarking.md#benchmarking-a-compiler-change-ab) records
+both variants and uses one isolated build path serially.
+
 Clang static analysis runs only against unsanitized Release. The native driver
 now freezes deterministic module shards and requires complete fail-closed
 aggregation; CI also exercises the authoritative split-source Clang database.
@@ -540,3 +554,59 @@ The opt-in production-throughput workflow, profile provenance contract,
 validation matrix, and evidence layout are documented in
 [`docs/production-profile.md`](../production-profile.md). Ordinary developer
 and CI defaults remain unchanged.
+
+## Exact-artifact binary coverage pilot
+
+The native command `binary_coverage_inventory` is the bounded inventory/reporting
+slice for [#2216](https://github.com/buster14a/buster/issues/2216). It accepts one
+ELF64 little-endian x86-64 executable/shared-object file; the maintained pilot
+target is the Linux x86-64 native build driver. It hashes the actual file and
+reads its program headers independently of any received coverage data:
+
+```sh
+./build.sh binary_coverage_inventory --self-test
+# Use the exact bootstrap-driver path recorded by the wrapper/CI, not ide.
+build/build binary_coverage_inventory build/build > build/driver-inventory.json
+build/build binary_coverage_inventory build/build --verify-inventory build/driver-inventory.json
+```
+
+A zero exit status means inventory creation or exact inventory verification
+succeeded. The report's coverage status remains `incomplete`; it does not mean
+100% coverage. Verification regenerates the report from the artifact and rejects
+different content, identity, omitted ranges, or unsupported completeness claims.
+No evidence collector is approved by this pilot.
+
+Executable `PT_LOAD` ranges are a conservative **byte inventory**, including
+zero-filled memory tails. Every byte remains unclassified: data/padding cannot
+be mistaken for instructions or removed because it was not hit. Instruction-site
+execution, machine edges, MC/DC obligations, and functional assertions are four
+separate unmeasured metrics with null totals/hits/percentages. This command
+neither decodes nor executes the artifact. Source/tree revision, compiler/linker
+versions, flags/defines, optimization/LTO, ABI details, linked-module identities,
+live executable mappings and generated code are not recovered from the file and
+remain explicit gaps. ELF virtual addresses are recorded; no ASLR attribution
+is claimed. Inputs must stay unchanged while mapped and hashed; this pilot does
+not certify mutable-file snapshot atomicity or runtime module continuity.
+
+The existing Release/combinations preflight runs the native self-tests on every
+desktop platform and prints an inventory of `/proc/self/exe` on Linux x86-64.
+That is the running native driver's artifact, including the documented hosted
+Clang-bootstrap configuration when used; it does not substitute a special
+coverage build for the delivery artifact. Other platforms run the format/report
+controls but have no measured pilot artifact. The complete JSON is retained in
+the ordinary combination log; no new workflow, collector, dependency or physical
+runner is introduced.
+
+Format contracts are consulted from ELF gABI 4.3 DRAFT, inspected at
+xinuos/gabi `81337e4611a7789761bdb4a46be12cac5a08dab1`:
+[header](https://github.com/xinuos/gabi/blob/81337e4611a7789761bdb4a46be12cac5a08dab1/docsrc/elf/02-eheader.rst)
+and [program loading](https://github.com/xinuos/gabi/blob/81337e4611a7789761bdb4a46be12cac5a08dab1/docsrc/elf/07-pheader.rst).
+Specification licensing is unverified (no root license in the inspected tree);
+no specification text or implementation is copied. Companion source MC/DC remains unimplemented. The inspected
+[Clang source-coverage documentation](https://github.com/llvm/llvm-project/blob/2078da43e25a4623cab2d0d60decddf709aaea28/clang/docs/SourceBasedCodeCoverage.rst)
+at LLVM `llvmorg-21.1.8` / `2078da43e25a4623cab2d0d60decddf709aaea28`
+describes source instrumentation and omissions; it does not provide actual-binary
+instruction tracing. Its [license](https://github.com/llvm/llvm-project/blob/2078da43e25a4623cab2d0d60decddf709aaea28/LICENSE.TXT)
+is Apache-2.0 WITH LLVM-exception with separately listed third-party/legacy terms.
+No LLVM material is imported. Buster first-party licensing remains unselected
+per [LICENSES/README.md](../../LICENSES/README.md) and #621.
