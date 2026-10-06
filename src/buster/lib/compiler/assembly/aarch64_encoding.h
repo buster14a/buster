@@ -498,6 +498,9 @@ BUSTER_F_DECL bool a64_arm_m1_scalar_integer_encode_mnemonic(Target target, Stri
 // omitted architectural default is reported with modifier_count=0, while a
 // non-default shift/extension is reported as one present modifier.  Both
 // count outputs and all output buffers remain byte-unchanged on failure.
+// Legal logical-immediate words can contain ignored high immr rotation bits;
+// decoding preserves their semantic value, while reencoding selects the
+// preferred equivalent word with those ignored bits zero.
 BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_decode_form(
     Target target, u32 form_index, u32 word, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
     A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count);
