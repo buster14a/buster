@@ -760,11 +760,38 @@ class NativeObservationTest(unittest.TestCase):
             "linux-x86_64", "linux-aarch64", "macos-aarch64",
             "windows-x86_64", "windows-aarch64",
         ])
-        self.assertEqual(shards.group(1),
-            "github.event_name == 'workflow_dispatch' && "
-            "github.ref == 'refs/heads/codex/ci-checks-split-overlap' && "
-            "'[\"release\", \"checks\", \"sanitized-debug\", \"sanitized-release\", \"portability\"]' "
-            "|| '[\"release\", \"checks\"]'")
+        combined_refs = (
+            "refs/heads/codex/ci-checks-combined-overlap",
+            "refs/heads/codex/ci-checks-combined-all-builds",
+            "refs/heads/codex/2120-evidence-v2-combined-overlap",
+            "refs/heads/codex/2120-evidence-v2-combined-all-builds",
+        )
+        combined_shards = ["release", "checks"]
+        split_shards = combined_shards + ["sanitized-debug", "sanitized-release", "portability"]
+        dispatch_guard = "github.event_name == 'workflow_dispatch' && (" + " || ".join(
+            "github.ref == '" + ref + "'" for ref in combined_refs) + ")"
+        self.assertEqual(shards.group(1), dispatch_guard + " && '" + json.dumps(combined_shards) +
+                         "' || '" + json.dumps(split_shards) + "'")
+        # Evaluate only the pinned expression above: all ordinary events and
+        # near-miss branch/tag refs must still expand the upload's split owners.
+        selector = shards.group(1).replace("github.event_name", "event").replace("github.ref", "ref")
+        selector = selector.replace("&&", "and").replace("||", "or")
+        refs = combined_refs + (
+            "refs/heads/main",
+            "refs/pull/2440/merge",
+            "refs/heads/gh-readonly-queue/main/pr-2440-abc",
+            "refs/heads/codex/ci-checks-split-overlap",
+            "refs/heads/codex/2120-evidence-v2-split-overlap",
+            combined_refs[0] + "-extra",
+            combined_refs[0].replace("refs/heads/", "refs/tags/"),
+            combined_refs[0].removeprefix("refs/heads/"),
+        )
+        for event in ("push", "pull_request", "merge_group", "workflow_dispatch"):
+            for ref in refs:
+                with self.subTest(event=event, ref=ref):
+                    selected = json.loads(eval(selector, {"__builtins__": {}}, {"event": event, "ref": ref}))
+                    expected = combined_shards if event == "workflow_dispatch" and ref in combined_refs else split_shards
+                    self.assertEqual(selected, expected)
         steps = dict(re.findall(
             r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop,
         ))

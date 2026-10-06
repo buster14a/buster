@@ -5,6 +5,8 @@ The checks shard retains the required `bootstrap_wrappers` lifecycle step and
 reports `owned-by-release-shard` without executing the suite again.
 
 ```sh
+# Full local harness: behavior, process ownership and recursive build graph.
+python3 tests/bootstrap_wrapper_test.py -v
 # Bash platforms; use python rather than python3 on Windows.
 python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v
 # Windows CI runs the same behavior methods through two-case scheduling.
@@ -13,12 +15,17 @@ python tools/bootstrap_wrapper_cases.py --jobs 2
 python tools/bootstrap_wrapper_cases.py --jobs 1
 # Lifecycle/admission controls, executed by workflow_tools in Release.
 python3 tools/bootstrap_wrapper_cases_test.py -v
+# Authoritative cache/bootstrap workflow contract, executed by workflow_tools.
+python3 tools/ci_zig_cache_test.py -v
 ```
 
 Fake TCC/driver inputs exercise the real Bash/PowerShell wrappers. This is not
-a real TCC bootstrap, compiler benchmark or self-host acceptance run. The old
-full-suite workflow assertions remain under [#1835](https://github.com/buster14a/buster/issues/1835);
-the selected behavior command above describes current CI accurately.
+a real TCC bootstrap, compiler benchmark or self-host acceptance run.
+`tools/ci_zig_cache_test.py` owns the workflow guard, separate budgets, retained
+logs and required-summary failure assessment. The wrapper module owns behavior,
+child-process controls and immutable-driver build-graph checks; it carries no
+duplicate workflow assertions. CI selects only its behavior class in the wrapper
+owner and executes the authoritative workflow contract in `workflow_tools`.
 
 ## Required gate and budgets
 

@@ -1,0 +1,11 @@
+Captured UTC: 2026-10-04T11:24:40Z
+Linux 8e6c159508c2 6.18.44 #1 SMP Sat Sep 26 20:02:31 UTC 2026 x86_64 GNU/Linux
+clang version 17.0.0 (https://github.com/swiftlang/llvm-project.git 10999b6d034fe318f3d56c83bddb6572593a8bb0)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /usr/local/swift/usr/bin
+gcc (Debian 14.2.0-19) 14.2.0
+Architecture:                            x86_64
+CPU(s):                                  5
+On-line CPU(s) list:                     0-4
+Model name:                              AMD EPYC 9V74 80-Core Processor

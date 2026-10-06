@@ -14,7 +14,13 @@
 
 #define BQ_SCHEMA_LEGACY 1u
 #define BQ_SCHEMA_MATERIALIZATION 2u
-#define BQ_SCHEMA 3u
+#define BQ_SCHEMA_WORKER 3u
+#define BQ_SCHEMA_NATIVE 4u
+#define BQ_SCHEMA_RUNTIME 6u
+#define BQ_SCHEMA BQ_SCHEMA_RUNTIME
+/* Worker custody ledgers alone use v7; local/control journals retain the
+ * compiled normal generation. Import never changes the request identity. */
+#define BQ_SCHEMA_ASSIGNED 7u
 #define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
 /* Lifetime caps (#2114). Nothing durable encodes them: journal frames carry
@@ -66,7 +72,7 @@ typedef enum BqValidity
 
 typedef enum BqRecordKind
 {
-    BQ_SUBMIT = 1, BQ_RESERVE, BQ_ADVANCE, BQ_CANCEL, BQ_RECONCILE, BQ_RESULT_BIND
+    BQ_SUBMIT = 1, BQ_RESERVE, BQ_ADVANCE, BQ_CANCEL, BQ_RECONCILE, BQ_RESULT_BIND, BQ_ASSIGN_IMPORT
 } BqRecordKind;
 
 typedef enum BqRecipe
@@ -76,7 +82,9 @@ typedef enum BqRecipe
     BQ_RECIPE_FAKE_FAILURE,
     BQ_RECIPE_VALIDATE_BUSTER,
     BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED,
-    BQ_RECIPE_ZEN5_CALIBRATION
+    BQ_RECIPE_ZEN5_CALIBRATION,
+    BQ_RECIPE_NATIVE_EXECUTE,
+    BQ_RECIPE_NATIVE_RUNTIME
 } BqRecipe;
 
 typedef struct BqRecipeFiles
@@ -88,6 +96,11 @@ typedef struct BqRecipeFiles
     char outcome[BQ_RECIPE_FILE_CAP + 1];
     char command[BQ_RECIPE_COMMAND_CAP + 1];
 } BqRecipeFiles;
+
+typedef struct BqRuntimeSummary
+{
+    u64 median_wall_ns, minimum_wall_ns, maximum_wall_ns, median_cpu_ns, maximum_rss_bytes;
+} BqRuntimeSummary;
 
 typedef struct BqRequest
 {
@@ -176,6 +189,7 @@ BUSTER_F_DECL BqError bq_open(BqQueue* queue, char const* existing_private_direc
 BUSTER_F_DECL void bq_close(BqQueue* queue);
 BUSTER_F_DECL BqError bq_submit(BqQueue* queue, BqRequest const* request, u64* id);
 BUSTER_F_DECL BqError bq_reserve(BqQueue* queue, u64* id, u64* token);
+BUSTER_F_DECL BqError bq_assigned_import(BqQueue* queue, BqRequest const* request, u64 id, u64 token);
 BUSTER_F_DECL BqError bq_cancel(BqQueue* queue, u64 id);
 BUSTER_F_DECL BqError bq_fake_step(BqQueue* queue, u64 id, u64 token);
 BUSTER_F_DECL BqError bq_fake_run(BqQueue* queue, u64* id);
@@ -186,11 +200,17 @@ BUSTER_F_DECL String8 bq_recipe_name(BqRecipe recipe);
 BUSTER_F_DECL String8 bq_recipe_profile(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files);
 BUSTER_F_DECL bool bq_recipe_admitted(BqRecipe recipe);
+/* Linux-only, like every consumer; an unused internal prototype fails -Werror. */
+#ifdef __linux__
+BUSTER_GLOBAL_LOCAL bool bq_native_runtime_records(char const* bytes, u32 length, char const* identity, int cpu, bool require_success, BqRuntimeSummary* summary);
+#endif
+BUSTER_F_DECL bool bq_recipe_native(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_service(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_blocked(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_fake(BqRequest const* request);
 BUSTER_F_DECL bool bq_recipe_real(BqRequest const* request);
 BUSTER_F_DECL BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token);
+BUSTER_F_DECL BqError bq_materialize_reserved(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token);
 BUSTER_F_DECL BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u64 token);
 BUSTER_F_DECL bool bq_workspace_name(char result[64], u64 id, u64 token);
 BUSTER_F_DECL BqError bq_failure_evidence(BqQueue* queue, BqJob const* job);
