@@ -1002,6 +1002,132 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
     return result;
 }
 
+// An array compound literal is an aggregate value with no LLVM address; the
+// backend must give each one a single entry alloca so every access (subscript,
+// call argument, decayed pointer, mutation, per-iteration re-initialisation)
+// reaches the same object (#2734). The checker is a separate clang-built unit.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_array_compound_literals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static int sum(int* p) { return p[0] + p[2]; }\n"
+        "int cl_first(int a) { int* cl = (int[2]){a, 3}; return *cl; }\n"
+        "int cl_constant(int a) { int* cl = (int[2]){1, 3}; return cl[a & 1]; }\n"
+        "int cl_argument(int a) { return sum((int[]){a, 2, 3}); }\n"
+        "int cl_subscript(int a) { return ((int[]){a, 2, 3})[1]; }\n"
+        "unsigned long long cl_wide(int a, int b)\n"
+        "{\n"
+        "    unsigned long long* cl = (unsigned long long[]){a, b, 3};\n"
+        "    return cl[a & 1] - cl[2];\n"
+        "}\n"
+        "int cl_mutate(int a) { int* p = (int[]){a, 2}; p[0] = 5; int* q = p; return q[0] + p[1]; }\n"
+        "int cl_loop(void)\n"
+        "{\n"
+        "    int t = 0;\n"
+        "    for (int i = 0; i < 3; i++)\n"
+        "    {\n"
+        "        int* p = (int[2]){i, i};\n"
+        "        p[1] += 10;\n"
+        "        t += p[0] + p[1];\n"
+        "    }\n"
+        "    return t;\n"
+        "}\n");
+    String8 caller = S8(
+        "int cl_first(int);\n"
+        "int cl_constant(int);\n"
+        "int cl_argument(int);\n"
+        "int cl_subscript(int);\n"
+        "unsigned long long cl_wide(int, int);\n"
+        "int cl_mutate(int);\n"
+        "int cl_loop(void);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    failures += cl_first(9) != 9;\n"
+        "    failures += cl_constant(2) != 1;\n"
+        "    failures += cl_constant(3) != 3;\n"
+        "    failures += cl_argument(4) != 7;\n"
+        "    failures += cl_subscript(4) != 2;\n"
+        "    failures += cl_wide(5, 7) != 4;\n"
+        "    failures += cl_wide(4, 7) != 1;\n"
+        "    failures += cl_mutate(4) != 7;\n"
+        "    failures += cl_loop() != 36;\n"
+        "    return failures;\n"
+        "}\n");
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-array-literal"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-array-literal-caller"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-array-literal"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
+        String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM array literal fixture {S8}: {S8}\n"), frontends[frontend], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-array-literal"),
+#if BUSTER_WINDOWS
+                                                               S8(".exe"));
+#else
+                                                               S8(""));
+#endif
+                String8 compile[] = {compiler, optimizations[optimization], output, caller_input, S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM array literal consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM array literal answers differ: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM array literal consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    return result;
+}
+
 // Keep the expected answers in a separately compiled consumer: valid bitcode
 // can still branch to the wrong case, including in the program's own checker.
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_switches(UnitTestArguments* arguments)
@@ -3549,6 +3675,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult stack_scopes = llvm_bitcode_test_stack_scopes(arguments);
     result.test_count += stack_scopes.test_count;
     result.succeeded_test_count += stack_scopes.succeeded_test_count;
+    UnitTestResult array_literals = llvm_bitcode_test_array_compound_literals(arguments);
+    result.test_count += array_literals.test_count;
+    result.succeeded_test_count += array_literals.succeeded_test_count;
     UnitTestResult switches = llvm_bitcode_test_switches(arguments);
     result.test_count += switches.test_count;
     result.succeeded_test_count += switches.succeeded_test_count;

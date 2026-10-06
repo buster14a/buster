@@ -120,9 +120,12 @@ BUSTER_GLOBAL_LOCAL WmWindowHandle* wm_x11_window_from_ic(WmHandle* handle, xcb_
 
 BUSTER_GLOBAL_LOCAL u32 wm_x11_window_event_mask(WmHandle* handle)
 {
+    // XIM synchronization selects the flags of forwarded protocol events, not
+    // additional core subscriptions. Providers may use a complement mask.
+    // X11 EventMask bits 25..31 are reserved and must remain zero.
     u32 result = XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
                  XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_BUTTON_MOTION | XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-                 XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE | handle->xim_forward_event_mask | handle->xim_synchronous_event_mask;
+                 XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE | (handle->xim_forward_event_mask & BUSTER_X11_CORE_EVENT_MASK);
     return result;
 }
 
@@ -131,7 +134,12 @@ BUSTER_GLOBAL_LOCAL void wm_x11_window_update_event_mask(WmWindowHandle* window)
     if (window && window->owner && window->owner->connection && window->handle)
     {
         u32 event_mask = wm_x11_window_event_mask(window->owner);
-        xcb_change_window_attributes(window->owner->connection, window->handle, XCB_CW_EVENT_MASK, &event_mask);
+        xcb_void_cookie_t cookie = xcb_change_window_attributes(window->owner->connection, window->handle, XCB_CW_EVENT_MASK, &event_mask);
+#if BUSTER_INCLUDE_TESTS
+        window->owner->native_event_mask_sequence = cookie.sequence;
+#else
+        BUSTER_UNUSED(cookie);
+#endif
     }
 }
 
@@ -1993,7 +2001,10 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
         if (event_type == 0)
         {
             xcb_generic_error_t* error = (xcb_generic_error_t*)event;
-            string_print_error(S8("XCB error: code {u8}, major {u8}, minor {u16}\n"), error->error_code, error->major_code, error->minor_code);
+#if BUSTER_INCLUDE_TESTS
+            windowing->native_error_count += 1;
+#endif
+            string_print_error(S8("XCB error: code {u8}, major {u8}, minor {u16}, sequence {u32}, value {u32:x}\n"), error->error_code, error->major_code, error->minor_code, error->full_sequence, error->resource_id);
             free(event);
             continue;
         }
@@ -4449,7 +4460,8 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     int screen_id = 0;
     xcb_connection_t* connection = xcb_connect(0, &screen_id);
     BUSTER_LSAN_ENABLE();
-    if (connection && !xcb_connection_has_error(connection))
+    int connection_error = connection ? xcb_connection_has_error(connection) : -1;
+    if (connection && !connection_error)
     {
         const xcb_setup_t* setup = xcb_get_setup(connection);
         if (setup)
@@ -4493,9 +4505,13 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     {
         result = &windowing_handle;
     }
-    else if (connection)
+    else
     {
-        xcb_disconnect(connection);
+        string_print_error(S8("WM_INITIALIZE_V1 stage=native-connection-or-setup connection_error={s32}\n"), (s32)connection_error);
+        if (connection)
+        {
+            xcb_disconnect(connection);
+        }
     }
     return result;
 }

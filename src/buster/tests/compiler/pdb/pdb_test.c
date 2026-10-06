@@ -380,7 +380,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_continuation_merge(UnitTestArguments
     {
         String8 path = index ? S8("second.c") : S8("first.c");
         DebugType types[] = {
-            {.kind = DEBUG_TYPE_BASE, .name = index ? S8("f32") : S8("int"), .size = 4, .is_signed = true},
+            {.kind = DEBUG_TYPE_BASE, .name = index ? S8("f32") : S8("int"), .size = 4, .is_signed = true, .is_float = index != 0},
             {.kind = DEBUG_TYPE_STRUCT, .name = index ? S8("Second") : S8("First"), .size = MEMBER_COUNT * 4,
              .fields = fields, .field_count = MEMBER_COUNT},
         };

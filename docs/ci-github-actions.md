@@ -169,7 +169,12 @@ GitHub's normal approval requirements still apply. The trusted cancellation
 recovery workflow remains scoped to `Buster CI` and eligible same-repository
 PRs; this change does not broaden recovery or the source-free broker.
 
-`python3 tests/ci_tools_test.py -v` checks the shared event/concurrency contract,
+The maintained entry preserves every frozen CI/action test on the legacy topology.
+After the queue-lint transition it delegates to the full current policy suite;
+it rejects a runner-only substitute. The protected trusted writer uses this
+entry so the frozen support-file identities remain unchanged.
+
+`python3 tools/ci_workflow_policy_test.py -v` checks the shared event/concurrency contract,
 retained bootstrap command order, and the actual `CI complete` shell predicate
 under all 625 combinations of success, failure, cancellation, skip and missing
 results. These checks validate the checked-in policy; they are not evidence
@@ -295,7 +300,7 @@ unknown label, so keep the two in step when a runner changes.
 
 ## Helper validation and timing
 
-`python3 tests/ci_tools_test.py -v` exercises the archive installer, fail-closed
+`python3 tools/ci_workflow_policy_test.py -v` exercises the archive installer, fail-closed
 summaries, native evidence packer and timing collector on each desktop platform
 (`python` on Windows).
 `python3 tools/ci_artifact_upload_test.py -v` runs in required Workflow lint.

@@ -174,7 +174,8 @@ class EvidenceTest(unittest.TestCase):
     def test_reads_receipt_and_summary_as_data(self) -> None:
         payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary())})
         got = compiler_publish.read_evidence(FakeApi(payload), "92", "buster-9700x-compiler-x-1")
-        self.assertEqual(got, (receipt(), summary(), ""))
+        self.assertEqual(got[:3], (receipt(), summary(), ""))
+        self.assertEqual(got[3]["name"], "buster-9700x-compiler-x-1")
 
     def test_missing_ambiguous_or_malformed_evidence(self) -> None:
         payload = archive({"receipt.json": "{not json"})

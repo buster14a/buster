@@ -74,6 +74,7 @@ jobs:
             --pairs 1 \
             --warmups 1 \
             --jobs 2 \
+            --build-lanes 2 \
             --timeout 3600
 
       - name: Verify compact acceptance evidence

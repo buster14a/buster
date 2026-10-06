@@ -132,7 +132,7 @@ and replace `--jobs 4` with explicit `--jobs 1`.
 
 ## Validation and acceptance
 
-`python3 tests/ci_tools_test.py -v` checks suite ownership, exact runner sets,
+`python3 tools/ci_workflow_policy_test.py -v` checks suite ownership, exact runner sets,
 independence, command retention, summaries and timing layouts. It executes the
 actual aggregate Bash body for all 625 combinations of four dependency groups
 across success, failure, cancellation, skipped and missing results. Timing tests
