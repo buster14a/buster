@@ -82,14 +82,16 @@ import sys
 directory, repo, repo_id = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
 read = lambda name: json.loads((directory / name).read_text())
 group = read("group.json")
-expected_workflow = f"{repo}/.github/workflows/9700x-service-dispatch.yml@refs/heads/main"
+expected_workflows = sorted(
+    f"{repo}/.github/workflows/{name}@refs/heads/main"
+    for name in ("9700x-direct-bench.yml", "9700x-service-dispatch.yml"))
 if not (
     group.get("visibility") == "selected"
     and group.get("allows_public_repositories") is True
     and group.get("restricted_to_workflows") is True
-    and group.get("selected_workflows") == [expected_workflow]
+    and sorted(group.get("selected_workflows") or []) == expected_workflows
 ):
-    sys.exit("runner group must be limited to the selected public repository and main workflow")
+    sys.exit("runner group must be limited to the selected public repository and its two main workflows")
 repositories = read("repositories.json")
 if repositories.get("total_count") != 1 or [r["id"] for r in repositories["repositories"]] != [repo_id]:
     sys.exit("runner group repository access is not exclusive")
@@ -112,6 +114,13 @@ gh api -H "X-GitHub-Api-Version: $api_version" -H "Accept: application/vnd.githu
   "repos/$repo/contents/.github/workflows/9700x-service-dispatch.yml?ref=main" >"$tmp/dispatch.yml"
 if ! cmp -s "$root/.github/workflows/9700x-service-dispatch.yml" "$tmp/dispatch.yml"; then
   printf 'main dispatch workflow differs from this reviewed checkout\n' >&2
+  exit 1
+fi
+# The direct workload workflow's gate is likewise its only actor restriction.
+gh api -H "X-GitHub-Api-Version: $api_version" -H "Accept: application/vnd.github.raw+json" \
+  "repos/$repo/contents/.github/workflows/9700x-direct-bench.yml?ref=main" >"$tmp/direct.yml"
+if ! cmp -s "$root/.github/workflows/9700x-direct-bench.yml" "$tmp/direct.yml"; then
+  printf 'main direct workload workflow differs from this reviewed checkout\n' >&2
   exit 1
 fi
 python3 -B "$root/tools/bench_service/workflow_policy_test.py"

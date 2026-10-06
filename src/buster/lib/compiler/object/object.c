@@ -40,13 +40,14 @@
 //   object_buffer_write .. object_writer_capacity  append-only write buffer
 //                                                  (COFF, Mach-O)
 //   object_writer_capacity_aligned                 checked Mach-O file bound
-//                                                  (and the ELF reference's)
 //   object_aarch64_elf_page_relocate               checked direct/GOT page and
 //                                                  scaled memory relocations
 //   object_assembly_build_index                    stable section/offset views
 //   object_assembly_append_*                       the disassembly printer
 //                                                  (x86 and AArch64 operand
 //                                                  and relocation rendering)
+//   object_elf_*_relocation_name                   unsupported ELF type names
+//   object_elf_unsupported_relocation              architecture/type diagnostics
 //   object_read_u16 .. object_read_string_checked  checked reading primitives
 //   object_coff_comdat_is_replaceable              COFF COMDAT selection
 //   object_read_elf64, object_read_coff,           the three format readers;
@@ -77,9 +78,6 @@
 //   object_elf64_plan, object_elf64_emit,          the ELF writer: plan every
 //   object_write_elf64                             range, then store each
 //                                                  byte once
-//   object_reference_split_initializer_priorities, the pre-plan ELF writer,
-//   object_reference_write_elf64                   test builds only, kept as
-//                                                  a differential oracle
 //   object_write_coff, object_write_mach_o64,      the other two writers and
 //   object_write_core, object_write                the dispatcher, which
 //                                                  counts every writer's work
@@ -488,9 +486,15 @@ bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind)
            object_relocation_kind_is_aarch64_elf_ldst(kind);
 }
 
+// AAELF64 GDAT relocations name a GOT entry for S and require zero addends.
+BUSTER_GLOBAL_LOCAL bool object_aarch64_elf_got_addend_valid(ObjectRelocationKind kind, s64 addend)
+{
+    return addend == 0 || (kind != OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 && kind != OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12);
+}
+
 // R_AARCH64_LD64_GOT_LO12_NC names `LDR Xt, [Xn, #imm]`, 64-bit unsigned
-// offset.  Its scaled offset is the REL addend; Rt 31 is XZR, which the ADD
-// the relaxation writes would read as SP, so that load is refused.
+// offset. Rt 31 is XZR, which the ADD relaxation would read as SP, so that
+// load is refused. A REL field is inspected before enforcing zero addend.
 BUSTER_GLOBAL_LOCAL bool object_aarch64_got_load_read(u32 word, u32* offset)
 {
     bool valid = (word & OBJECT_AARCH64_LDR_X_UNSIGNED_MASK) == OBJECT_AARCH64_LDR_X_UNSIGNED && (word & 31) != 31;
@@ -506,18 +510,18 @@ BUSTER_GLOBAL_LOCAL bool object_aarch64_got_load_read(u32 word, u32* offset)
 // Share the checked address arithmetic and instruction authority between
 // the in-memory linker and both native ELF executable writers.
 //
-// 311/312 name G(GDAT(S+A)): the page of, and a load from, a GOT slot
-// holding S+A.  No image this toolchain writes carries such a slot; the
-// pair is relaxed instead to ADRP of Page(S+A) and `ADD Xt, Xn, #lo12(S+A)`,
-// which leaves S+A in Xt without the load.  That is sound because a
-// producer cannot know where the linker puts any slot, so an ADRP for one
-// symbol's slot page can only feed that symbol's slot loads.  A weak symbol
-// nothing defines is S = 0 here, which reads as the zero slot would; its
+// 311/312 name G(GDAT(S)): the page of, and a load from, a GOT slot
+// holding S. No image this toolchain writes carries such a slot; the
+// zero-addend pair is relaxed to ADRP of Page(S) and `ADD Xt, Xn, #lo12(S)`,
+// which leaves S in Xt without the load. General GOT relaxation eligibility
+// is separate from the addend contract checked here. A weak symbol nothing
+// defines is S = 0 here, which reads as the zero slot would; its
 // ADRP becomes `MOVZ Xd, #0` so no image address limits that reach.
 bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched)
 {
     u64 address = 0;
-    bool valid = patched && !(place & 3) && object_address_addend(target, addend, &address);
+    bool valid = patched && !(place & 3) && object_aarch64_elf_got_addend_valid(kind, addend) &&
+                 object_address_addend(target, addend, &address);
     if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12)
     {
         valid = object_aarch64_got_load_read(word, 0);
@@ -673,6 +677,55 @@ bool object_aarch64_pe_page_relocate(ObjectRelocationKind kind, u32 word, u64 pl
     else
     {
         valid = false;
+    }
+    return valid;
+}
+
+// SECREL_HIGH12A uses a shifted ADD, but COFF stores its inline byte addend
+// unscaled in imm12. Both halves add that byte addend before splitting the
+// final section offset; a carry across 4 KiB must reach the high half.
+BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_tls_offset_addend_decode(ObjectRelocationKind kind, u32 word, s64* addend, u32* canonical)
+{
+    bool high = kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
+    u32 shift_bit = UINT32_C(1) << 22;
+    u32 immediate = 0;
+    u32 unshifted = 0;
+    bool valid = addend && canonical && (high || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12) &&
+                 ((word & shift_bit) != 0) == high && a64_add_lo12_read(word & ~shift_bit, &immediate) &&
+                 a64_add_lo12_patch(word & ~shift_bit, 0, &unshifted);
+    if (valid)
+    {
+        *addend = immediate;
+        *canonical = unshifted | (high ? shift_bit : 0);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_tls_offset_addend_encode(ObjectRelocationKind kind, u32 word, s64 addend, u32* patched)
+{
+    s64 inline_addend = 0;
+    u32 canonical = 0;
+    bool valid = patched && object_aarch64_pe_tls_offset_addend_decode(kind, word, &inline_addend, &canonical) &&
+                 inline_addend == 0 && addend >= 0 && addend <= A64_IMM12_MAX;
+    if (valid)
+    {
+        *patched = canonical | ((u32)addend << 10);
+    }
+    return valid;
+}
+
+bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind kind, u32 word, u64 offset, s64 addend, u32* patched)
+{
+    u32 canonical = 0;
+    s64 inline_addend = 0;
+    u64 value = 0;
+    bool valid = patched && object_aarch64_pe_tls_offset_addend_decode(kind, word, &inline_addend, &canonical) &&
+                 inline_addend == 0 && addend >= 0 && addend <= A64_IMM12_MAX &&
+                 object_address_addend(offset, addend, &value) && value <= UINT32_C(0xffffff);
+    if (valid)
+    {
+        u32 immediate = kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ? (u32)(value >> 12) : (u32)(value & A64_IMM12_MAX);
+        *patched = canonical | (immediate << 10);
     }
     return valid;
 }
@@ -1514,6 +1567,20 @@ BUSTER_GLOBAL_LOCAL void object_assembly_advance_index(ObjectAssemblyBuffer* buf
     }
 }
 
+// CFI uses this private zero-size function symbol as the default code base.
+// GNU ELF assemblers already own .text as a section symbol; its references
+// remain valid without a second definition or a function type/size override.
+BUSTER_GLOBAL_LOCAL bool object_assembly_is_aarch64_text_anchor(ObjectFile* object, Target target, u32 section, ObjectSymbol* symbol)
+{
+    bool result = target.cpu_arch == CPU_ARCH_AARCH64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64 &&
+                  section == OBJECT_SECTION_TEXT && section < object->section_count &&
+                  object->sections[section].kind == OBJECT_SECTION_TEXT && string_equal(object->sections[section].name, S8(".text")) &&
+                  symbol->section == section && symbol->kind == OBJECT_SYMBOL_FUNCTION && !symbol->global && !symbol->weak &&
+                  !symbol->hidden && !symbol->comdat && symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
+                  symbol->value == 0 && symbol->size == 0 && string_equal(symbol->name, S8(".text"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section, u64 offset)
 {
     u32 end = buffer->index.sections[section].symbol_end;
@@ -1521,6 +1588,10 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
     {
         ObjectSymbol* symbol = object->symbols + buffer->index.symbols[index];
         if (symbol->value != offset) break;
+        if (object_assembly_is_aarch64_text_anchor(object, target, section, symbol))
+        {
+            continue;
+        }
         if (symbol->global)
         {
             object_assembly_append_string(buffer, S8("\t.globl "));
@@ -1548,6 +1619,10 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_sizes(ObjectAssemblyBuffer* buffer
     for (u32 index = range.symbol_begin; index < range.symbol_end; index += 1)
     {
         ObjectSymbol* symbol = object->symbols + buffer->index.original_symbols[index];
+        if (object_assembly_is_aarch64_text_anchor(object, target, section, symbol))
+        {
+            continue;
+        }
         object_assembly_append_string(buffer, S8("\t.size "));
         object_assembly_append_assembly_symbol(buffer, target, symbol->name);
         object_assembly_append_string(buffer, S8(", "));
@@ -1898,6 +1973,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
                                                                          relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12);
         }
         case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
+        case OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12:
         {
             u32 word = 0;
             memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
@@ -1905,7 +1981,8 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_aarch64_register(buffer, word);
             object_assembly_append_string(buffer, S8(", "));
             object_assembly_append_aarch64_register(buffer, word >> 5);
-            object_assembly_append_string(buffer, S8(", #:tprel_hi12:"));
+            object_assembly_append_string(buffer, relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12
+                                                        ? S8(", #:secrel_hi12:") : S8(", #:tprel_hi12:"));
             object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
             object_assembly_append_string(buffer, S8("\n"));
             return true;
@@ -3484,7 +3561,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_sp_register_width(Object
 {
     if ((index & 31) == 31)
     {
-        object_assembly_append_string(buffer, S8("sp"));
+        object_assembly_append_string(buffer, wide ? S8("sp") : S8("wsp"));
     }
     else
     {
@@ -3580,11 +3657,28 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_aarch64_target(ByteSlice data, u64 targ
     return target < data.length && (target & 3) == 0;
 }
 
+// The existing pair spelling carries GPR size and temporal addressing only.
+// Unpredictable register overlaps are also left raw: host assemblers refuse them.
+BUSTER_GLOBAL_LOCAL bool object_assembly_aarch64_pair_mnemonic(u32 word)
+{
+    u32 mode = (word >> 23) & 3;
+    u32 first = word & 31;
+    u32 second = (word >> 10) & 31;
+    u32 base = (word >> 5) & 31;
+    bool load = (word & UINT32_C(0x00400000)) != 0;
+    bool result = (word & UINT32_C(0x7e000000)) == UINT32_C(0x28000000) && mode != 0 &&
+                  (!load || first != second) &&
+                  (mode == 2 || base == 31 || (base != first && base != second));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section,
                                                                   ByteSlice data, u64 offset, u64 end)
 {
     BUSTER_UNUSED(object);
     BUSTER_UNUSED(target);
+    // Decode only a subset whose complete fields and register roles are
+    // preserved by the emitted spelling. Every other word stays raw.
     if (offset + 4 <= end)
     {
         u32 word = 0;
@@ -3614,7 +3708,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
         }
         if ((word & UINT32_C(0x7c000000)) == UINT32_C(0x14000000))
         {
-            s64 displacement = object_assembly_aarch64_sign_extend(word & UINT32_C(0x03ffffff), 26) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend(word & UINT32_C(0x03ffffff), 26) * 4;
             u64 target_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
             {
@@ -3625,16 +3719,16 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x18000000))
+        if ((word & UINT32_C(0xff000000)) == UINT32_C(0x58000000))
         {
-            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) * 4;
             u64 literal_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, literal_offset) || !object_assembly_has_internal_label(buffer, section, literal_offset))
             {
                 return 0;
             }
             object_assembly_append_string(buffer, S8("\tldr "));
-            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, true);
             object_assembly_append_string(buffer, S8(", "));
             object_assembly_append_internal_label(buffer, section, literal_offset);
             object_assembly_append_string(buffer, S8("\n"));
@@ -3642,7 +3736,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
         }
         if ((word & UINT32_C(0xff000010)) == UINT32_C(0x54000000))
         {
-            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) * 4;
             u64 target_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
             {
@@ -3659,7 +3753,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             bool nonzero = (word & UINT32_C(0x01000000)) != 0;
-            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) * 4;
             u64 target_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
             {
@@ -3676,7 +3770,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
         {
             bool nonzero = (word & UINT32_C(0x01000000)) != 0;
             u32 bit = ((word >> 31) & 1) * 32 + ((word >> 19) & 31);
-            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x3fff), 14) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x3fff), 14) * 4;
             u64 target_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
             {
@@ -3700,9 +3794,9 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
                                                                                                                                    : S8("\tror "));
             object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
@@ -3711,22 +3805,23 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\tmul "));
             object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x7fe00c00)) == UINT32_C(0x1a800400) && ((word >> 5) & 31) == 31 && ((word >> 16) & 31) == 31)
+        if ((word & UINT32_C(0x7fe00c00)) == UINT32_C(0x1a800400) && ((word >> 5) & 31) == 31 && ((word >> 16) & 31) == 31 &&
+            ((word >> 12) & 15) < 14)
         {
             object_assembly_append_string(buffer, S8("\tcset "));
-            object_assembly_append_aarch64_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
             object_assembly_append_string(buffer, object_assembly_aarch64_condition(((word >> 12) & 15) ^ 1));
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        u32 logical_operation = word & UINT32_C(0x7f200000);
+        u32 logical_operation = word & UINT32_C(0x7fe0fc00);
         if (logical_operation == UINT32_C(0x0a000000) || logical_operation == UINT32_C(0x2a000000) || logical_operation == UINT32_C(0x4a000000))
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
@@ -3755,7 +3850,8 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x11000000))
+        if ((word & UINT32_C(0x1f800000)) == UINT32_C(0x11000000) &&
+            (!(word & UINT32_C(0x00400000)) || ((word >> 10) & 0xfff)))
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             bool subtract = (word & UINT32_C(0x40000000)) != 0;
@@ -3786,7 +3882,9 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x1f200000)) == UINT32_C(0x0b000000))
+        if ((word & UINT32_C(0x1fe00000)) == UINT32_C(0x0b000000) &&
+            ((word & UINT32_C(0x80000000)) || ((word >> 10) & 63) < 32) &&
+            ((word & UINT32_C(0x2000001f)) != UINT32_C(0x2000001f) || !(word & UINT32_C(0x0000fc00))))
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             bool subtract = (word & UINT32_C(0x40000000)) != 0;
@@ -3798,18 +3896,18 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             if (set_flags && destination == 31)
             {
                 object_assembly_append_string(buffer, subtract ? S8("\tcmp ") : S8("\tcmn "));
-                object_assembly_append_aarch64_register_width(buffer, source, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, source, wide);
                 object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_aarch64_register_width(buffer, second, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, second, wide);
             }
             else
             {
                 object_assembly_append_string(buffer, subtract ? set_flags ? S8("\tsubs ") : S8("\tsub ") : set_flags ? S8("\tadds ") : S8("\tadd "));
-                object_assembly_append_aarch64_register_width(buffer, destination, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, destination, wide);
                 object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_aarch64_register_width(buffer, source, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, source, wide);
                 object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_aarch64_register_width(buffer, second, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, second, wide);
                 if (shift)
                 {
                     object_assembly_append_string(buffer, S8(", lsl #"));
@@ -3819,8 +3917,9 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x7f800000)) == UINT32_C(0x52800000) || (word & UINT32_C(0x7f800000)) == UINT32_C(0x72800000) ||
-            (word & UINT32_C(0x7f800000)) == UINT32_C(0x12800000))
+        if (((word & UINT32_C(0x7f800000)) == UINT32_C(0x52800000) || (word & UINT32_C(0x7f800000)) == UINT32_C(0x72800000) ||
+             (word & UINT32_C(0x7f800000)) == UINT32_C(0x12800000)) &&
+            ((word & UINT32_C(0x80000000)) || !(word & UINT32_C(0x00400000))))
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             u32 operation = (word >> 29) & 3;
@@ -3830,7 +3929,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\t"));
             object_assembly_append_string(buffer, name);
             object_assembly_append_string(buffer, S8(" "));
-            object_assembly_append_aarch64_register_width(buffer, word, wide);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, wide);
             object_assembly_append_string(buffer, S8(", #0x"));
             object_assembly_append_u64_hex(buffer, immediate, 4);
             if (shift)
@@ -3841,7 +3940,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000))
+        if ((word & UINT32_C(0x3f800000)) == UINT32_C(0x39000000))
         {
             u32 size_bits = (word >> 30) & 3;
             u32 bytes = 1u << size_bits;
@@ -3863,16 +3962,16 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("]\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x3a000000)) == UINT32_C(0x28000000))
+        if (object_assembly_aarch64_pair_mnemonic(word))
         {
             bool load = (word & UINT32_C(0x00400000)) != 0;
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             u32 mode = (word >> 23) & 3;
             s64 displacement = object_assembly_aarch64_sign_extend((word >> 15) & 0x7f, 7) * (wide ? 8 : 4);
             object_assembly_append_string(buffer, load ? S8("\tldp ") : S8("\tstp "));
-            object_assembly_append_aarch64_register_width(buffer, word, wide);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, wide);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 10, wide);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 10, wide);
             object_assembly_append_string(buffer, S8(", ["));
             object_assembly_append_aarch64_sp_register(buffer, word >> 5);
             if (mode == 1)
@@ -3896,19 +3995,19 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x13000000))
+        if ((word & UINT32_C(0xfffffc00)) == UINT32_C(0x93407c00))
         {
             object_assembly_append_string(buffer, S8("\tsxtw "));
-            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, true);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 5, false);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, false);
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0xffc00000)) == UINT32_C(0xd5000000))
+        if ((word & UINT32_C(0xffffffe0)) == UINT32_C(0xd53bd040))
         {
             object_assembly_append_string(buffer, S8("\tmrs "));
-            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, true);
             object_assembly_append_string(buffer, S8(", tpidr_el0\n"));
             return 4;
         }
@@ -4203,6 +4302,11 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
         }
         valid = valid && object->relocation_count <= (UINT64_MAX - capacity) / 256;
         if (valid) capacity += (u64)object->relocation_count * 256;
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count && valid; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + relocation_index;
+            valid = object_aarch64_elf_got_addend_valid(relocation->kind, relocation->addend);
+        }
     }
     if (valid)
     {
@@ -4644,14 +4748,42 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
     }
 }
 
+// ABI names for the unsupported AArch64 branch and descriptor forms this
+// reader can identify. Naming a type here does not admit it into the object
+// model; the existing relocation-kind mapping remains the support authority.
+BUSTER_GLOBAL_LOCAL String8 object_elf_aarch64_relocation_name(u32 type)
+{
+    String8 result = {0};
+    switch (type)
+    {
+    case 279: result = S8("R_AARCH64_TSTBR14"); break;
+    case 280: result = S8("R_AARCH64_CONDBR19"); break;
+    case 560: result = S8("R_AARCH64_TLSDESC_LD_PREL19"); break;
+    case 561: result = S8("R_AARCH64_TLSDESC_ADR_PREL21"); break;
+    case 562: result = S8("R_AARCH64_TLSDESC_ADR_PAGE21"); break;
+    case 563: result = S8("R_AARCH64_TLSDESC_LD64_LO12"); break;
+    case 564: result = S8("R_AARCH64_TLSDESC_ADD_LO12"); break;
+    case 565: result = S8("R_AARCH64_TLSDESC_OFF_G1"); break;
+    case 566: result = S8("R_AARCH64_TLSDESC_OFF_G0_NC"); break;
+    case 567: result = S8("R_AARCH64_TLSDESC_LDR"); break;
+    case 568: result = S8("R_AARCH64_TLSDESC_ADD"); break;
+    case 569: result = S8("R_AARCH64_TLSDESC_CALL"); break;
+    case 1031: result = S8("R_AARCH64_TLSDESC"); break;
+    default: break;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void object_elf_unsupported_relocation(ObjectFile* object, Arena* arena, u32 type)
 {
     if (object)
     {
         object->error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-        String8 name = object_elf_x86_64_relocation_name(type);
-        object->diagnostic = name.length ? string_format(arena, S8("unsupported ELF x86-64 relocation {S8} (type {u32})"), name, type)
-                                         : string_format(arena, S8("unsupported ELF x86-64 relocation type {u32}"), type);
+        bool aarch64 = object->target.cpu_arch == CPU_ARCH_AARCH64;
+        String8 architecture = aarch64 ? S8("AArch64") : S8("x86-64");
+        String8 name = aarch64 ? object_elf_aarch64_relocation_name(type) : object_elf_x86_64_relocation_name(type);
+        object->diagnostic = name.length ? string_format(arena, S8("unsupported ELF {S8} relocation {S8} (type {u32})"), architecture, name, type)
+                                         : string_format(arena, S8("unsupported ELF {S8} relocation type {u32}"), architecture, type);
     }
 }
 
@@ -4928,6 +5060,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         ELF_REL_SIZE = 16,
         ELF_RELA_SIZE = 24,
         ELF_SHN_LORESERVE = 0xff00,
+        ELF_STO_AARCH64_VARIANT_PCS = 0x80,
     };
     u16 type = 0;
     u16 machine = 0;
@@ -4987,6 +5120,84 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     if (read_ok)
     {
         section_bases = arena_allocate(arena, u64, section_count);
+    }
+    // Before alignment merges, record sections named by ordinary definitions.
+    // The same table becomes contribution bases below; no persistent side map
+    // is needed. A zero-size definition still makes its section observable.
+    if (read_ok)
+    {
+        memset(section_bases, 0, (u64)section_count * sizeof(u64));
+    }
+    u32 symbol_section = 0;
+    if (read_ok)
+    {
+        symbol_section = UINT32_MAX;
+    }
+    u32 symbol_count = 0;
+    if (read_ok)
+    {
+        symbol_count = 0;
+    }
+    u32 string_section = 0;
+    if (read_ok)
+    {
+        string_section = UINT32_MAX;
+    }
+    u64 symbol_offset = 0;
+    if (read_ok)
+    {
+        symbol_offset = 0;
+    }
+    u64 string_offset = 0;
+    if (read_ok)
+    {
+        string_offset = 0;
+    }
+    u64 string_size = 0;
+    if (read_ok)
+    {
+        string_size = 0;
+        for (u16 section_index = 0; section_index < section_count && read_ok; section_index += 1)
+        {
+            u64 section = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
+            u32 section_type = 0;
+            u64 offset = 0;
+            u64 size = 0;
+            u64 entry_size = 0;
+            u32 link = 0;
+            if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_u64(bytes, section + 24, &offset) ||
+                !object_read_u64(bytes, section + 32, &size) || !object_read_u32(bytes, section + 40, &link) || !object_read_u64(bytes, section + 56, &entry_size))
+            {
+                read_ok = false;
+            }
+            if (read_ok)
+            {
+                if (section_type == 2)
+                {
+                    if (symbol_section != UINT32_MAX || entry_size != ELF_SYMBOL_SIZE || size % ELF_SYMBOL_SIZE || offset > bytes.length ||
+                        size > bytes.length - offset || size / ELF_SYMBOL_SIZE > UINT32_MAX || link >= section_count)
+                    {
+                        read_ok = false;
+                    }
+                    if (read_ok)
+                    {
+                        symbol_section = section_index;
+                        symbol_count = (u32)(size / ELF_SYMBOL_SIZE);
+                        symbol_offset = offset;
+                        string_section = link;
+                    }
+                }
+            }
+        }
+    }
+    for (u32 symbol = 1; read_ok && symbol < symbol_count; symbol += 1)
+    {
+        u16 section_index = 0;
+        read_ok = object_read_u16(bytes, symbol_offset + (u64)symbol * ELF_SYMBOL_SIZE + 6, &section_index);
+        if (read_ok && section_index && section_index < ELF_SHN_LORESERVE && section_index < section_count)
+        {
+            section_bases[section_index] = 1;
+        }
     }
     if (read_ok)
     {
@@ -5150,6 +5361,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 }
                 slot = OBJECT_SECTION_COUNT + named;
             }
+            // Empty canonical placeholders and legacy Windows unwind slots
+            // contribute no storage or alignment when no definition names them.
+            // Validate the original alignment above, and keep named/custom and
+            // referenced empty contributions unchanged.
+            bool legacy_windows_slot = kind == OBJECT_SECTION_READ_ONLY_DATA &&
+                                       (string_equal(name, S8(".pdata")) || string_equal(name, S8(".xdata")));
+            bool empty_placeholder = string_equal(name, object_section_name_for_kind(kind)) || legacy_windows_slot;
+            if (read_ok && !size && slot < OBJECT_SECTION_COUNT && !section_bases[section_index] && empty_placeholder)
+            {
+                alignment = 1;
+            }
             u64* slot_size = slot < OBJECT_SECTION_COUNT ? section_sizes + slot : named_sizes + (slot - OBJECT_SECTION_COUNT);
             u32* slot_alignment = slot < OBJECT_SECTION_COUNT ? section_alignments + slot : named_alignments + (slot - OBJECT_SECTION_COUNT);
             u64 base = 0;
@@ -5251,72 +5473,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             }
         }
     }
-    u32 symbol_section = 0;
     if (read_ok)
     {
-        symbol_section = UINT32_MAX;
-    }
-    u32 symbol_count = 0;
-    if (read_ok)
-    {
-        symbol_count = 0;
-    }
-    u32 string_section = 0;
-    if (read_ok)
-    {
-        string_section = UINT32_MAX;
-    }
-    u64 symbol_offset = 0;
-    if (read_ok)
-    {
-        symbol_offset = 0;
-    }
-    u64 string_offset = 0;
-    if (read_ok)
-    {
-        string_offset = 0;
-    }
-    u64 string_size = 0;
-    if (read_ok)
-    {
-        string_size = 0;
         for (u16 section_index = 0; section_index < section_count && read_ok; section_index += 1)
         {
-            u64 section = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
-            u32 section_type = 0;
-            u64 offset = 0;
-            u64 size = 0;
-            u64 entry_size = 0;
-            u32 link = 0;
-            if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_u64(bytes, section + 24, &offset) ||
-                !object_read_u64(bytes, section + 32, &size) || !object_read_u32(bytes, section + 40, &link) || !object_read_u64(bytes, section + 56, &entry_size))
+            if (section_kinds[section_index] != UINT32_MAX)
             {
-                read_ok = false;
-            }
-            if (read_ok)
-            {
-                if (section_kinds[section_index] != UINT32_MAX)
+                u64 section = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
+                u32 section_type = 0;
+                u64 offset = 0;
+                u64 size = 0;
+                read_ok = object_read_u32(bytes, section + 4, &section_type) && object_read_u64(bytes, section + 24, &offset) &&
+                          object_read_u64(bytes, section + 32, &size);
+                if (read_ok && section_type != 8 && size)
                 {
-                    ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
-                    if (section_type != 8 && size)
-                    {
-                        memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
-                    }
-                }
-                if (section_type == 2)
-                {
-                    if (symbol_section != UINT32_MAX || entry_size != ELF_SYMBOL_SIZE || size % ELF_SYMBOL_SIZE || offset > bytes.length ||
-                        size > bytes.length - offset || size / ELF_SYMBOL_SIZE > UINT32_MAX || link >= section_count)
-                    {
-                        read_ok = false;
-                    }
-                    if (read_ok)
-                    {
-                        symbol_section = section_index;
-                        symbol_count = (u32)(size / ELF_SYMBOL_SIZE);
-                        symbol_offset = offset;
-                        string_section = link;
-                    }
+                    u32 slot = section_kinds[section_index];
+                    memcpy(result.sections[slot].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
                 }
             }
         }
@@ -5394,6 +5566,24 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 if (symbol_type == 4)
                 {
                     continue;
+                }
+                // Variant PCS needs preserved symbol metadata and linker/runtime
+                // register-state guarantees that ObjectSymbol cannot represent.
+                // Refuse before section-based skipping can discard that marking.
+                if (target.cpu_arch == CPU_ARCH_AARCH64 && (other & ELF_STO_AARCH64_VARIANT_PCS))
+                {
+                    if (object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
+                    {
+                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                        String8 diagnostic_name = name.length ? name : S8("<unnamed>");
+                        if (diagnostic_name.length <= UINT64_MAX - 128 &&
+                            object_reader_arena_can_allocate_bytes(arena, diagnostic_name.length + 128, BUSTER_ALIGN_OF(char8)))
+                        {
+                            result.diagnostic = string_format(arena, S8("unsupported ELF AArch64 symbol {S8} (index {u32}): STO_AARCH64_VARIANT_PCS"),
+                                                              diagnostic_name, source_index);
+                        }
+                    }
+                    read_ok = false;
                 }
                 // Absolute, common, processor-specific, and SHN_XINDEX symbols do
                 // not identify one of the ordinary section headers represented by an
@@ -5658,11 +5848,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     {
                         if (target.cpu_arch == CPU_ARCH_X86_64)
                         {
-                            // R_X86_64_PLT32 reads back as a plain rel32: a
-                            // call through a PLT entry and a direct call
-                            // resolve identically here, and only the writer
-                            // has to keep the distinction (a shared link
-                            // refuses PC32 against an undefined function).
+                            // PLT32 states an explicit PLT reference. PC32
+                            // can expose a function's address, which needs
+                            // canonical-address handling rather than a thunk.
+                            // Preserve this distinction through object reads.
                             // The four GOT families stay distinct: a
                             // GOTPCRELX is a GOTPCREL the producer promises is
                             // relaxable, and the two X spellings differ in
@@ -5671,7 +5860,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             // there, so neither survives being collapsed.
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 24                        ? OBJECT_RELOCATION_X86_64_PC64
-                                   : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
+                                   : relocation_type == 2                         ? OBJECT_RELOCATION_X86_64_PC32
+                                   : relocation_type == 4                         ? OBJECT_RELOCATION_X86_64_PLT32
                                    : relocation_type == 9                         ? OBJECT_RELOCATION_X86_64_GOTPCREL
                                    : relocation_type == 41                        ? OBJECT_RELOCATION_X86_64_GOTPCRELX
                                    : relocation_type == 42                        ? OBJECT_RELOCATION_X86_64_REX_GOTPCRELX
@@ -5732,7 +5922,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             source_offset > target_section_data->virtual_size - section_bases[target_section] ||
                             relocation_width > target_section_data->virtual_size - section_bases[target_section] - source_offset)
                         {
-                            if (kind == OBJECT_RELOCATION_COUNT && target.cpu_arch == CPU_ARCH_X86_64)
+                            if (kind == OBJECT_RELOCATION_COUNT)
                             {
                                 object_elf_unsupported_relocation(&result, arena, relocation_type);
                             }
@@ -5779,7 +5969,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 // unlike its executed displacement and Mach-O's rule.
                                 if (section_type == 9)
                                 {
-                                    if (object_relocation_kind_is_aarch64_elf_ldst(kind))
+                                    if (object_relocation_kind_is_aarch64_elf_ldst(kind) || kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
                                     {
                                         // AAELF64 REL instruction addends are
                                         // sign-extended after access-size scaling.
@@ -5790,9 +5980,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                         addend = page ? decoded.operands[1].value / 4096 : (s64)immediate;
                                     }
                                 }
-                                memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
+                                read_ok = read_ok && object_aarch64_elf_got_addend_valid(kind, addend);
+                                if (read_ok)
+                                {
+                                    memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
+                                }
                             }
-                            else
+                            if (!read_ok)
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                             }
@@ -5852,7 +6046,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 }
                                 addend = (s64)(s32)stored;
                             }
-                            else if (kind == OBJECT_RELOCATION_X86_64_PC32 || object_relocation_kind_is_x86_got(kind) ||
+                            else if (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 || object_relocation_kind_is_x86_got(kind) ||
                                      kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                                      kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
                                      kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
@@ -6371,7 +6565,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     .name = object_section_name_for_kind((ObjectSectionKind)kind),
                     .data =
                         {
-                            .pointer = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]),
+                            .pointer = zero_fill ? 0 : arena_allocate_zeroed(arena, u8, section_sizes[kind]),
                             .length = zero_fill ? 0 : section_sizes[kind],
                         },
                     .virtual_size = section_sizes[kind],
@@ -6850,10 +7044,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                                : relocation_type == 7 && tls_index_symbol
                                    ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
                                : relocation_type == 7   ? (tls_index_name ? OBJECT_RELOCATION_COUNT : OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
-                               : relocation_type == 9 && referenced->section < result.section_count &&
+                               : (relocation_type == 9 || relocation_type == 10) && referenced->section < result.section_count &&
                                      (result.sections[referenced->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
                                       result.sections[referenced->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
-                                   ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                                   ? (relocation_type == 10 ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12
+                                                            : OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
                                : relocation_type == 0xe ? OBJECT_RELOCATION_ABSOLUTE64
                                                         : OBJECT_RELOCATION_COUNT;
                         if (relocation_type == 0xe)
@@ -6888,7 +7083,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             kind = decoded.opcode == A64_OPCODE_B ? OBJECT_RELOCATION_AARCH64_JUMP26 : OBJECT_RELOCATION_AARCH64_CALL26;
                             referenced->kind = OBJECT_SYMBOL_FUNCTION;
                         }
-                        else if (relocation_type == 4 || relocation_type == 6 || relocation_type == 9)
+                        else if (relocation_type == 4 || relocation_type == 6 || relocation_type == 9 || relocation_type == 10)
                         {
                             ObjectRelocationKind page_kind = relocation_type == 4 ? OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
                                                                : OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A;
@@ -6897,7 +7092,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             if (((section_bases[section_index] + source_offset) & 3) ||
                                 result.sections[section_kinds[section_index]].alignment < 4 ||
                                 !object_read_u32(bytes, (u64)raw_offset + source_offset, &stored) ||
-                                !object_aarch64_pe_page_addend_decode(page_kind, stored, &addend, &canonical))
+                                (relocation_type == 9 || relocation_type == 10
+                                     ? !object_aarch64_pe_tls_offset_addend_decode(kind, stored, &addend, &canonical)
+                                     : !object_aarch64_pe_page_addend_decode(page_kind, stored, &addend, &canonical)))
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                 read_ok = false;
@@ -11310,6 +11507,7 @@ BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleReloca
             case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12; return true;
             case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32: *destination = OBJECT_RELOCATION_X86_64_MACH_TLV_PC32; return true;
@@ -12683,9 +12881,10 @@ BUSTER_GLOBAL_LOCAL String8 const object_elf_generated_section_names[] = {
 typedef struct ObjectElfPlan ObjectElfPlan;
 struct ObjectElfPlan
 {
-    // Indexed by ELF section number: 0 is SHN_UNDEF, 1 .. input count are the
-    // input sections in order, then one RELA table per input section that has
-    // relocations, then .symtab, .strtab and .shstrtab.
+    // Input section to emitted ELF section number; zero means omitted.
+    u32* section_indices;
+    // Indexed by emitted ELF section number: 0 is SHN_UNDEF, retained inputs
+    // in order, one RELA table per relocated input, then the generated tables.
     u64* offsets;
     u64* sizes;
     u32* name_offsets;
@@ -12710,8 +12909,7 @@ struct ObjectElfPlan
 // STT_TLS 6. An undefined data symbol no input typed -- an undeclared
 // assembly reference, or an STT_NOTYPE one read from another toolchain --
 // stays STT_NOTYPE 0: stamping STT_OBJECT would invent the claim that makes a
-// linker copy a library function into the executable (GitHub #1242). Both ELF
-// writers share this so their bytes agree.
+// linker copy a library function into the executable (GitHub #1242).
 BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool is_defined, bool is_thread_local)
 {
     bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
@@ -12721,6 +12919,15 @@ BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)
 {
     return section->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_elf64_section_can_omit(u32 index, ObjectSection const* section)
+{
+    // Only the model's canonical empty slots are storage placeholders. A
+    // custom name or an additional section can carry identity without bytes.
+    bool result = index < OBJECT_SECTION_COUNT && section->kind == (ObjectSectionKind)index && !section->data.length && !section->virtual_size &&
+                  string_equal(section->name, object_section_name_for_kind(section->kind));
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan* plan,
@@ -12742,11 +12949,13 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
     if (result == OBJECT_ERROR_NONE)
     {
         plan->relocation_counts = object_writer_table_allocate(scratch, u32, input_count);
-        result = plan->relocation_counts ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
+        plan->section_indices = object_writer_table_allocate(scratch, u32, input_count);
+        result = plan->relocation_counts && plan->section_indices ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
     }
     if (result == OBJECT_ERROR_NONE)
     {
         memset(plan->relocation_counts, 0, (u64)input_count * sizeof(u32));
+        memset(plan->section_indices, 0, (u64)input_count * sizeof(u32));
     }
     // Relocations: each section's count, and with it how many sections need
     // a RELA table -- a section's first relocation opens one.
@@ -12775,11 +12984,6 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
     }
     if (result == OBJECT_ERROR_NONE)
     {
-        plan->header_count = (u32)header_count;
-        plan->relocation_section = input_count + 1;
-        plan->symbol_section = plan->relocation_section + plan->relocation_section_count;
-        plan->string_section = plan->symbol_section + 1;
-        plan->section_string_section = plan->string_section + 1;
         plan->offsets = object_writer_table_allocate(scratch, u64, header_count);
         plan->sizes = object_writer_table_allocate(scratch, u64, header_count);
         plan->name_offsets = object_writer_table_allocate(scratch, u32, header_count);
@@ -12793,41 +12997,57 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
     for (u32 symbol = 0; result == OBJECT_ERROR_NONE && symbol < object->symbol_count; symbol += 1)
     {
         statistics->symbol_visits += 1;
-        plan->local_symbol_count += object->symbols[symbol].global ? 0 : 1;
+        ObjectSymbol const* source = object->symbols + symbol;
+        plan->local_symbol_count += source->global ? 0 : 1;
+        if (source->section != OBJECT_SECTION_UNDEFINED && source->section < input_count)
+        {
+            plan->section_indices[source->section] = 1;
+        }
         sizes_valid =
             sizes_valid && u64_add_checked(string_size, object->symbols[symbol].name.length, &string_size) && u64_add_checked(string_size, 1, &string_size);
     }
-    // Sections, once: each name's .shstrtab offset, each payload's offset
-    // after its alignment padding, and the sections that get a RELA table,
-    // in section order. Zero-fill sections take their padding and an offset
-    // but no bytes, as they always have.
+    // Sections, once: omit unused canonical slots, map every retained input,
+    // and lay out its name and payload. Defined symbols and relocation targets
+    // retain an empty section; zero-fill takes an offset but no file bytes.
     u64 section_string_size = 1;
     u64 cursor = OBJECT_ELF_HEADER_SIZE;
     bool layout_valid = result == OBJECT_ERROR_NONE;
     u32 relocation_table = 0;
+    u32 next_section = 1;
     for (u32 section = 0; result == OBJECT_ERROR_NONE && section < input_count; section += 1)
     {
         ObjectSection const* source = object->sections + section;
         statistics->section_visits += 1;
-        plan->name_offsets[section + 1] = (u32)section_string_size;
-        sizes_valid = sizes_valid && u64_add_checked(section_string_size, source->name.length, &section_string_size) &&
-                      u64_add_checked(section_string_size, 1, &section_string_size);
-        u64 payload_size = object_section_kind_is_zero_fill(source->kind) ? 0 : source->data.length;
-        u64 end = 0;
-        layout_valid =
-            layout_valid && align_forward_checked(cursor, source->alignment ? source->alignment : 1, &cursor) && u64_add_checked(cursor, payload_size, &end);
-        if (layout_valid)
+        bool retained = plan->section_indices[section] || plan->relocation_counts[section] || !object_elf64_section_can_omit(section, source);
+        u32 emitted = retained ? next_section++ : 0;
+        plan->section_indices[section] = emitted;
+        if (retained)
         {
-            plan->offsets[section + 1] = cursor;
-            plan->sizes[section + 1] = BUSTER_MAX(source->data.length, source->virtual_size);
-            cursor = end;
-        }
-        if (plan->relocation_counts[section])
-        {
-            plan->relocation_targets[relocation_table] = section;
-            relocation_table += 1;
+            plan->name_offsets[emitted] = (u32)section_string_size;
+            sizes_valid = sizes_valid && u64_add_checked(section_string_size, source->name.length, &section_string_size) &&
+                          u64_add_checked(section_string_size, 1, &section_string_size);
+            u64 payload_size = object_section_kind_is_zero_fill(source->kind) ? 0 : source->data.length;
+            u64 end = 0;
+            layout_valid = layout_valid && align_forward_checked(cursor, source->alignment ? source->alignment : 1, &cursor) &&
+                           u64_add_checked(cursor, payload_size, &end);
+            if (layout_valid)
+            {
+                plan->offsets[emitted] = cursor;
+                plan->sizes[emitted] = BUSTER_MAX(source->data.length, source->virtual_size);
+                cursor = end;
+            }
+            if (plan->relocation_counts[section])
+            {
+                plan->relocation_targets[relocation_table++] = section;
+            }
         }
     }
+    plan->relocation_section = next_section;
+    plan->symbol_section = plan->relocation_section + plan->relocation_section_count;
+    plan->string_section = plan->symbol_section + 1;
+    plan->section_string_section = plan->string_section + 1;
+    plan->header_count = plan->section_string_section + 1;
+    header_count = plan->header_count;
     // Then `.rela` + name for each RELA table, and the three generated names.
     for (u32 table = 0; result == OBJECT_ERROR_NONE && table < plan->relocation_section_count; table += 1)
     {
@@ -12961,7 +13181,12 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
     {
         ObjectSection const* source = object->sections + section;
         statistics->section_visits += 1;
-        object_image_zero_to(&payloads, plan->offsets[section + 1]);
+        u32 emitted = plan->section_indices[section];
+        if (!emitted)
+        {
+            continue;
+        }
+        object_image_zero_to(&payloads, plan->offsets[emitted]);
         if (borrowed && object_elf64_payload_borrowable(source))
         {
             borrowed[(*borrowed_count)++] = (ObjectBorrowedPayload){
@@ -13009,7 +13234,7 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
         // STV_HIDDEN 2.
         object_image_u8(slot, source->hidden ? 2 : 0);
-        object_image_u16(slot, source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u16)(source->section + 1));
+        object_image_u16(slot, source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u16)plan->section_indices[source->section]);
         object_image_u64(slot, source->value);
         object_image_u64(slot, source->size);
     }
@@ -13035,8 +13260,11 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
     for (u32 section = 0; section < input_count; section += 1)
     {
         statistics->section_visits += 1;
-        object_image_store(&tail, object->sections[section].name.pointer, object->sections[section].name.length);
-        object_image_u8(&tail, 0);
+        if (plan->section_indices[section])
+        {
+            object_image_store(&tail, object->sections[section].name.pointer, object->sections[section].name.length);
+            object_image_u8(&tail, 0);
+        }
     }
     for (u32 table = 0; table < plan->relocation_section_count; table += 1)
     {
@@ -13057,6 +13285,11 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
     {
         ObjectSection const* source = object->sections + section;
         statistics->section_visits += 1;
+        u32 emitted = plan->section_indices[section];
+        if (!emitted)
+        {
+            continue;
+        }
         u32 type = 1;
         if (object_section_kind_is_zero_fill(source->kind))
         {
@@ -13086,14 +13319,14 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
                         ? 0x3
                     : object_section_kind_is_debug(source->kind) ? 0x0
                                                                  : 0x2;
-        object_elf64_section_header(&tail, plan->name_offsets[section + 1], type, flags, plan->offsets[section + 1], plan->sizes[section + 1], 0, 0,
+        object_elf64_section_header(&tail, plan->name_offsets[emitted], type, flags, plan->offsets[emitted], plan->sizes[emitted], 0, 0,
                                     source->alignment, 0);
     }
     for (u32 table = 0; table < plan->relocation_section_count; table += 1)
     {
         u32 section = plan->relocation_section + table;
         object_elf64_section_header(&tail, plan->name_offsets[section], 4, 0, plan->offsets[section], plan->sizes[section], plan->symbol_section,
-                                    plan->relocation_targets[table] + 1, OBJECT_ELF_TABLE_ALIGNMENT, OBJECT_ELF_RELOCATION_SIZE);
+                                    plan->section_indices[plan->relocation_targets[table]], OBJECT_ELF_TABLE_ALIGNMENT, OBJECT_ELF_RELOCATION_SIZE);
     }
     object_elf64_section_header(&tail, plan->name_offsets[plan->symbol_section], 2, 0, symbol_table, plan->sizes[plan->symbol_section], plan->string_section,
                                 1 + plan->local_symbol_count, OBJECT_ELF_TABLE_ALIGNMENT, OBJECT_ELF_SYMBOL_SIZE);
@@ -13192,418 +13425,6 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
     return result;
 }
 
-#if BUSTER_INCLUDE_TESTS
-// The ELF64 writer and priority split as they stood before planned emission,
-// kept as a differential oracle for object_write. The edits are the names,
-// the counters -- which count what this code did the way
-// ObjectWriteStatistics counts it for the writer that replaced it -- and
-// raw stores routed through object_write_u8_at and object_write_bytes_at,
-// which count them and store the same bytes on every input the old writer
-// accepted without writing past its buffer.
-BUSTER_GLOBAL_LOCAL ObjectFile object_reference_split_initializer_priorities(Arena* arena, ObjectFile* object, ObjectFormat format,
-                                                                             ObjectWriteStatistics* statistics)
-{
-    ObjectFile result = *object;
-    ObjectSectionKind initializer_kinds[2] = {OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_FINI_ARRAY};
-    u32 initializer_entries[2] = {0};
-    u32 group_count = 0;
-    for (u32 slot = 0; slot < 2; slot += 1)
-    {
-        u32* priorities = object->initializer_priorities[slot];
-        if (priorities && (u32)initializer_kinds[slot] < object->section_count)
-        {
-            initializer_entries[slot] = (u32)(object->sections[initializer_kinds[slot]].data.length / OBJECT_INITIALIZER_ENTRY_SIZE);
-        }
-        for (u32 entry = 0; entry < initializer_entries[slot]; entry += 1)
-        {
-            // A group starts wherever the priority changes.  The entries that
-            // named none sort last and keep the unsuffixed section, so they
-            // are the one run that never becomes a group.
-            bool starts_group = priorities[entry] != IR_INITIALIZER_PRIORITY_NONE && (!entry || priorities[entry - 1] != priorities[entry]);
-            group_count += starts_group ? 1 : 0;
-        }
-    }
-    // Renaming the unprioritized section is COFF's alone, and it is why that
-    // format takes the copy whether or not a group came out of the array; the
-    // relocations are copied only when there is a group to move one into.
-    bool rename_unprioritized = format == OBJECT_FORMAT_COFF;
-    if (group_count || rename_unprioritized)
-    {
-        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count + group_count);
-        memcpy(sections, object->sections, (u64)object->section_count * sizeof(ObjectSection));
-        ObjectRelocation* relocations = result.relocations;
-        result.sections = sections;
-        if (group_count)
-        {
-            relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count ? object->relocation_count : 1);
-            memcpy(relocations, object->relocations, (u64)object->relocation_count * sizeof(ObjectRelocation));
-            result.relocations = relocations;
-        }
-        for (u32 slot = 0; slot < 2; slot += 1)
-        {
-            ObjectSectionKind kind = initializer_kinds[slot];
-            if (rename_unprioritized && (u32)kind < object->section_count)
-            {
-                sections[kind].name = object_initializer_section_name(arena, format, kind, IR_INITIALIZER_PRIORITY_NONE);
-            }
-            // Zero entries is also the shape an ObjectFile that carries no
-            // priorities at all takes, and the one where the section the rest
-            // of this reads may not exist.
-            if (!initializer_entries[slot])
-            {
-                continue;
-            }
-            u32* priorities = object->initializer_priorities[slot];
-            ByteSlice array = object->sections[kind].data;
-            u32 entry = 0;
-            while (entry < initializer_entries[slot] && priorities[entry] != IR_INITIALIZER_PRIORITY_NONE)
-            {
-                u32 end = entry + 1;
-                while (end < initializer_entries[slot] && priorities[end] == priorities[entry])
-                {
-                    end += 1;
-                }
-                u64 group_start = (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE;
-                u64 group_end = (u64)end * OBJECT_INITIALIZER_ENTRY_SIZE;
-                u32 group = result.section_count++;
-                sections[group] = (ObjectSection){
-                    .name = object_initializer_section_name(arena, format, kind, priorities[entry]),
-                    .data =
-                        {
-                            .pointer = array.pointer + group_start,
-                            .length = group_end - group_start,
-                        },
-                    .kind = kind,
-                    .alignment = object->sections[kind].alignment,
-                };
-                for (u32 index = 0; index < result.relocation_count; index += 1)
-                {
-                    ObjectRelocation* relocation = relocations + index;
-                    statistics->relocation_visits += 1;
-                    if (relocation->section == (u32)kind && relocation->offset >= group_start && relocation->offset < group_end)
-                    {
-                        relocation->section = group;
-                        relocation->offset -= group_start;
-                    }
-                }
-                entry = end;
-            }
-            // What is left in the unprioritized section is the run that named
-            // no priority, which now starts at the array's front rather than
-            // after the groups that moved out.
-            u64 remainder_start = (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE;
-            if (remainder_start)
-            {
-                sections[kind].data.pointer = array.pointer + remainder_start;
-                sections[kind].data.length = array.length - remainder_start;
-                for (u32 index = 0; index < result.relocation_count; index += 1)
-                {
-                    statistics->relocation_visits += 1;
-                    if (relocations[index].section == (u32)kind)
-                    {
-                        relocations[index].offset -= remainder_start;
-                    }
-                }
-            }
-        }
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_reference_write_elf64_with_capacity(Arena* arena, ObjectFile* object, u64 capacity,
-                                                                              ObjectWriteStatistics* statistics)
-{
-    ObjectArtifact result = {
-        .format = OBJECT_FORMAT_ELF64,
-    };
-    ObjectBuffer buffer = {
-        .bytes = arena_allocate(arena, u8, capacity),
-        .capacity = capacity,
-        .statistics = statistics,
-    };
-    statistics->image_bytes_reserved += capacity;
-    enum
-    {
-        ELF_HEADER_SIZE = 64,
-        ELF_SECTION_HEADER_SIZE = 64,
-        ELF_SYMBOL_SIZE = 24,
-        ELF_RELOCATION_SIZE = 24,
-    };
-    u32 relocation_section_count = 0;
-    u32* relocation_targets = arena_allocate(arena, u32, object->section_count);
-    for (u32 section = 0; section < object->section_count; section += 1)
-    {
-        statistics->section_visits += 1;
-        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
-        {
-            statistics->relocation_visits += 1;
-            if (object->relocations[relocation].section == section)
-            {
-                relocation_targets[relocation_section_count++] = section;
-                break;
-            }
-        }
-    }
-    u32 relocation_section = object->section_count + 1;
-    u32 section_count = object->section_count + relocation_section_count + 4;
-    u32 symbol_section = relocation_section + relocation_section_count;
-    u32 string_section = symbol_section + 1;
-    u32 section_string_section = string_section + 1;
-    u32* symbol_order = arena_allocate(arena, u32, object->symbol_count);
-    u32* symbol_indices = arena_allocate(arena, u32, object->symbol_count);
-    u32 ordered_symbol_count = 0;
-    for (u32 pass = 0; pass < 2; pass += 1)
-    {
-        bool global = pass != 0;
-        for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
-        {
-            statistics->symbol_visits += 1;
-            if (object->symbols[symbol].global != global)
-            {
-                continue;
-            }
-            symbol_order[ordered_symbol_count] = symbol;
-            symbol_indices[symbol] = ordered_symbol_count + 1;
-            ordered_symbol_count += 1;
-        }
-    }
-    object_buffer_zero(&buffer, ELF_HEADER_SIZE);
-    u64* section_offsets = arena_allocate(arena, u64, section_count);
-    u64* section_sizes = arena_allocate(arena, u64, section_count);
-    u32* section_name_offsets = arena_allocate(arena, u32, section_count);
-    for (u32 section = 0; section < object->section_count; section += 1)
-    {
-        statistics->section_visits += 1;
-        object_buffer_align(&buffer, object->sections[section].alignment);
-        section_offsets[section + 1] = buffer.count;
-        if (!object_section_kind_is_zero_fill(object->sections[section].kind))
-        {
-            object_buffer_write(&buffer, object->sections[section].data.pointer, object->sections[section].data.length);
-            statistics->payload_bytes_copied += object->sections[section].data.length;
-        }
-        section_sizes[section + 1] = BUSTER_MAX(object->sections[section].data.length, object->sections[section].virtual_size);
-    }
-    for (u32 relocation_section_index = 0; relocation_section_index < relocation_section_count; relocation_section_index += 1)
-    {
-        u32 target = relocation_targets[relocation_section_index];
-        u32 output_section = relocation_section + relocation_section_index;
-        object_buffer_align(&buffer, 8);
-        section_offsets[output_section] = buffer.count;
-        for (u32 index = 0; index < object->relocation_count; index += 1)
-        {
-            ObjectRelocation* relocation = object->relocations + index;
-            statistics->relocation_visits += 1;
-            if (relocation->section != target)
-            {
-                continue;
-            }
-            u32 type = object_elf_relocation_type(object->target.cpu_arch, relocation->kind);
-            if (!type)
-            {
-                buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                break;
-            }
-            u64 offset = buffer.count;
-            object_buffer_zero(&buffer, ELF_RELOCATION_SIZE);
-            object_write_u64_at(&buffer, offset, relocation->offset);
-            object_write_u64_at(&buffer, offset + 8, ((u64)symbol_indices[relocation->symbol] << 32) | type);
-            object_write_s64_at(&buffer, offset + 16, relocation->addend);
-        }
-        section_sizes[output_section] = buffer.count - section_offsets[output_section];
-    }
-    object_buffer_align(&buffer, 8);
-    section_offsets[symbol_section] = buffer.count;
-    object_buffer_zero(&buffer, ELF_SYMBOL_SIZE);
-    u64 symbol_table_offset = buffer.count;
-    object_buffer_zero(&buffer, (u64)object->symbol_count * ELF_SYMBOL_SIZE);
-    section_sizes[symbol_section] = buffer.count - section_offsets[symbol_section];
-    section_offsets[string_section] = buffer.count;
-    u8 zero = 0;
-    object_buffer_write(&buffer, &zero, 1);
-    u32* symbol_name_offsets = arena_allocate(arena, u32, object->symbol_count);
-    for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
-    {
-        statistics->symbol_visits += 1;
-        symbol_name_offsets[symbol] = (u32)(buffer.count - section_offsets[string_section]);
-        object_buffer_write(&buffer, object->symbols[symbol].name.pointer, object->symbols[symbol].name.length);
-        object_buffer_write(&buffer, &zero, 1);
-    }
-    section_sizes[string_section] = buffer.count - section_offsets[string_section];
-    section_offsets[section_string_section] = buffer.count;
-    object_buffer_write(&buffer, &zero, 1);
-    for (u32 section = 0; section < object->section_count; section += 1)
-    {
-        statistics->section_visits += 1;
-        section_name_offsets[section + 1] = (u32)(buffer.count - section_offsets[section_string_section]);
-        object_buffer_write(&buffer, object->sections[section].name.pointer, object->sections[section].name.length);
-        object_buffer_write(&buffer, &zero, 1);
-    }
-    for (u32 index = 0; index < relocation_section_count; index += 1)
-    {
-        u32 section = relocation_section + index;
-        section_name_offsets[section] = (u32)(buffer.count - section_offsets[section_string_section]);
-        String8 name = string_format(arena, S8(".rela{S8}"), object->sections[relocation_targets[index]].name);
-        statistics->section_visits += 1;
-        object_buffer_write(&buffer, name.pointer, name.length);
-        object_buffer_write(&buffer, &zero, 1);
-    }
-    String8 generated_names[] = {
-        S8_INITIALIZER(".symtab"),
-        S8_INITIALIZER(".strtab"),
-        S8_INITIALIZER(".shstrtab"),
-    };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(generated_names); index += 1)
-    {
-        u32 section = symbol_section + index;
-        section_name_offsets[section] = (u32)(buffer.count - section_offsets[section_string_section]);
-        object_buffer_write(&buffer, generated_names[index].pointer, generated_names[index].length);
-        object_buffer_write(&buffer, &zero, 1);
-    }
-    section_sizes[section_string_section] = buffer.count - section_offsets[section_string_section];
-    for (u32 ordered_symbol = 0; ordered_symbol < object->symbol_count; ordered_symbol += 1)
-    {
-        u32 symbol = symbol_order[ordered_symbol];
-        ObjectSymbol* source = object->symbols + symbol;
-        statistics->symbol_visits += 1;
-        u64 offset = symbol_table_offset + (u64)ordered_symbol * ELF_SYMBOL_SIZE;
-        object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
-        bool section_thread_local = source->section < object->section_count &&
-                                    (object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-                                     object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
-        bool is_defined = source->section != OBJECT_SECTION_UNDEFINED && source->section < object->section_count;
-        bool is_thread_local = is_defined ? section_thread_local : source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
-        // Binding is gated on global because the symbol table is partitioned
-        // local-then-global and sh_info below counts that split: a local
-        // STB_WEAK entry would contradict it.
-        u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
-        object_write_u8_at(&buffer, offset + 4, (u8)(binding | object_elf64_symbol_type(source, is_defined, is_thread_local)));
-        // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
-        // STV_HIDDEN 2.
-        object_write_u8_at(&buffer, offset + 5, source->hidden ? 2 : 0);
-        object_write_u16_at(&buffer, offset + 6, source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u16)(source->section + 1));
-        object_write_u64_at(&buffer, offset + 8, source->value);
-        object_write_u64_at(&buffer, offset + 16, source->size);
-    }
-    object_buffer_align(&buffer, 8);
-    u64 section_header_offset = buffer.count;
-    object_buffer_zero(&buffer, (u64)section_count * ELF_SECTION_HEADER_SIZE);
-    for (u32 section = 1; section < section_count; section += 1)
-    {
-        u64 offset = section_header_offset + (u64)section * ELF_SECTION_HEADER_SIZE;
-        object_write_u32_at(&buffer, offset, section_name_offsets[section]);
-        u32 type = 1;
-        u64 flags = 0;
-        u64 alignment = 1;
-        u64 entry_size = 0;
-        u32 link = 0;
-        u32 info = 0;
-        if (section <= object->section_count)
-        {
-            ObjectSection* source = object->sections + section - 1;
-            statistics->section_visits += 1;
-            if (object_section_kind_is_zero_fill(source->kind))
-            {
-                type = 8;
-            }
-            else if (source->kind == OBJECT_SECTION_UNWIND && object->target.cpu_arch == CPU_ARCH_X86_64)
-            {
-                type = 0x70000001;
-            }
-            // SHT_INIT_ARRAY and SHT_FINI_ARRAY: the type is what tells `ld`
-            // these are the arrays to concatenate into DT_INIT_ARRAY and
-            // DT_FINI_ARRAY rather than ordinary writable data.  A section
-            // attribute's `.preinit_array` is an INIT_ARRAY to this model and
-            // its name is what keeps it SHT_PREINIT_ARRAY (issue 1276).
-            else if (source->kind == OBJECT_SECTION_INIT_ARRAY)
-            {
-                type = string_starts_with_sequence(source->name, S8(".preinit_array")) ? 16 : 14;
-            }
-            else if (source->kind == OBJECT_SECTION_FINI_ARRAY)
-            {
-                type = 15;
-            }
-            flags = source->kind == OBJECT_SECTION_TEXT                                                                    ? 0x6
-                    : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0x403
-                    : source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_ZERO ||
-                              source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY      ? 0x3
-                    : object_section_kind_is_debug(source->kind)                                                           ? 0x0
-                                                                                                                           : 0x2;
-            alignment = source->alignment;
-        }
-        else if (section >= relocation_section && section < symbol_section)
-        {
-            type = 4;
-            alignment = 8;
-            entry_size = ELF_RELOCATION_SIZE;
-            link = symbol_section;
-            info = relocation_targets[section - relocation_section] + 1;
-        }
-        else if (section == symbol_section)
-        {
-            type = 2;
-            alignment = 8;
-            entry_size = ELF_SYMBOL_SIZE;
-            link = string_section;
-            info = 1;
-            for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
-            {
-                statistics->symbol_visits += 1;
-                if (!object->symbols[symbol].global)
-                {
-                    info += 1;
-                }
-            }
-        }
-        else if (section == string_section || section == section_string_section)
-        {
-            type = 3;
-        }
-        object_write_u32_at(&buffer, offset + 4, type);
-        object_write_u64_at(&buffer, offset + 8, flags);
-        object_write_u64_at(&buffer, offset + 24, section_offsets[section]);
-        object_write_u64_at(&buffer, offset + 32, section_sizes[section]);
-        object_write_u32_at(&buffer, offset + 40, link);
-        object_write_u32_at(&buffer, offset + 44, info);
-        object_write_u64_at(&buffer, offset + 48, alignment);
-        object_write_u64_at(&buffer, offset + 56, entry_size);
-    }
-    u8 identity[16] = {
-        0x7f, 'E', 'L', 'F', 2, 1, 1, 0,
-    };
-    object_write_bytes_at(&buffer, 0, identity, sizeof(identity));
-    object_write_u16_at(&buffer, 16, 1);
-    object_write_u16_at(&buffer, 18, object->target.cpu_arch == CPU_ARCH_X86_64 ? 62 : 183);
-    object_write_u32_at(&buffer, 20, 1);
-    object_write_u64_at(&buffer, 40, section_header_offset);
-    object_write_u16_at(&buffer, 52, ELF_HEADER_SIZE);
-    object_write_u16_at(&buffer, 58, ELF_SECTION_HEADER_SIZE);
-    object_write_u16_at(&buffer, 60, (u16)section_count);
-    object_write_u16_at(&buffer, 62, (u16)section_string_section);
-    result.bytes = (ByteSlice){
-        .pointer = buffer.bytes,
-        .length = buffer.count,
-    };
-    result.error = buffer.error;
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_reference_write_elf64(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
-{
-    ObjectArtifact result = {
-        .format = OBJECT_FORMAT_ELF64,
-        .error = OBJECT_ERROR_CAPACITY,
-    };
-    // Priority groups become extra sections before the bound is computed.
-    ObjectFile split_object = object_reference_split_initializer_priorities(arena, object, OBJECT_FORMAT_ELF64, statistics);
-    u64 capacity = 0;
-    if (object_writer_capacity_aligned(&split_object, OBJECT_FORMAT_ELF64, &capacity, statistics))
-    {
-        result = object_reference_write_elf64_with_capacity(arena, &split_object, capacity, statistics);
-    }
-    return result;
-}
-#endif
-
 BUSTER_GLOBAL_LOCAL u16 object_coff_relocation_type(CpuArch arch, ObjectRelocationKind kind)
 {
     if (arch == CPU_ARCH_X86_64)
@@ -13623,6 +13444,7 @@ BUSTER_GLOBAL_LOCAL u16 object_coff_relocation_type(CpuArch arch, ObjectRelocati
            : kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ? 0x0006
            : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L ? 0x0007
            : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12   ? 0x0009
+           : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ? 0x000a
            : kind == OBJECT_RELOCATION_ABSOLUTE64                ? 0x000e
            : kind == OBJECT_RELOCATION_ABSOLUTE32                ? 0x0001
            : kind == OBJECT_RELOCATION_COFF_SECREL32             ? 0x0008
@@ -13828,7 +13650,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
             else if (source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
                      source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
                      source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
-                     source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
+                     source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                     source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
             {
                 ObjectRelocationKind page_kind = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
                                                      ? OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
@@ -13838,7 +13661,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
                 u32 word = 0;
                 u32 patched = 0;
                 memcpy(&word, buffer.bytes + raw_offsets[section] + source->offset, sizeof(word));
-                if (!object_aarch64_pe_page_addend_encode(page_kind, word, addend, &patched))
+                bool tls_offset = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                                  source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
+                if (tls_offset ? !object_aarch64_pe_tls_offset_addend_encode(source->kind, word, addend, &patched)
+                               : !object_aarch64_pe_page_addend_encode(page_kind, word, addend, &patched))
                 {
                     buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     break;
@@ -14392,11 +14218,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     return result;
 }
 
-// Validates the object for `format` and dispatches to its writer. `reference`
-// selects the pre-plan ELF64 writer, which exists only in test builds;
+// Validates the object for `format` and dispatches to its writer.
 // `borrow_payloads` lets the planned ELF64 writer name large payloads in
 // place (object_write_borrowing).
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference, bool borrow_payloads)
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool borrow_payloads)
 {
     ObjectArtifact result = {
         .format = format,
@@ -14486,7 +14311,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         if (source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
             source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
             source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
-            source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
+            source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+            source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
         {
             ObjectRelocationKind page_kind = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
                                                  ? OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
@@ -14496,11 +14322,14 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             u32 word = 0;
             u32 encoded = 0;
             memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
+            bool tls_offset = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                              source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
             if (format != OBJECT_FORMAT_COFF || object->target.cpu_arch != CPU_ARCH_AARCH64 || (source->offset & 3) ||
                 (source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 &&
                  string_equal(object->symbols[source->symbol].name, S8("__tls_index"))) ||
                 object->sections[source->section].alignment < 4 ||
-                !object_aarch64_pe_page_addend_encode(page_kind, word, source->addend, &encoded))
+                (tls_offset ? !object_aarch64_pe_tls_offset_addend_encode(source->kind, word, source->addend, &encoded)
+                            : !object_aarch64_pe_page_addend_encode(page_kind, word, source->addend, &encoded)))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;
@@ -14550,6 +14379,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             u64 validation_target = object_relocation_kind_is_aarch64_elf_ldst(source->kind) ? 0 : source->offset;
             if (format != OBJECT_FORMAT_ELF64 || object->target.cpu_arch != CPU_ARCH_AARCH64 ||
                 object->sections[source->section].alignment < 4 ||
+                !object_aarch64_elf_got_addend_valid(source->kind, source->addend) ||
                 !object_aarch64_elf_page_relocate(source->kind, word, source->offset, validation_target, 0, &canonical))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -14615,15 +14445,6 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
     }
     ObjectWriteStatistics statistics = result.statistics;
     u64 arena_start = arena->position;
-#if BUSTER_INCLUDE_TESTS
-    if (reference)
-    {
-        result = object_reference_write_elf64(arena, object, &statistics);
-    }
-    else
-#else
-    BUSTER_UNUSED(reference);
-#endif
     if (format == OBJECT_FORMAT_ELF64)
     {
         result = object_write_elf64(arena, object, borrow_payloads, &statistics);
@@ -14648,7 +14469,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 
 ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format)
 {
-    return object_write_core(arena, object, format, false, false);
+    return object_write_core(arena, object, format, false);
 }
 
 // The file-output form of object_write. Only an ELF image currently borrows
@@ -14656,7 +14477,7 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
 // artifacts carry no borrowed ranges and yield one slice.
 ObjectArtifact object_write_borrowing(Arena* arena, ObjectFile* object, ObjectFormat format)
 {
-    return object_write_core(arena, object, format, false, true);
+    return object_write_core(arena, object, format, true);
 }
 
 // The artifact's file in order: the image's own ranges interleaved with the
@@ -14687,11 +14508,6 @@ ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* sl
 }
 
 #if BUSTER_INCLUDE_TESTS
-ObjectArtifact object_test_write_elf64_reference(Arena* arena, ObjectFile* object)
-{
-    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true, false);
-}
-
 ObjectError object_test_elf64_plan(Arena* arena, ObjectFile* object, u64* size)
 {
     ObjectWriteStatistics statistics = {0};
@@ -14855,7 +14671,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                 break;
             }
             u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
-            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32)
             {
                 s64 displacement = 0;
                 if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
@@ -14958,6 +14774,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                      relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
                      relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
                      relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ||
                      relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
                      relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
                      relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
