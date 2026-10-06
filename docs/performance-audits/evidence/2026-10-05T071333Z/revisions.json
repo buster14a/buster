@@ -1,0 +1,7 @@
+{
+  "base": "034d33d738f819114f00ff1db671518e9201ff8b",
+  "candidate": "a2480366895d8bbb89f9aaedbfdae19f864212c9",
+  "compiler": "clang",
+  "config": "Release",
+  "include_tests": false
+}

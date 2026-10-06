@@ -7,8 +7,25 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - Type-embedded constant producers use the protected TYPE query contract
   described in [foundations](foundations.md). It reads a declaration-point
   model and returns stable integer facts without entering the live declaration
-  machine. Enum consumers retain the explicit ENUM compatibility mode until
-  their declaration preparation is migrated (#1247).
+  machine. Enum consumers retain explicit ENUM compatibility arithmetic and
+  successful machineless answers. Only failed `sizeof` expression leaves use
+  that private reader at their live declaration point, exporting the size
+  magnitude without a private type ID. Type-name/function-valued operands,
+  nested layout operators and attributes remain outside this partial fallback;
+  stored-layout and broader declaration preparation remain open (#1258/#1247).
+- Record definitions in expression type names are registered in the containing
+  C scope as their keyword is reached. Their braces hold member declarations;
+  the block binder skips those bodies instead of opening a local scope or
+  parsing a bit-field's colon as a local declarator trailer. The existing type
+  parser owns widths and nested record definitions, while array-bound tokens
+  keep source-point identifier bindings after nested enumeration constants are
+  published in the containing scope. This includes
+  `sizeof` operands in returns, arguments and controlling expressions.
+  `c_test_expression_aggregate_bit_fields` checks these contexts, unnamed and
+  zero-width members, typedef-named anonymous members, arithmetic widths, tag visibility and local/member name
+  separation across six target layouts and both frontend forms. Its embedded
+  runtime source checks fixed sizes and unevaluated width operands in all four
+  native allocators; invalid member declarations retain structured diagnostics.
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
   alignment above the native stack's sixteen-byte guarantee, both canonical
   and machine emitters compute `align_down(old_sp - size, alignment)` and
@@ -130,8 +147,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   zero meaning the declared type's size, and `ir_field_access_size` is what
   every reader asks: the load and the read-modify-write in `c_gen.c`, the four
   constant-initializer folds there, the `IR_OPCODE_AGGREGATE` selectors in
-  `machine_x86_64.c` and `machine_aarch64.c`, and the two canonical emitters in
-  `codegen.c`. It is also the one place a `LOAD` or `STORE` may disagree with
+  `machine_x86_64.c` and `machine_aarch64.c`. It is also the one place a `LOAD` or `STORE` may disagree with
   its place's type, which `ir_place_narrow_bit_field_access` is what validation
   admits it through. **A field whose bits cross every unit that fits has no
   single-unit access even then**, which is every width whose byte count is not
@@ -160,7 +176,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
   one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
   refuse `int b : 0;`, where accepting it laid out a member that occupies no
-  bits and can still be assigned and read back (issue #710). **A width is
+  bits and can still be assigned and read back (issue #710). **A bit-field has an integer type, and no member has an incomplete type** (C17 6.7.2.1p3, p5): `c_parse_validate_members` refuses `float f : 3`, `int *p : 4`, a member whose struct or union was still incomplete at its declarator (its own tag, or a tag defined only later -- `CMember.has_incomplete_type` records that, since both read complete once the unit is parsed) and a member name repeated in one aggregate; each of these used to lay out with a fabricated size (issue #2517). **A width is
   evaluated once, where the member is declared**: `c_parse.c` folds a
   single-token literal (decimal, hex, octal or suffixed) with
   `c_integer_expression_evaluate` and anything else through
@@ -232,8 +248,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   writer of a bit-field is a read-modify-write, including the one inside an
   aggregate initializer, where the members are materialized into a zero-filled
   slot and it is tempting to treat the accumulated word as the whole unit: the
-  canonical emitters spell it `OR mem, reg` and the two `IR_OPCODE_AGGREGATE`
-  selectors seed the accumulator with a load of the unit rather than with zero.
+  two `IR_OPCODE_AGGREGATE` selectors seed the accumulator with a load of the
+  unit rather than with zero.
   Ordering the members differently does not substitute for it -- a whole-unit
   store loses whichever neighbour ran first, and two overlapping units lose one
   of themselves whatever the order (issue #705).
@@ -285,9 +301,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   at 32 bits before converting back. Boolean results use truth conversion.
   The computed value supplies the result without a second volatile load.
   Assignment-expression destination calls are prepared before place lowering;
-  the retained place carries their result into the store exactly once. The
-  runtime fixture includes `get_fields()->c = 9` in a local initializer, whose
-  returned value is 1 and whose destination call must run once.
+  the retained place carries their result into the store exactly once. A
+  parenthesized base followed by a member or subscript suffix remains on the
+  place machine; only a group enclosing the complete destination needs value
+  recovery. The runtime fixture includes `get_fields()->c = 9` in a local
+  initializer, whose returned value is 1 and whose destination call must run
+  once. `c_test_parenthesized_bit_field_assignment_values` covers grouped
+  record and pointer bases as statements and values (GitHub #1413).
   `compiler_driver_test_bit_field_assignment_results` covers both frontend
   forms and all four allocators, with ordinary, volatile and split packed
   fields, postfix controls, full-width fields and terminating update loops.
@@ -445,23 +465,119 @@ mutate it, so there only runs of integer expressions and builtin types fold;
 `_Alignof(object)`, so each engine counts nested evaluations and refuses past
 `C_ALIGNOF_OBJECT_DEPTH_LIMIT`; the refusal is sticky up to the outermost
 operand, because a record's evaluator otherwise falls back to another fold and
-answers the type's alignment. Member operands (`_Alignof(s.x)` with an
-`_Alignas` member, or a `packed` one) still answer the member type's alignment
-where Clang answers the member's (issue #1249).
+answers the type's alignment.
+
+For a final member expression, both entry paths call
+`c_semantic_alignof_member` (#1249). It identifies the declaring aggregate and
+physical member through the existing direct/full expression typing and promoted
+member search, then asks the existing record-layout solve for that member's
+placement alignment. GNU member/aggregate packed, explicit requests and pragma
+pack therefore use the same target rules as storage. A nested or promoted field
+uses its declaring inner aggregate, including when the outer aggregate is
+packed; incidental address alignment does not raise the answer.
+
+Lookup and layout run on the protected TYPE query's private model. Address-of
+and qualified-array traversal may append temporary pointer/qualified types, so
+they must never run against the published canonical type-map input. Only the
+final alignment number escapes. Unevaluated named calls pass the existing
+argument-count checker against the private model before that number is exported.
+The prefix TYPE query checks expression constraints before the direct fallback;
+an explicit refusal cannot be rescued by that fallback. Checked postfix updates
+run as an expression-leaf continuation after existing cast/primary parsing.
+Binary, unary, cast and sizeof/alignof priorities stay with their existing
+frames; GNU real/imaginary prefixes split before the leaf and extension prefixes
+are stripped by the existing task normalization. The continuation types
+the isolated operand and uses the existing modifiable-place/type check without
+evaluating it. Valid pointer updates remain unevaluated; aggregate updates are
+refused. The unchecked TYPE path retains its existing leaf.
+The query bypasses committed type-layout rows
+to visit the selected placement; its alignment requests use the protected typed
+integer query in their original source scopes. Other layout solves retain their
+existing evaluation path. Member-query nesting uses the same fixed limit of
+four with a thread-local sticky refusal, including across private models. Member
+answers precede the enum-only natural-layout reader, which cannot type promoted
+or address-derived operands. Canonical constants likewise read a final member's
+alignment before natural operand typing, which can refuse a selected generic
+aggregate's member even when the protected semantic query has its answer.
+The canonical constant fold consults object alignment only for alignof
+spellings; sizeof retains its natural size path.
+
+The grammar check applies declaration alignment only to an outer final member
+expression. Unary, arithmetic, assignment, comma and conditional values keep
+their type's answer; grouped aggregate bases, calls, compound literals and
+selected generic expressions retain the field declaration. Operands remain
+unevaluated.
+
+`c_test_alignof_member` registers frozen enum/global/array-bound answers across
+Linux, Windows and macOS on x86-64/AArch64, GNU17/GNU23 and both frontend forms.
+It includes the original 64/128/16/32/1/32 object/member answers, packed and
+pragma cases, promoted/nested owner selection, typed and shadowed requests,
+unevaluated operands, invalid neighbors, refusal reset, and supported desktop
+execution under all allocators. Direct private-seam snapshots compare the
+published model's complete header and spare rows before and after address and
+const-union queries. Reference semantics come from GCC's
+[alignment manual](https://gcc.gnu.org/onlinedocs/gcc/Alignment.html) and Clang
+18.1.8's [member-expression evaluator](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/clang/lib/AST/ExprConstant.cpp)
+and [declaration alignment](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/clang/lib/AST/ASTContext.cpp).
+The held Microsoft aligned-typedef packing repair (#2226/#2203) retains its
+separate rule ownership.
 
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their
-object size to the next power of two. The x86-64 SysV and Win64 canonical
-emitters implement their call boundaries; optimized modes currently report
-canonical fallback for those new shapes. The registered driver suite keeps
+object size to the next power of two. The x86-64 SysV and Win64 MIR selectors
+implement their call boundaries across retained allocator spellings. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
 cross-target, native mixed-compiler, and Wine checks. In the native Linux
 mixed-compiler rows Buster compiles its half for `znver5` while the PATH Clang
 compiles the other half for `x86-64-v4`, which has the same 64-byte vector ABI
 and is accepted by Clang releases older than 19, unlike `znver5`. The approved retirement
-corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
-leaves this new frontend feature to #73, separate from retirement coverage.
+corpus and its pre-existing C ABI header stay unchanged. The padded-vector
+regressions cover the admitted MIR shapes independently of the archived oracle.
+
+## Offsetof member promotion
+
+Runtime `__builtin_offsetof` enters `c_ir_offsetof_evaluate`, and static
+initializers use the OFFSETOF query child. Both dispatch
+`c_ir_constant_offsetof_attempt`, which selects each member through the
+existing `c_ir_promoted_member_path`. Anonymous struct/union promotion, missing
+or ambiguous members, and bit-field refusal therefore use the same lowering
+walk. Member sums, array-index multiplication and accumulated array offsets
+are checked before publication. Array-index expressions are constant-query
+children on the explicit query stack; a dot must separate member selections.
+
+Parser enumerators and static assertions use `c_parse_constant_offsetof` as
+states 8/9 of the existing `CParseConstantTask` stack. Each array index is a
+typed child over its original token range, so nested `offsetof`, `sizeof` and
+integer casts retain C conversions without input-dependent recursion. Type IDs
+and token cursors survive child queries; the parent retains the accumulated
+offset. Anonymous promotion still uses `c_parse_constant_member_offset`.
+
+Parser and lowering walks require a nonnegative integer index with no remaining
+high limb after conversion to its actual type. Floating results, malformed dot
+separators and offsets beyond the target's `size_t` range are refused. Promoted
+member sums, index products and accumulated sums are checked before arithmetic.
+Issue #1570 remains open for a shared parser/lowering designator authority;
+the two walks now share these admission and arithmetic bounds.
+
+`c_test_offsetof_members` pins direct and anonymous member offsets, a nested
+anonymous struct within a union, and an anonymous array element through
+parser constants, scalar initializer bits, aggregate initializer bytes and both canonical frontend forms
+on Linux, Windows and macOS x86-64/AArch64 in GNU17/GNU23. It also refuses
+direct/promoted bit-fields in enumerators, assertions, static initializers and
+runtime expressions, plus missing members, malformed dot separators and lowering arithmetic overflow.
+The positive source also includes a named multidimensional member chain.
+Static initializer and runtime witnesses use an array index containing nested
+`sizeof` and `offsetof` queries; the matching parser enumerator uses literal
+index 1 as an independent member-promotion control.
+`c_test_offsetof_members_runtime` compares all three constant contexts with
+addresses of real subobjects in generated programs, using both frontend forms
+and all four register allocators. Runtime execution is omitted on Android/iOS.
+`c_test_offsetof_typed_indices` extends the parser/static/runtime comparison to
+nested typed indices on LP64, LLP64 and 32-bit layouts. Its refusal fixture checks
+signed negatives, high limbs, target-width multiplication/addition overflow and
+malformed separators; its runtime fixture checks real subobject addresses under
+both frontend forms and all four allocators.
 
 ## Parse-side layout solve: ordered passes and the agenda
 

@@ -1,0 +1,12 @@
+pinned_head=5b0e7b4ecad9bae50d824d349e995c006e045508
+pinned_tree=f169369aac54807f9ccd0d6f51fb2ac908157a15
+probe_head=5b0e7b4ecad9bae50d824d349e995c006e045508
+probe_diffstat= src/buster/lib/compiler/frontend/c/c_parse.c | 2 +-  1 file changed, 1 insertion(+), 1 deletion(-)
+clang=Ubuntu clang version 21.1.8 (6ubuntu1)
+valgrind=valgrind-3.26.0
+kernel=7.0.0-1012-azure
+nproc=4
+cpu=Intel(R) Xeon(R) 6973P-C
+mem_kb=16365692
+pairs=8
+sqlite_root=
