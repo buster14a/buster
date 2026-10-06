@@ -284,6 +284,9 @@ typedef enum CDiagnosticKind
     // A reachable direct call to a function declared with GNU
     // `__attribute__((error("message")))`.
     C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL,
+    // GNU's obsolete `member: value` field designator in a strict ISO dialect;
+    // it is accepted as `.member = value` with this warning.
+    C_DIAGNOSTIC_OBSOLETE_DESIGNATOR,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -573,6 +576,11 @@ struct CPreprocessOptions
     u8 position_independent_level;
     // The selected position-independent spelling was a PIE flag.
     bool position_independent_executable;
+    // The token stream is printed as text (-E) rather than parsed, so it keeps
+    // the source's spellings: parser-facing rewrites such as the obsolete
+    // `member:` designator (c_preprocess_rewrite_obsolete_designators) are
+    // skipped. Consumes padding before phase_arena.
+    bool preserve_spellings;
     // Optional caller-owned arena for state whose last reader is inside the
     // phase: per-file lexed rows, macro records, include tables and line
     // staging. The phase allocates above the arena's position at entry and
@@ -1654,6 +1662,10 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
+    // Resolve every pending SSA parameter of a local initialized only at its
+    // declaration through the general predecessor walk. The output must not
+    // change; tests use it as the differential reference for the shortcut.
+    bool disable_declaration_shortcut;
     bool sysv_unnamed_bitfields_integer;
     // No consumer will read debug information (-g0): lowered functions carry
     // no IrDebugLocal records. Their only readers are the debug-value, debug
