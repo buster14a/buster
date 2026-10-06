@@ -28684,7 +28684,13 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_UNREACHABLE: maximum = 0; break;
         default: break;
         }
-        String8 message = count < minimum || count > maximum ? S8("could not prepare C calls") : (String8){0};
+        // One unsigned range test, with minimum <= maximum in every arm above.
+        // GCC 13.3 -O2/-O3 (dom2 relation oracle) folds the mirrored pair
+        // `count < minimum || count > maximum` to true once it propagates the
+        // `minimum = maximum = N` arms' shared value, which rejected every
+        // fixed-arity builtin (#1301); a single comparison has no pair to fuse.
+        bool arity_mismatch = count - minimum > maximum - minimum;
+        String8 message = arity_mismatch ? S8("could not prepare C calls") : (String8){0};
         u32 location = close;
         if (builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET && !message.length)
         {

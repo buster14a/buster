@@ -15679,6 +15679,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_case(UnitTestArguments* ar
     return result;
 }
 
+// #1301: every builtin that takes a fixed argument count goes through the
+// `minimum = maximum = N` arms of c_parse_validate_builtin_calls. GCC 13.3
+// -O2 once folded that arity test to "always wrong", so the matching count
+// must be accepted and every other count rejected, for each arm.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_arity_builtins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    String8 valid_sources[] = {
+        S8("int f(unsigned x) { return __builtin_popcount(x); }"),
+        S8("int f(unsigned x) { return __builtin_ctz(x); }"),
+        S8("int f(unsigned x) { return __builtin_clz(x); }"),
+        S8("int f(unsigned x) { return __builtin_ffs((int)x); }"),
+        S8("unsigned long f(const char* s) { return __builtin_strlen(s); }"),
+        S8("void* f(void) { return __builtin_alloca(8); }"),
+        S8("void f(char* p, const char* q) { __builtin_memcpy(p, q, 4); }"),
+        S8("void f(char* p, const char* q) { __builtin___memcpy_chk(p, q, 4, 8); }"),
+        S8("int f(int* p) { return __atomic_load_n(p, 5); }"),
+        S8("void f(int* p) { __atomic_store_n(p, 1, 5); }"),
+        S8("int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int v = __builtin_va_arg(ap, int); __builtin_va_end(ap); return v; }"),
+        S8("int f(int n, ...) { __builtin_va_list ap, bp; __builtin_va_start(ap, n); __builtin_va_copy(bp, ap); __builtin_va_end(bp); __builtin_va_end(ap); return n; }"),
+        S8("int f(int x) { return __builtin_expect(x, 1); }"),
+        S8("void f(void) { __builtin_unreachable(); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid_sources[index], (CPreprocessOptions){.target = target});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        c_test_scratch_end(temporary);
+    }
+
+    String8 invalid_sources[] = {
+        S8("int f(void) { return __builtin_popcount(); }"),
+        S8("int f(unsigned x) { return __builtin_popcount(x, x); }"),
+        S8("unsigned long f(const char* s) { return __builtin_strlen(s, s); }"),
+        S8("void* f(void) { return __builtin_alloca(); }"),
+        S8("void f(char* p) { __builtin_memcpy(p, p); }"),
+        S8("void f(char* p) { __builtin_memcpy(p, p, 1, 1); }"),
+        S8("int f(int* p) { return __atomic_load_n(p); }"),
+        S8("int f(int* p) { return __atomic_load_n(p, 5, 5); }"),
+        S8("void f(__builtin_va_list ap) { __builtin_va_end(); }"),
+        S8("void f(__builtin_va_list ap) { __builtin_va_end(ap, ap); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_sources[index], (CPreprocessOptions){.target = target});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -46645,6 +46705,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_file_tls_dialect);
     C_TEST_FIXTURE(arguments, c_test_file_tls_dialect_runtime);
     C_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
+    C_TEST_FIXTURE(arguments, c_test_fixed_arity_builtins);
     C_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
     C_TEST_FIXTURE(arguments, c_test_float16_type);
