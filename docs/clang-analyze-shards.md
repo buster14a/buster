@@ -99,8 +99,12 @@ The required analyzer job executes **one complete candidate analysis**, followed
 by independent aggregation of its retained results. Pull requests, merge groups,
 main/tag pushes and manual runs all use that same path. Changes to `build.c`, its
 dependencies, the analyzer or the workflow cannot select a reference pass.
-There is no `analyzer_comparison` workflow input or `--baseline-driver` CLI option;
-removed comparison options are rejected rather than silently ignored. Existing
+There is no `--baseline-driver` CLI option. The `analyzer_comparison` dispatch
+input is retained only because the frozen native-retirement support declaration
+pins `tests/ci_tools_test.py`, which asserts its declaration; dispatching it as
+`true` fails the candidate bootstrap before any analysis. Removing the input
+needs a separate support-contract successor. Removed comparison options are
+rejected rather than silently ignored. Existing
 exact queue-to-main reuse remains separate: a valid reuse receipt can replace
 fresh execution, but never an incomplete candidate run.
 

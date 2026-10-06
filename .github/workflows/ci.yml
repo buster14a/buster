@@ -22,6 +22,13 @@ on:
         required: false
         default: false
         type: boolean
+      # Retired by #2683: the analyzer bootstrap rejects true. The frozen
+      # workflow-policy test still pins this declaration verbatim.
+      analyzer_comparison:
+        description: Run an explicit reference/candidate Clang analyzer comparison
+        required: false
+        default: false
+        type: boolean
 
 # Supersede only the same PR/merge-group. Main, tags and deliberate manual
 # measurements get unique groups, so neither active nor pending runs are lost.
@@ -1301,8 +1308,16 @@ jobs:
       - name: Bootstrap and identify candidate build driver
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
+        env:
+          COMPARISON_REQUESTED: ${{ inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
+          # The frozen workflow-policy test still pins this dispatch input; it
+          # may only refuse the retired reference comparison (#2683).
+          if [[ "$COMPARISON_REQUESTED" != false ]]; then
+            echo '::error::The reference/candidate analyzer comparison was removed by #2683; dispatch without analyzer_comparison.'
+            exit 1
+          fi
           mkdir -p build "$RUNNER_TEMP/buster-analyzer"
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
           printf '%s\n' "$candidate_revision" | tee "$RUNNER_TEMP/buster-analyzer/revision.txt"

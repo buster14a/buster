@@ -441,7 +441,10 @@ class MainCIReuseTests(unittest.TestCase):
         # reuse only that complete execution, never a retired reference step.
         self.assertNotIn("BASELINE_REVISION", analyzer)
         self.assertNotIn("--baseline-driver", analyzer)
-        self.assertNotIn("inputs.analyzer_comparison", text)
+        # The retired dispatch input remains only as a candidate-bootstrap refusal.
+        self.assertEqual(analyzer.count("inputs.analyzer_comparison"), 1)
+        self.assertNotIn("inputs.analyzer_comparison", analyzer.split(
+            '      - name: ' + reuse.ANALYZER_STEPS[-1] + '\n', 1)[1].split('\n      - name:', 1)[0])
         for name in reuse.ANALYZER_STEPS:
             block = analyzer.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             self.assertIn("if: ${{ needs.reuse.outputs.reuse != 'true' }}", block)

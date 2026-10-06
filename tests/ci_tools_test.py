@@ -948,6 +948,11 @@ class WorkflowPolicyTests(unittest.TestCase):
                 "        required: false",
                 "        default: false",
                 "        type: boolean",
+                "      analyzer_comparison:",
+                "        description: Run an explicit reference/candidate Clang analyzer comparison",
+                "        required: false",
+                "        default: false",
+                "        type: boolean",
             ),
             "self-host-audit.yml": common + ("  workflow_dispatch:",),
         }
@@ -964,7 +969,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertNotRegex(workflow, r"(?m)^\s+(ref|repository):")
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("inputs.cmake_profile", ci)
-        self.assertNotIn("analyzer_comparison", ci)
+        self.assertIn("inputs.analyzer_comparison", ci)
         self.assertNotIn("vars.BUSTER_CMAKE_PROFILE", ci)
 
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
@@ -1374,26 +1379,6 @@ class TimingTests(unittest.TestCase):
         sample, reason = github_ci_time.measure(self.current_sample())
         self.assertIsNone(reason)
         self.assertEqual(sample["runner_seconds"], 1140)
-
-    def test_candidate_only_and_historical_analyzer_steps_remain_distinct(self):
-        old = "Compare reference analysis and aggregate all module shards"
-        new = "Analyze candidate and aggregate all module shards"
-        run = self.current_sample()
-        analyzer = next(job for job in run["jobs"] if job["name"] == "Clang analyzer shards")
-        campaign = next(step for step in analyzer["steps"] if step["name"] == old)
-        campaign["name"] = new
-        campaign.update(started_at=analyzer["started_at"], completed_at=analyzer["completed_at"])
-        sample, reason = github_ci_time.measure(run)
-        self.assertIsNone(reason)
-        self.assertIn(new, sample["step_seconds"]["Clang analyzer shards"])
-        self.assertNotIn(old, sample["step_seconds"]["Clang analyzer shards"])
-        for name in (old, new):
-            duplicate = copy.deepcopy(run)
-            job = next(job for job in duplicate["jobs"] if job["name"] == "Clang analyzer shards")
-            job["steps"].append(dict(campaign, name=name))
-            self.assertIsNone(github_ci_time.measure(duplicate)[0])
-        campaign["conclusion"] = "failure"
-        self.assertIsNone(github_ci_time.measure(run)[0])
 
     def test_suite_matrix_rejects_missing_duplicate_failed_and_skipped_coverage(self):
         for index in range(len(github_ci_time.PARTITIONED_JOBS)):

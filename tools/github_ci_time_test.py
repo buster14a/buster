@@ -368,5 +368,39 @@ class MacosRunnerDemandTests(unittest.TestCase):
                       "|| '[\"ubuntu-26.04\", \"macos-26\"]') }}\n", text)
 
 
+class AnalyzerCampaignTimingTests(unittest.TestCase):
+    # tests/ci_tools_test.py is pinned byte-for-byte by the frozen
+    # native-retirement support declaration, so #2683 reuses its sample
+    # builder here instead of adding the case there.
+    @staticmethod
+    def current_sample():
+        sys.path.insert(0, str(ROOT / "tests"))
+        try:
+            import ci_tools_test
+        finally:
+            sys.path.remove(str(ROOT / "tests"))
+        return ci_tools_test.TimingTests().current_sample()
+
+    def test_candidate_only_and_historical_analyzer_steps_remain_distinct(self):
+        old = "Compare reference analysis and aggregate all module shards"
+        new = "Analyze candidate and aggregate all module shards"
+        run = self.current_sample()
+        analyzer = next(job for job in run["jobs"] if job["name"] == "Clang analyzer shards")
+        campaign = next(step for step in analyzer["steps"] if step["name"] == old)
+        campaign["name"] = new
+        campaign.update(started_at=analyzer["started_at"], completed_at=analyzer["completed_at"])
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertIn(new, sample["step_seconds"]["Clang analyzer shards"])
+        self.assertNotIn(old, sample["step_seconds"]["Clang analyzer shards"])
+        for name in (old, new):
+            duplicate = copy.deepcopy(run)
+            job = next(job for job in duplicate["jobs"] if job["name"] == "Clang analyzer shards")
+            job["steps"].append(dict(campaign, name=name))
+            self.assertIsNone(github_ci_time.measure(duplicate)[0])
+        campaign["conclusion"] = "failure"
+        self.assertIsNone(github_ci_time.measure(run)[0])
+
+
 if __name__ == "__main__":
     unittest.main()

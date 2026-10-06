@@ -113,7 +113,7 @@ chmod +x "$output"
             runner.mkdir()
             environment = dict(os.environ, GITHUB_EVENT_NAME=event, EVENT_NAME=event,
                                GITHUB_REF=ref, BASELINE_REVISION=baseline,
-                               COMPARISON_REQUESTED="true", ANALYZER_COMPARISON_SELECTION="compare",
+                               COMPARISON_REQUESTED="false", ANALYZER_COMPARISON_SELECTION="compare",
                                ANALYZER_COMPARISON_REASON="changed-driver-closure",
                                RUNNER_TEMP=str(runner), GITHUB_WORKSPACE=str(root),
                                CLANG_LOG=str(folder / "clang.log"), DRIVER_LOG=str(folder / "driver.log"),
@@ -144,17 +144,24 @@ chmod +x "$output"
         self.assertFalse((evidence / "reference-driver.d").exists())
         self.assertFalse((evidence / "comparison-selection.txt").exists())
 
-    def test_workflow_has_no_reference_selection_or_dispatch_input(self):
+    def test_workflow_has_no_reference_selection_and_rejects_retired_input(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         analyzer = workflow.split("\n  analyzer:\n", 1)[1].split("\n  complete:\n", 1)[0]
-        for removed in ("analyzer_comparison", "--baseline-driver", "ANALYZER_COMPARISON",
-                        "BASELINE_REVISION", "reference-tree", "reference-driver", "analyzer-baseline"):
+        for removed in ("--baseline-driver", "ANALYZER_COMPARISON", "BASELINE_REVISION",
+                        "reference-tree", "reference-driver", "analyzer-baseline"):
             self.assertNotIn(removed, analyzer)
-        self.assertNotIn("analyzer_comparison", workflow)
+        # The frozen workflow-policy test still pins the dispatch input, so it
+        # survives only as a refusal inside the candidate bootstrap.
+        self.assertEqual(workflow.count("analyzer_comparison"), 3)
+        bootstrap = analyzer.split("      - name: " + BOOTSTRAP + "\n", 1)[1].split("      - name:", 1)[0]
+        self.assertEqual(analyzer.count("analyzer_comparison"), 2)
+        self.assertIn("removed by #2683", bootstrap)
+        self.assertIn("COMPARISON_REQUESTED: ${{ inputs.analyzer_comparison && 'true' || 'false' }}", bootstrap)
         for name in (BOOTSTRAP, CAMPAIGN):
             step = analyzer.split("      - name: " + name + "\n", 1)[1].split("      - name:", 1)[0]
             self.assertIn("if: ${{ needs.reuse.outputs.reuse != 'true' }}", step)
             self.assertNotIn("github.event_name", step)
+        self.assertNotIn("COMPARISON_REQUESTED", self.analyzer_step(CAMPAIGN))
         self.assertEqual(self.analyzer_step(CAMPAIGN).count("build/analyzer-driver clang_analyze "), 2)
         self.assertEqual(self.analyzer_step(CAMPAIGN).count("--aggregate"), 1)
 
@@ -172,6 +179,18 @@ chmod +x "$output"
                         output.write("\n# changed workflow\n" if change.endswith(".yml") else "\n/* changed input */\n")
                     self.commit(root, "changed candidate input")
                     self.assert_one_campaign(root, folder, env)
+
+    @unittest.skipIf(os.name == "nt", "The analyzer policy runs on hosted Unix")
+    def test_retired_comparison_request_fails_before_any_analysis(self):
+        for value in ("true", "", "1"):
+            with self.subTest(value=value), self.fixture("workflow_dispatch", "refs/heads/main") as (root, folder, env):
+                env["COMPARISON_REQUESTED"] = value
+                result = self.run_step(BOOTSTRAP, root, env, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("removed by #2683", result.stdout)
+                self.assertEqual(self.lines(folder / "clang.log"), [])
+                self.assertEqual(self.lines(folder / "driver.log"), [])
+                self.assertFalse((root / "build/analyzer-driver").exists())
 
     @unittest.skipIf(os.name == "nt", "The analyzer policy runs on hosted Unix")
     def test_candidate_manifest_binds_complete_dependencies_and_executable(self):
