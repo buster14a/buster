@@ -8,7 +8,7 @@
 #define CM_SERIES 96u
 #define CM_FILES 256u
 typedef struct CmOutputs CmOutputs;
-struct CmOutputs { CmFile files[CM_FILES]; unsigned count; };
+struct CmOutputs { CmFile files[CM_FILES]; unsigned count; size_t bytes; };
 typedef struct CmSeries CmSeries;
 struct CmSeries { const CmRow *representative; uint64_t hash; unsigned samples, raw, missing; };
 typedef struct CmShift CmShift;
@@ -38,8 +38,8 @@ BUSTER_GLOBAL_LOCAL int cm_output(CmOutputs *out, const char *path, FILE *file)
     char *content = result ? cm_memory(file) : NULL;
     if (file) fclose(file);
     char *name = content ? strdup(path) : NULL;
-    result = result && content && name;
-    if (result) out->files[out->count++] = (CmFile){name, content, {0}};
+    result = result && content && name && strlen(content) <= CM_ARENA_BYTES - out->bytes;
+    if (result) { out->bytes += strlen(content); out->files[out->count++] = (CmFile){name, content, {0}}; }
     else { free(content); free(name); }
     return result;
 }
@@ -125,7 +125,7 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
 {
     CmSeries series[CM_SERIES]; memset(series, 0, sizeof(series));
     CmShift shifts[CM_SERIES]; unsigned shift_count = 0;
-    unsigned count = 0, excluded = 0, missing_hardware = 0, costs_missing = 0, aliases = 0, failed = 0;
+    unsigned count = 0, excluded = 0, export_omitted = 0, missing_hardware = 0, costs_missing = 0, aliases = 0, failed = 0;
     uint64_t runner_seconds = 0, waste_seconds = 0;
     const CmRow **ordered = calloc(store->count + 1, sizeof(*ordered));
     const CmRow **scratch = calloc(store->count + 1, sizeof(*scratch));
@@ -176,6 +176,17 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
         }
     }
     if (valid) cm_order(ordered, scratch, n);
+    size_t export_budget = 0;
+    unsigned kept = n;
+    while (kept)
+    {
+        const CmRow *r = ordered[kept - 1]; size_t bytes = 1024;
+        for (unsigned k = 0; k < CM_FIELD_COUNT; ++k) bytes += strlen(r->s[k]) * 6;
+        if (bytes > CM_BYTES / 2 - export_budget) break;
+        export_budget += bytes; --kept;
+    }
+    export_omitted = kept;
+    if (kept) { memmove(ordered, ordered + kept, (n - kept) * sizeof(*ordered)); n -= kept; }
     FILE *index = valid ? tmpfile() : NULL, *csv = valid ? tmpfile() : NULL, *json = valid ? tmpfile() : NULL;
     FILE *all = valid ? tmpfile() : NULL;
     valid = valid && index && csv && json && all;
@@ -192,6 +203,8 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
             "Dependency/deployment waits and required-CI critical-path attribution remain unavailable.\n\n", runner_seconds, waste_seconds, failed);
         fprintf(index, "Reporting bounds: 30 observation-date shards / %u rows / %u rendered series; %u rows outside the rendered series bound remain in exports. "
             "Raw history is retained separately from these bounded derived reports.\n\n", CM_ROWS, CM_SERIES, excluded);
+        fprintf(index, "Bounded view omitted %u older shards and %u older loaded rows; their raw records remain on the data branch.\n\n",
+            t->omitted_shards, export_omitted);
         fputs("[JSON export](recent.jsonl) · [CSV export](recent.csv) · [Collector policy](https://github.com/" CM_REPO
             "/blob/main/docs/ci-timing-history.md)\n\n", index);
         fputs("Default view: trusted main push observations only. [All events, PRs and queues](all.md). "

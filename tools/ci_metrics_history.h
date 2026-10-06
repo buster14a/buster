@@ -84,7 +84,7 @@ BUSTER_GLOBAL_LOCAL int cm_history_load(CmTransport *t, CmStore *s, unsigned day
     else if (available < 0) valid = 0;
     free(progress);
     time_t now = time(NULL);
-    for (unsigned day = days; valid && day > 0; --day)
+    for (unsigned day = 1; valid && day <= days; ++day)
     {
         char date[11], path[128];
         valid = cm_day(date, now - (time_t)(day - 1) * 86400);
@@ -98,11 +98,18 @@ BUSTER_GLOBAL_LOCAL int cm_history_load(CmTransport *t, CmStore *s, unsigned day
             valid = j.valid && cm_equal(cm_get(&j, 1, "schema"), "buster-ci-history-day-v1") &&
                 cm_equal(cm_get(&j, 1, "date"), date) && count > 0 && count <= 64;
             cm_json_free(&j);
-            for (uint64_t shard = 0; valid && shard < count; ++shard)
+            for (uint64_t remaining = count; valid && remaining > 0; --remaining)
             {
-                snprintf(path, sizeof(path), "history/%s/%" PRIu64 ".jsonl", date, shard);
+                snprintf(path, sizeof(path), "history/%s/%" PRIu64 ".jsonl", date, remaining - 1);
                 char *records = cm_data_read(t, path, &available);
-                valid = records && available == 1 && cm_import(s, records, strlen(records));
+                valid = records && available == 1;
+                if (valid)
+                {
+                    size_t length = strlen(records); unsigned rows = 0;
+                    for (size_t i = 0; i < length; ++i) rows += records[i] == '\n';
+                    if (rows > CM_ROWS / 2 - s->count || length > CM_ARENA_BYTES / 2 - s->used) ++t->omitted_shards;
+                    else valid = cm_import(s, records, length);
+                }
                 free(records);
             }
         }

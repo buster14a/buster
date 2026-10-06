@@ -23,7 +23,8 @@ clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function \
 ./ci-metrics collect --out /tmp/new-ci-history-bundle --days 2 --max-runs 100
 ./ci-metrics collect --out /tmp/new-backfill-bundle --run 37459678394
 ./ci-metrics report --input observations.jsonl --out /tmp/new-selected-report \
-  --event push --revision 5e46e4f552a8caf9cbecaa408e5089436e831a8a \
+  --event push --branch main --job-key native --os Windows --cpu "AMD EPYC 7763 64-Core Processor" \
+  --revision 5e46e4f552a8caf9cbecaa408e5089436e831a8a \
   --since 2026-10-01T00:00:00Z --until 2026-10-07T00:00:00Z
 ~~~
 
@@ -45,13 +46,21 @@ not scheduled. The definition-level hardware inventory is owned by #2758/#2766;
 the consumer adds four executing jobs in its own workflow.
 
 The default cadence is a bounded half-hourly batch from trusted main. Manual
-dispatch can select a terminal run for recovery. Collection excludes its own
-workflow from recursive workload collection. A missed batch is recoverable
-without rerunning jobs while API evidence remains available. The API's
-created-range ceiling, run/attempt bounds, byte limits and exhausted read budget
-are reported as gaps. An old rerun outside the recent created-date window needs
-explicit run-ID backfill; this limitation remains visible rather than pretending
-the rolling scan covers arbitrary old reruns.
+dispatch can select a terminal run for recovery. There is no completion-event self-trigger loop; earlier terminal executions of
+this observational workflow are inventoried by later batches. A missed batch is
+recoverable without rerunning jobs while API evidence remains available.
+
+The data branch also retains a bounded 4,096-run attempt receipt cache, at most
+64 pending run IDs, and a reverse-created-date sweep cursor/page. Pending runs
+resume late finalization/API failures; a newer attempt invalidates its prior
+complete receipt. Routine batches revisit recent runs and advance one reverse
+page through older runs, retaining pending work before moving the cursor. This
+provides automatic missed-event/old-rerun discovery beyond the recent window;
+its lag depends on repository volume and remaining API/time budget. The report
+shows the sweep cursor and pending counts rather than claiming instantaneous
+all-history completeness. Large same-second inventories beyond GitHub's filtered
+search ceiling remain visible gaps and require explicit run-ID recovery. Manual
+backfill can recover an old rerun immediately while API evidence survives.
 
 ## Physical execution and metric identities
 
@@ -61,9 +70,11 @@ first checkout identity/tree when proven, collector revision/observation time,
 job display name, stable workflow job key, workflow path/revision/blob and matrix
 identity. A source SHA labels a point and is not the cohort key.
 
-For static definitions, matrix identity combines the workflow blob and original
-strategy ordinal; no display-name matching chooses among matrix cells. Dynamic
-matrix expansion and reusable caller mappings remain explicitly unavailable
+Restricted include-only static matrices retain the complete selected literal
+configuration as JSON, bound to the first action's exact strategy.job-index
+input and immutable workflow blob. No display-name matching chooses among
+cells. Axis products, include/exclude combinations, escaped YAML scalars,
+dynamic expansion and reusable caller mappings remain explicitly unavailable
 until they have an independently verifiable complete context receipt. The API
 still retains their timing rows. The collector does not guess a reusable job
 from an ambiguous name or assign its reported CPU to another numeric job.
@@ -89,9 +100,13 @@ known-hosted latency or cost populations.
 API-observed elapsed seconds are completed_at minus started_at, with one-second
 timestamp resolution. Missing, inverted and interrupted intervals are null,
 never zero. Steps retain their individual API spans, outcomes and endpoints for
-drill-down; overlapping spans are not summed into process CPU time. Native phase
-records remain with their existing producers and artifact roots; this consumer
-does not fabricate a complete phase decomposition.
+drill-down; overlapping spans are not summed into process CPU time. Existing NATIVE_PHASE_RECORD JSON and NATIVE_TOOLCHAIN lines in the exact
+numeric job log are retained as reported context when their schemas/clock/units,
+bounds, uniqueness and API time interval validate. Native phase elapsed_ns,
+observer overhead and monotonic clock scope remain in raw exports, separate from
+API job time. These receipts do not complete missing cache/workload/worker
+context or authenticate every selected tool. No phase total or complete
+unattributed-time decomposition is fabricated.
 
 Job start minus workflow creation is not labeled runner-queue delay. Dependency,
 deployment-approval and scheduling wait components, required-CI completion
@@ -132,11 +147,21 @@ The separate ci-timing-history Git branch is the durable store:
 |---|---|
 | history/YYYY-MM-DD/N.jsonl | Immutable observation records in append-only shards, each at most 16 MiB |
 | history/YYYY-MM-DD/index.json | Versioned bounded shard count, at most 64 |
+| history/progress.json | Bounded completed-attempt receipts, pending IDs and reverse sweep cursor |
 | history/anchors/KEY.jsonl | First at most twenty physical samples for a fixed cohort/policy anchor |
 | manifest.json | Latest collection watermark, collector/policy revisions and gap/overhead counters |
-| reports/index.md | Browsable job/matrix/OS/CPU/event/branch selector |
+| reports/index.md | Default trusted-main selector, largest absolute median shifts and freshness |
+| reports/all.md | Independently selectable PR/queue/manual/main job/matrix/OS/CPU histories |
 | reports/series-KEY.md | Raw execution links, baseline/candidate/anchor membership and comparisons |
 | reports/recent.jsonl / recent.csv | Reproducible allowlisted exports |
+
+Each batch stages at most 8 MiB of new raw records and reserves API budget for
+reporting/publication. The thirty-day reader visits newer shards first and
+limits loaded history to half its row/string capacity, reserving the remainder
+for new observations. Derived exports retain the newest rows within a separate
+byte budget; older omitted shards/rows are counted and remain accessible in raw
+history. Output files together are bounded to 128 MiB. Bounds do not erase data
+or let an older bundle overwrite a newer one.
 
 Raw shards have no automatic expiry; old Git revisions also retain previous
 indexes/reports. Routine refresh reads thirty observation-date days, at most
@@ -151,13 +176,15 @@ The publisher is a distinct job with contents:write; the collector has only
 contents/actions read. Both execute the current immutable main workflow checkout.
 PR/push tests and previews have no data-write job. Candidate code/reports are
 never executed with the publisher's credentials. Only this trusted workflow
-run's generated artifact is downloaded; plan schema/revision, safe paths,
+run's generated artifact is downloaded; plan schema/revision and producer run/attempt, strict allowlisted paths,
 regular files, row bounds, raw append prefixes, collector watermark and data-head
 lease are validated before publication. Allowed paths are history/, reports/,
 manifest.json and README.md on the data branch. No main ref is written.
 
 Publication creates one commit based on the observed data head and updates the
-ref without force. A changed lease/stale watermark fails closed. API POSTs are
+ref without force. A changed lease/stale watermark fails closed. An exact previously successful
+bundle is idempotent only when its producer/revision/watermark and every target
+file already match the pinned current data head; it creates no new Git objects. API POSTs are
 not blindly retried after uncertain replies; reconciliation must inspect the
 resulting data head. Collection failures remain failed observability results
 even when valid partial observations can be retained/published. They are not
@@ -224,9 +251,10 @@ resource/CPU/image/toolchain/cache/workload transitions, outliers, slowdown,
 improvement, cumulative anchor drift, sparse/short histories and self-baseline
 rejection. They never enter the production history store.
 
-The read-only hosted preview collects two authentic existing Linux/Windows
-numeric job executions from run 37459678394, including their primary merge
-checkout and CPU evidence. It retains generated data/reports as review artifacts;
+The read-only hosted preview collects five authentic existing desktop jobs
+from run 37459678394: Linux x86-64, Linux AArch64, macOS AArch64, Windows
+x86-64 and Windows AArch64, including their primary merge checkout and CPU
+evidence. They are retained in independent read-only review bundles. It retains generated data/reports as review artifacts;
 it does not publish candidate output or claim a synthetic regression occurred.
 Cloud validation records the actual revision, commands and observed job spans
 on the owning PR. Native/collector compilation and real join checks are ordinary
@@ -234,9 +262,13 @@ functional validation, not performance-validation tests or 9700X acceptance.
 
 Full delivery still requires live trusted publication after #2766 integration,
 complete reusable/dynamic matrix and comparison-context receipts, explicit
-queue-to-main reuse association, broader API failure/late-finalization/pagination
-fixtures, old-rerun/missed-event recovery beyond the bounded scan, and measured
-steady-state collection/publication overhead. The issues remain open until
+queue-to-main reuse association, broader reusable/reuse and recovery-sweep failure fixtures, plus measured
+steady-state collection/publication overhead. Native fixtures already cover
+paginated inventories, duplicate pages, transient GET recovery, late job
+finalization, persisted pending/attempt state, wrong-run publication rejection,
+exact replay, stale leases and symlink payloads. Collection wall time, native
+peak RSS, API requests/retries and pending/sweep progress are retained in the
+manifest; publication wall time/API requests are printed in its job log. The issues remain open until
 their own acceptance criteria are met. Missing checks are not called green.
 
 First-party license selection remains unselected per

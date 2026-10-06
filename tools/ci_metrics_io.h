@@ -29,7 +29,7 @@ struct CmTransport
     // Explicit synthetic read fixtures; production leaves this pointer null.
     const CmResponse *fixture;
     unsigned fixture_count, fixture_cursor;
-    unsigned request_limit, run_count, run_replace, pending_count, sweep_page;
+    unsigned request_limit, run_count, run_replace, pending_count, sweep_page, omitted_shards;
     double collection_started;
     CmRunReceipt run_cache[CM_RUN_CACHE];
     uint64_t pending[CM_PENDING];

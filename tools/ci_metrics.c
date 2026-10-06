@@ -7,9 +7,9 @@
 BUSTER_GLOBAL_LOCAL void cm_summary(CmCollection *c, int success, const char *directory)
 {
     FILE *summary = stdout;
-    fprintf(summary, "CI_HISTORY_COLLECTION status=%s physical_executions=%u verified_machine_joins=%u verified_source_joins=%u "
+    fprintf(summary, "CI_HISTORY_COLLECTION status=%s physical_executions=%u verified_machine_joins=%u verified_matrix_joins=%u verified_source_joins=%u "
         "skipped=%u gaps=%u api_requests=%u read_retries=%u api_failures=%u\n",
-        success ? "complete" : "partial", c->executions, c->machine_verified, c->source_verified,
+        success ? "complete" : "partial", c->executions, c->machine_verified, c->matrix_verified, c->source_verified,
         c->skipped, c->store->gaps, c->transport->requests, c->transport->retries, c->transport->failures);
     const char *path = getenv("GITHUB_STEP_SUMMARY");
     FILE *file = path && path[0] ? fopen(path, "ab") : NULL;
@@ -31,7 +31,7 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
     int result = 2, valid = argc >= 2;
     const char *mode = valid ? argv[1] : "", *directory = "", *input = "", *event = "", *revision = "";
     const char *job_filter = "", *os_filter = "", *cpu_filter = "", *branch_filter = "";
-    uint64_t selected_run = 0, selected_job = 0, days = 2, max_runs = 100, expected_machine = 0;
+    uint64_t selected_run = 0, selected_job = 0, days = 2, max_runs = 100, expected_machine = 0, expected_matrix = 0;
     int64_t since = -1, until = -1;
     for (int i = 2; valid && i < argc; i += 2)
     {
@@ -51,6 +51,7 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
             else if (cm_equal(key, "--until")) { until = cm_time(value); valid = until >= 0; }
             else if (cm_equal(key, "--run")) valid = cm_unsigned(value, &selected_run) && selected_run;
             else if (cm_equal(key, "--expect-machine")) valid = cm_unsigned(value, &expected_machine) && expected_machine <= 1000;
+            else if (cm_equal(key, "--expect-matrix")) valid = cm_unsigned(value, &expected_matrix) && expected_matrix <= 1000;
             else if (cm_equal(key, "--job")) valid = cm_unsigned(value, &selected_job) && selected_job;
             else if (cm_equal(key, "--days")) valid = cm_unsigned(value, &days) && days > 0 && days <= 7;
             else if (cm_equal(key, "--max-runs")) valid = cm_unsigned(value, &max_runs) && max_runs > 0 && max_runs <= 1000;
@@ -87,6 +88,7 @@ BUSTER_GLOBAL_LOCAL int cm_main(int argc, char **argv)
                     cm_collect_recent(&collection, (unsigned)days, (unsigned)max_runs);
                 if (selected_job && collection.executions != 1) { complete = 0; ++store.gaps; }
                 if (expected_machine && collection.machine_verified < expected_machine) { complete = 0; ++store.gaps; }
+                if (expected_matrix && collection.matrix_verified < expected_matrix) { complete = 0; ++store.gaps; }
                 transport.request_limit = CM_REQUESTS; transport.deadline = cm_clock() + 300;
                 CmOutputs outputs = {0};
                 if (valid) valid = cm_history_append(&transport, &store, &outputs, checkpoint, observed);

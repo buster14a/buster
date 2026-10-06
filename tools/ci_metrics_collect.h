@@ -16,7 +16,8 @@ struct CmCollection
     CmStore *store;
     const char *observed;
     uint64_t selected_job;
-    unsigned executions, machine_verified, source_verified, skipped, failed;
+    unsigned executions, machine_verified, matrix_verified, source_verified, skipped, failed;
+    size_t new_record_bytes;
     int source_action_verified, quiet;
 };
 BUSTER_GLOBAL_LOCAL const char *cm_machine_value(const CmJson *j, const char *key)
@@ -321,7 +322,7 @@ BUSTER_GLOBAL_LOCAL int cm_workflow_proof(CmCollection *c, const CmJson *machine
             const char *index = cm_machine_value(machine, "matrix_index");
             unsigned field = cm_member(machine, 1, "matrix_index");
             uint64_t ordinal = 0;
-            if (cm_unsigned(index, &ordinal) && ordinal < 256 && static_matrix &&
+            if (cm_unsigned(index, &ordinal) && ordinal < 256 &&
                 cm_matrix_identity(fields[CM_MATRIX], CM_FIELD + 1, workflow, key, ordinal)) { }
             else if (cm_equal(cm_get(machine, field, "status"), "not_applicable"))
                 cm_copy(fields[CM_MATRIX], CM_FIELD + 1, "non-matrix");
@@ -447,6 +448,7 @@ BUSTER_GLOBAL_LOCAL int cm_machine(CmCollection *c, const CmJson *jobs, unsigned
                 row->s[CM_MACHINE_JSON] = cm_keep(c->store, record);
                 valid = row->s[CM_MACHINE_JSON] != NULL;
                 ++c->machine_verified;
+                if (fields[CM_MATRIX][0] && strncmp(fields[CM_MATRIX], "unavailable", 11) != 0) ++c->matrix_verified;
                 if (original_log) cm_reported_context(c, original_log, row, fields);
                 if (original_log && source_step && c->source_action_verified)
                 {
@@ -591,9 +593,16 @@ BUSTER_GLOBAL_LOCAL int cm_collect_job(CmCollection *c, const CmJson *j, unsigne
             }
             if (valid)
             {
-                int added = cm_add(c->store, &row);
-                valid = added != 0;
-                if (added == 1 && !c->quiet) cm_emit_row(stdout, &row);
+                FILE *encoded = tmpfile(); char *text = NULL;
+                if (encoded) { cm_emit_row(encoded, &row); text = cm_memory(encoded); fclose(encoded); }
+                size_t bytes = text ? strlen(text) : 0;
+                valid = text && bytes <= CM_BYTES / 2 - c->new_record_bytes;
+                if (valid)
+                {
+                    int added = cm_add(c->store, &row); valid = added != 0;
+                    if (added == 1) { c->new_record_bytes += bytes; if (!c->quiet) fputs(text, stdout); }
+                }
+                free(text);
             }
         }
         free(steps);
@@ -604,6 +613,7 @@ BUSTER_GLOBAL_LOCAL int cm_collect_run(CmCollection *c, uint64_t id)
 {
     char endpoint[512];
     snprintf(endpoint, sizeof(endpoint), "actions/runs/%" PRIu64, id);
+    unsigned initial_failures = c->transport->failures;
     CmJson run = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
     uint64_t attempts = cm_number(&run, 1, "run_attempt");
     int valid = run.valid && cm_number(&run, 1, "id") == id &&
@@ -647,6 +657,7 @@ BUSTER_GLOBAL_LOCAL int cm_collect_run(CmCollection *c, uint64_t id)
         }
         cm_json_free(&previous);
     }
+    valid = valid && c->transport->failures == initial_failures;
     if (!valid) { ++c->store->gaps; ++c->store->incomplete_runs; ++c->failed; }
     cm_json_free(&run);
     return valid;

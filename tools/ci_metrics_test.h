@@ -327,6 +327,12 @@ BUSTER_GLOBAL_LOCAL int cm_self_test(void)
             CmRow enriched = rows[0]; enriched.s[CM_OBSERVED] = "2026-10-06T13:00:00Z"; enriched.s[CM_TOOLCHAIN] = "verified";
             failures += cm_test_check(cm_add(&store, &enriched) == 1 && !store.rows[0].active && store.rows[1].active, "append-only enrichment");
             failures += cm_test_check(cm_add(&store, &rows[0]) == 2 && store.rows[1].active, "stale observation cannot overwrite");
+            CmRow unavailable = enriched; unavailable.s[CM_OBSERVED] = "2026-10-07T12:00:00Z";
+            unavailable.s[CM_HARDWARE] = "missing-startup-report"; unavailable.s[CM_CPU] = "";
+            failures += cm_test_check(cm_add(&store, &unavailable) == 2 && store.rows[1].active &&
+                cm_equal(store.rows[1].s[CM_CPU], "CPU A"), "expired logs cannot erase a retained verified receipt");
+            CmRow conflicting = enriched; conflicting.s[CM_OBSERVED] = "2026-10-07T12:00:00Z"; conflicting.s[CM_CPU] = "CPU B";
+            failures += cm_test_check(!cm_add(&store, &conflicting), "conflicting hardware for the same physical execution quarantines enrichment");
             cm_store_free(&store);
         }
         else ++failures;

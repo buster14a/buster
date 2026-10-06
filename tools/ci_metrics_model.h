@@ -138,7 +138,7 @@ BUSTER_GLOBAL_LOCAL int cm_alias(const CmRow *later, const CmRow *earlier)
 }
 BUSTER_GLOBAL_LOCAL int cm_immutable_equal(const CmRow *a, const CmRow *b)
 {
-    const unsigned immutable[] = {CM_NAME, CM_EVENT, CM_EVENT_SHA, CM_STARTED, CM_COMPLETED, CM_STEPS, CM_CONCLUSION, CM_KIND};
+    const unsigned immutable[] = {CM_NAME, CM_EVENT, CM_EVENT_SHA, CM_STARTED, CM_COMPLETED, CM_STEPS, CM_CONCLUSION};
     int result = a->run == b->run && a->job == b->job && a->attempt == b->attempt;
     for (unsigned i = 0; result && i < sizeof(immutable) / sizeof(immutable[0]); ++i)
         result = cm_equal(a->s[immutable[i]], b->s[immutable[i]]);
@@ -163,12 +163,39 @@ BUSTER_GLOBAL_LOCAL int cm_add(CmStore *s, const CmRow *input)
     if (result == 1)
     {
         CmRow row = *input;
-        size_t checkpoint = s->used;
-        for (unsigned i = 0; result && i < CM_FIELD_COUNT; ++i)
+        if (previous < s->count)
         {
-            row.s[i] = cm_keep(s, input->s[i]); result = row.s[i] != NULL;
+            const CmRow *old = &s->rows[previous];
+            if (old->origin_job == row.origin_job && old->origin_attempt == row.origin_attempt &&
+                cm_equal(old->s[CM_HARDWARE], "verified-startup") && !cm_equal(row.s[CM_HARDWARE], "verified-startup"))
+            {
+                for (unsigned i = CM_JOB_KEY; i <= CM_WORKERS; ++i)
+                    if (i != CM_NAME && i != CM_EVENT && i != CM_HEAD_BRANCH && i != CM_EVENT_SHA) row.s[i] = old->s[i];
+                row.s[CM_CONTEXT_STATUS] = old->s[CM_CONTEXT_STATUS];
+                row.s[CM_MACHINE_JSON] = old->s[CM_MACHINE_JSON]; row.s[CM_SOURCE_JSON] = old->s[CM_SOURCE_JSON];
+                row.s[CM_PHASE_JSON] = old->s[CM_PHASE_JSON];
+            }
+            else if (old->origin_job == row.origin_job && old->origin_attempt == row.origin_attempt)
+            {
+                const unsigned immutable_receipts[] = {CM_TESTED_SHA, CM_TESTED_TREE, CM_CPU, CM_OS, CM_WORKFLOW_SHA, CM_WORKFLOW_BLOB};
+                for (unsigned i = 0; result && i < sizeof(immutable_receipts) / sizeof(immutable_receipts[0]); ++i)
+                {
+                    unsigned field = immutable_receipts[i];
+                    if (old->s[field][0] && row.s[field][0] && !cm_equal(old->s[field], row.s[field])) { ++s->conflicts; result = 0; }
+                    else if (!row.s[field][0]) row.s[field] = old->s[field];
+                }
+                const unsigned receipts[] = {CM_MACHINE_JSON, CM_SOURCE_JSON, CM_PHASE_JSON};
+                for (unsigned i = 0; i < sizeof(receipts) / sizeof(receipts[0]); ++i)
+                    if (!row.s[receipts[i]][0]) row.s[receipts[i]] = old->s[receipts[i]];
+            }
+            if (result && cm_rows_equal(old, &row, 1)) { ++s->duplicates; result = 2; }
         }
-        if (result)
+        size_t checkpoint = s->used;
+        for (unsigned i = 0; result == 1 && i < CM_FIELD_COUNT; ++i)
+        {
+            row.s[i] = cm_keep(s, row.s[i]); result = row.s[i] != NULL;
+        }
+        if (result == 1)
         {
             row.active = 1;
             if (previous < s->count) { s->rows[previous].active = 0; ++s->enrichments; }

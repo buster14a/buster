@@ -88,11 +88,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/ci_metrics.c -lm -o "$RUNNER_TEMP/ci-metrics"
-          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256466829 --expect-machine 1 --out "$RUNNER_TEMP/metrics-linux"
-          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256467684 --expect-machine 1 --out "$RUNNER_TEMP/metrics-windows"
-          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256467574 --expect-machine 1 --out "$RUNNER_TEMP/metrics-macos"
-          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256467664 --expect-machine 1 --out "$RUNNER_TEMP/metrics-linux-arm"
-          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256467622 --expect-machine 1 --out "$RUNNER_TEMP/metrics-windows-arm"
+          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256466829 --expect-machine 1 --expect-matrix 1 --out "$RUNNER_TEMP/metrics-linux"
+          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256467684 --expect-machine 1 --expect-matrix 1 --out "$RUNNER_TEMP/metrics-windows"
+          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256467574 --expect-machine 1 --expect-matrix 1 --out "$RUNNER_TEMP/metrics-macos"
+          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256467664 --expect-machine 1 --expect-matrix 1 --out "$RUNNER_TEMP/metrics-linux-arm"
+          "$RUNNER_TEMP/ci-metrics" collect --run 37459678394 --job 112256467622 --expect-machine 1 --expect-matrix 1 --out "$RUNNER_TEMP/metrics-windows-arm"
       - name: Preserve read-only preview
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
