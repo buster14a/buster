@@ -184,6 +184,93 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("sum=198", result.stdout)
 
+    def run_in_process(self, head: str, *patches, cc: str = "", work: str = "") -> tuple[int, str]:
+        """Run main() here so faults can be injected; returns status and stdout."""
+        import contextlib
+        import io
+        import run_workloads
+        arguments = ["run_workloads.py", "--candidate", str(self.repository), "--base", self.base,
+                     "--head", head, "--work", work or str(self.root / "work"),
+                     "--summary", str(self.root / "summary.md"),
+                     "--cpu", str(min(os.sched_getaffinity(0))), "--cc", cc or COMPILER]
+        captured = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", arguments))
+            stack.enter_context(patch.object(run_workloads, "observed_cpu_model", lambda: APPROVED_CPU))
+            stack.enter_context(patch.object(sys, "stdout", captured))
+            for entered in patches:
+                stack.enter_context(entered)
+            status = run_workloads.main()
+        return status, captured.getvalue()
+
+    def test_compile_timeout_keeps_earlier_workload_results(self) -> None:
+        import run_workloads
+        wrapper = self.root / "slow-cc"
+        wrapper.write_text(f'#!/bin/sh\ncase "$*" in *zz_slow*) exec sleep 30;; esac\nexec {COMPILER} "$@"\n',
+                           encoding="utf-8")
+        wrapper.chmod(0o755)
+        head = self.commit({"benchmarks/9700x/aa_ok.c": PASSING, "benchmarks/9700x/zz_slow.c": PASSING})
+        status, out = self.run_in_process(
+            head, patch.object(run_workloads, "COMPILE_TIMEOUT_SECONDS", 3), cc=str(wrapper))
+        self.assertEqual(status, 1)
+        self.assertEqual(out.count("| sample "), 9)
+        self.assertIn("**INCOMPLETE:** compilation timed out", out)
+        self.assertIn("benchmarks/9700x/zz_slow.c: compilation timed out", out)
+        self.assertEqual((self.root / "summary.md").read_text(encoding="utf-8"), out)
+
+    def test_compiler_that_cannot_launch_is_a_failed_stage(self) -> None:
+        wrapper = self.root / "broken-cc"
+        wrapper.write_text("#!/nonexistent/interpreter\n", encoding="utf-8")
+        wrapper.chmod(0o755)
+        status, out = self.run_in_process(
+            self.commit({"benchmarks/9700x/aa_ok.c": PASSING}), cc=str(wrapper))
+        self.assertEqual(status, 1)
+        self.assertIn("compilation failed (", out)
+        self.assertIn("0 of 11 runs completed", out)
+        self.assertNotIn("| sample ", out)
+
+    def test_unavailable_work_directory_is_reported(self) -> None:
+        blocker = self.root / "blocker"
+        blocker.write_text("file", encoding="utf-8")
+        status, out = self.run_in_process(
+            self.commit({"benchmarks/9700x/aa_ok.c": PASSING}), work=str(blocker / "work"))
+        self.assertEqual(status, 1)
+        self.assertIn("preparing the run directory failed", out)
+        self.assertIn("NOT RUN", out)
+
+    def test_input_copy_failure_is_reported(self) -> None:
+        self.commit({"benchmarks/9700x/aa_ok.c": PASSING, "benchmarks/9700x/aa_ok.data": "AB"})
+        head = git(self.repository, "rev-parse", "HEAD")
+        real = Path.read_bytes
+
+        def failing(path):
+            if path.name.endswith(".data"):
+                raise OSError(5, "injected read failure")
+            return real(path)
+
+        status, out = self.run_in_process(head, patch.object(Path, "read_bytes", failing))
+        self.assertEqual(status, 1)
+        self.assertIn("reading the input data failed", out)
+        self.assertIn("injected read failure", out)
+        self.assertNotIn("| sample ", out)
+
+    def test_interruption_keeps_completed_runs_and_marks_the_rest_not_run(self) -> None:
+        import run_workloads
+        real = run_workloads.run_sample
+
+        def interrupted(program, scratch, cpu, index, data):
+            if index == 4:
+                raise KeyboardInterrupt
+            return real(program, scratch, cpu, index, data)
+
+        head = self.commit({"benchmarks/9700x/aa_ok.c": PASSING, "benchmarks/9700x/bb_ok.c": PASSING})
+        status, out = self.run_in_process(head, patch.object(run_workloads, "run_sample", interrupted))
+        self.assertEqual(status, 1)
+        self.assertIn("measurement interrupted", out)
+        self.assertIn("4 of 11 runs completed", out)
+        self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", out)
+        self.assertNotIn("Wall over", out)
+
     def test_every_run_starts_without_predecessor_files(self) -> None:
         marker = ('#include <stdio.h>\nint main(void) { FILE* f = fopen("marker", "rb"); int existed = f != 0;\n'
                   '  if (f) fclose(f); else { f = fopen("marker", "wb"); if (f) fclose(f); }\n'

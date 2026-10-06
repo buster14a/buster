@@ -247,50 +247,87 @@ def main() -> int:
              f"Observed host: `{cpu_model}`.", "",
              "Diagnostic process latency (fork through wait4). No service lease is held; "
              "other host activity is not excluded.", ""]
+    summary_failed: list[str] = []
+
+    def publish(chunk: list[str]) -> None:
+        # A finished piece of the report is written at once, so a later failure keeps it.
+        text = "\n".join(chunk) + "\n"
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        if arguments.summary and not summary_failed:
+            try:
+                with open(arguments.summary, "a", encoding="utf-8") as summary:
+                    summary.write(text)
+            except OSError as error:
+                summary_failed.append(f"cannot write --summary: {error}")
+
+    publish(lines)
     load_before = Path("/proc/loadavg").read_text(encoding="ascii").strip()
-    for name in ([] if failures else workloads):
+    remaining = [] if failures else list(workloads)
+    while remaining:
+        name = remaining.pop(0)
         problem = source_problem(arguments.candidate, name)
         if problem:
             failures.append(f"{name}: {problem}")
             continue
+        rows: list[dict] = []
+        stage = "preparing the run directory"
         scratch = arguments.work / Path(name).stem
-        scratch.mkdir(parents=True)
         source = arguments.candidate / name
         program = scratch / "program"
-        build = subprocess.run(
-            [compiler, *COMPILE_FLAGS, "-o", str(program), str(source.resolve())],
-            cwd=scratch, capture_output=True, timeout=COMPILE_TIMEOUT_SECONDS, check=False)
-        if build.returncode != 0:
-            failures.append(f"{name}: compilation failed")
-            diagnostics = (build.stdout + build.stderr)[:OUTPUT_SHOWN].decode("utf-8", "replace")
-            lines += [f"### `{name}`", "", "Compilation failed:", "", "```text",
-                      diagnostics.replace("```", "'''").rstrip("\n"), "```", ""]
-            continue
-        data = data_path(arguments.candidate, name)
-        data_bytes = data.read_bytes() if data.is_file() else None
-        data_sha = hashlib.sha256(data_bytes).hexdigest() if data_bytes is not None else ""
-        rows = [run_sample(program, scratch, arguments.cpu, index, data_bytes)
-                for index in range(WARMUPS + SAMPLES)]
-        section, passed = render(
-            name, hashlib.sha256(source.read_bytes()).hexdigest(),
-            hashlib.sha256(program.read_bytes()).hexdigest(), rows, data_sha)
-        lines += section
-        if not passed:
-            failures.append(f"{name}: a run exited nonzero, was signalled, timed out or invalidated its input")
-        for row in rows:
-            if row.get("invalid"):
-                failures.append(f"{name}: {row['invalid']}")
-                break
+        try:
+            scratch.mkdir(parents=True)
+            stage = "compilation"
+            build = subprocess.run(
+                [compiler, *COMPILE_FLAGS, "-o", str(program), str(source.resolve())],
+                cwd=scratch, capture_output=True, timeout=COMPILE_TIMEOUT_SECONDS, check=False)
+            if build.returncode != 0:
+                failures.append(f"{name}: compilation failed")
+                diagnostics = (build.stdout + build.stderr)[:OUTPUT_SHOWN].decode("utf-8", "replace")
+                publish([f"### `{name}`", "", "Compilation failed:", "", "```text",
+                         diagnostics.replace("```", "'''").rstrip("\n"), "```", ""])
+                continue
+            stage = "reading the input data"
+            data = data_path(arguments.candidate, name)
+            data_bytes = data.read_bytes() if data.is_file() else None
+            data_sha = hashlib.sha256(data_bytes).hexdigest() if data_bytes is not None else ""
+            stage = "measurement"
+            for index in range(WARMUPS + SAMPLES):
+                rows.append(run_sample(program, scratch, arguments.cpu, index, data_bytes))
+            stage = "reporting"
+            section, passed = render(
+                name, hashlib.sha256(source.read_bytes()).hexdigest(),
+                hashlib.sha256(program.read_bytes()).hexdigest(), rows, data_sha)
+            publish(section)
+            if not passed:
+                failures.append(f"{name}: a run exited nonzero, was signalled, timed out or invalidated its input")
+            for row in rows:
+                if row.get("invalid"):
+                    failures.append(f"{name}: {row['invalid']}")
+                    break
+        except (OSError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+            # Keep what finished, name the stage, and never turn it into success.
+            kind = ("interrupted" if isinstance(error, KeyboardInterrupt)
+                    else "timed out" if isinstance(error, subprocess.TimeoutExpired) else "failed")
+            detail = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+            failures.append(f"{name}: {stage} {kind} ({detail}); {len(rows)} of {WARMUPS + SAMPLES} "
+                            "runs completed, the remaining work was NOT RUN")
+            completed = [f"Completed runs (exit/timed out/wall ms): " + ", ".join(
+                f"{row['exit']}/{int(row['timed_out'])}/{row['wall_ns'] / 1e6:.3f}" for row in rows), ""]
+            publish([f"### `{name}`", "",
+                     f"**INCOMPLETE:** {stage} {kind}: `{detail}`. {len(rows)} of {WARMUPS + SAMPLES} runs "
+                     "completed; the rest was NOT RUN and no summary is given.", ""]
+                    + (completed if rows else []))
+            if remaining:
+                failures.append("NOT RUN: " + ", ".join(remaining))
+            remaining.clear()
     load_after = Path("/proc/loadavg").read_text(encoding="ascii").strip()
-    lines += [f"Compiler: `{compiler}`. Flags: `{' '.join(COMPILE_FLAGS)}`.", "",
-              f"Load average before: `{load_before}`; after: `{load_after}`.", ""]
+    lines = [f"Compiler: `{compiler}`. Flags: `{' '.join(COMPILE_FLAGS)}`.", "",
+             f"Load average before: `{load_before}`; after: `{load_after}`.", ""]
+    failures.extend(summary_failed)
     for failure in failures:
         lines.append(f"**FAILED:** {failure}")
-    report = "\n".join(lines) + "\n"
-    sys.stdout.write(report)
-    if arguments.summary:
-        with open(arguments.summary, "a", encoding="utf-8") as summary:
-            summary.write(report)
+    publish(lines)
     return 1 if failures else 0
 
 
