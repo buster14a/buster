@@ -106,6 +106,7 @@ enum
     LLVM_BC_FUNC_ALLOCA = 19,
     LLVM_BC_FUNC_LOAD = 20,
     LLVM_BC_FUNC_VAARG = 23,
+    LLVM_BC_FUNC_VSELECT = 29,
     LLVM_BC_FUNC_EXTRACTVAL = 26,
     LLVM_BC_FUNC_INSERTVAL = 27,
     LLVM_BC_FUNC_INDIRECTBR = 31,
@@ -145,6 +146,7 @@ enum
     LLVM_BC_BINOP_AND = 10,
     LLVM_BC_BINOP_OR = 11,
     LLVM_BC_BINOP_XOR = 12,
+    LLVM_BC_ICMP_ULE = 37,
 
     LLVM_BC_ORDERING_MONOTONIC = 2,
     LLVM_BC_ORDERING_ACQUIRE = 3,
@@ -2984,6 +2986,31 @@ BUSTER_GLOBAL_LOCAL bool llvm_bc_aggregate_is_byte_array(IrType* type)
 
 BUSTER_GLOBAL_LOCAL u32 llvm_bc_bit_field_aggregate(LlvmBcContext* context, LlvmBcFunction* record, IrFunction* function, IrBlock* block,
                                                     IrInstruction* instruction, u32* current_value_id, LlvmBcBitFieldAggregateMode mode);
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_va_arg_aggregate(LlvmBcContext* context, LlvmBcFunction* record, IrFunction* function, IrBlock* block,
+                                                IrInstruction* instruction, u32* current_value_id, LlvmBcBitFieldAggregateMode mode);
+
+typedef enum LlvmBcVaArgKind
+{
+    LLVM_BC_VA_ARG_SYSV_MEMORY,
+    LLVM_BC_VA_ARG_SYSV_REGISTERS,
+    LLVM_BC_VA_ARG_WIN64_INLINE,
+    LLVM_BC_VA_ARG_WIN64_REFERENCE,
+} LlvmBcVaArgKind;
+
+typedef struct LlvmBcVaArgClass LlvmBcVaArgClass;
+struct LlvmBcVaArgClass
+{
+    LlvmBcVaArgKind kind;
+    u32 part_count;
+    bool part_sse[2];
+    u32 integer_count;
+    u32 sse_count;
+    u64 slot_size;
+    u32 alignment;
+    LlvmBcAbiValue storage;
+};
+
+BUSTER_GLOBAL_LOCAL bool llvm_bc_va_arg_classify(LlvmBcContext* context, IrTypeId type_id, LlvmBcVaArgClass* result);
 
 static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
 {
@@ -3090,6 +3117,12 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
             }
             case IR_OPCODE_INDEX:
                 llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64, 0);
+                break;
+            case IR_OPCODE_VA_ARG:
+                if (llvm_bc_is_aggregate(llvm_bc_ir_type(context, instruction->canonical_type)))
+                {
+                    llvm_bc_va_arg_aggregate(context, 0, function, 0, instruction, 0, LLVM_BC_BIT_FIELD_AGGREGATE_CONSTANTS);
+                }
                 break;
             case IR_OPCODE_FIELD:
                 if (instruction->operand_count == 1 && instruction->immediate_count == 1)
@@ -3256,7 +3289,7 @@ BUSTER_GLOBAL_LOCAL bool llvm_bc_va_shape_supported(LlvmBcContext* context, IrFu
         else if (instruction->opcode == IR_OPCODE_VA_ARG)
         {
             IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
-            supported = type && ((type->kind == IR_TYPE_INTEGER && (type->bit_width == 32 || type->bit_width == 64)) ||
+            supported = type && (llvm_bc_is_aggregate(type) || (type->kind == IR_TYPE_INTEGER && (type->bit_width == 32 || type->bit_width == 64)) ||
                                  (type->kind == IR_TYPE_FLOAT && type->bit_width == 64) || type->kind == IR_TYPE_POINTER);
             if (!supported)
             {
@@ -3414,9 +3447,16 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
         if (llvm_bc_va_shape_supported(context, function, block, instruction))
         {
             IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
-            // Generic Win64 VAARG advances by the LLVM result size; a C int
-            // still occupies a full eight-byte slot in the Win64 argument area.
-            count = context->abi_target.os == OPERATING_SYSTEM_WINDOWS && type->kind == IR_TYPE_INTEGER && type->bit_width == 32 ? 2 : 1;
+            if (llvm_bc_is_aggregate(type))
+            {
+                count = llvm_bc_va_arg_aggregate(context, 0, function, block, instruction, 0, LLVM_BC_BIT_FIELD_AGGREGATE_COUNT);
+            }
+            else
+            {
+                // Generic Win64 VAARG advances by the LLVM result size; a C int
+                // still occupies a full eight-byte slot in the Win64 argument area.
+                count = context->abi_target.os == OPERATING_SYSTEM_WINDOWS && type->kind == IR_TYPE_INTEGER && type->bit_width == 32 ? 2 : 1;
+            }
         }
         return count;
     }
@@ -3597,6 +3637,16 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_plan_instruction_allocas(LlvmBcContext* context,
     case IR_OPCODE_VA_COPY:
         llvm_bc_plan_fixed_alloca(context, record, context->ir_type_ids[instruction->canonical_type.value], 8);
         break;
+    case IR_OPCODE_VA_ARG:
+    {
+        LlvmBcVaArgClass class;
+        if (llvm_bc_is_aggregate(llvm_bc_ir_type(context, instruction->canonical_type)) &&
+            llvm_bc_va_arg_classify(context, instruction->canonical_type, &class) && class.kind == LLVM_BC_VA_ARG_SYSV_REGISTERS)
+        {
+            llvm_bc_plan_fixed_alloca(context, record, class.storage.storage_type_id, class.storage.alignment);
+        }
+        break;
+    }
     default:
         break;
     }
@@ -4353,6 +4403,306 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_load(LlvmBcContext* context, u32 pointer, u3
     return result;
 }
 
+// Aggregate va_arg. LLVM's va_arg instruction does not classify aggregates, so
+// the x86-64 argument-area walk is spelled out, as Clang does. Control flow is
+// branch-free: every eightbyte address is a select between the register-save
+// and overflow areas, and the va_list fields are rewritten with selected values.
+// COUNT sizes the value plan, CONSTANTS registers every constant before value
+// numbering, and EMIT writes the records; all three walk the same shape.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_va_arg_classify(LlvmBcContext* context, IrTypeId type_id, LlvmBcVaArgClass* result)
+{
+    IrType* type = llvm_bc_ir_type(context, type_id);
+    bool valid = type && type->layout.size && type->layout.alignment;
+    *result = (LlvmBcVaArgClass){0};
+    if (valid)
+    {
+        bool windows = context->abi_target.os == OPERATING_SYSTEM_WINDOWS;
+        IrAbiValue abi = ir_type_abi_value(context->program, type_id,
+                                           windows ? IR_ABI_CONVENTION_WIN64_X86_64 : IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+        result->alignment = type->layout.alignment;
+        result->slot_size = (type->layout.size + 7) & ~UINT64_C(7);
+        if (windows)
+        {
+            result->kind = abi.indirect || abi.memory ? LLVM_BC_VA_ARG_WIN64_REFERENCE : LLVM_BC_VA_ARG_WIN64_INLINE;
+        }
+        else if (abi.indirect || abi.memory || type->layout.size > 16)
+        {
+            result->kind = LLVM_BC_VA_ARG_SYSV_MEMORY;
+        }
+        else
+        {
+            llvm_bc_sysv_aggregate_parts(context, type_id, &abi);
+            result->kind = LLVM_BC_VA_ARG_SYSV_REGISTERS;
+            result->part_count = abi.part_count;
+            valid = !llvm_bc_failed(context) && abi.part_count >= 1 && abi.part_count <= 2;
+            for (u32 part = 0; valid && part < abi.part_count; part += 1)
+            {
+                IrAbiClass abi_class = abi.parts[part].abi_class;
+                bool general = abi_class == IR_ABI_CLASS_INTEGER || abi_class == IR_ABI_CLASS_POINTER;
+                bool sse = abi_class == IR_ABI_CLASS_FLOAT && abi.parts[part].size <= 8;
+                valid = general || sse;
+                result->part_sse[part] = sse;
+                result->integer_count += general;
+                result->sse_count += sse;
+            }
+            if (valid)
+            {
+                u32 integers = 0;
+                u32 floats = 0;
+                result->storage = llvm_bc_abi_value(context, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, false, &integers, &floats);
+                valid = result->storage.aggregate && !result->storage.indirect && !llvm_bc_failed(context);
+            }
+        }
+        if (!valid && !llvm_bc_failed(context))
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("unsupported LLVM aggregate va_arg classification"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+        }
+    }
+    else
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("LLVM va_arg requires a nonempty aggregate layout"),
+                     0, 0, 0, IR_SYMBOL_ID_INVALID);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_va_constant(LlvmBcContext* context, bool constants, u32 type_id, u32 width, u64 bits)
+{
+    return constants ? llvm_bc_integer_constant_for_type_id(context, type_id, width, bits) : 0;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_va_gep(LlvmBcContext* context, bool emit, u32 base, u32 offset, u32* current_value_id)
+{
+    if (emit)
+    {
+        u64 operands[6];
+        u32 count = 0;
+        operands[count++] = 0;
+        operands[count++] = context->i8_type_id;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, base, context->pointer_type_id);
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, offset, context->i64_type_id);
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_GEP, operands, count);
+    }
+    u32 result = *current_value_id;
+    *current_value_id += 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_va_load(LlvmBcContext* context, bool emit, u32 pointer, u32 type, u32 alignment, u32* current_value_id)
+{
+    u32 result;
+    if (emit)
+    {
+        result = llvm_bc_abi_load(context, pointer, type, alignment, current_value_id);
+    }
+    else
+    {
+        result = *current_value_id;
+        *current_value_id += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void llvm_bc_va_store(LlvmBcContext* context, bool emit, u32 pointer, u32 value, u32 type, u32 alignment, u32 current_value_id)
+{
+    if (emit)
+    {
+        llvm_bc_abi_store(context, pointer, value, type, alignment, current_value_id);
+    }
+}
+
+// Two-operand record: a BINOP (operation is the binary opcode) or CMP2 (operation is the predicate).
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_va_binary(LlvmBcContext* context, bool emit, u32 record_code, u32 left, u32 left_type, u32 right,
+                                         u32 operation, u32* current_value_id)
+{
+    if (emit)
+    {
+        u64 operands[4];
+        u32 count = 0;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, left, left_type);
+        llvm_bc_push_relative(operands, &count, *current_value_id, right);
+        operands[count++] = operation;
+        llvm_bc_record(&context->stream, record_code, operands, count);
+    }
+    u32 result = *current_value_id;
+    *current_value_id += 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_va_cast(LlvmBcContext* context, bool emit, u32 source, u32 source_type, u32 destination_type, u32 operation,
+                                       u32* current_value_id)
+{
+    if (emit)
+    {
+        u64 operands[4];
+        u32 count = 0;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, source, source_type);
+        operands[count++] = destination_type;
+        operands[count++] = operation;
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_CAST, operands, count);
+    }
+    u32 result = *current_value_id;
+    *current_value_id += 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_va_select(LlvmBcContext* context, bool emit, u32 condition, u32 chosen, u32 other, u32 type,
+                                         u32* current_value_id)
+{
+    if (emit)
+    {
+        u64 operands[6];
+        u32 count = 0;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, chosen, type);
+        llvm_bc_push_relative(operands, &count, *current_value_id, other);
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, condition, context->i1_type_id);
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_VSELECT, operands, count);
+    }
+    u32 result = *current_value_id;
+    *current_value_id += 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_va_arg_aggregate(LlvmBcContext* context, LlvmBcFunction* record, IrFunction* function, IrBlock* block,
+                                                IrInstruction* instruction, u32* current_value_id, LlvmBcBitFieldAggregateMode mode)
+{
+    // Failures carry no instruction position: classification has no block context.
+    (void)function;
+    (void)block;
+    bool constants = mode != LLVM_BC_BIT_FIELD_AGGREGATE_COUNT;
+    bool emit = mode == LLVM_BC_BIT_FIELD_AGGREGATE_EMIT;
+    u32 counter = 0;
+    u32* cursor = emit ? current_value_id : &counter;
+    u32 start = *cursor;
+    u32 result = LLVM_BC_INVALID_ID;
+    LlvmBcVaArgClass class;
+    if (llvm_bc_va_arg_classify(context, instruction->canonical_type, &class))
+    {
+        u32 pointer_type = context->pointer_type_id;
+        u32 i64_type = context->i64_type_id;
+        u32 aggregate_type = context->ir_type_ids[instruction->canonical_type.value];
+        u32 list = emit ? llvm_bc_function_value_id(context, record, instruction->operands[0]) : 0;
+        u32 c8 = llvm_bc_va_constant(context, constants, i64_type, 64, 8);
+        u32 value = 0;
+        bool windows = class.kind == LLVM_BC_VA_ARG_WIN64_INLINE || class.kind == LLVM_BC_VA_ARG_WIN64_REFERENCE;
+        bool align16 = class.alignment > 8;
+        u32 c15 = 0;
+        u32 cm16 = 0;
+        if (align16 && !windows)
+        {
+            c15 = llvm_bc_va_constant(context, constants, i64_type, 64, 15);
+            cm16 = llvm_bc_va_constant(context, constants, i64_type, 64, 0 - UINT64_C(16));
+        }
+        if (windows)
+        {
+            // The list is a char*: step it one slot, then read the value or
+            // the pointer to it.
+            u32 slot = llvm_bc_va_load(context, emit, list, pointer_type, 8, cursor);
+            u32 next = llvm_bc_va_gep(context, emit, slot, c8, cursor);
+            llvm_bc_va_store(context, emit, list, next, pointer_type, 8, *cursor);
+            u32 address = slot;
+            if (class.kind == LLVM_BC_VA_ARG_WIN64_REFERENCE)
+            {
+                address = llvm_bc_va_load(context, emit, slot, pointer_type, 8, cursor);
+            }
+            value = llvm_bc_va_load(context, emit, address, aggregate_type, class.kind == LLVM_BC_VA_ARG_WIN64_REFERENCE ? class.alignment : 1,
+                                    cursor);
+        }
+        else
+        {
+            u32 c_slot = llvm_bc_va_constant(context, constants, i64_type, 64, class.slot_size);
+            u32 c4 = llvm_bc_va_constant(context, constants, i64_type, 64, 4);
+            u32 c16 = llvm_bc_va_constant(context, constants, i64_type, 64, 16);
+            u32 overflow_list = llvm_bc_va_gep(context, emit, list, c8, cursor);
+            u32 overflow = llvm_bc_va_load(context, emit, overflow_list, pointer_type, 8, cursor);
+            u32 aligned = overflow;
+            if (align16)
+            {
+                u32 bumped = llvm_bc_va_gep(context, emit, overflow, c15, cursor);
+                u32 integer = llvm_bc_va_cast(context, emit, bumped, pointer_type, i64_type, LLVM_BC_CAST_PTRTOINT, cursor);
+                u32 masked = llvm_bc_va_binary(context, emit, LLVM_BC_FUNC_BINOP, integer, i64_type, cm16, LLVM_BC_BINOP_AND, cursor);
+                aligned = llvm_bc_va_cast(context, emit, masked, i64_type, pointer_type, LLVM_BC_CAST_INTTOPTR, cursor);
+            }
+            if (class.kind == LLVM_BC_VA_ARG_SYSV_MEMORY)
+            {
+                // The aggregate load comes last: the instruction's result is its final value.
+                u32 next = llvm_bc_va_gep(context, emit, aligned, c_slot, cursor);
+                llvm_bc_va_store(context, emit, overflow_list, next, pointer_type, 8, *cursor);
+                value = llvm_bc_va_load(context, emit, aligned, aggregate_type, align16 ? 16 : 8, cursor);
+            }
+            else
+            {
+                u32 i32_type = context->i32_type_id;
+                u32 gp_limit = llvm_bc_va_constant(context, constants && class.integer_count, i32_type, 32, 48 - 8 * class.integer_count);
+                u32 gp_step = llvm_bc_va_constant(context, constants && class.integer_count, i32_type, 32, 8 * class.integer_count);
+                u32 fp_limit = llvm_bc_va_constant(context, constants && class.sse_count, i32_type, 32, 176 - 16 * class.sse_count);
+                u32 fp_step = llvm_bc_va_constant(context, constants && class.sse_count, i32_type, 32, 16 * class.sse_count);
+                u32 fp_list = llvm_bc_va_gep(context, emit, list, c4, cursor);
+                u32 save_list = llvm_bc_va_gep(context, emit, list, c16, cursor);
+                u32 gp = llvm_bc_va_load(context, emit, list, i32_type, 8, cursor);
+                u32 fp = llvm_bc_va_load(context, emit, fp_list, i32_type, 4, cursor);
+                u32 save = llvm_bc_va_load(context, emit, save_list, pointer_type, 8, cursor);
+                u32 fits = LLVM_BC_INVALID_ID;
+                u32 gp_base = LLVM_BC_INVALID_ID;
+                u32 fp_base = LLVM_BC_INVALID_ID;
+                if (class.integer_count)
+                {
+                    fits = llvm_bc_va_binary(context, emit, LLVM_BC_FUNC_CMP2, gp, i32_type, gp_limit, LLVM_BC_ICMP_ULE, cursor);
+                    u32 wide = llvm_bc_va_cast(context, emit, gp, i32_type, i64_type, LLVM_BC_CAST_ZEXT, cursor);
+                    gp_base = llvm_bc_va_gep(context, emit, save, wide, cursor);
+                }
+                if (class.sse_count)
+                {
+                    u32 fp_fits = llvm_bc_va_binary(context, emit, LLVM_BC_FUNC_CMP2, fp, i32_type, fp_limit, LLVM_BC_ICMP_ULE, cursor);
+                    fits = fits == LLVM_BC_INVALID_ID ? fp_fits
+                                                      : llvm_bc_va_binary(context, emit, LLVM_BC_FUNC_BINOP, fits, context->i1_type_id, fp_fits,
+                                                                          LLVM_BC_BINOP_AND, cursor);
+                    u32 wide = llvm_bc_va_cast(context, emit, fp, i32_type, i64_type, LLVM_BC_CAST_ZEXT, cursor);
+                    fp_base = llvm_bc_va_gep(context, emit, save, wide, cursor);
+                }
+                u32 temporary = emit ? llvm_bc_abi_temporary(context, record, class.storage) : 0;
+                u32 integer_used = 0;
+                u32 sse_used = 0;
+                for (u32 part = 0; part < class.part_count; part += 1)
+                {
+                    u32 register_address = class.part_sse[part] ? fp_base : gp_base;
+                    u32 used = class.part_sse[part] ? sse_used++ : integer_used++;
+                    if (used)
+                    {
+                        register_address = llvm_bc_va_gep(context, emit, register_address, class.part_sse[part] ? c16 : c8, cursor);
+                    }
+                    u32 stack_address = part ? llvm_bc_va_gep(context, emit, aligned, c8, cursor) : aligned;
+                    u32 address = llvm_bc_va_select(context, emit, fits, register_address, stack_address, pointer_type, cursor);
+                    u32 piece = llvm_bc_va_load(context, emit, address, i64_type, 8, cursor);
+                    u32 destination = part ? llvm_bc_va_gep(context, emit, temporary, c8, cursor) : temporary;
+                    llvm_bc_va_store(context, emit, destination, piece, i64_type, 8, *cursor);
+                }
+                if (class.integer_count)
+                {
+                    u32 advanced = llvm_bc_va_binary(context, emit, LLVM_BC_FUNC_BINOP, gp, i32_type, gp_step, LLVM_BC_BINOP_ADD, cursor);
+                    u32 chosen = llvm_bc_va_select(context, emit, fits, advanced, gp, i32_type, cursor);
+                    llvm_bc_va_store(context, emit, list, chosen, i32_type, 8, *cursor);
+                }
+                if (class.sse_count)
+                {
+                    u32 advanced = llvm_bc_va_binary(context, emit, LLVM_BC_FUNC_BINOP, fp, i32_type, fp_step, LLVM_BC_BINOP_ADD, cursor);
+                    u32 chosen = llvm_bc_va_select(context, emit, fits, advanced, fp, i32_type, cursor);
+                    llvm_bc_va_store(context, emit, fp_list, chosen, i32_type, 4, *cursor);
+                }
+                u32 stack_next = llvm_bc_va_gep(context, emit, aligned, c_slot, cursor);
+                u32 chosen = llvm_bc_va_select(context, emit, fits, overflow, stack_next, pointer_type, cursor);
+                llvm_bc_va_store(context, emit, overflow_list, chosen, pointer_type, 8, *cursor);
+                value = llvm_bc_va_load(context, emit, temporary, aggregate_type, class.storage.alignment, cursor);
+            }
+        }
+        (void)value; // The last record emitted is the value; the caller checks the count.
+        // The planned count includes the fixed temporary, which is numbered at entry.
+        result = *cursor - start + (mode == LLVM_BC_BIT_FIELD_AGGREGATE_COUNT && class.kind == LLVM_BC_VA_ARG_SYSV_REGISTERS);
+    }
+    return result;
+}
+
 // A struct with bit-fields or a union is an opaque byte array in LLVM, which
 // insertvalue cannot address by member. Its value is built in a zeroed temporary: members
 // are stored at their byte offsets, and each bit-field byte is ORed in from the
@@ -4992,8 +5342,21 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
     case IR_OPCODE_VA_START:
     case IR_OPCODE_VA_COPY:
     case IR_OPCODE_VA_END:
-    case IR_OPCODE_VA_ARG:
         llvm_bc_emit_va_instruction(context, record, instruction, current_value_id);
+        break;
+    case IR_OPCODE_VA_ARG:
+        if (llvm_bc_is_aggregate(llvm_bc_ir_type(context, instruction->canonical_type)))
+        {
+            if (llvm_bc_va_arg_aggregate(context, record, function, block, instruction, current_value_id,
+                                         LLVM_BC_BIT_FIELD_AGGREGATE_EMIT) == LLVM_BC_INVALID_ID)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            llvm_bc_emit_va_instruction(context, record, instruction, current_value_id);
+        }
         break;
     case IR_OPCODE_CAST:
         if (!llvm_bc_cast_is_alias(context, function, instruction))

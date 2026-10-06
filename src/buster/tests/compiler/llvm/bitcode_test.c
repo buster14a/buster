@@ -1114,6 +1114,221 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_debug_trap(UnitTestArgument
     return result;
 }
 
+// An aggregate va_arg is classified by the x86-64 ABI rather than by LLVM's
+// va_arg instruction (#2919). A separately compiled caller passes aggregates in
+// each eightbyte class combination, with the registers exhausted for one or both
+// classes, to a variadic callee emitted here; the callee checks every value.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_aggregate_va_arg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    String8 source = S8(
+        "#include <stdarg.h>\n"
+        "typedef struct { char* p; unsigned long long n; } AggPtr;\n"
+        "typedef struct { double a; double b; } AggDouble;\n"
+        "typedef struct { long long i; double d; } AggMixed;\n"
+        "typedef struct { double d; long long i; } AggMixedRev;\n"
+        "typedef struct { int v; } AggSmall;\n"
+        "typedef struct { long long a; long long b; long long c; } AggBig;\n"
+        "int va_all(int tag, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, tag);\n"
+        "    AggPtr p = va_arg(ap, AggPtr);\n"
+        "    AggDouble d = va_arg(ap, AggDouble);\n"
+        "    AggMixed m = va_arg(ap, AggMixed);\n"
+        "    AggMixedRev r = va_arg(ap, AggMixedRev);\n"
+        "    AggSmall s = va_arg(ap, AggSmall);\n"
+        "    AggBig b = va_arg(ap, AggBig);\n"
+        "    long long tail = va_arg(ap, long long);\n"
+        "    va_end(ap);\n"
+        "    int failures = 0;\n"
+        "    failures += p.p[0] != 'q' || p.p[1] != 'z' || p.n != 11;\n"
+        "    failures += d.a != 1.5 || d.b != 2.5;\n"
+        "    failures += m.i != -7 || m.d != 3.25;\n"
+        "    failures += r.d != 4.5 || r.i != -9;\n"
+        "    failures += s.v != 42;\n"
+        "    failures += b.a != 1 || b.b != 2 || b.c != 3;\n"
+        "    failures += tail != 77;\n"
+        "    return failures;\n"
+        "}\n"
+        "int va_late(long a, long b, long c, long d, long e, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, e);\n"
+        "    AggPtr first = va_arg(ap, AggPtr);\n"
+        "    long long single = va_arg(ap, long long);\n"
+        "    AggPtr second = va_arg(ap, AggPtr);\n"
+        "    AggDouble pair = va_arg(ap, AggDouble);\n"
+        "    va_end(ap);\n"
+        "    int failures = a != 1 || b != 2 || c != 3 || d != 4 || e != 5;\n"
+        "    failures += first.p[0] != 'a' || first.p[1] != 'b' || first.n != 7;\n"
+        "    failures += single != 99;\n"
+        "    failures += second.p[0] != 'c' || second.p[1] != 'd' || second.n != 8;\n"
+        "    failures += pair.a != 1.5 || pair.b != 2.5;\n"
+        "    return failures;\n"
+        "}\n"
+        "int va_exhaust(long a, long b, long c, long d, long e, long f, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, f);\n"
+        "    AggPtr p = va_arg(ap, AggPtr);\n"
+        "    AggMixed m = va_arg(ap, AggMixed);\n"
+        "    AggDouble pair = va_arg(ap, AggDouble);\n"
+        "    long long tail = va_arg(ap, long long);\n"
+        "    va_end(ap);\n"
+        "    int failures = a + b + c + d + e + f != 21;\n"
+        "    failures += p.p[0] != 'x' || p.n != 5;\n"
+        "    failures += m.i != 6 || m.d != 0.5;\n"
+        "    failures += pair.a != -1.5 || pair.b != 8;\n"
+        "    failures += tail != 123;\n"
+        "    return failures;\n"
+        "}\n"
+        "int va_sse(double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, x7);\n"
+        "    AggDouble pair = va_arg(ap, AggDouble);\n"
+        "    AggMixed m = va_arg(ap, AggMixed);\n"
+        "    long long tail = va_arg(ap, long long);\n"
+        "    va_end(ap);\n"
+        "    int failures = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 != 36;\n"
+        "    failures += pair.a != 9.5 || pair.b != -2;\n"
+        "    failures += m.i != 31 || m.d != 4.75;\n"
+        "    failures += tail != 321;\n"
+        "    return failures;\n"
+        "}\n");
+    String8 caller = S8(
+        "typedef struct { char* p; unsigned long long n; } AggPtr;\n"
+        "typedef struct { double a; double b; } AggDouble;\n"
+        "typedef struct { long long i; double d; } AggMixed;\n"
+        "typedef struct { double d; long long i; } AggMixedRev;\n"
+        "typedef struct { int v; } AggSmall;\n"
+        "typedef struct { long long a; long long b; long long c; } AggBig;\n"
+        "int va_all(int, ...);\n"
+        "int va_late(long, long, long, long, long, ...);\n"
+        "int va_exhaust(long, long, long, long, long, long, ...);\n"
+        "int va_sse(double, double, double, double, double, double, double, double, ...);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    failures += va_all(0, (AggPtr){\"qz\", 11}, (AggDouble){1.5, 2.5}, (AggMixed){-7, 3.25}, (AggMixedRev){4.5, -9},\n"
+        "                       (AggSmall){42}, (AggBig){1, 2, 3}, 77LL);\n"
+        "    failures += va_late(1, 2, 3, 4, 5, (AggPtr){\"ab\", 7}, 99LL, (AggPtr){\"cd\", 8}, (AggDouble){1.5, 2.5});\n"
+        "    failures += va_exhaust(1, 2, 3, 4, 5, 6, (AggPtr){\"x\", 5}, (AggMixed){6, 0.5}, (AggDouble){-1.5, 8}, 123LL);\n"
+        "    failures += va_sse(1, 2, 3, 4, 5, 6, 7, 8, (AggDouble){9.5, -2}, (AggMixed){31, 4.75}, 321LL);\n"
+        "    return failures;\n"
+        "}\n");
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va-caller"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
+        String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM aggregate va_arg fixture {S8}: {S8}\n"), frontends[frontend], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va"), S8(""));
+                String8 compile[] = {compiler, optimizations[optimization], output, caller_input, S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM aggregate va_arg consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM aggregate va_arg values differ: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM aggregate va_arg consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    {
+        // Win64 passes these by value up to eight bytes and by reference above;
+        // the same source must lower and be accepted by the independent consumer.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va-win64"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va-win64"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 command[] = {S8("-emit-llvm"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM Win64 aggregate va_arg fixture: {S8}\n"), emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 object = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va-win64"), S8(".o"));
+            String8 compile[] = {compiler, S8("-O2"), S8("-c"), output, S8("-o"), object};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                {
+                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM Win64 aggregate va_arg consumer: {S8}\n"),
+                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
 // __builtin___clear_cache lowers to a call of llvm.clear_cache (#2894). The
 // checker fills a buffer, clears its cache range and then reads it back, so a
 // dropped or mis-numbered call surfaces as a consumer rejection or wrong sum.
@@ -4394,6 +4609,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult debug_trap = llvm_bitcode_test_debug_trap(arguments);
     result.test_count += debug_trap.test_count;
     result.succeeded_test_count += debug_trap.succeeded_test_count;
+    UnitTestResult aggregate_va_arg = llvm_bitcode_test_aggregate_va_arg(arguments);
+    result.test_count += aggregate_va_arg.test_count;
+    result.succeeded_test_count += aggregate_va_arg.succeeded_test_count;
     UnitTestResult clear_cache = llvm_bitcode_test_clear_cache(arguments);
     result.test_count += clear_cache.test_count;
     result.succeeded_test_count += clear_cache.succeeded_test_count;
