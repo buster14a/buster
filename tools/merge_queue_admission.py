@@ -14,7 +14,9 @@ gates; run_gate is the legacy runner-held merge_group loop and wait_base the
 predecessor wait still used by the native-retirement workflows. reconcile is
 the event-driven replacement (#1807): one bounded pass from trusted main, no
 sleeping, publishing CONTEXT through CheckWriter only for groups whose own
-workflow no longer produces it (group_owner).
+workflow no longer produces it (group_owner). compiler_benchmark optionally
+adds the 9700X compiler comparison (#2752) as one more exact-head prerequisite;
+it is off unless the trusted BENCH_COMPILER_ADMISSION variable says require.
 """
 
 from __future__ import annotations
@@ -69,6 +71,13 @@ QUEUE = {
     "min_entries_to_merge": 1,
     "min_entries_to_merge_wait_minutes": 0,
 }
+# The 9700X compiler comparison (#2752): a completed, successful check of this
+# name and exact-head marker, published by a run of the trusted bench workflow.
+# Its success means a valid measurement, never a performance judgement.
+COMPILER_BENCHMARK_CONTEXT = "9700X compiler benchmark"
+COMPILER_BENCHMARK_MARKER = "buster-9700x-compiler-bench-v1"
+COMPILER_BENCHMARK_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
+COMPILER_BENCHMARK_POLICIES = ("off", "require")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 MAX_PAGES = 20
@@ -539,9 +548,57 @@ def published_checks(api: GitHub, head: str, context: str = CONTEXT,
     return (ours[0] if ours else None), [row.get("id") for row in foreign]
 
 
+def compiler_benchmark(api: GitHub, candidate: dict) -> tuple[dict | None, list]:
+    """(evidence, pending) for the exact head's 9700X comparison; a failed one raises.
+
+    The latest marked check run decides, so a maintainer's "Re-run all jobs"
+    can replace an earlier attempt before admission reads it. Same-name runs
+    without the marker are never authority. A completed non-success is
+    terminal: the candidate was not benchmarked, and re-enqueueing builds a
+    new group that is measured afresh.
+    """
+    head = candidate["head"]
+    marker = COMPILER_BENCHMARK_MARKER + ":" + digest(head, "group head")
+    rows = api.pages(f"commits/{head}/check-runs", "check_runs", check_name=COMPILER_BENCHMARK_CONTEXT,
+                     filter="all", app_id=GITHUB_ACTIONS_APP_ID)
+    ours = []
+    for row in rows:
+        require(isinstance(row, dict) and row.get("name") == COMPILER_BENCHMARK_CONTEXT and
+                row.get("head_sha") == head and row.get("app", {}).get("id") == GITHUB_ACTIONS_APP_ID and
+                type(row.get("id")) is int, "malformed compiler benchmark check-run row")
+        if row.get("external_id") == marker:
+            ours.append(row)
+    evidence, pending = None, []
+    latest = max(ours, key=lambda row: row["id"]) if ours else None
+    if latest is None:
+        pending = [COMPILER_BENCHMARK_CONTEXT + ": not reported"]
+    elif latest.get("status") != "completed":
+        pending = [COMPILER_BENCHMARK_CONTEXT + ": still running"]
+    else:
+        title = str(latest.get("output", {}).get("title", ""))
+        require(latest.get("conclusion") == "success",
+                f"{COMPILER_BENCHMARK_CONTEXT} {latest.get('conclusion')}: {title}; this candidate was not "
+                "benchmarked, re-enqueue it or record an explicit BENCH_COMPILER_ADMISSION=off exception")
+        prefix = f"https://github.com/{candidate['repository']}/actions/runs/"
+        details = latest.get("details_url")
+        match = re.fullmatch(re.escape(prefix) + r"([1-9][0-9]*)/attempts/([1-9][0-9]*)",
+                             details if isinstance(details, str) else "")
+        require(match is not None, COMPILER_BENCHMARK_CONTEXT + ": details do not name a workflow run attempt")
+        run = api.get("actions/runs/" + match.group(1))
+        require(isinstance(run, dict) and run.get("path") == COMPILER_BENCHMARK_WORKFLOW and
+                run.get("event") == "workflow_run" and
+                run.get("repository", {}).get("full_name") == candidate["repository"],
+                COMPILER_BENCHMARK_CONTEXT + ": published by a run other than the trusted bench workflow")
+        evidence = {"context": COMPILER_BENCHMARK_CONTEXT, "check_run_id": latest["id"],
+                    "run_id": int(match.group(1)), "run_attempt": int(match.group(2)), "title": title}
+    return evidence, pending
+
+
 def evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
     """One bounded pass: ("pending", reasons) or ("admitted", report); rejects raise."""
     state, detail = "pending", ["queued predecessor has not landed"]
+    policy = getattr(arguments, "compiler_benchmark", "off")
+    require(policy in COMPILER_BENCHMARK_POLICIES, f"unknown compiler benchmark policy {policy!r}")
     # Requiring the trusted checkout to be the landed base is stronger than
     # verify_trusted_policy alone: a predecessor policy change is never judged
     # by older authority. A stale checkout waits for the base's own main push.
@@ -556,6 +613,10 @@ def evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
         # the ephemeral reconstruction job (#1893).
         checks = required_checks(retirement)
         evidence, detail = collect(api, candidate, checks)
+        benchmark = {"policy": "off"}
+        if not detail and policy == "require":
+            measured, detail = compiler_benchmark(api, candidate)
+            benchmark = {"policy": policy, "evidence": measured}
         if not detail:
             ruleset_before = live_ruleset(api, arguments.repository)
             # An older successful attempt must not hide a rerun started during
@@ -563,6 +624,8 @@ def evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
             repeated, detail = collect(api, candidate, checks)
             if not detail and repeated != evidence:
                 detail = ["required workflow attempts changed during collection"]
+            if not detail and policy == "require" and compiler_benchmark(api, candidate) != (measured, []):
+                detail = [COMPILER_BENCHMARK_CONTEXT + ": attempt changed during collection"]
             if not detail:
                 require(retirement_admission(arguments, candidate) == retirement,
                         "trusted publication changed during combined-head CI; rebuild admission")
@@ -571,7 +634,7 @@ def evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
                 ruleset_after = live_ruleset(api, arguments.repository)
                 state = "admitted"
                 detail = dict(candidate, status="admitted", checks=evidence, retirement=retirement,
-                              ruleset_reads=[ruleset_before, ruleset_after])
+                              compiler_benchmark=benchmark, ruleset_reads=[ruleset_before, ruleset_after])
     return state, detail
 
 
@@ -774,7 +837,8 @@ def reconcile(arguments) -> dict:
             # the scheduled sweep retries. Correctness failures never land here.
             groups.append({"ref": ref, "head": head, "state": "retry", "detail": str(error)})
     return {"schema": SCHEMA, "mode": "reconcile", "repository": arguments.repository,
-            "policy_sha": policy, "main": main, "groups": groups}
+            "policy_sha": policy, "main": main, "groups": groups,
+            "compiler_benchmark": getattr(arguments, "compiler_benchmark", "off")}
 
 
 def main(argv=None) -> int:
@@ -803,6 +867,8 @@ def main(argv=None) -> int:
     sweep.add_argument("--repository", required=True)
     sweep.add_argument("--details-url", required=True)
     sweep.add_argument("--output", type=Path, required=True)
+    sweep.add_argument("--compiler-benchmark", choices=COMPILER_BENCHMARK_POLICIES, default="off",
+                       help="require: front groups also need a valid 9700X compiler measurement (#2752)")
     arguments = parser.parse_args(argv)
     code = 0
     try:

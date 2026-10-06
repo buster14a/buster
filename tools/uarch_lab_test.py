@@ -344,6 +344,15 @@ if args[:1] == ["bench"]:
     print("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=21042 min_ns=3359552 median_ns=3983033")
     sys.exit(0)
 out = args[args.index("-o") + 1]
+if globals().get("FAIL_AFTER") is not None:
+    # Succeed for the first FAIL_AFTER compiles (probes, warm-up), then fail.
+    import os
+    counter = out + ".count"
+    count = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
+    open(counter, "w").write(str(count))
+    if count > FAIL_AFTER:
+        sys.stderr.write("cc: error: requested failure\n")
+        sys.exit(1)
 if globals().get("FAIL_PLAIN") and not any(arg.startswith(("-fsource-metrics=", "-fmetrics-out=")) for arg in args):
     sys.stderr.write("cc: error: requested plain compile failure\n")
     sys.exit(1)
@@ -883,7 +892,7 @@ class Lab2ReviewTests(unittest.TestCase):
 RUN_SUMMARY_KEYS = {"schema", "directory", "command", "cpu", "ide", "host", "capabilities", "steps", "timed", "phases", "work",
                     "topdown", "dominant_topdown_category", "hot_symbols", "findings"}
 COMPARE_SUMMARY_KEYS = {"schema", "directory", "command", "repo_root", "cpu", "host", "baseline", "candidate", "outputs_identical",
-                        "phase_metrics", "code_bytes", "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
+                        "phase_metrics", "counters", "code_bytes", "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
 CODE_BYTES_KEYS = {"a_value", "b_value", "ratio", "a_format", "b_format", "a_file_bytes", "b_file_bytes", "a_sections", "b_sections", "note"}
 RETIREMENT_SUMMARY_KEYS = {"schema", "directory", "decision", "contract", "verdict", "baseline", "candidate", "stage1", "repo_root", "cpu",
                            "host", "plan", "limits", "cells", "aggregates", "external_checks", "warnings"}
@@ -1029,8 +1038,9 @@ class CompareStatisticsTests(unittest.TestCase):
 
 @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
 class CompareFlowTests(Fakes, unittest.TestCase):
-    def compare(self, arguments, candidate=None, baseline=None):
-        root, ide, perf = self.fakes("new")
+    def compare(self, arguments, candidate=None, baseline=None, perf=None):
+        root, ide, fake_perf = self.fakes("new")
+        perf = perf(root) if perf else fake_perf
         write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
                                         "COMPILE_LOG": os.path.join(root, "compile-a.jsonl")}, **(baseline or {})))
         other = os.path.join(root, "ide-b")
@@ -1049,6 +1059,33 @@ class CompareFlowTests(Fakes, unittest.TestCase):
             summary = json.load(handle)
         with open(os.path.join(output, "report.md")) as handle:
             return summary, handle.read(), output
+
+    def test_compare_without_perf_measures_wall_cpu_and_rss_with_counters_na(self):
+        # #2768: a host without perf still yields a wall-time verdict.
+        summary, report, output = self.compare(["--pairs", "6"], {"DELAY": 0.25},
+                                               perf=lambda root: os.path.join(root, "no-such-perf"))
+        self.assertEqual(set(summary), COMPARE_SUMMARY_KEYS)
+        self.assertEqual(summary["counters"]["perf_stat"], False)
+        self.assertIn("exit 127", summary["counters"]["reason"])
+        self.assertEqual(summary["plan"]["complete_pairs"], 6)
+        self.assertEqual(summary["verdict"]["outcome"], "slower", summary["verdict"])
+        self.assertEqual(summary["metrics"]["task_clock"]["n"], 6)
+        for name in ("instructions", "cycles", "branch_misses", "page_faults"):
+            self.assertEqual((summary["metrics"][name]["n"], summary["metrics"][name]["outcome"]), (0, "no data"), name)
+        self.assertTrue(any(warning.startswith("perf stat unusable") for warning in summary["warnings"]), summary["warnings"])
+        with open(os.path.join(output, "pairs.json")) as handle:
+            records = json.load(handle)
+        self.assertTrue(all(record["counters"] is False and record["cpu_s"] is not None for record in records))
+
+    def test_compare_profile_steps_without_perf_stop_before_any_pair(self):
+        with self.assertRaises(SystemExit) as stop:
+            self.compare(["--pairs", "6", "--profile-steps", "topdown"], perf=lambda root: os.path.join(root, "no-such-perf"))
+        self.assertIn("need a working perf", str(stop.exception.code))
+
+    def test_compare_with_no_complete_pair_exits_nonzero(self):
+        with self.assertRaises(SystemExit) as stop:
+            self.compare(["--pairs", "2"], {"FAIL_AFTER": 3})
+        self.assertIn("no complete pair", str(stop.exception.code))
 
     def test_slower_candidate_end_to_end(self):
         summary, report, output = self.compare(

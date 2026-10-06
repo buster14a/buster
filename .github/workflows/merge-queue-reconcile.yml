@@ -57,13 +57,18 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
+      # BENCH_COMPILER_ADMISSION is an administrator setting (#2752): unset or
+      # off leaves admission unchanged; require also waits for a valid 9700X
+      # compiler measurement of the exact group. Candidates cannot change it.
       - name: Reconcile every live merge group once
         env:
           GH_TOKEN: ${{ github.token }}
+          COMPILER_BENCHMARK: ${{ vars.BENCH_COMPILER_ADMISSION || 'off' }}
         run: |
           python3 -B tools/merge_queue_admission.py reconcile \
             --repo-root . --repository "$GITHUB_REPOSITORY" \
             --details-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --compiler-benchmark "$COMPILER_BENCHMARK" \
             --output "$RUNNER_TEMP/merge-queue-reconcile.json"
       - name: Retain reconciliation evidence
         if: ${{ always() }}
