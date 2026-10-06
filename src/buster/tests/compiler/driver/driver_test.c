@@ -3051,6 +3051,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
+        // GNU fallthrough is a null statement in pre-C23 dialects (#1411).
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c99")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c99")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=gnu11")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=gnu11")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough)); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c99")},
+        {S8("int f(int x) { switch(x) { case 0: __attribute__((fallthrough)) x += 1; case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute requires a null statement"), S8("-std=c99")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__)); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c99")},
+        {S8("int f(int x) { switch(x) { case 0: __attribute__((__fallthrough__)) x += 1; case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute requires a null statement"), S8("-std=c99")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough)); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=gnu11")},
+        {S8("int f(int x) { switch(x) { case 0: __attribute__((fallthrough)) x += 1; case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute requires a null statement"), S8("-std=gnu11")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__)); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=gnu11")},
+        {S8("int f(int x) { switch(x) { case 0: __attribute__((__fallthrough__)) x += 1; case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute requires a null statement"), S8("-std=gnu11")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough)); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("int f(int x) { switch(x) { case 0: __attribute__((fallthrough)) x += 1; case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute requires a null statement"), S8("-std=c17")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__)); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("int f(int x) { switch(x) { case 0: __attribute__((__fallthrough__)) x += 1; case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute requires a null statement"), S8("-std=c17")},
+        {S8("int f(int x) { switch(x) { case 0: __attribute__((fallthrough(1))); case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute takes no arguments"), S8("-std=c17")},
+        {S8("int f(int x) { switch(x) { case 0: __attribute__((__fallthrough__(1))); case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute takes no arguments"), S8("-std=gnu11")},
+
         // #1388: GNU body declarations retain every comma-separated declarator.
         {S8("int f(void) { return ({ static int a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("int f(void) { return ({ volatile int a = 3, b = 4; a += 1, b += 2, a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
@@ -36621,6 +36643,29 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             "        __attribute__((fallthrough));\n"
             "    case 1:\n"
             "        result += 2;\n"
+            "        __attribute__((__fallthrough__));\n"
+            "    case 2:\n"
+            "        result += 4;\n"
+            "        break;\n"
+            "    default:\n"
+            "        break;\n"
+            "    }\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
+            "static int fall_empty(int value)\n"
+            "{\n"
+            "    int result = 0;\n"
+            "    switch (value)\n"
+            "    {\n"
+            "    case 0:\n"
+            "        result += 1;\n"
+            "        __attribute__((fallthrough()));\n"
+            "    case 1:\n"
+            "        result += 2;\n"
+            "        __attribute__((__fallthrough__()));\n"
+            "    case 2:\n"
+            "        result += 4;\n"
             "        break;\n"
             "    default:\n"
             "        break;\n"
@@ -36656,7 +36701,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             "    {\n"
             "        return 3;\n"
             "    }\n"
-            "    if (fall(0) != 3 || fall(1) != 2)\n"
+            "    if (fall(0) != 7 || fall(1) != 6 || fall(2) != 4 || fall(9) != 0 ||\n"
+            "        fall_empty(0) != 7 || fall_empty(1) != 6 || fall_empty(2) != 4 || fall_empty(9) != 0)\n"
             "    {\n"
             "        return 4;\n"
             "    }\n"
@@ -36666,12 +36712,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 gnu_specifier_fixtures[] = {
             S8("tests/basic_c_local_typedef_attribute.c"),
             S8("tests/basic_c_offsetof_subscript.c"),
-            leading_gnu_attribute_path,
         };
         String8 gnu_specifier_names[] = {
             S8("buster-c-local-typedef-attribute"),
             S8("buster-c-offsetof-subscript"),
-            S8("buster-c-leading-gnu-attribute-declaration-program"),
         };
         for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(gnu_specifier_fixtures); fixture_index += 1)
         {
@@ -36701,6 +36745,76 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
             scratch_end(gnu_specifier_temporary);
         }
+        // Both GNU spellings retain their control-flow effect under every
+        // allocator/frontend and each dialect from the original report.
+        String8 fallthrough_dialects[] = {S8("-std=c99"), S8("-std=gnu11"), S8("-std=c17")};
+        for (u32 fallthrough_dialect = 0; fallthrough_dialect < BUSTER_ARRAY_LENGTH(fallthrough_dialects); fallthrough_dialect += 1)
+        {
+            for (u32 fallthrough_frontend = 0; fallthrough_frontend < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); fallthrough_frontend += 1)
+            {
+                for (u32 fallthrough_allocator = 0; fallthrough_allocator < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); fallthrough_allocator += 1)
+                {
+                    TemporalArena fallthrough_temporary = scratch_begin(&arguments->arena, 1);
+                    String8 fallthrough_path = buster_test_temporary_path(fallthrough_temporary.arena,
+                        S8("buster-c-gnu-fallthrough"), string_format(fallthrough_temporary.arena, S8("-{u32}-{u32}-{u32}"), fallthrough_dialect, fallthrough_frontend, fallthrough_allocator));
+                    String8 fallthrough_syntax_command[] = {
+                        fallthrough_dialects[fallthrough_dialect], c_flat_initializer_frontends[fallthrough_frontend], c_lz4_regression_allocators[fallthrough_allocator],
+                        S8("-fsyntax-only"), leading_gnu_attribute_path,
+                    };
+                    CompilerDriverResult fallthrough_syntax = compiler_driver_execute_invocation(fallthrough_temporary.arena,
+                        compiler_driver_parse_arguments(fallthrough_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_syntax_command)));
+                    BUSTER_TEST_RAW(arguments, fallthrough_syntax.error == COMPILER_DRIVER_ERROR_NONE, fallthrough_syntax.diagnostic);
+                    bool fallthrough_native = !string_equal(c_lz4_regression_allocators[fallthrough_allocator], S8("-fregister-allocator=none"));
+                    String8 fallthrough_command[] = {
+                        fallthrough_dialects[fallthrough_dialect], S8("-O0"), c_flat_initializer_frontends[fallthrough_frontend], c_lz4_regression_allocators[fallthrough_allocator],
+                        S8("-fverify-codegen"), fallthrough_native ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                        S8("-o"), fallthrough_path, leading_gnu_attribute_path,
+                    };
+                    CompilerDriverResult fallthrough_compiled = compiler_driver_execute_invocation(fallthrough_temporary.arena,
+                        compiler_driver_parse_arguments(fallthrough_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_command)));
+                    BUSTER_TEST_RAW(arguments, fallthrough_compiled.error == COMPILER_DRIVER_ERROR_NONE, fallthrough_compiled.diagnostic);
+                    if (fallthrough_compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 fallthrough_run_command[] = {fallthrough_path};
+                        ProcessSpawnResult fallthrough_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_run_command), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, fallthrough_spawn.handle != 0);
+                        if (fallthrough_spawn.handle)
+                            BUSTER_TEST(arguments, os_process_wait_sync(fallthrough_temporary.arena, fallthrough_spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
+                    scratch_end(fallthrough_temporary);
+                }
+            }
+        }
+#if BUSTER_LINUX && !BUSTER_ANDROID
+        String8 fallthrough_hosts[] = {executable_resolve_in_path(arguments->arena, S8("gcc")), executable_resolve_in_path(arguments->arena, S8("clang"))};
+        for (u32 fallthrough_host = 0; fallthrough_host < BUSTER_ARRAY_LENGTH(fallthrough_hosts); fallthrough_host += 1)
+        {
+            if (BUSTER_REQUIRE(arguments, fallthrough_hosts[fallthrough_host].length != 0))
+            {
+                for (u32 fallthrough_dialect = 0; fallthrough_dialect < BUSTER_ARRAY_LENGTH(fallthrough_dialects); fallthrough_dialect += 1)
+                {
+                    TemporalArena fallthrough_reference_temporary = scratch_begin(&arguments->arena, 1);
+                    String8 fallthrough_reference_path = buster_test_temporary_path(fallthrough_reference_temporary.arena, S8("buster-c-gnu-fallthrough-reference"), S8(""));
+                    String8 fallthrough_reference_command[] = {fallthrough_hosts[fallthrough_host], fallthrough_dialects[fallthrough_dialect], S8("-O0"), S8("-o"), fallthrough_reference_path, leading_gnu_attribute_path};
+                    ProcessSpawnResult fallthrough_build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_reference_command), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    bool fallthrough_built = fallthrough_build.handle && os_process_wait_sync(fallthrough_reference_temporary.arena, fallthrough_build).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, fallthrough_built);
+                    if (fallthrough_built)
+                    {
+                        String8 fallthrough_run_command[] = {fallthrough_reference_path};
+                        ProcessSpawnResult fallthrough_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_run_command), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, fallthrough_spawn.handle != 0);
+                        if (fallthrough_spawn.handle)
+                            BUSTER_TEST(arguments, os_process_wait_sync(fallthrough_reference_temporary.arena, fallthrough_spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
+                    scratch_end(fallthrough_reference_temporary);
+                }
+            }
+        }
+#endif
     }
     // Walking through an intermediate aggregate member under every allocator.
     // `((T *)p)->a.b` names b, and a is only the route: loading a copied a
