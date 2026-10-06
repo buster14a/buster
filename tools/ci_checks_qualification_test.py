@@ -692,7 +692,7 @@ class QualificationTests(unittest.TestCase):
             sidecar = self.root / "unit-observations" / event["id"]
             sidecar.mkdir(parents=True)
             inventory = [dict(index=0, name="compiler_driver_tests", table_audit=False), dict(index=1, name="fixture", table_audit=False), dict(index=2, name="table_audit_fixture", table_audit=True)]
-            lines = [HOST_RECORD] + [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'driver' if r['index'] == 0 else 'rest'}" for r in inventory]
+            lines = [HOST_RECORD] + [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'primary' if r['index'] == 0 else 'rest'}" for r in inventory]
             lines += ["CI_UNIT_BATCH_V1 group=inventory modules=0 modules_passed=0 assertions=0 passed=0 failed=0 external=0 external_passed=0 status=inventory", "[0/0] Unit tests (0 of 3 modules selected)", "[0/0] Module tests", "[0/0] External tests"]
             inventory_path = sidecar / "inventory.log"
             inventory_path.write_text("\n".join(lines) + "\n")
