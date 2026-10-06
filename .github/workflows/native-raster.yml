@@ -102,6 +102,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/native-raster-evidence"
           set -o pipefail
           xvfb-run -a -e "$RUNNER_TEMP/native-raster-evidence/xvfb-native.stderr" -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster_native 2>&1 | tee "$RUNNER_TEMP/native-raster-evidence/native.log"
+      - name: Controlled same-source server lifetime experiment
+        if: ${{ always() }}
+        env:
+          BUSTER_NATIVE_CAMPAIGN_REPETITIONS: '64'
+        run: |
+          set -o pipefail
+          xvfb-run -a -e "$RUNNER_TEMP/native-raster-evidence/xvfb-noreset.stderr" -s "-noreset -screen 0 1280x1024x24" "$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster_native 2>&1 | tee "$RUNNER_TEMP/native-raster-evidence/noreset.log"
       - name: Preserve native failure evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
