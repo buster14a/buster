@@ -89,6 +89,11 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+A cached driver whose recorded dependency was deleted is a normal cache miss:
+the wrapper quietly rejects it and selects another valid entry or rebuilds.
+A missing dependency in a fresh TCC closure still fails with a diagnostic.
+The canonical hosted TCC workflow covers deletion, rebuild and warm reuse.
+
 Absolute dependency paths may contain lexical `..` components, as TinyCC
 resource paths can when its installation prefix contains them. Cold publication
 and warm validation hash the files at those paths and retain their spelling in
@@ -128,7 +133,9 @@ the validated merge revision against its first parent.
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
 `0fb54300b56512754221d80adda85ddb9815bceb` (0.9.28rc) bootstraps this tree
-without changing those initializers. Keep the chosen TCC source/binary identity
+without changing those initializers, so 0.9.28rc is the minimum supported
+TinyCC. `build.c` checks `__TINYC__` and stops an older TCC with an `#error`
+naming that minimum, before the first shared source it would reject. Keep the chosen TCC source/binary identity
 with local validation evidence; the older compiler's failure is not a reason
 to report a Clang-built driver as the canonical TCC bootstrap.
 
