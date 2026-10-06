@@ -7,8 +7,10 @@ lowercase commit SHA. Mutable branches/tags, unlisted paths and unapproved
 revisions fail. Local and container references require a separate policy
 decision before use; approved same-commit references are listed below.
 
-The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
-actionlint. The checker now lives under `tools/` because the Forgejo workflows
+The `Workflow lint` job runs the checker and the maintained
+`tools/ci_workflow_policy_test.py` entry before actionlint. It delegates to the complete maintained `tools/ci_workflow_tools_test.py` suite, which inherits
+the frozen `tests/action_pins_test.py` cases and replaces only the current
+lint entry point and artifact-reference inventory assertions. The checker now lives under `tools/` because the Forgejo workflows
 and their script directory were removed. Its allowlist preserves existing revisions and records staged migrations; an
 older pin remains approved only while at least one reviewed workflow still uses it.
 
