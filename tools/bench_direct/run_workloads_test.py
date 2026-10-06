@@ -317,6 +317,53 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertNotIn("Wall over", result.stdout)
         self.assertEqual(result.stdout.count("| sample "), 9)
 
+    @staticmethod
+    def writer(files: int, size: int, ignore_xfsz: bool = False) -> str:
+        return ('#include <signal.h>\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n'
+                '#include <fcntl.h>\nstatic char block[%d];\n'
+                'int main(void) {\n%s  memset(block, 7, sizeof block); int short_writes = 0;\n'
+                '  for (int i = 0; i < %d; i++) { char name[16]; snprintf(name, sizeof name, "f%%d", i);\n'
+                '    int fd = open(name, O_WRONLY | O_CREAT, 0644); if (fd < 0) return 3;\n'
+                '    long done = 0; while (done < (long)sizeof block) { long n = write(fd, block + done, sizeof block - done);\n'
+                '      if (n <= 0) { short_writes++; break; } done += n; } close(fd); }\n'
+                '  printf("short_writes=%%d\\n", short_writes); return 0; }\n'
+                % (size, "  signal(SIGXFSZ, SIG_IGN);\n" if ignore_xfsz else "", files))
+
+    def test_scratch_files_are_bounded_separately_from_the_transcript(self) -> None:
+        import run_workloads
+        limits = (patch.object(run_workloads, "SCRATCH_FILE_LIMIT", 65536),
+                  patch.object(run_workloads, "SCRATCH_TOTAL_LIMIT", 100000))
+        cases = (
+            ("boundary", self.writer(1, 65536), 0, "short_writes=0"),
+            ("over", self.writer(1, 65537), 1, "a file exceeded the 65536 byte scratch file limit (SIGXFSZ)"),
+            ("many", self.writer(3, 60000), 1, "run files total 180000 bytes, over the 100000 byte scratch limit"),
+            ("efbig", self.writer(1, 65537, True), 0, "short_writes=1"),
+        )
+        for label, source, status, expected in cases:
+            with self.subTest(label=label):
+                shutil.rmtree(self.root / "work", ignore_errors=True)
+                head = self.commit({f"benchmarks/9700x/{label}.c": source})
+                code, out = self.run_in_process(head, *limits)
+                self.assertEqual(code, status, out)
+                self.assertIn(expected, out)
+                self.base = head
+                self.assertEqual(sorted(os.listdir(self.root / "work" / label)), ["program", "source"])
+
+    def test_quiet_two_mebibyte_file_is_not_a_transcript_overflow(self) -> None:
+        result = self.run_harness(self.commit({"benchmarks/9700x/bigfile.c": self.writer(1, 2 * 1024 * 1024)}))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("short_writes=0", result.stdout)
+
+    def test_noisy_output_is_truncated_without_limiting_the_program(self) -> None:
+        import run_workloads
+        noisy = ('#include <stdio.h>\nint main(void) { for (int i = 0; i < 40000; i++) '
+                 'fputs("0123456789abcdef", stdout); fputs("END\\n", stderr); return 0; }\n')
+        head = self.commit({"benchmarks/9700x/noisy.c": noisy})
+        code, out = self.run_in_process(head, patch.object(run_workloads, "OUTPUT_CAPTURE_LIMIT", 1024))
+        self.assertEqual(code, 0, out)
+        self.assertIn("Captured output is limited to 1024 bytes per run", out)
+        self.assertIn("truncated", out)
+
     def test_every_run_starts_without_predecessor_files(self) -> None:
         marker = ('#include <stdio.h>\nint main(void) { FILE* f = fopen("marker", "rb"); int existed = f != 0;\n'
                   '  if (f) fclose(f); else { f = fopen("marker", "wb"); if (f) fclose(f); }\n'

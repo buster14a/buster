@@ -8,6 +8,11 @@ compiled from a staged copy of that one file, so only system headers resolve;
 a quoted include of a neighbouring header fails to compile (#2935). This file,
 the compile command, the pinned CPU and the sample plan come from `main`.
 
+Captured output (stdout and stderr together) keeps the first OUTPUT_CAPTURE_LIMIT
+bytes per run; files a run writes are bounded separately (SCRATCH_FILE_LIMIT per
+file, SCRATCH_TOTAL_LIMIT per run directory) and a violation invalidates the run
+(#2936).
+
 A workload may bring one input file, `<name>.data` beside `<name>.c`, of at
 most DATA_LIMIT bytes (#2769). It is copied read-only into the run directory
 as `input.data` into a fresh directory for every warmup and sample, and its
@@ -37,6 +42,7 @@ import hashlib
 import os
 import re
 import resource
+import select
 import shutil
 import signal
 import statistics
@@ -56,7 +62,14 @@ WARMUPS = 2
 SAMPLES = 9
 RUN_TIMEOUT_SECONDS = 10
 COMPILE_TIMEOUT_SECONDS = 120
-OUTPUT_FILE_LIMIT = 1024 * 1024
+# Three separate bounds (#2936): the captured transcript keeps this many bytes
+# per run and discards the rest without limiting the program; each regular file
+# a program writes may reach SCRATCH_FILE_LIMIT (larger writes get SIGXFSZ or
+# EFBIG); and all files left in a run directory may total SCRATCH_TOTAL_LIMIT,
+# checked when the run ends, after which the directory is deleted.
+OUTPUT_CAPTURE_LIMIT = 1024 * 1024
+SCRATCH_FILE_LIMIT = 16 * 1024 * 1024
+SCRATCH_TOTAL_LIMIT = 64 * 1024 * 1024
 OUTPUT_SHOWN = 2000
 COMPILE_FLAGS = (
     "-std=c11", "-O2", "-static", "-fwrapv", "-fno-strict-aliasing",
@@ -99,7 +112,7 @@ def prepare_child(cpu: int) -> None:
     os.setsid()
     os.sched_setaffinity(0, {cpu})
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (OUTPUT_FILE_LIMIT, OUTPUT_FILE_LIMIT))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (SCRATCH_FILE_LIMIT, SCRATCH_FILE_LIMIT))
 
 
 def kill_group(pid: int, fired: list[bool]) -> None:
@@ -110,38 +123,78 @@ def kill_group(pid: int, fired: list[bool]) -> None:
         pass
 
 
+def drain(descriptor: int, stop: threading.Event, sink: dict) -> None:
+    """Read a pipe to its end, keeping only the first OUTPUT_CAPTURE_LIMIT bytes."""
+    while True:
+        ready, _, _ = select.select([descriptor], [], [], 0.05)
+        if ready:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            sink["total"] += len(chunk)
+            room = OUTPUT_CAPTURE_LIMIT - len(sink["data"])
+            if room > 0:
+                sink["data"] += chunk[:room]
+        elif stop.is_set():
+            break
+
+
 def run_once(program: Path, scratch: Path, cpu: int) -> dict:
     """Start one fresh process and return its outcome, timings and output."""
-    log = scratch / "output.log"
     fired: list[bool] = []
-    with open(log, "wb") as output, open(os.devnull, "rb") as nothing:
-        started = time.monotonic_ns()
-        child = subprocess.Popen(
-            [str(program)], stdin=nothing, stdout=output, stderr=subprocess.STDOUT,
-            cwd=scratch, env=RUN_ENVIRONMENT, close_fds=True,
-            preexec_fn=lambda: prepare_child(cpu))
-        watchdog = threading.Timer(RUN_TIMEOUT_SECONDS, kill_group, (child.pid, fired))
-        watchdog.start()
-        _, status, usage = os.wait4(child.pid, 0)
-        finished = time.monotonic_ns()
-        watchdog.cancel()
-        watchdog.join()
-        child.returncode = os.waitstatus_to_exitcode(status)
-    # A descendant that outlived its leader would disturb the next sample.
+    sink = {"data": bytearray(), "total": 0}
+    stop = threading.Event()
+    read_end, write_end = os.pipe()
+    reader = threading.Thread(target=drain, args=(read_end, stop, sink))
+    reader.start()
     try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    text = log.read_bytes()
-    log.unlink()
+        with open(os.devnull, "rb") as nothing:
+            started = time.monotonic_ns()
+            child = subprocess.Popen(
+                [str(program)], stdin=nothing, stdout=write_end, stderr=subprocess.STDOUT,
+                cwd=scratch, env=RUN_ENVIRONMENT, close_fds=True,
+                preexec_fn=lambda: prepare_child(cpu))
+            os.close(write_end)
+            write_end = -1
+            watchdog = threading.Timer(RUN_TIMEOUT_SECONDS, kill_group, (child.pid, fired))
+            watchdog.start()
+            _, status, usage = os.wait4(child.pid, 0)
+            finished = time.monotonic_ns()
+            watchdog.cancel()
+            watchdog.join()
+            child.returncode = os.waitstatus_to_exitcode(status)
+        # A descendant that outlived its leader would disturb the next sample.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    finally:
+        if write_end >= 0:
+            os.close(write_end)
+        stop.set()
+        reader.join()
+        os.close(read_end)
     return {
         "exit": child.returncode,
         "timed_out": bool(fired),
         "wall_ns": finished - started,
         "cpu_ns": int((usage.ru_utime + usage.ru_stime) * 1e9),
         "rss_bytes": usage.ru_maxrss * 1024,
-        "output": text,
+        "output": bytes(sink["data"]),
+        "output_bytes": sink["total"],
     }
+
+
+def scratch_bytes(directory: Path) -> int:
+    """Total size of the regular files under a run directory."""
+    total = 0
+    for root, _, names in os.walk(directory):
+        for name in names:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return total
 
 
 def run_sample(program: Path, scratch: Path, cpu: int, index: int, data: bytes | None) -> dict:
@@ -160,6 +213,11 @@ def run_sample(program: Path, scratch: Path, cpu: int, index: int, data: bytes |
                 same = False
             if not same:
                 row["invalid"] = f"{DATA_NAME} was modified or removed during the run"
+        used = scratch_bytes(directory)
+        if row["exit"] == -signal.SIGXFSZ:
+            row["invalid"] = f"a file exceeded the {SCRATCH_FILE_LIMIT} byte scratch file limit (SIGXFSZ)"
+        elif used > SCRATCH_TOTAL_LIMIT:
+            row["invalid"] = f"run files total {used} bytes, over the {SCRATCH_TOTAL_LIMIT} byte scratch limit"
     finally:
         shutil.rmtree(directory, ignore_errors=True)
     return row
@@ -207,6 +265,11 @@ def render(name: str, source_sha: str, program_sha: str, rows: list[dict], data_
             f"`{hashlib.sha256(row['output']).hexdigest()[:16]}` |")
     lines.append("")
     outputs = [row["output"] for row in rows]
+    cut = [str(index) for index, row in enumerate(rows) if row.get("output_bytes", 0) > len(row["output"])]
+    if cut:
+        lines.append(f"Captured output is limited to {OUTPUT_CAPTURE_LIMIT} bytes per run; "
+                     f"runs {', '.join(cut)} printed more and were truncated (the program was not limited).")
+        lines.append("")
     if outputs and all(output == outputs[0] for output in outputs):
         lines.append(f"All {len(rows)} runs printed identical output:")
         shown = [("every run", outputs[0])]
