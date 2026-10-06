@@ -380,6 +380,99 @@ Crafted empty/tied-symbol/relocation cases and printer phase attribution remain
 separate correctness/profiling work for #116; no new compiler timing hooks or
 parallel measurement framework are introduced here.
 
+## Multi-TU scaling (`scale`)
+
+`scale` measures the native link cohort that `-fcompile-jobs=N` drives
+([driver contract](../../docs/agents/driver.md#opt-in-native-translation-unit-lanes)).
+`-c`, `-S` and single-input commands stay serial, so the ordinary `run` corpus
+never exercises it. Linux only: it needs both a per-process CPU set and the
+sysfs CPU topology. On macOS and Windows it exits 2 without measuring.
+
+```sh
+./build.sh bench_throughput scale --compiler /absolute/ide --output build/scaling-new \
+  --cpu-set 1-7 --workers 1,2,4,7 --repeats 15
+```
+
+**Placement.**
+- `--cpu-set` takes Linux cpulist syntax, or `auto` for the whole permitted
+  mask. Every listed CPU must be in the current affinity mask. A set is never
+  narrowed silently, and a duplicate or reversed range is an error.
+- `thread_siblings_list` defines a physical core. Missing or malformed topology
+  for any CPU in the set refuses the run; the layout is never guessed from CPU
+  numbering.
+- Worker count W runs on one logical CPU from each of the first W physical cores
+  of the set, in ascending order. The child is pinned to exactly those CPUs.
+- Asking for more workers than the set has physical cores is an error.
+- `--allow-smt` adds a separate whole-set point labelled `smt`, with one worker
+  per logical CPU (for example 8C/16T). Core and SMT points are never pooled.
+- Leave a housekeeping core outside the set. The tool records topology but does
+  not prove the siblings or the rest of the host are idle.
+
+**Workloads.** Deterministic C sources are generated before any timing. Only
+TU 0 defines `main`, so every input set links. Each series is a fixed input
+set:
+
+| Series | Inputs | Shape |
+|---|---|---|
+| `equal` | 4 × max W | Equal-size TUs |
+| `skewed` | 4 × max W | One TU eight times larger than the others |
+| `tiny` | 16 × max W | One small function per TU |
+| `count-wW-nN` | W−1, W or W+1 | Equal TUs, measured at 1 and W workers |
+| `diagnostic` | max(3, max W + 1) | Two TUs reference undeclared identifiers |
+
+- `equal`, `skewed` and `tiny` keep the same inputs at every W, so they are
+  strong-scaling series. Their points are: the compiler default with no
+  `-fcompile-jobs`, the explicit one-worker reference, then each listed W.
+- `--shape equal|skewed|tiny|count|all` selects series (repeatable; default
+  all). The diagnostic series always runs.
+- `--profile` and `--scale` size the functions as in `generate`.
+
+**Each sample** is a fresh process:
+`ide cc -g0 -O0 [-fcompile-jobs=W] -fmetrics-out=M tu0000.c … -o program`,
+run in the series directory. After every sample, `scale` checks:
+- exit status 0 and a nonempty executable;
+- the `CC_METRICS` header reports every input `ok`;
+- `compilation_workers` equals `min(W, inputs)`, or 1 for the default and
+  one-worker points;
+- the executable is byte-identical across every worker count and repeat;
+- peak RSS stays under `--max-rss-mib`, when given.
+
+**Diagnostics.** Each diagnostic point must exit nonzero, produce no artifact,
+and give the same exit status and a byte-identical ordered log at every worker
+count.
+
+**Sampling.** Each point gets `--warmups` untimed runs, then `--repeats` timed
+iterations (1–64, default 10). Each iteration rotates the starting point and
+odd iterations reverse the order. Any failure, mismatch, timeout or budget
+excess makes the run invalid: exit 2 and a `scaling.json` with
+`"status":"invalid"` and the first reason.
+
+**Bundle.** `--output` must be a new directory.
+
+| File | Contents |
+|---|---|
+| `scaling-metadata.json` | Compiler path and SHA-256, requested set, per-CPU package/core/sibling topology, placements, input hashes per series |
+| `scaling.csv` | One row per timed sample: wall, user and system time, peak RSS, observed workers, interval kind, artifact hash |
+| `commands.jsonl` | Exact argv, working directory and CPU set of every launch |
+| `scaling.json`, `scaling.md` | Per point: median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency, CPU-work (user+system) inflation and peak-RSS inflation |
+
+Peak RSS is the compiler process's own high-water mark. It is not a sum over a
+process tree.
+
+**Not covered.**
+- No threshold, guard or exit 1 decision.
+- No generated-program timing.
+- Concurrent independent compiler processes are a separate experiment.
+- `--machine-id`/`--lock-file` are not wired into `scale` yet. On the shared
+  9700X, hold the cooperative lease externally.
+- `os_get_logical_thread_count()` does not respect affinity. The compiler can
+  therefore start more workers than its CPU set holds, which is why `scale`
+  only requests W up to the selected physical cores and checks
+  `compilation_workers`.
+
+The [dedicated-host guide](DEDICATED.md#multi-tu-scaling-series) covers
+choosing the set on the 9700X.
+
 ## Measurements and their limits
 
 `wall_seconds` spans process launch through wait completion. User and system

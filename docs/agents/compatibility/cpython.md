@@ -49,8 +49,10 @@ The checkout must be tag `v3.13.9` at commit
 `8183fa5e3f78ca6ab862de7fb8b14f3d929421e0` with no tracked or untracked
 changes. The harness configures and builds the tree with CPython's own
 autoconf build system five times -- once with clang as the reference, once
-per register allocator with `ide cc` -- passing `MODULE_BUILDTYPE=static`
-because the driver has no `-shared`, and drives each build with `make -j4`.
+per register allocator with `ide cc` -- passing `MODULE_BUILDTYPE=static`,
+and drives each build with `make -j4`. The static module build predates the
+driver's x86-64 Linux `-shared`/PIE support (#1712); switching to shared
+modules needs a pristine harness run to requalify it.
 CPython's own regression suite is the oracle, and the gate is the verdict
 comparison: a test the Buster FAST build fails while the Clang build of the
 same tree passes fails the run. Tests failing in both builds are environment
@@ -59,7 +61,9 @@ TZ=UTC -j2 -u none --timeout 120`, so nothing touches the network, and both run
 with an exact 8 MiB soft stack limit. That limit is the evaluator-frame
 regression gate from issue #79: raising the stack concealed frames too large
 for CPython's recursion accounting instead of testing the ordinary Linux
-budget. The NONE, MIR_STACK and QUALITY builds prove the whole tree still
+budget. The current state of that gate is recorded under
+[Evaluator frame status](#evaluator-frame-status-issue-79). The NONE,
+MIR_STACK and QUALITY builds prove the whole tree still
 compiles, links, and answers a deterministic workload -- json, hashlib, pickle
 round trips, the class machinery -- byte-for-byte against the Clang build; the
 full suite runs once per side.
@@ -79,7 +83,7 @@ python.
 
 What the harness does not gate, and why: `Modules/Setup.local` disables the
 seven modules upstream marks `*shared*` (each exists to exercise
-shared-object import, and the driver has no `-shared`) plus
+shared-object import, which the static module build cannot produce) plus
 `_testinternalcapi`, whose static build cannot link into the
 `_freeze_module` bootstrap under any toolchain -- it references
 `_Py_Get_Getpath_CodeObject`, defined only by getpath.o, while the bootstrap
@@ -97,11 +101,41 @@ needed; the ELF reader accepts the ordinary DWARF 5 section family (GitHub
 #77). `CPYTHON_UNIT` records this Buster-built object independently for every
 allocator, and `CPYTHON_REMAINDER` distinguishes a later whole-tree failure
 without treating the unit as failed. `test_gdb`'s two tests are the expected buster-only
-suite divergence: gdb inspects a running python and Buster-linked
-executables carry no `.symtab` (issue 843). Refleak hunting, the
+suite divergence: gdb inspects a running python, and the exemption was
+recorded when Buster-linked executables carried no `.symtab` (issue 843,
+GitHub #80). The ELF symbol-table writer has since landed (#606), so the
+exemption stays only until a pristine run shows whether gdb now agrees.
+Refleak hunting, the
 resource-gated suite surface (`-u all`), and performance are out of scope.
 
 The run leaves `build/cpython-v3.13.9-<pid>/` behind -- five configured
 trees, the workload, and both suite transcripts -- and is not cleaned up on
 the way out. A full run is dominated by the two suite executions at about
 ten minutes each plus five configure+make cycles; budget roughly an hour.
+
+## Evaluator frame status (issue #79)
+
+Measured on `main` `222cf440` with a Clang-built Release `ide` on x86-64
+Linux, compiling the pinned `Python/ceval.c` with the harness's include and
+define set. `-U__SSE2__` is diagnostic only: without it the unit stops on the
+Clang intrinsic-header barrier (#1419), which therefore still blocks the
+pristine harness. `_PyEval_EvalFrameDefault` frame sizes (bytes below the
+pushed registers):
+
+| Compiler | Frame |
+|---|---|
+| Clang 18 `-O3` | 392 |
+| Buster FAST | 1,672 |
+| Buster QUALITY | 2,488 |
+| Buster NONE / MIR_STACK | 209,920 |
+
+FAST and QUALITY fit CPython's recursion budget: a Clang tree whose
+`ceval.o` alone is Buster FAST passes the unmodified
+`test_functools` (including both `test_lru_recursion` methods) under the 8 MiB
+limit, and an `lru_cache` recursion to the full C recursion limit raises
+`RecursionError` rather than overflowing. That mixed build needs about
+6.5 MiB of stack to reach the limit where the Clang build needs about 2 MiB,
+so the margin is real but not large. NONE and MIR_STACK keep one slot per
+value and are not expected to meet the budget; the harness gates only their
+deterministic workload. A pristine all-Buster run, where the C wrapper frames
+are Buster-compiled too, remains outstanding until #1419 is resolved.

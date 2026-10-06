@@ -33,6 +33,7 @@ BUSTER_V_DECL RIO_EXTENSION_FUNCTION_TABLE w32_rio_functions;
 #include <pthread.h>
 
 #if defined(__linux__)
+#include <sched.h>
 #include <sys/sysinfo.h>
 #include <linux/limits.h>
 #include <ucontext.h>
