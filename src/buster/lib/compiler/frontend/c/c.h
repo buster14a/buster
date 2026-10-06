@@ -1130,6 +1130,19 @@ struct CParseBindingUndo
     CEntityId previous;
 };
 
+// One GNU `__label__ name;` declaration. The label is visible, under that
+// name, from the declaration to the end of the declaring scope; `unique_name`
+// is the function-wide key every label lookup uses for the tokens in that
+// range, so the same spelling can name a different label in another block.
+typedef struct CLocalLabel CLocalLabel;
+struct CLocalLabel
+{
+    String8 name;
+    String8 unique_name;
+    u32 declaration_token;
+    CScopeId scope;
+};
+
 typedef struct CScope CScope;
 struct CScope
 {
@@ -1505,6 +1518,10 @@ struct CParseResult
     CSymbolTable* symbols;
     CDeclaration* declarations;
     CType* types;
+    // Every `__label__` declaration of the translation unit, in token order.
+    CLocalLabel* local_labels;
+    u32 local_label_count;
+    u32 local_label_capacity;
     // Borrowed only while semantic constraints are checked. Scalar query
     // results share immutable types; declarator types remain independent.
     CTypeId* expression_scalar_types;

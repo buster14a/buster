@@ -9376,6 +9376,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_abstract_pointer_array_sizeof(UnitTest
         "}\n"));
 }
 
+// GNU `__label__ a, b;` declares labels scoped to the enclosing block, so a
+// macro that declares one can be used twice in a function and an inner
+// declaration shadows an outer label of the same name (#2845).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_label_declarations(UnitTestArguments* arguments)
+{
+    return c_test_run_exit_zero_program(arguments, S8("local-label-declarations"), S8(
+        "#define PICK(c) ({ __label__ out; int r = 1; if (c) goto out; r = 2; out: r; })\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    int a = PICK(1);\n"
+        "    int b = PICK(0);\n"
+        "    failures |= (a != 1 || b != 2) << 0;\n"
+        "    int r = 0;\n"
+        "    { __label__ first, second; goto second; first: r += 1; second: r += 2; }\n"
+        "    { __label__ first; goto first; r += 100; first: r += 10; }\n"
+        "    failures |= (r != 12) << 1;\n"
+        "    int s = 0;\n"
+        "    {\n"
+        "        __label__ x;\n"
+        "        { __label__ x; goto x; s += 1; x: s += 2; }\n"
+        "        goto x; s += 4; x: s += 8;\n"
+        "    }\n"
+        "    failures |= (s != 10) << 2;\n"
+        "    int t = 0;\n"
+        "    goto x; t += 1; x: t += 2;\n"
+        "    { __label__ x; goto x; t += 4; x: t += 8; }\n"
+        "    failures |= (t != 10) << 3;\n"
+        "    return failures;\n"
+        "}\n"));
+}
+
 // A parameter-list ellipsis inside a cast or initializer is not a GNU range
 // designator: `(int(*)(int, ...))0` was refused as one in a function body
 // (#2840), while `[0 ... 2] = 1` in a static initializer must keep working.
@@ -45401,6 +45433,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
+    C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
     C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_static_aggregates);

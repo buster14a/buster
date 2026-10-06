@@ -31736,11 +31736,11 @@ c_ir_expression_core_loop:
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
-            CToken label_token = builder->preprocess.tokens[index + 1];
-            CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, label_token));
+            String8 label_key = c_parse_label_name(&builder->parse, &builder->preprocess, index + 1);
+            CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, label_key);
             if (!label)
             {
-                builder->failure_message = string_format(builder->arena, S8("label '{S8}' is not defined in this function"), c_token_spelling(builder->preprocess.spelling_base, label_token));
+                builder->failure_message = string_format(builder->arena, S8("label '{S8}' is not defined in this function"), label_key);
                 builder->failure_token_index = index + 1;
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
@@ -35344,7 +35344,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
     if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
         builder->preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
     {
-        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start + 1]));
+        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_parse_label_name(&builder->parse, &builder->preprocess, start + 1));
         if (label && start + 2 == end)
         {
             return c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
@@ -40286,11 +40286,11 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_labels_parse(CIntegerIrBuilder* buil
                 return false;
             }
         }
-        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
+        String8 label_key = c_parse_label_name(&builder->parse, &builder->preprocess, index);
+        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, label_key);
         if (!label)
         {
-            builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is not defined in this function"),
-                                                     c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
+            builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is not defined in this function"), label_key);
             builder->failure_token_index = index;
             return false;
         }
@@ -41343,7 +41343,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
                 break;
             }
         }
-        CToken token = builder->preprocess.tokens[index];
         bool named_label = c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end) &&
                            (builder->label_candidates_valid ||
                             c_parse_label_candidate_at(&builder->parse, &builder->preprocess, declaration.body_start, index));
@@ -41351,23 +41350,24 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         {
             continue;
         }
-        if (c_ir_label_find(state->labels, state->label_count, c_token_spelling(builder->preprocess.spelling_base, token)))
+        String8 label_key = c_parse_label_name(&builder->parse, &builder->preprocess, index);
+        if (c_ir_label_find(state->labels, state->label_count, label_key))
         {
-            builder->failure_message = string_format(builder->arena, S8("duplicate label '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, token));
+            builder->failure_message = string_format(builder->arena, S8("duplicate label '{S8}'"), label_key);
             builder->failure_token_index = index;
             return false;
         }
         // Labels have function scope, including labels inside a GNU
         // statement expression. Its nested body walk must reuse the block
         // already published by the outer walk at this exact source token.
-        CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, token));
+        CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, label_key);
         IrBlockId block = existing_label && existing_label->token_index == index ? existing_label->block : c_ir_block_create(builder);
         if (block.value == IR_ID_UNDERLYING_INVALID)
         {
             return false;
         }
         state->labels[state->label_count++] = (CIrLabel){
-            .name = c_token_spelling(builder->preprocess.spelling_base, token),
+            .name = label_key,
             .token_index = index,
             .block = block,
         };
@@ -41393,7 +41393,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         if (!builder->label_metadata_enabled && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) && index + 1 < body_end &&
             builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
         {
-            String8 label_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+            String8 label_name = c_parse_label_name(&builder->parse, &builder->preprocess, index + 1);
             if (c_ir_label_find(state->labels, state->label_count, label_name) ||
                 c_ir_label_find(builder->labels, builder->label_count, label_name))
             {
@@ -42092,7 +42092,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
                 c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
             {
-                CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, first));
+                CIrLabel* label = c_ir_label_find(labels, label_count, c_parse_label_name(&builder->parse, &builder->preprocess, index));
                 IrBlock* current = &builder->function->blocks[builder->current_block.value];
                 if (!label)
                 {
@@ -42162,6 +42162,21 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 // deferred pass checks the rest before any function is lowered.
                 // Consume the declaration without evaluating or diagnosing it twice.
                 index = assertion_end + 1;
+                continue;
+            }
+            // A `__label__` declaration only scopes names; the parse pass
+            // recorded them, so lowering steps over the whole declaration.
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_LOCAL_LABEL))
+            {
+                while (index < task.end && !c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_SEMICOLON))
+                {
+                    index += 1;
+                }
+                if (index >= task.end)
+                {
+                    return false;
+                }
+                index += 1;
                 continue;
             }
             if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH))
@@ -42899,7 +42914,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     builder->failure_message = S8("malformed goto statement");
                     return false;
                 }
-                CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
+                CIrLabel* label = c_ir_label_find(labels, label_count, c_parse_label_name(&builder->parse, &builder->preprocess, index + 1));
                 CScopeId label_scope = c_parse_scope_for_token(
                     &builder->parse,
                     builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
@@ -44727,7 +44742,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     IrType* cast = ir_type_from_id(&program->types, label_cast_type);
                     cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
                 }
-                CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
+                CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_parse_label_name(&builder->parse, &preprocess, label_index)) : 0;
                 if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
                                                                    (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label || !relocations ||
                     !relocation_count || *relocation_count >= relocation_capacity || !builder->function)
@@ -52734,7 +52749,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
                 IrType* cast = ir_type_from_id(&program->types, label_cast_type);
                 cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
             }
-            CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
+            CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_parse_label_name(&builder->parse, &preprocess, label_index)) : 0;
             if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
                                                                (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label)
             {

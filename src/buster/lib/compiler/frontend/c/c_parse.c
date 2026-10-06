@@ -20072,6 +20072,83 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                                            });
 }
 
+// Records the names of the `__label__` declaration at `index` against the
+// scope that holds it and returns the token after its `;`. A malformed list
+// is diagnosed and skipped to its `;` (or the end of the body).
+BUSTER_GLOBAL_LOCAL u32 c_parse_record_local_labels(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 index,
+                                                    u32 body_end)
+{
+    u32 cursor = index + 1;
+    bool expect_name = true;
+    bool malformed = false;
+    while (cursor < body_end && !c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_SEMICOLON))
+    {
+        CToken token = preprocess.tokens[cursor];
+        if (expect_name && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            if (result->local_label_count == result->local_label_capacity)
+            {
+                u32 capacity = result->local_label_capacity ? result->local_label_capacity * 2 : 16;
+                CLocalLabel* grown = arena_allocate(arena, CLocalLabel, capacity);
+                if (result->local_label_count)
+                {
+                    memcpy(grown, result->local_labels, sizeof(CLocalLabel) * result->local_label_count);
+                }
+                result->local_labels = grown;
+                result->local_label_capacity = capacity;
+            }
+            String8 name = c_token_spelling(preprocess.spelling_base, token);
+            // A space cannot appear in an identifier, so the key never
+            // collides with an ordinary label of the function.
+            result->local_labels[result->local_label_count++] = (CLocalLabel){
+                .name = name,
+                .unique_name = string_format(arena, S8("{S8} (local label {u32})"), name, cursor),
+                .declaration_token = index,
+                .scope = scope,
+            };
+            expect_name = false;
+        }
+        else if (!expect_name && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            expect_name = true;
+        }
+        else
+        {
+            malformed = true;
+        }
+        cursor += 1;
+    }
+    if (malformed || expect_name || cursor >= body_end)
+    {
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                           S8("malformed local label declaration"));
+    }
+    return BUSTER_MIN(cursor + 1, body_end);
+}
+
+BUSTER_C_SHARED String8 c_parse_label_name(CParseResult const* result, CPreprocessResult const* preprocess, u32 token_index)
+{
+    String8 name = c_token_spelling(preprocess->spelling_base, preprocess->tokens[token_index]);
+    String8 key = name;
+    if (result->local_label_count)
+    {
+        u32 innermost = 0;
+        bool found = false;
+        for (u32 index = 0; index < result->local_label_count; index += 1)
+        {
+            CLocalLabel const* label = result->local_labels + index;
+            if (label->declaration_token < token_index && token_index < result->scopes[label->scope.value].token_end &&
+                (!found || label->declaration_token > innermost) && string_equal(label->name, name))
+            {
+                innermost = label->declaration_token;
+                key = label->unique_name;
+                found = true;
+            }
+        }
+    }
+    return key;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                        CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
                                                        u32 body_token_count);
@@ -21917,6 +21994,14 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     }
                 }
             }
+        }
+        // GNU `__label__ a, b;` declares labels scoped to the enclosing block;
+        // none of its names is a use of anything in scope.
+        if (shape == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_LOCAL_LABEL))
+        {
+            index = c_parse_record_local_labels(result_arena, result, preprocess, scope_stack[scope_count - 1], index, body_end);
+            statement_start = true;
+            continue;
         }
         // A declaration begins a statement, so the attribute skip that finds
         // its first specifier runs at statement starts alone -- the tokens
@@ -26420,9 +26505,9 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
         if (c_ir_named_label_at(&preprocess, start, index, end) &&
             (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index)))
         {
-            String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+            String8 name = c_parse_label_name(result, &preprocess, index);
             u64 slot = c_macro_name_hash(name) & (capacity - 1);
-            while (labels[slot] && !string_equal(name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[labels[slot] - 1])))
+            while (labels[slot] && !string_equal(name, c_parse_label_name(result, &preprocess, labels[slot] - 1)))
             {
                 slot = (slot + 1) & (capacity - 1);
             }
@@ -26447,9 +26532,9 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
             c_parse_lowering_constraint_consider(diagnostic, S8("malformed goto statement"), index, index);
         if ((named_goto || label_address) && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
         {
-            String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]);
+            String8 name = c_parse_label_name(result, &preprocess, index + 1);
             u64 slot = c_macro_name_hash(name) & (capacity - 1);
-            while (labels[slot] && !string_equal(name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[labels[slot] - 1])))
+            while (labels[slot] && !string_equal(name, c_parse_label_name(result, &preprocess, labels[slot] - 1)))
             {
                 slot = (slot + 1) & (capacity - 1);
             }
