@@ -1527,6 +1527,9 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, timed.timed_out && timed.process_result == PROCESS_RESULT_FAILED);
         BUSTER_TEST(arguments, elapsed < 5000000);
         BUSTER_TEST(arguments, timed.temporary_directory.length && gpu_test_path_has_kind(timed.temporary_directory, OS_FILE_KIND_MISSING));
+        // The failure case must not inherit the short deadline: on a slow runner
+        // the timeout path would fire instead of the exit status 7 under test.
+        options.tool_timeout_microseconds = 0;
         String8 failure_script = S8("#!/bin/sh\nexit 7\n");
         u8 old_output[] = {'o', 'l', 'd'};
         ByteSlice old_bytes = (ByteSlice)BUSTER_ARRAY_TO_SLICE(old_output);
