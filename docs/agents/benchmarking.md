@@ -29,13 +29,10 @@ sensitivity. Matching paths does not eliminate source-induced layout sensitivity
 keep conclusions scoped to the measured binaries and workloads. See the
 [matched-build #791 audit](../performance-audits/2026-09-20T050606Z.md).
 For dedicated 9700X calibration, retain a same-root rebuild control and a
-cross-root control beside the immutable-binary A/A capture. The
-[`zen5_build_control.py`](../../tools/zen5_build_control.py) reader checks their
-predeclared, fixed-count records and summarizes build, path, order and drift
-effects. Its schema and execution boundary are in the
-[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls).
-These offline checks cannot authenticate the capture or prove that the family
-was frozen before sampling; the admitted service receipt must bind both facts.
+cross-root control beside the immutable-binary A/A capture; the
+[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls)
+describes them. No repository tool currently produces or analyzes these
+captures (#2741).
 
 - **`./build.sh bench_throughput`** provides deterministic startup, scaling,
   symbol, CFG, backend and frozen-source self-host workloads with raw paired
@@ -446,8 +443,9 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   the `9700X compiler benchmark` check on the candidate commit; see
   [merge-queue admission](../merge-queue-admission.md#9700x-compiler-comparison-2752).
   That is the only sanctioned compiler A/B path on that host; it runs no
-  profile steps and no A/A. `native-retirement-performance-v1` remains blocked
-  and the `zen5-calibration-v1` producer no longer exists. Use the local
+  profile steps and no A/A. `native-retirement-performance-v1` remains blocked,
+  and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
+  removed (#2741; tag `bench-service-final` retains them). Use the local
   trusted capture methods above for ad-hoc profiling. Historical audit notes retain
   the removed workflows and service job numbers only as provenance.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is

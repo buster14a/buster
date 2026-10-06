@@ -40812,16 +40812,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
-                u32 expression_start = 0;
-                u32 expression_end = 0;
-                CIrConstantValue assertion = {0};
-                if (!c_ir_static_assert_expression_range(builder, index, assertion_end + 1, &expression_start, &expression_end) ||
-                    !c_ir_constant_evaluate(builder, expression_start, expression_end, &assertion) ||
-                    assertion.kind != C_IR_CONSTANT_INTEGER || c_ir_constant_truth(builder, &assertion) != C_IR_CONSTANT_TRUTH_TRUE)
-                {
-                    builder->failure_message = S8("static assertion expression is not a true integer constant expression");
-                    return false;
-                }
+                // Parsing checks immediate assertions; the translation-unit
+                // deferred pass checks the rest before any function is lowered.
+                // Consume the declaration without evaluating or diagnosing it twice.
                 index = assertion_end + 1;
                 continue;
             }
