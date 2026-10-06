@@ -147,12 +147,19 @@ The dependency walk is unnecessary when every retained owner already has entry
 initialization; restored loads still become independent definitions first.
 
 After predecessor propagation finishes, parameter simplification reuses its
-block cursor for a stable list of blocks that still own parameters. Empty
-blocks leave the list after each sweep. Simplification never adds parameters,
-so they cannot become active again. Retain ascending block order and each
-block's parameter order: changing elimination order can change replacement
-representatives and canonical value IDs. The allocation diagnostic census
-counts initial list construction as well as subsequent block visits.
+block cursor for a stable list of blocks that still own parameters.
+`c_ir_ssa_simplify_parameters` reproduces the repeated block-order sweep
+without its repeated visits: each retained parameter is numbered in sweep
+order and filed as a user of the roots its incoming rows read, and it is
+evaluated again only when one of those roots is replaced, at the (sweep,
+position) key the full sweep would next reach it, drawn from a min-heap. A
+nested chain of N joins therefore costs O(N log N), not N sweeps (#2801).
+Retain ascending block order and each block's parameter order: changing
+elimination order can change replacement representatives and canonical value
+IDs, for example which member of a closed parameter cycle survives. The
+allocation diagnostic census counts the initial list construction and the one
+final unlink sweep as block visits, and `SSA_SIMPLIFY_PASSES` reports the
+sweeps the full sweep would have taken.
 
 Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization

@@ -425,3 +425,36 @@ library dependency. Its own loader uses existing OS threads, one-lane dispatch
 and Linux libc synchronization/filesystem calls where no current generic API
 fits. It adds no UI/font/Vulkan module to the compiler. Native Xvfb pixel
 readback is software-XCB evidence, not GPU or other-platform product support.
+
+## Native XCB fixture lifecycle
+
+The actual raster fixture owns an independent admitted XCB connection through
+allocation refusal, repeated WM initialization and both real XIM provider modes.
+Default X servers reset when their last admitted client disconnects; an accepted
+next client can be closed before its setup completes. The independent owner
+keeps that server lifetime explicit. A server-generation atom must survive every
+tested cycle. Production initialization still reports unavailable/lost native
+connections without reconnect retries.
+
+The window-arena fault fixture must prove its reserve fault was consumed.
+`arena_test_cancel_reserve_failure` in the private tests-only arena header
+cancels any unused calling-thread injection before another consumer can
+allocate. The unavailable-display control distinguishes native admission
+refusal from allocation refusal and requires subsequent unpooled allocations
+to succeed.
+
+XIM forward and synchronous masks keep their protocol meanings. Native
+subscriptions add only valid core forward bits; synchronous masks determine
+protocol event flags, not additional X server subscriptions. Both live provider
+modes independently check committed text, refusal/recovery, error-free native
+requests, input-context teardown, advertisement/selection removal and restored
+environment. A separate real client-loss control preserves the fixture owner.
+
+The native workflow runs 64 complete repetitions per profile, requiring
+192 lifecycle cases and 128 real encoding cases, and retains native logs plus
+Xvfb stderr even on failure. Local fixture invocations default to one complete
+repetition; `BUSTER_NATIVE_CAMPAIGN_REPETITIONS` admits only 1..64. A smaller
+executed case count fails independently of the assertion total. Existing
+five-second phase deadlines, pass bounds, pixel readback and downstream browser
+checks remain required. See [#2499](https://github.com/buster14a/buster/issues/2499)
+for the before/after experiments and attribution.

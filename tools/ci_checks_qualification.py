@@ -470,8 +470,12 @@ def observation(root, item, test, unit, manifest_path, event, identity):
     log_path = retained(path.parent, {"path": "test.log", "sha256": value.get("log_sha256")})
     manifest = phases.read(manifest_path)
     require((manifest_path.parent / manifest["log"]).resolve() == log_path.resolve() and test["log_sha256"] == value["log_sha256"], "manifest did not consume the native test log")
-    require(unit["inventory"] == unit_campaign.inventory(inventory_path), "native independent inventory differs from test manifest")
-    profile = unit_campaign.host_profile(inventory_path, required=True)
+    inventory_rows, profile, inventory_primary = unit_campaign.inventory_proof(inventory_path)
+    require(profile is not None, "Missing measured native host profile")
+    require(unit["inventory"] == inventory_rows, "native independent inventory differs from test manifest")
+    if unit["mode"] == "groups":
+        require(manifest.get("primary_module") == inventory_primary,
+                "native independent inventory primary differs from grouped manifest")
     declared_profile = unit["identity"].get("native_host_profile")
     require(profile["architecture"] == identity["architecture"] and
             declared_profile == profile and json.dumps(declared_profile, sort_keys=True) == json.dumps(profile, sort_keys=True),
