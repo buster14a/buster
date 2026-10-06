@@ -5239,6 +5239,84 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
     return result;
 }
 
+// #2496: label discovery must neither invent a label from a colon inside an
+// initializer, ternary, bit-field, case or asm operand list, nor lose a real
+// label in any valid position. The fixture runs under every allocator mode and
+// both lowering forms; the obsolete GNU `member: value` designator is not
+// supported and must fail with a diagnostic instead of producing a phantom
+// label or partial output.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_obsolete_designator_labels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = S8("src/buster/tests/compiler/frontend/c/fixtures/label_discovery_initializers.c");
+    String8 rejected[] = {
+        S8("struct P { int member; }; int f(void) { struct P p = { member: 7 }; return p.member; }"),
+        S8("struct P { int member; }; int f(void) { return ((struct P){ member: 7 }).member; }"),
+        S8("struct P { int member; }; struct W { struct P inner; }; int f(void) { struct W w = { inner: { member: 1 } }; return w.inner.member; }"),
+        S8("struct P { int member; }; int f(void) { return ({ struct P p = { member: 9 }; p.member; }); }"),
+        S8("struct P { int member; }; int f(void) { struct P p = { member: 1 }; again: p.member += 1; if (p.member < 3) goto again; return p.member; }"),
+        S8("struct P { int member; }; int f(void) { struct P p = { member: 1 }; member: return p.member; }"),
+    };
+    for (u32 dialect = 0; dialect < 2; dialect += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[index], (CPreprocessOptions){
+                    .target = target_native, .data_layout = target_data_layout(target_native),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("obsolete-designator.c"), tokens, syntax, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                String8 context = string_format(temporary.arena, S8("obsolete designator source={u32} dialect={u32} form={u32}"),
+                    index, dialect, form);
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, context);
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("label-discovery-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
+                                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 context = string_format(temporary.arena, S8("label discovery {S8} {S8} form={u32}"), dialects[dialect], modes[mode], form);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("{S8}: {S8}"), context, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // A million flat leaves exercise the real initializer machines in bounded
 // scratch; the complete frontend additionally checks the original failure
 // threshold in both forms, plus independent containment/relocation oracles.
@@ -44481,6 +44559,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
     C_TEST_FIXTURE(arguments, c_test_static_compound_literal);
     C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
+    C_TEST_FIXTURE(arguments, c_test_obsolete_designator_labels);
     C_TEST_FIXTURE(arguments, c_test_static_range_designators);
     C_TEST_FIXTURE(arguments, c_test_stddef_need_protocol);
     C_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
