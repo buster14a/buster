@@ -57,7 +57,18 @@ candidate rather than a parent-chain walk; `UI_State.focus_scope_steps` counts
 the parent hops and subtree visits. The target compares selected keys with an
 independent copy of the ancestor-walk algorithm on chain, nested-scope, comb and
 broad trees with ineligible nodes, and bounds steps per box on 500 to 4000 deep
-spines. Desktop `test_all` and `test_units` include it when tests and libc are enabled.
+spines. Pointer hit testing (`ui_route_event_owners`) builds one grid index over
+the previous tree's pointer-visible rectangles per build (when at least 32 boxes
+and 3 pointer queries justify it), so a query visits only the boxes in the
+point's cell plus a short list of very wide boxes instead of every active box.
+The topmost box is still the maximum of build order then active-list position, a
+press reuses the clickable target resolved for its own pointer update, and the
+full scan remains the fallback and the oracle (`UI_State.hit_index_disabled`).
+`UI_State.hit_test_candidates` counts visited boxes; the target bounds visits per
+event while boxes and events vary independently (sparse boxes, miss-only moves,
+clicks) and compares indexed and linear routing on randomized scenes with
+overlaps, disabled occluders, zero-size, clipped and off-screen boxes.
+Desktop `test_all` and `test_units` include it when tests and libc are enabled.
 
 Create a feature issue for a concrete application workflow or component behavior,
 not a speculative checklist claiming that a future editor/viewer already exists.
