@@ -16,7 +16,10 @@ It follows the documented A/B recipe of docs/agents/benchmarking.md in one
 tree: a tests-off Clang Release `ide` of the base (main baseline or merge base),
 then of the head, then the base again so the frozen workload has its generated
 closure; `tools/uarch_lab.py compare` then times both compilers on that same
-base source. Builds are preparation and are timed separately.
+base source. Builds are preparation and are timed separately. Then the
+native throughput corpus (THROUGHPUT_PROFILE, #2761) runs on the same two
+binaries through the base revision's `./build.sh bench_throughput`, and its
+own summary and metadata join the evidence.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -24,7 +27,7 @@ as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
 
 Map: queue_head (pull-mode supersession), build (one ide), toolchain, collect_evidence,
-main. Validity rules live in compiler_receipt.classify.
+measure_throughput (corpus leg), main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -42,11 +45,13 @@ import time
 from pathlib import Path
 
 from compiler_github import RECONCILE_DEPTH
-from compiler_receipt import IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, classify, dumps, host_problem, render
+from compiler_receipt import (IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, THROUGHPUT_PROFILE, classify,
+                              classify_throughput, dumps, host_problem, render, throughput_digest)
 from compiler_receipt import observed_cpu_model as cpu_model
 
 BUILD_TIMEOUT_SECONDS = 1800
 LAB_TIMEOUT_SECONDS = 3000
+THROUGHPUT_TIMEOUT_SECONDS = 1800
 GIT_TIMEOUT_SECONDS = 120
 EVIDENCE_FILE_LIMIT = 32 * 1024 * 1024
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
@@ -143,6 +148,30 @@ def collect_evidence(lab: Path, evidence: Path) -> None:
                 path.unlink()
 
 
+def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
+                       binaries: dict) -> tuple[list[str], dict]:
+    """Run the corpus on both binaries from the checked-out base; (reasons, receipt section)."""
+    output = work / "throughput"
+    status = run(["./build.sh", "bench_throughput", "run", "--baseline", str(bins / "ide-base"),
+                  "--candidate", str(bins / "ide-cand"), "--output", str(output), "--baseline-id", base,
+                  "--candidate-id", head, *THROUGHPUT_PROFILE["arguments"]],
+                 candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
+    documents = []
+    if output.is_dir():
+        shutil.copytree(output, evidence / "throughput", ignore=shutil.ignore_patterns(*EVIDENCE_IGNORE))
+        for path in sorted((evidence / "throughput").rglob("*")):
+            if path.is_file() and path.stat().st_size > EVIDENCE_FILE_LIMIT:
+                path.unlink()
+    for name in ("summary.json", "metadata.json"):
+        try:
+            documents.append(json.loads((output / name).read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            documents.append(None)
+    reasons = [] if status == 0 else [f"bench_throughput run exited {status} (see throughput.log)"]
+    reasons.extend(classify_throughput(documents[0], documents[1], binaries))
+    return reasons, dict(throughput_digest(documents[0]), exit=status)
+
+
 def parse(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--candidate", type=Path, required=True)
@@ -169,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         directory.mkdir(parents=True)
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
-               "profile": PROFILE, "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
+               "profile": PROFILE, "throughput_profile": THROUGHPUT_PROFILE, "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
                "toolchain": toolchain(), "binaries": {}, "lab": {},
                "timings": {"started_at": started_at, "build_seconds": {}}}
     reasons = receipt["reasons"]
@@ -247,11 +276,16 @@ def main(argv: list[str] | None = None) -> int:
             summary = json.loads((lab / "summary.json").read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
             reasons.append(f"lab summary unreadable: {error}")
+        if status != 0:
+            reasons.append(f"uarch_lab compare exited {status}")
+        measured = time.monotonic()
+        corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
+                                                           arguments.head, receipt["binaries"])
+        receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
+        reasons.extend(corpus)
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
                 reasons.append(f"{role} binary changed during measurement")
-        if status != 0:
-            reasons.append(f"uarch_lab compare exited {status}")
         reasons.extend(classify(summary, receipt["binaries"]))
         if isinstance(summary, dict):
             receipt["lab"].update(schema=summary.get("schema"), verdict=summary.get("verdict"),
