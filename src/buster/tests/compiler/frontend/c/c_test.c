@@ -29017,6 +29017,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_lookup_work_growth(UnitTestArgum
     return result;
 }
 
+// The scope levels one lowering of the family at this depth walks; UINT64_MAX
+// when it did not lower cleanly.
+BUSTER_GLOBAL_LOCAL u64 c_test_nested_control_lowering_levels(u32 family, u32 depth)
+{
+    u64 work = UINT64_MAX;
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = c_test_nested_control_source(temporary.arena, family, depth);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    u64 before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("nested-control-lowering.c"), preprocess, parse, target_native);
+    if (preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0 && ir.diagnostic_count == 0 && ir.program)
+    {
+        work = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) - before;
+    }
+    c_test_scratch_end(temporary);
+    return work;
+}
+
+// Lowering finds the scope of every loop's `break` and `continue` target, and
+// each answer used to descend from the function's scope: one level per
+// enclosing scope, so a D-deep nest cost D squared levels (#2676). The levels
+// walked must grow with the depth.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_lowering_scope_levels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 200, DEEP = 800 };
+    u32 families[] = {C_TEST_NESTED_CONTROL_WHILE, C_TEST_NESTED_CONTROL_FOR};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(families); index += 1)
+    {
+        u32 family = families[index];
+        u64 shallow = c_test_nested_control_lowering_levels(family, SHALLOW);
+        u64 deep = c_test_nested_control_lowering_levels(family, DEEP);
+        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && shallow >= SHALLOW && deep <= shallow * 5 && deep <= DEEP * 16,
+                        string_format(arguments->arena, S8("lowering scope levels family={u32} shallow={u64} deep={u64}"), family, shallow, deep));
+    }
+    return result;
+}
+
 // `sizeof(c ? (c ? ( ... 1) : 2) : 2)` nested `depth` deep, spelled into one
 // constant-expression context (issue #2765). The strict operand type walk once
 // refused anything past 64 levels, which surfaced as a false "not a true
@@ -38034,6 +38073,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_scope_interval_index(UnitTestArguments
         BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, (CScopeId){0}, siblings * 4 + 8).value == 0);
         BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){0}, 0, siblings * 4 + 9) == 0);
         BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){siblings}, 2, 8) == 0);
+        // Starting from any earlier answer gives the answer a descent from the root does.
+        u32 near_step = size_index == 0 ? 1 : parse.scope_count / 5 + 1;
+        for (u32 near = 0; near < parse.scope_count; near += near_step)
+        {
+            for (u32 token = 0; token < siblings * 4 + 10; token += size_index == 0 ? 1 : 3)
+            {
+                BUSTER_TEST(arguments, c_parse_scope_for_token_near(&parse, (CScopeId){0}, (CScopeId){near}, token).value ==
+                                           c_parse_scope_for_token(&parse, (CScopeId){0}, token).value);
+            }
+        }
     }
     c_test_scratch_end(temporary);
     return result;
@@ -44390,6 +44439,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_nested_control_lowering_scope_levels);
     C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
     C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);

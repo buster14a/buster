@@ -334,6 +334,8 @@ BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, 
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base,
                                                        CScopeId scope, CToken const* token);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
+// The same answer from a nearby earlier answer under `root` (or `root` itself): O(tree distance), not O(depth).
+BUSTER_C_EXTERN CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId near, u32 token_index);
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
 BUSTER_C_EXTERN u32 c_parse_definition_scan_start(CParseResult const* result, u32 definition_start);
 // CDefinitionIndex diagnostic counts, kept out of ordinary compilers and timing

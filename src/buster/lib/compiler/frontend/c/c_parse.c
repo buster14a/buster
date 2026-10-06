@@ -3934,6 +3934,9 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
     u32 attribute_group_count = 0;
     u32 attribute_group_capacity = C_CALL_ATTRIBUTE_INLINE_GROUPS;
     CParseCandidates calls = c_parse_call_candidates(preprocess);
+    // The candidates ascend, so each scope query starts from the previous answer
+    // instead of descending from the file scope through every enclosing block (#2676).
+    CScopeId scope_finger = {.value = 0};
     for (u32 index = c_parse_candidates_next(&calls, start, end); index + 1 < end && !result.message.length;
          index = c_parse_candidates_next(&calls, index + 1, end))
     {
@@ -4040,7 +4043,8 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
         // a block-scope object or function-pointer shadow still wins.
         if (entity.value == C_ID_UNDERLYING_INVALID && analysis->scope_count)
         {
-            CScopeId scope = c_parse_scope_for_token(analysis, (CScopeId){.value = 0}, index);
+            CScopeId scope = c_parse_scope_for_token_near(analysis, (CScopeId){.value = 0}, scope_finger, index);
+            scope_finger = scope;
             entity = c_parse_lookup_entity_token(analysis, preprocess.spelling_base, scope, &token);
         }
         if (entity.value < analysis->entity_count && analysis->entities[entity.value].declaration_token_plus_one == index + 1)
@@ -21892,6 +21896,91 @@ u32 c_test_parse_body_scope_mismatches(CParseResult* result, Arena* arena, CScop
 }
 #endif
 
+// The deepest scope at or under `best` holding the token, found by descending the
+// child index one binary search per level: O(levels below `best`). Counts each
+// level for the nesting tests, which bound the levels a lowering walks (#2676).
+BUSTER_C_INTERNAL CScopeId c_parse_scope_descend(CParseResult* result, CScopeId best, u32 token_index)
+{
+    // Siblings do not overlap. Find the last child starting at or before
+    // the token, then descend only if its half-open interval contains it.
+    // Equal-range parent/child pairs still resolve to the deepest child.
+    bool descended = true;
+    while (descended)
+    {
+        descended = false;
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_SCOPE_LEVELS, 1);
+        u32 child_begin = result->scope_children_offsets[best.value];
+        u32 low = child_begin;
+        u32 high = result->scope_children_offsets[best.value + 1];
+        while (low < high)
+        {
+            u32 middle = low + (high - low) / 2;
+            u32 candidate = result->scope_children[middle];
+            if (result->scopes[candidate].token_start <= token_index)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        if (low > child_begin)
+        {
+            u32 candidate = result->scope_children[low - 1];
+            if (token_index < result->scopes[candidate].token_end)
+            {
+                best.value = candidate;
+                descended = true;
+            }
+        }
+    }
+    return best;
+}
+
+// c_parse_scope_for_token's answer for a caller that already holds `near`, the
+// answer of an earlier query under the same root: climb from `near` to the
+// lowest ancestor holding the token, then descend from there. Scopes nest, so
+// that ancestor lies on the root's own descent path and the answer is the
+// same, but the cost is the tree distance between consecutive queries, not
+// the depth of the root-to-token path -- a lowering that asks about each loop
+// of a D-deep nest in turn pays one level per loop instead of D (#2676). The
+// caller guarantees `near` is `root` or under it; the climb stops at `root`.
+BUSTER_C_SHARED CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId near, u32 token_index)
+{
+    CScopeId answer;
+    CScopeId start = root;
+    if (result && result->scope_children_offsets && root.value < result->scope_count && near.value < result->scope_count && near.value != root.value)
+    {
+        CScopeId cursor = near;
+        bool climbing = true;
+        while (climbing)
+        {
+            CScope const* candidate = &result->scopes[cursor.value];
+            C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_SCOPE_LEVELS, 1);
+            if (token_index >= candidate->token_start && token_index < candidate->token_end)
+            {
+                start = cursor;
+                climbing = false;
+            }
+            else
+            {
+                cursor = candidate->parent;
+                climbing = cursor.value != root.value && cursor.value < result->scope_count;
+            }
+        }
+    }
+    if (start.value != root.value)
+    {
+        answer = c_parse_scope_descend(result, start, token_index);
+    }
+    else
+    {
+        answer = c_parse_scope_for_token(result, root, token_index);
+    }
+    return answer;
+}
+
 BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index)
 {
     CScopeId best = root;
@@ -21906,36 +21995,7 @@ BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId 
         // Siblings do not overlap. Find the last child starting at or before
         // the token, then descend only if its half-open interval contains it.
         // Equal-range parent/child pairs still resolve to the deepest child.
-        bool descended = true;
-        while (descended)
-        {
-            descended = false;
-            u32 child_begin = result->scope_children_offsets[best.value];
-            u32 low = child_begin;
-            u32 high = result->scope_children_offsets[best.value + 1];
-            while (low < high)
-            {
-                u32 middle = low + (high - low) / 2;
-                u32 candidate = result->scope_children[middle];
-                if (result->scopes[candidate].token_start <= token_index)
-                {
-                    low = middle + 1;
-                }
-                else
-                {
-                    high = middle;
-                }
-            }
-            if (low > child_begin)
-            {
-                u32 candidate = result->scope_children[low - 1];
-                if (token_index < result->scopes[candidate].token_end)
-                {
-                    best.value = candidate;
-                    descended = true;
-                }
-            }
-        }
+        best = c_parse_scope_descend(result, best, token_index);
     }
     else if (result && root.value < result->scope_count)
     {

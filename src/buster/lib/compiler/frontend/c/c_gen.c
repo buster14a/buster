@@ -3185,6 +3185,10 @@ struct CIntegerIrBuilder
     // once more with this clear, which lets what never maps decay.
     bool sizeof_defers_unmapped_local_arrays;
     u32 declaration_index;
+    // The scope the last lowering scope query under `scope_finger_root` answered
+    // (c_ir_scope_for_token): the next query starts its search there.
+    CScopeId scope_finger;
+    CScopeId scope_finger_root;
     CIntegerIrLocal* locals;
     // The entity of `locals[i]`, kept beside the table rather than read out of
     // it: c_ir_find_local_by_entity scans the whole table backwards on every
@@ -37617,18 +37621,34 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_is_outside_target(CParseResult* parse, CEnti
     return true;
 }
 
+// c_parse_scope_for_token under the lowered function's own scope, started from the
+// previous answer. Lowering asks about loop keywords and loop headers in source
+// order, so consecutive answers are a scope or two apart and a D-deep nest costs
+// O(D) levels in all, where a descent from the root costs D per query (#2676).
+BUSTER_C_INTERNAL CScopeId c_ir_scope_for_token(CIntegerIrBuilder* builder, u32 token_index)
+{
+    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                     : C_SCOPE_ID_INVALID;
+    CScopeId near = builder->scope_finger_root.value == root.value ? builder->scope_finger : root;
+    CScopeId scope = c_parse_scope_for_token_near(&builder->parse, root, near, token_index);
+    if (scope.value < builder->parse.scope_count)
+    {
+        builder->scope_finger = scope;
+        builder->scope_finger_root = root;
+    }
+    return scope;
+}
+
 BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_block(CIntegerIrBuilder* builder, CIrBodyTask* tasks, u32 task_count, IrBlockId block,
                                                         CScopeId* scope_out, u32* token_out)
 {
-    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                      : C_SCOPE_ID_INVALID;
     for (u32 task_index = 0; task_index < task_count; task_index += 1)
     {
         CIrBodyTask task = tasks[task_index];
         if (task.break_block.value == block.value || task.continue_block.value == block.value)
         {
             *token_out = task.start;
-            *scope_out = c_parse_scope_for_token(&builder->parse, root, task.start);
+            *scope_out = c_ir_scope_for_token(builder, task.start);
             return true;
         }
         if (task.continuation.value != block.value && task.block.value != block.value)
@@ -37636,7 +37656,7 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_block(CIntegerIrBuilder* builder,
             continue;
         }
         *token_out = task.end;
-        *scope_out = c_parse_scope_for_token(&builder->parse, root, task.end);
+        *scope_out = c_ir_scope_for_token(builder, task.end);
         return true;
     }
     *scope_out = C_SCOPE_ID_INVALID;
@@ -37646,10 +37666,8 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_block(CIntegerIrBuilder* builder,
 
 BUSTER_C_INTERNAL void c_ir_body_task_set_loop_cleanup_targets(CIntegerIrBuilder* builder, CIrBodyTask* task, u32 break_token, u32 continue_token)
 {
-    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                     : C_SCOPE_ID_INVALID;
-    task->break_scope = c_parse_scope_for_token(&builder->parse, root, break_token);
-    task->continue_scope = c_parse_scope_for_token(&builder->parse, root, continue_token);
+    task->break_scope = c_ir_scope_for_token(builder, break_token);
+    task->continue_scope = c_ir_scope_for_token(builder, continue_token);
     task->break_token = break_token;
     task->continue_token = continue_token;
 }
@@ -37671,10 +37689,8 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_task(CIntegerIrBuilder* builder, 
     }
     if (block.value == task.continuation.value && task.continuation.value != IR_ID_UNDERLYING_INVALID)
     {
-        CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                          : C_SCOPE_ID_INVALID;
         *token_out = task.end;
-        *scope_out = c_parse_scope_for_token(&builder->parse, root, task.end);
+        *scope_out = c_ir_scope_for_token(builder, task.end);
         return true;
     }
     return c_ir_cleanup_target_for_block(builder, tasks, task_count, block, scope_out, token_out);
@@ -37981,9 +37997,7 @@ struct CIrSwitchCase
 // which is what C says jumping past an initializer does.
 BUSTER_C_INTERNAL bool c_ir_emit_switch_prefix_locals(CIntegerIrBuilder* builder, u32 body_start, u32 prefix_end)
 {
-    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                  : C_SCOPE_ID_INVALID;
-    CScopeId scope = c_parse_scope_for_token(&builder->parse, root, body_start);
+    CScopeId scope = c_ir_scope_for_token(builder, body_start);
     if (scope.value >= builder->parse.scope_count)
     {
         return true;
@@ -41979,11 +41993,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 .continue_block = task.continue_block,
             };
             c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
-            CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                           : C_SCOPE_ID_INVALID;
             // A switch may have no compound-body scope. Its break target is
             // outside the controlled statement, within the keyword's scope.
-            CScopeId switch_break_scope = c_parse_scope_for_token(&builder->parse, root, state->switch_statement_start);
+            CScopeId switch_break_scope = c_ir_scope_for_token(builder, state->switch_statement_start);
             u32 switch_break_token = state->index;
             if (switch_break_scope.value == C_ID_UNDERLYING_INVALID)
             {
@@ -43759,10 +43771,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         }
         else if (cleanup_state && statement_expression_mode)
         {
-            CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                            : C_SCOPE_ID_INVALID;
             cleanup_token = task.end;
-            cleanup_scope = c_parse_scope_for_token(&builder->parse, root, cleanup_token);
+            cleanup_scope = c_ir_scope_for_token(builder, cleanup_token);
         }
         if (cleanup_state && !c_ir_emit_cleanup_calls(builder, tasks, task_count, cleanup_scope, cleanup_token, declaration_source))
         {
