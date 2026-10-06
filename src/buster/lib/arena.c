@@ -121,6 +121,17 @@ bool arena_test_cancel_reserve_failure(void)
 
 BUSTER_GLOBAL_LOCAL bool arena_test_release_fill;
 
+// Reservation bytes held by arenas that were created and not yet destroyed on
+// this thread, so concurrently running tests cannot disturb one another's
+// reading. A destroyed arena parked in the reuse pool no longer counts: the
+// pool is bounded per thread, so the counter is the leak signal.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 arena_test_live_bytes;
+
+u64 arena_test_live_reserved_bytes(void)
+{
+    return arena_test_live_bytes;
+}
+
 void arena_test_fill_releases(bool enabled)
 {
     arena_test_release_fill = enabled;
@@ -466,6 +477,18 @@ bool arena_destroy(Arena* arena, u64 count)
     // A released range stays poisoned until the next allocation reaches it;
     // neither a pooled reuse nor a later mapping at this address may inherit it.
     BUSTER_ARENA_UNPOISON((u8*)arena + arena_minimum_position, BUSTER_MAX(arena_dirty_position(arena), arena->os_position) - arena_minimum_position);
+#if BUSTER_INCLUDE_TESTS
+    arena_test_live_bytes -= reserved_size * count;
+    if (arena_test_release_fill)
+    {
+        // Everything the arena committed is released with it; a reference
+        // that outlives the arena reads the pattern, not stale data.
+        u64 extent = BUSTER_MAX(arena_dirty_position(arena), arena->os_position);
+        memset((u8*)arena + arena_minimum_position, ARENA_TEST_RELEASE_FILL, extent - arena_minimum_position);
+        // A pooled arena promises zeroed bytes above its dirty mark.
+        arena->dirty_position = extent;
+    }
+#endif
     if (arena_pool_eligible(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
     {
         arena->dirty_position = BUSTER_MAX(arena_dirty_position(arena), arena_minimum_position + sizeof(Arena*));
@@ -584,6 +607,12 @@ Arena* arena_create(ArenaCreation original_creation)
         }
     }
 
+#if BUSTER_INCLUDE_TESTS
+    if (result)
+    {
+        arena_test_live_bytes += total_reserved_size;
+    }
+#endif
     return (Arena*)result;
 }
 

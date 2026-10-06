@@ -16,6 +16,13 @@ and nine measured fresh processes. Every run's exit state, wall and CPU time,
 peak RSS and captured output is reported. The numbers are diagnostic process
 latency from fork through wait4. Nothing here holds the service lease, so
 other activity on the host is reported (load average) but not excluded.
+
+The observed CPU model, read from the kernel and never from a runner label,
+heads the report (#2761). On any host other than the approved Zen 5 host
+nothing is compiled or run and the run fails, so a workload can only be
+reported as measured on the Ryzen 7 9700X.
+
+Map: changed_workloads, source_problem, run_once, render, main.
 """
 
 from __future__ import annotations
@@ -33,6 +40,8 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+from compiler_receipt import APPROVED_HOST, observed_cpu_model
 
 WORKLOAD_DIRECTORY = "benchmarks/9700x"
 WORKLOAD_NAME = re.compile(r"benchmarks/9700x/[a-z0-9][a-z0-9_-]{0,47}\.c")
@@ -184,6 +193,10 @@ def main() -> int:
     arguments = parser.parse_args()
 
     failures: list[str] = []
+    cpu_model = observed_cpu_model()
+    if not APPROVED_HOST.search(cpu_model):
+        failures.append(f"observed CPU {cpu_model!r} is not the approved Zen 5 host (AMD Ryzen 7 9700X); "
+                        "nothing was measured")
     for value in (arguments.base, arguments.head):
         if not re.fullmatch(r"[0-9a-f]{40}", value):
             failures.append("base and head must be full lowercase commit IDs")
@@ -201,6 +214,7 @@ def main() -> int:
     lines = ["## 9700X direct workload run", "",
              f"head `{arguments.head}`, base `{arguments.base}`, CPU {arguments.cpu}, "
              f"{WARMUPS} warmups and {SAMPLES} samples, {RUN_TIMEOUT_SECONDS} s limit per run.", "",
+             f"Observed host: `{cpu_model}`.", "",
              "Diagnostic process latency (fork through wait4). No service lease is held; "
              "other host activity is not excluded.", ""]
     load_before = Path("/proc/loadavg").read_text(encoding="ascii").strip()

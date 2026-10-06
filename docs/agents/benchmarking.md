@@ -452,7 +452,9 @@ captures (#2741).
   `build.c`, `uarch_lab.py`, `ide`, `tools/` and the workflows, and fails on an
   unregistered or stale one. Each published 9700X compiler receipt must name
   the observed CPU, the Ryzen 7 9700X; a runner label, target flag or other
-  host is refused.
+  host is refused. The direct workload harness reads the same observed CPU
+  model, prints it in its report, and on any other host compiles and runs
+  nothing and fails.
 - **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
   The queued benchmark service, its dispatch workflow and the earlier
   `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
@@ -463,13 +465,16 @@ captures (#2741).
   [`benchmarks/9700x/README.md`](../../benchmarks/9700x/README.md) and its
   [admission guide](../../benchmarks/9700x/ADMISSION.md). Once enabled, it
   also runs the routine `uarch_lab.py compare` of each commit after it lands
-  on main against its first parent (#2752; frozen `compiler-compare-v1`
+  on main against its first parent, or against the nearest earlier measured
+  main commit when a merge burst left the first parent unmeasured (#2752;
+  frozen `compiler-compare-v1`
   profile, report-only, merging never waits). Each comparison is published as
   the `9700X compiler benchmark` check on that main commit, queued before the
   run starts and in progress while the 9700X measures (#2803), plus one
   maintained report comment on the commit (#2804). During merge bursts only
   the newest pending commit is measured; the others' checks read
-  **Not measured**. See the
+  **Not measured** and name the range comparison that covers their change.
+  A range result does not isolate one commit. See the
   [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
   An owner pull request can request the same comparison of its head against
   its merge base before merging by changing

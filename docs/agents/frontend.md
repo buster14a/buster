@@ -240,6 +240,30 @@ is unimplemented. `c_test_gnu_common_predefined_macros` pins the reference
 spellings for thirteen target triples in GNU17 and C23, plus type/limit
 consistency, GNU89 inline, and PIC/PIE behavior.
 
+`__float128`, `_Float128`, `_Float64x` and `_Float128x` are recognized as builtin
+type words but have no lowering. A declaration that would define something with
+one fails with `unsupported type '<name>'`: file-scope object definitions
+(tentative and static included), struct/union members, block-scope declarations,
+function definitions (return or parameter type) and function-pointer objects.
+Declarations that create no storage stay accepted and are silently ignored, as
+before: typedefs, function prototypes that are not definitions, and `extern`
+object declarations without an initializer. glibc requires this: `bits/floatn.h`
+contains `typedef __float128 _Float128;` and `_GNU_SOURCE` adds `_Float128`
+prototypes (`strtof128`, the math functions) to `<stdlib.h>`, `<math.h>` and
+`<Python.h>` users. The ignored typedef declares no name, so a later
+`typedef __float128 T; T x;` fails with `unknown type name 'T'`, and a use of
+the spelling itself is diagnosed as above. A function-pointer parameter inside a
+struct or union member (including nested, array and function-returning-function-pointer
+declarators) is diagnosed the same way, as is an unknown type name there; the
+type-machine parameter frame reports it while `member_declarator_depth` is nonzero,
+which aggregate members and storage-creating parenthesized declarations set.
+An identifier-list parameter such as `void (*fp)(a)` is not accepted in a member
+(Clang: only valid in a function definition) and reports `unknown type name 'a'`;
+plain prototypes such as `int legacy(old_style_argument);` keep the GNU acceptance.
+Typedef, prototype and `extern` declarations of function pointers stay lenient.
+`c_test_unsupported_float_extension_diagnostics` and
+`c_test_unknown_type_name_diagnostics` pin this.
+
 ## Trigraph translation policy
 
 Raw root and included source in strict C99, C11 and C17 modes replaces all

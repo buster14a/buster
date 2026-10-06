@@ -1,7 +1,9 @@
 name: 9700X direct workload benchmark
 
 # Runs the owner's pull-request workloads directly on the 9700X runner (#2704),
-# and compares each commit that lands on main with its first parent (#2752).
+# and compares each commit that lands on main with its first parent, or with
+# the nearest measured first-parent ancestor when that has no valid
+# measurement, so a merge burst's unmeasured commits sit in a range (#2752).
 # workflow_run executes this definition from main, so a pull request cannot
 # edit the gate, and the runner group stays pinned to this one file at
 # refs/heads/main.
@@ -15,8 +17,9 @@ name: 9700X direct workload benchmark
 #
 # Main compiler comparison: starts when 9700x-compiler-request.yml completes for
 # a push to main and BENCH_COMPILER_ENABLED is also true. authorize-compiler
-# re-reads the commit, its first parent and main; main is trusted code, so no
-# author gate applies. compare builds and times both compilers; the hosted
+# re-reads the commit, its first-parent chain, the chosen baseline and main
+# (checks: read finds the nearest measured ancestor); main is trusted code, so
+# no author gate applies. compare builds and times both compilers; the hosted
 # publish-compiler job validates the evidence as data and completes the check.
 # Merging never waits for it, and the verdict is report-only.
 #
@@ -285,6 +288,7 @@ jobs:
       contents: read
       pull-requests: read
       actions: read
+      checks: read
     timeout-minutes: 5
     outputs:
       attempt: ${{ steps.verify.outputs.attempt }}
@@ -293,6 +297,8 @@ jobs:
       head_tree: ${{ steps.verify.outputs.head_tree }}
       pull: ${{ steps.verify.outputs.pull }}
       pull_head: ${{ steps.verify.outputs.pull_head }}
+      first_parent: ${{ steps.verify.outputs.first_parent }}
+      range: ${{ steps.verify.outputs.range }}
     steps:
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -376,14 +382,15 @@ jobs:
           path: trusted
           sparse-checkout: tools
           persist-credentials: false
-      # The main commit with its parents: the base and, for a queue merge, the
-      # pull request head.
+      # The main commit with its history without blobs: the baseline on its
+      # first-parent chain and, for a queue merge, the pull request head.
       - name: Check out the main commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           path: candidate
-          fetch-depth: 2
+          fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
       - name: Build and compare both compilers
         shell: bash
@@ -455,6 +462,8 @@ jobs:
           BQ_BASE_COMMIT: ${{ needs.authorize-compiler.outputs.base }}
           BQ_BASE_TREE: ${{ needs.authorize-compiler.outputs.base_tree }}
           BQ_HEAD_TREE: ${{ needs.authorize-compiler.outputs.head_tree }}
+          BQ_FIRST_PARENT: ${{ needs.authorize-compiler.outputs.first_parent }}
+          BQ_RANGE: ${{ needs.authorize-compiler.outputs.range }}
           BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}
           BQ_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: python3 -B tools/bench_direct/compiler_publish.py

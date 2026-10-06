@@ -4404,6 +4404,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
         result.tokenizer_error_count = (u32)preprocess.error_count;
         result.diagnostic = preprocessing_error;
+        c_preprocess_release(&preprocess);
         return result;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
@@ -4419,9 +4420,65 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
         {
             compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);
         }
+        c_preprocess_release(&preprocess);
         return result;
     }
-    return compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess, (String8){.pointer = split, .length = split_length}, metrics);
+    result = compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess, (String8){.pointer = split, .length = split_length}, metrics);
+    c_preprocess_release(&preprocess);
+    return result;
+}
+
+// The spelling arena holds the text every name in the frontend's IR points
+// into, and the driver gives it back as soon as the unit is compiled. An
+// object the result carries must therefore not name anything inside it: copy
+// each string (and any section payload) that does into the result arena.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_in_released_arena(Arena const* released, void const* pointer, u64 length)
+{
+    u8 const* begin = (u8 const*)released;
+    u8 const* address = (u8 const*)pointer;
+    return length != 0 && address >= begin && address < begin + released->reserved_size;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_detach_string(Arena* arena, Arena const* released, String8 value)
+{
+    String8 result = value;
+    if (compiler_driver_in_released_arena(released, value.pointer, value.length))
+    {
+        result = string_duplicate_arena(arena, value, false);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_detach_object(Arena* arena, CPreprocessResult const* preprocess, ObjectFile* object)
+{
+    Arena const* released = preprocess->recovery ? preprocess->recovery->spelling_arena : 0;
+    if (released)
+    {
+        for (u32 index = 0; index < object->section_count; index += 1)
+        {
+            ObjectSection* section = &object->sections[index];
+            section->name = compiler_driver_detach_string(arena, released, section->name);
+            if (compiler_driver_in_released_arena(released, section->data.pointer, section->data.length))
+            {
+                u8* copy = arena_allocate(arena, u8, section->data.length);
+                memcpy(copy, section->data.pointer, section->data.length);
+                section->data.pointer = copy;
+            }
+        }
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            object->symbols[index].name = compiler_driver_detach_string(arena, released, object->symbols[index].name);
+        }
+        for (u32 index = 0; index < object->comdat_count; index += 1)
+        {
+            object->comdats[index].key = compiler_driver_detach_string(arena, released, object->comdats[index].key);
+        }
+        for (u32 index = 0; index < object->debug_module_count; index += 1)
+        {
+            object->debug_modules[index].name = compiler_driver_detach_string(arena, released, object->debug_modules[index].name);
+        }
+        object->diagnostic = compiler_driver_detach_string(arena, released, object->diagnostic);
+    }
 }
 
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
@@ -4432,6 +4489,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         .diagnostic = invocation.diagnostic,
     };
     FileMapRead source_file = {0};
+    // Filled once the source is preprocessed; the end label releases its
+    // private arenas, which nothing the result holds points into.
+    CPreprocessResult preprocess = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -4467,7 +4527,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
     }
     WORK_LEDGER_PHASE(PREPROCESS);
-    CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
+    preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
                                                     .macro_operations = invocation.macro_operations,
                                                     .definitions = definitions,
@@ -4848,6 +4908,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     WORK_LEDGER_PHASE(OUTPUT);
     compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
 end:
+    if (result.has_object)
+    {
+        compiler_driver_detach_object(arena, &preprocess, &result.object);
+    }
+    c_preprocess_release(&preprocess);
     file_map_unmap(source_file);
     return result;
 }

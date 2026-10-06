@@ -17,6 +17,12 @@ HARNESS = Path(__file__).resolve().with_name("run_workloads.py")
 COMPILER = shutil.which("clang") or shutil.which("cc")
 PASSING = '#include <stdio.h>\nint main(void) { puts("self-check ok checksum=2a"); return 0; }\n'
 FAILING = "int main(void) { return 3; }\n"
+APPROVED_CPU = "AMD Ryzen 7 9700X 8-Core Processor"
+# Runs the harness with the observed CPU model replaced, so these tests do not
+# depend on the host they run on; the harness itself has no override.
+LAUNCHER = ("import sys; sys.path.insert(0, sys.argv[1]); import run_workloads; "
+            "model = sys.argv[2]; run_workloads.observed_cpu_model = lambda: model; "
+            "sys.argv = [run_workloads.__file__, *sys.argv[3:]]; sys.exit(run_workloads.main())")
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -51,10 +57,10 @@ class DirectWorkloadTest(unittest.TestCase):
         git(self.repository, "commit", "-q", "-m", "head")
         return git(self.repository, "rev-parse", "HEAD")
 
-    def run_harness(self, head: str) -> subprocess.CompletedProcess:
+    def run_harness(self, head: str, cpu_model: str = APPROVED_CPU) -> subprocess.CompletedProcess:
         cpu = min(os.sched_getaffinity(0))
         return subprocess.run(
-            [sys.executable, "-B", str(HARNESS), "--candidate", str(self.repository),
+            [sys.executable, "-B", "-c", LAUNCHER, str(HARNESS.parent), cpu_model, "--candidate", str(self.repository),
              "--base", self.base, "--head", head, "--work", str(self.root / "work"),
              "--summary", str(self.root / "summary.md"), "--cc", COMPILER, "--cpu", str(cpu)],
             capture_output=True, text=True, check=False)
@@ -62,11 +68,24 @@ class DirectWorkloadTest(unittest.TestCase):
     def test_reports_every_run_and_its_output(self) -> None:
         result = self.run_harness(self.commit({"benchmarks/9700x/sort_check.c": PASSING}))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"Observed host: `{APPROVED_CPU}`.", result.stdout)
         self.assertIn("All 11 runs printed identical output:", result.stdout)
         self.assertIn("self-check ok checksum=2a", result.stdout)
         self.assertEqual(result.stdout.count("| sample "), 9)
         self.assertEqual(result.stdout.count("| warmup "), 2)
         self.assertEqual((self.root / "summary.md").read_text(encoding="utf-8"), result.stdout)
+
+    def test_other_or_unknown_host_measures_nothing(self) -> None:
+        head = self.commit({"benchmarks/9700x/sort_check.c": PASSING})
+        for model in ("AMD EPYC 7763 64-Core Processor", "AMD Ryzen 7 7700X 8-Core Processor", "NA", ""):
+            with self.subTest(model=model):
+                result = self.run_harness(head, model)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"Observed host: `{model}`.", result.stdout)
+                self.assertIn("is not the approved Zen 5 host (AMD Ryzen 7 9700X); nothing was measured",
+                              result.stdout)
+                self.assertNotIn("| sample ", result.stdout)
+                self.assertFalse((self.root / "work").exists())
 
     def test_nonzero_exit_fails(self) -> None:
         result = self.run_harness(self.commit({"benchmarks/9700x/broken.c": FAILING}))

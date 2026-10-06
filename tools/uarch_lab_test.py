@@ -1141,7 +1141,9 @@ class CompareFlowTests(Fakes, unittest.TestCase):
         self.assertEqual(summary["metrics"]["task_clock"]["n"], 6)
         for name in ("instructions", "cycles", "branch_misses", "page_faults"):
             self.assertEqual((summary["metrics"][name]["n"], summary["metrics"][name]["outcome"]), (0, "no data"), name)
-        self.assertTrue(any(warning.startswith("perf stat unusable") for warning in summary["warnings"]), summary["warnings"])
+        warnings = [warning for warning in summary["warnings"] if warning.startswith("perf stat unusable")]
+        self.assertEqual(len(warnings), 1, summary["warnings"])
+        self.assertNotIn("unusable (perf stat unusable", warnings[0])
         with open(os.path.join(output, "pairs.json")) as handle:
             records = json.load(handle)
         self.assertTrue(all(record["counters"] is False and record["cpu_s"] is not None for record in records))
