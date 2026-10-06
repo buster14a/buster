@@ -29212,6 +29212,21 @@ c_ir_compound_literal_failed:
     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
 }
 
+// One anonymous aggregate the promoted-member search walked through between
+// the designated root and the aggregate that declares the member: its type,
+// its offset from the root, and the field of it that continues the path (the
+// next anonymous aggregate, or the member itself for the last link). C17
+// 6.7.9p17 resumes positional initialization after the designated member in
+// that innermost aggregate, then outward, so each link is a continuation.
+typedef struct CIrPromotedMemberLink CIrPromotedMemberLink;
+struct CIrPromotedMemberLink
+{
+    IrTypeId type;
+    u64 offset;
+    u32 field_index;
+    u8 reserved[4];
+};
+
 typedef struct CIrPromotedMemberPath CIrPromotedMemberPath;
 struct CIrPromotedMemberPath
 {
@@ -29223,6 +29238,10 @@ struct CIrPromotedMemberPath
     u64 offset;
     u64 union_offset;
     u64 union_size;
+    // Anonymous aggregates below the root, outermost first; zero for a member
+    // the root declares directly. Allocated from the builder's temporary arena.
+    CIrPromotedMemberLink* links;
+    u32 link_count;
     u32 root_field;
     u32 union_field;
     bool ambiguous;
@@ -29241,6 +29260,8 @@ struct CIrPromotedMemberWork
     u32 root_field;
     u32 depth;
     u32 union_field;
+    u32 parent;
+    u32 via_field;
     bool has_union;
     u8 reserved[3];
 };
@@ -29279,6 +29300,8 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
     bool found = false;
     bool ambiguous = false;
     u32 found_depth = UINT32_MAX;
+    u32 found_work = 0;
+    u32 found_field = 0;
     IrType* root_type = ir_type_from_id(&builder->program->types, root);
     work[0] = (CIrPromotedMemberWork){
         .type = root,
@@ -29330,6 +29353,8 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
                     };
                     found = true;
                     found_depth = current.depth;
+                    found_work = work_index - 1;
+                    found_field = field_index;
                 }
                 else if (current.depth == found_depth)
                 {
@@ -29356,9 +29381,31 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
                     .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
                     .depth = current.depth + 1,
                     .union_field = child_is_union ? UINT32_MAX : type->kind == IR_TYPE_UNION ? field_index : current.union_field,
+                    .parent = work_index - 1,
+                    .via_field = field_index,
                     .has_union = child_is_union || current.has_union,
                 };
             }
+        }
+    }
+    u32 link_count = found && !ambiguous ? work[found_work].depth : 0;
+    CIrPromotedMemberLink* links = 0;
+    if (link_count)
+    {
+        // The chain outlives the scratch scope, so it comes from the builder's
+        // arena (the scratch arena is never that one).
+        links = arena_allocate(builder->temporary_arena, CIrPromotedMemberLink, link_count);
+        u32 walk = found_work;
+        u32 field_on_path = found_field;
+        for (u32 link_index = link_count; link_index > 0; link_index -= 1)
+        {
+            links[link_index - 1] = (CIrPromotedMemberLink){
+                .type = work[walk].type,
+                .offset = work[walk].offset,
+                .field_index = field_on_path,
+            };
+            field_on_path = work[walk].via_field;
+            walk = work[walk].parent;
         }
     }
     if (ambiguous)
@@ -29366,6 +29413,11 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
         result->ambiguous = true;
     }
     scratch_end(promoted_member_scratch);
+    if (found && !ambiguous)
+    {
+        result->links = links;
+        result->link_count = link_count;
+    }
     return found && !ambiguous;
 }
 
@@ -46616,6 +46668,28 @@ BUSTER_C_INTERNAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder* 
                     .next_index = member_slot + 1,
                 };
             }
+            for (u32 link_index = 0; link_index < path.link_count; link_index += 1)
+            {
+                CIrPromotedMemberLink link = path.links[link_index];
+                IrType* link_type = ir_type_from_id(&builder->program->types, link.type);
+                u32 link_slot = c_ir_constant_initializer_field_slot(builder, link_type, link.field_index);
+                if (link_slot == UINT32_MAX || link_slot == UINT32_MAX - 1)
+                {
+                    return c_ir_initializer_inference_fail(message_out, token_out, S8("aggregate designator names an uninitializable field"), cursor + 1);
+                }
+                if ((u64)link_slot + 1 >= c_ir_constant_initializer_slot_count(builder, link_type))
+                {
+                    continue;
+                }
+                if (designator->continuation_count >= continuation_capacity)
+                {
+                    return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer designator exceeds its capacity"), cursor);
+                }
+                designator->continuations[designator->continuation_count++] = (CIrInitializerContinuation){
+                    .type = link.type,
+                    .next_index = link_slot + 1,
+                };
+            }
             current = path.type;
             cursor += 2;
         }
@@ -47547,6 +47621,33 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
                     .type = container_id,
                     .offset = current_offset,
                     .next_index = member_slot + 1,
+                    .range_count = result->range_count,
+                };
+            }
+            // Positional items after a member promoted out of anonymous
+            // aggregates resume inside the innermost one that still has a
+            // slot, then in each enclosing one (C17 6.7.9p17).
+            for (u32 link_index = 0; link_index < path.link_count; link_index += 1)
+            {
+                CIrPromotedMemberLink link = path.links[link_index];
+                IrType* link_type = ir_type_from_id(&builder->program->types, link.type);
+                u32 link_slot = c_ir_constant_initializer_field_slot(builder, link_type, link.field_index);
+                if (link_slot == UINT32_MAX || link_slot == UINT32_MAX - 1 || link.offset > UINT64_MAX - current_offset)
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("aggregate designator names an uninitializable field"), cursor + 1);
+                }
+                if ((u64)link_slot + 1 >= c_ir_constant_initializer_slot_count(builder, link_type))
+                {
+                    continue;
+                }
+                if (result->continuation_count >= continuation_capacity)
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("initializer designator exceeds its capacity"), cursor);
+                }
+                result->continuations[result->continuation_count++] = (CIrConstantInitializerContinuation){
+                    .type = link.type,
+                    .offset = current_offset + link.offset,
+                    .next_index = (u64)link_slot + 1,
                     .range_count = result->range_count,
                 };
             }

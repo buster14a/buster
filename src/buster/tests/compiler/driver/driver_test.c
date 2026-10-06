@@ -28040,6 +28040,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_static_local_member_address.c"),
         S8("tests/basic_c_tied_operand_reused_source.c"),
         S8("tests/basic_c_union_designator_merge.c"),
+        S8("tests/basic_c_promoted_designator_continuation.c"),
         S8("tests/basic_c_date_time_predefines.c"),
         S8("tests/basic_c_plain_char_literal_sign.c"),
         S8("tests/basic_c_char_limits.c"),

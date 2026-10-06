@@ -1306,6 +1306,8 @@ struct CParsePromotedMemberWork
     CTypeId type;
     u32 root_field;
     u32 depth;
+    u32 parent;
+    u32 via_field;
 };
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);

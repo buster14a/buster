@@ -8648,8 +8648,13 @@ BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseResult* result, C
     return 0;
 }
 
+// The search keeps its queue in the machine's promoted_member_work, and a
+// found member leaves in found_work_out/found_field_out the queue row that
+// declares it and that row's field index. The rows' parent/via_field links
+// then spell the anonymous aggregates between the root and the member until
+// the next search (c_parse_initializer_promoted_continuations reads them).
 BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, CParseResult* result, CTypeId root, u32 symbol, String8 name, CTypeId* type_out,
-                                                      u32* root_field_out, bool* ambiguous_out)
+                                                      u32* root_field_out, bool* ambiguous_out, u32* found_work_out, u32* found_field_out)
 {
     if (ambiguous_out)
     {
@@ -8706,6 +8711,8 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
                 {
                     *type_out = field->type;
                     *root_field_out = current.root_field == UINT32_MAX ? field_index : current.root_field;
+                    *found_work_out = work_index - 1;
+                    *found_field_out = field_index;
                     found = true;
                     found_depth = current.depth;
                 }
@@ -8737,6 +8744,8 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
                 .type = child_id,
                 .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
                 .depth = current.depth + 1,
+                .parent = work_index - 1,
+                .via_field = field_index,
             };
         }
     }
@@ -8907,6 +8916,51 @@ BUSTER_C_INTERNAL bool c_parse_initializer_index_range(CTypeParseMachine* machin
     return true;
 }
 
+// Appends the continuations a member promoted out of anonymous aggregates
+// leaves behind: one per anonymous aggregate between the root and the member
+// that still has a slot after the one the path used, outermost first, so the
+// innermost is resumed first (C17 6.7.9p17). The queue row of the search above
+// that declared the member is the starting point.
+BUSTER_C_INTERNAL bool c_parse_initializer_promoted_continuations(CTypeParseMachine* machine, CParseResult* result, u32 found_work, u32 found_field,
+                                                                    CParseInitializerContinuation* continuations, u32* continuation_count, u32 capacity)
+{
+    CParsePromotedMemberWork* work = machine->promoted_member_work;
+    u32 depth = work[found_work].depth;
+    u32 base = *continuation_count;
+    bool ok = base <= capacity && depth <= capacity - base;
+    if (ok)
+    {
+        u32 walk = found_work;
+        u32 field_on_path = found_field;
+        for (u32 link = depth; link > 0; link -= 1)
+        {
+            CType* link_type = result->types + work[walk].type.value;
+            u32 link_slot = c_parse_initializer_member_slot(result, link_type, field_on_path);
+            ok &= link_slot != UINT32_MAX && link_slot != UINT32_MAX - 1;
+            continuations[base + link - 1] = (CParseInitializerContinuation){
+                .type = work[walk].type,
+                .next_index = (u64)link_slot + 1,
+            };
+            field_on_path = work[walk].via_field;
+            walk = work[walk].parent;
+        }
+    }
+    if (ok)
+    {
+        u32 kept = base;
+        for (u32 link = base; link < base + depth; link += 1)
+        {
+            CType* link_type = result->types + continuations[link].type.value;
+            if (continuations[link].next_index < c_parse_initializer_member_count(result, link_type))
+            {
+                continuations[kept++] = continuations[link];
+            }
+        }
+        *continuation_count = kept;
+    }
+    return ok;
+}
+
 BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                          CScopeId scope, CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
                                                          CParseInitializerContinuation* continuation_work, u32 continuation_capacity,
@@ -9002,10 +9056,13 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                 return false;
             }
             u32 field_index = UINT32_MAX;
+            u32 found_work = 0;
+            u32 found_field = 0;
             CTypeId member_type = C_TYPE_ID_INVALID;
             bool ambiguous = false;
             if (!c_parse_promoted_member_type(machine, result, current, preprocess.tokens[cursor + 1].symbol,
-                                              c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]), &member_type, &field_index, &ambiguous))
+                                              c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]), &member_type, &field_index, &ambiguous,
+                                              &found_work, &found_field))
             {
                 if (ambiguous)
                 {
@@ -9051,6 +9108,11 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                     .type = container_id,
                     .next_index = member_slot + 1,
                 };
+            }
+            if (!c_parse_initializer_promoted_continuations(machine, result, found_work, found_field, designator->continuations,
+                                                            &designator->continuation_count, continuation_capacity))
+            {
+                return false;
             }
             cursor += 2;
         }
