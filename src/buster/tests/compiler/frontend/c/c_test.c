@@ -27301,6 +27301,252 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_call(Unit
     return result;
 }
 
+// #1290: an empty argument list can return the next call's function pointer.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8(
+            "static int factory_calls, invoke_calls, arg_calls, slot;\n"
+            "static int twice(int value) { invoke_calls += 1; return value * 2; }\n"
+            "static void sink(int value) { invoke_calls += 1; slot = value; }\n"
+            "static void release(void *value) { invoke_calls += 1; *(int *)value = 29; }\n"
+            "static void (*get(void))(int) { factory_calls += 1; return sink; }\n"
+            "typedef int (*Unary)(int);\n"
+            "typedef int (*Binary)(int, int);\n"
+            "static Unary tget(void) { factory_calls += 1; return twice; }\n"
+            "static void (*get_free(void))(void *) { factory_calls += 1; return release; }\n"
+            "static int sum(int left, int right) { invoke_calls += 1; return left + right; }\n"
+            "static Binary pick(void) { factory_calls += 1; return sum; }\n"
+            "static int arg(int value) { arg_calls += 1; return value; }\n"
+            "static Unary get1(int unused) { (void)unused; factory_calls += 1; return twice; }\n"
+            "#define RESET() factory_calls = 0; invoke_calls = 0; arg_calls = 0; slot = 0\n"
+            "int chain_statement(void) { RESET(); get()(3); return slot == 3 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int chain_typedef(void) { RESET(); int value = tget()(3); return value == 6 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int chain_pointer_argument(void) { RESET(); get_free()(&slot); return slot == 29 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int chain_value(void) { RESET(); int value = pick()(1, 2); return value == 3 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int chain_argument(void) { RESET(); int value = tget()(arg(4)); return value == 8 && factory_calls == 1 && invoke_calls == 1 && arg_calls == 1; }\n"
+            "int chain_parenthesized(void) { RESET(); int value = (*tget())(6); return value == 12 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int chain_group(void) { RESET(); int value = (tget())(7); return value == 14 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int chain_argument_factory(void) { RESET(); int value = get1(0)(8); return value == 16 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int chain_lazy(int enabled) { RESET(); int value = enabled ? tget()(10) : 0; return value == enabled * 20 && factory_calls == enabled && invoke_calls == enabled; }\n"
+            "int chain_lazy_and(int enabled) { RESET(); int value = enabled && tget()(11); return value == enabled && factory_calls == enabled && invoke_calls == enabled; }\n"
+            "int chain_lazy_or(int enabled) { RESET(); int value = enabled || tget()(12); return value == 1 && factory_calls == !enabled && invoke_calls == !enabled; }\n"
+            "int main(void) {\n"
+            " int failed = 0;\n"
+            " failed |= !chain_statement(); failed |= !chain_typedef(); failed |= !chain_pointer_argument(); failed |= !chain_value();\n"
+            " failed |= !chain_argument(); failed |= !chain_parenthesized(); failed |= !chain_group(); failed |= !chain_argument_factory();\n"
+            " failed |= !chain_lazy(0); failed |= !chain_lazy(1); failed |= !chain_lazy_and(0); failed |= !chain_lazy_and(1);\n"
+            " failed |= !chain_lazy_or(0); failed |= !chain_lazy_or(1); return failed;\n"
+            "}\n"),
+        S8(
+            "static int factory_calls, invoke_calls;\n"
+            "typedef int (*Unary)(int);\n"
+            "static int twice(int value) { invoke_calls += 1; return value * 2; }\n"
+            "typedef Unary (*Chooser)(int);\n"
+            "static Unary choose(int unused) { (void)unused; factory_calls += 1; return twice; }\n"
+            "static Chooser l2(void) { factory_calls += 1; return choose; }\n"
+            "static Chooser l2a(int unused) { (void)unused; factory_calls += 1; return choose; }\n"
+            "typedef Unary (*EmptyChooser)(void);\n"
+            "static Unary choose0(void) { factory_calls += 1; return twice; }\n"
+            "static EmptyChooser middle(int unused) { (void)unused; factory_calls += 1; return choose0; }\n"
+            "typedef int (*Terminal)(void);\n"
+            "static int terminal(void) { invoke_calls += 1; return 7; }\n"
+            "typedef Terminal (*EmptyLevel)(void);\n"
+            "static Terminal get_terminal(void) { factory_calls += 1; return terminal; }\n"
+            "static EmptyLevel empty_chain(void) { factory_calls += 1; return get_terminal; }\n"
+            "#define RESET() factory_calls = 0; invoke_calls = 0\n"
+            "int chain_triple(void) { RESET(); int value = l2()(1)(4); return value == 8 && factory_calls == 2 && invoke_calls == 1; }\n"
+            "int chain_middle_empty(void) { RESET(); int value = middle(0)()(5); return value == 10 && factory_calls == 2 && invoke_calls == 1; }\n"
+            "int chain_all_empty(void) { RESET(); int value = empty_chain()()(); return value == 7 && factory_calls == 2 && invoke_calls == 1; }\n"
+            "int chain_argument_triple(void) { RESET(); int value = l2a(0)(1)(9); return value == 18 && factory_calls == 2 && invoke_calls == 1; }\n"
+            "int main(void) {\n"
+            " int failed = 0;\n"
+            " failed |= !chain_triple(); failed |= !chain_middle_empty(); failed |= !chain_all_empty(); failed |= !chain_argument_triple();\n"
+            " return failed;\n"
+            "}\n"),
+    };
+    typedef struct CTestCallResultExpected CTestCallResultExpected;
+    struct CTestCallResultExpected
+    {
+        u32 program;
+        String8 name;
+        u32 calls;
+    };
+    CTestCallResultExpected expected[] = {
+        {0, S8("chain_statement"), 2},
+        {0, S8("chain_typedef"), 2},
+        {0, S8("chain_pointer_argument"), 2},
+        {0, S8("chain_value"), 2},
+        {0, S8("chain_argument"), 3},
+        {0, S8("chain_parenthesized"), 2},
+        {0, S8("chain_group"), 2},
+        {0, S8("chain_argument_factory"), 2},
+        {0, S8("chain_lazy"), 2},
+        {0, S8("chain_lazy_and"), 2},
+        {0, S8("chain_lazy_or"), 2},
+        {1, S8("chain_triple"), 3},
+        {1, S8("chain_middle_empty"), 3},
+        {1, S8("chain_all_empty"), 3},
+        {1, S8("chain_argument_triple"), 3},
+    };
+    for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
+    {
+        for (u32 target_index = 0; target_index < 6; target_index += 1)
+        {
+            Target target = target_native;
+            target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+            target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+            for (u32 dialect = 0; dialect < 2; dialect += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, sources[program], (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target),
+                        .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("call-result-callees.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = lowered.diagnostics[index];
+                        BUSTER_TEST_RAW(arguments, false,
+                            string_format(temporary.arena, S8("call result program={u32} target={u32} dialect={u32} form={u32} line={u32} column={u32}: {S8}"),
+                                program, target_index, dialect, form, diagnostic.location.line, diagnostic.location.column, diagnostic.message));
+                    }
+                    if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                                                  lowered.program->module_count == 1))
+                    {
+                        IrModule* module = lowered.program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                        u32 checked = 0;
+                        u32 expected_count = 0;
+                        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+                        {
+                            CTestCallResultExpected entry = expected[index];
+                            if (entry.program != program)
+                            {
+                                continue;
+                            }
+                            expected_count += 1;
+                            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                            {
+                                IrFunction* function = module->functions + function_index;
+                                if (!string_equal(function->name, entry.name))
+                                {
+                                    continue;
+                                }
+                                u32 call_count = 0;
+                                bool unreachable = false;
+                                bool returns = false;
+                                for (u32 row = 0; row < function->instruction_count; row += 1)
+                                {
+                                    IrOpcode opcode = function->instructions[row].opcode;
+                                    call_count += opcode == IR_OPCODE_CALL;
+                                    unreachable |= opcode == IR_OPCODE_UNREACHABLE;
+                                    returns |= opcode == IR_OPCODE_RETURN;
+                                }
+                                BUSTER_TEST_RAW(arguments, call_count == entry.calls && returns && !unreachable,
+                                    string_format(temporary.arena, S8("call result {S8} program={u32} target={u32} dialect={u32} form={u32}: calls={u32} expected={u32}"),
+                                        entry.name, program, target_index, dialect, form, call_count, entry.calls));
+                                checked += 1;
+                            }
+                        }
+                        BUSTER_TEST(arguments, checked == expected_count);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    String8 rejected[] = {
+        S8("static int scalar(void) { return 1; } int bad(void) { return scalar()(3); }"),
+        S8("typedef int (*Unary)(int); static int twice(int value) { return value * 2; }"
+           "static Unary get(void) { return twice; } int bad(void) { return get()(); }"),
+        S8("typedef int (*Unary)(int); static int twice(int value) { return value * 2; }"
+           "static Unary get(void) { return twice; } int bad(void) { return get()(1, 2); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+    {
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[index], (CPreprocessOptions){
+                    .target = target_native, .data_layout = target_data_layout(target_native),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("invalid-call-result.c"), tokens, syntax, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,
+                    string_format(temporary.arena, S8("invalid call result case={u32} dialect={u32} form={u32} diagnostics={u32} certified={u32}"),
+                        index, dialect, form, lowered.diagnostic_count, (u32)lowered.canonical_ir_certified));
+                if (index == 0 && BUSTER_REQUIRE(arguments, lowered.diagnostic_count != 0))
+                {
+                    BUSTER_TEST_RAW(arguments, string_equal(lowered.diagnostics[0].message,
+                        S8("in function 'bad': called object is not a function or function pointer (have 'int')")),
+                        string_format(temporary.arena, S8("scalar call result dialect={u32} form={u32}: {S8}"),
+                            dialect, form, lowered.diagnostics[0].message));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
+    {
+        String8 path = buster_test_temporary_path(arguments->arena, S8("call-result-callees"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sources[program]))))
+        {
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            {
+                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                {
+                    for (u32 form = 0; form < 2; form += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("call-result-callees-run"), S8(".exe"));
+                        String8 command[] = {S8("-nostdinc"), S8("-fno-builtin"), dialects[dialect], modes[mode],
+                            form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        invocation.reject_machine_fallback = mode != 0;
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        String8 context = string_format(temporary.arena, S8("call result program={u32} {S8} {S8} form={u32}"),
+                            program, dialects[dialect], modes[mode], form);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                            string_format(temporary.arena, S8("{S8}: {S8}"), context, compiled.diagnostic));
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("{S8}: status={u32} timed_out={u32}"),
+                                        context, execution.platform_status, (u32)execution.timed_out));
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // A control-bearing statement expression can also occur inside a function
 // call argument (the shape used by glibc's assert/check_exp macros).  The
 // deferred call must still be lowered in the statement-expression body rather
@@ -41884,6 +42130,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_assignment_values);
+    BUSTER_TEST_FIXTURE(arguments, c_test_call_result_callees);
     BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
     BUSTER_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
