@@ -10,6 +10,13 @@ protocol before it may claim a number. Audit history and the negative
 results this document must not re-litigate live in `docs/performance-audits/`,
 indexed by `PERFORMANCE_AUDITS.md`.
 
+> **Spelling note.** The vocabulary now names lane widths by bit width
+> (`_u8`, `_u32`, `_u64`) instead of `_byte`, `_word` and `_quad`:
+> `simd512_equal_word` is `simd512_equal_u32`, `simd512_popcount_quad` would be
+> `simd512_popcount_u64`, and so on. The catalogue below keeps its original spellings.
+> `simd512_permute2_u32` and `simd512_add_u32` have since landed with the
+> C lexer's row writer as their consumer (#129).
+
 ## Method and reference profile
 
 Ten back-to-back stage-1 unity compiles (`ide cc -Isrc -Ibuild/generated

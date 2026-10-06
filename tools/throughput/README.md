@@ -75,6 +75,17 @@ the end of the child's log. It also keeps the whole log as `LOG.line-N` under th
 test root, which the harness artifacts upload. The desktop matrix also retains
 these parent diagnostics and the child-log tail in `combinations.log`.
 
+Source-to-object admission failures additionally name the first failed predicate,
+the attempted command, and the original process result, including launch stage.
+The private process group's raw PID/PGID is not returned by this result API.
+If the workload-admission success fixture unexpectedly fails, it prints the
+original nested command, log, metrics and artifact file identities before a
+later self-test clears the root. Text is limited to 65,536 bytes per file and
+reports truncation; binaries are identified by SHA-256 and size. This bounded
+console packet helps diagnose the failed invocation. It does not replace the
+full original files in a harness artifact or establish a historical failure's
+cause. Admission predicates, deadlines and exit codes remain unchanged.
+
 POSIX launch failures preserve the failing setup/exec stage and errno through
 a small close-on-exec error pipe. Child reporting uses no allocation or buffered
 stdio, and parent reads are nonblocking after the waited child exits. A missing
@@ -83,6 +94,16 @@ reports a launch error; a program that successfully starts and exits 125 remains
 a normal child result. The native self-test checks all four refusals, the valid
 exit 125 control and repeated descriptor cleanup. This diagnoses a refusal; it
 does not explain an unreproduced transient OS error or retry the invocation.
+
+Group setup accepts `setpgid(0,0)`'s `EPERM` only when a fresh `getpgrp()` equals
+the child's own `getpid()`, proving the required private-group postcondition.
+Another group or any other error remains a launch failure with its captured
+errno. The native self-test exercises actual session-leader `EPERM`, ordinary
+group creation, an already private group's synthetic redundant refusal, and
+wrong-group/other-error refusals in two directly owned children with two-second
+deadlines and descriptor census. `THROUGHPUT_GROUP_POSTCONDITION` records these
+kernel witnesses. This does not establish the historical macOS refusal's cause;
+those incidents did not retain the failed child's group state.
 
 The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure
 and three-second child deadline. It restores the saved limit only after
@@ -359,6 +380,107 @@ Crafted empty/tied-symbol/relocation cases and printer phase attribution remain
 separate correctness/profiling work for #116; no new compiler timing hooks or
 parallel measurement framework are introduced here.
 
+## Multi-TU scaling (`scale`)
+
+`scale` measures the native link cohort that `-fcompile-jobs=N` drives
+([driver contract](../../docs/agents/driver.md#opt-in-native-translation-unit-lanes)).
+`-c`, `-S` and single-input commands stay serial, so the ordinary `run` corpus
+never exercises it. Linux only: it needs both a per-process CPU set and the
+sysfs CPU topology. On macOS and Windows it exits 2 without measuring.
+
+```sh
+./build.sh bench_throughput scale --compiler /absolute/ide --output build/scaling-new \
+  --cpu-set 1-7 --workers 1,2,4,7 --repeats 15
+```
+
+**Placement.**
+- `--cpu-set` takes Linux cpulist syntax, or `auto` for the whole permitted
+  mask. Every listed CPU must be in the current affinity mask. A set is never
+  narrowed silently, and a duplicate or reversed range is an error.
+- `thread_siblings_list` defines a physical core. Missing or malformed topology
+  for any CPU in the set refuses the run; the layout is never guessed from CPU
+  numbering.
+- Worker count W runs on one logical CPU from each of the first W physical cores
+  of the set, in ascending order. The child is pinned to exactly those CPUs.
+- Asking for more workers than the set has physical cores is an error.
+- `--allow-smt` adds a separate whole-set point labelled `smt`, with one worker
+  per logical CPU (for example 8C/16T). Core and SMT points are never pooled.
+- Leave a housekeeping core outside the set. The tool records topology but does
+  not prove the siblings or the rest of the host are idle.
+
+**Workloads.** Deterministic C sources are generated before any timing. Only
+TU 0 defines `main`, so every input set links. Each series is a fixed input
+set:
+
+| Series | Inputs | Shape |
+|---|---|---|
+| `equal` | 4 × max W | Equal-size TUs |
+| `skewed` | 4 × max W | One TU eight times larger than the others |
+| `tiny` | 16 × max W | One small function per TU |
+| `count-wW-nN` | W−1, W or W+1 | Equal TUs, measured at 1 and W workers |
+| `diagnostic` | max(3, max W + 1) | Two TUs reference undeclared identifiers |
+
+- `equal`, `skewed` and `tiny` keep the same inputs at every W, so they are
+  strong-scaling series. Their points are: the compiler default with no
+  `-fcompile-jobs`, the explicit one-worker reference, then each listed W.
+- `--shape equal|skewed|tiny|count|all` selects series (repeatable; default
+  all). The diagnostic series always runs.
+- `--profile` and `--scale` size the functions as in `generate`.
+
+**Each sample** is a fresh process:
+`ide cc -g0 -O0 [-fcompile-jobs=W] -fmetrics-out=M tu0000.c … -o program`,
+run in the series directory. After every sample, `scale` checks:
+- exit status 0 and a nonempty executable;
+- the `CC_METRICS` header reports every input `ok`;
+- `compilation_workers` equals `min(W, inputs)`, or 1 for the default and
+  one-worker points;
+- the executable is byte-identical across every worker count and repeat;
+- peak RSS stays under `--max-rss-mib`, when given.
+
+**Diagnostics.** Each diagnostic point must exit nonzero, produce no artifact,
+and give the same exit status and a byte-identical ordered log at every worker
+count.
+
+**Sampling.** Each point gets `--warmups` untimed runs, then `--repeats` timed
+iterations (1–64, default 10). Each iteration rotates the starting point and
+odd iterations reverse the order. Any failure, mismatch, timeout or budget
+excess makes the run invalid: exit 2 and a `scaling.json` with
+`"status":"invalid"` and the first reason.
+
+**Bundle.** `--output` must be a new directory.
+
+| File | Contents |
+|---|---|
+| `scaling-metadata.json` | Compiler path and SHA-256, requested set, per-CPU package/core/sibling topology, placements, input hashes per series |
+| `scaling.csv` | One row per timed sample: wall, user and system time, peak RSS, observed workers, interval kind, artifact hash |
+| `commands.jsonl` | Exact argv, working directory and CPU set of every launch |
+| `scaling.json`, `scaling.md` | Per point: median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency, CPU-work (user+system) inflation and peak-RSS inflation |
+
+Peak RSS is the compiler process's own high-water mark. It is not a sum over a
+process tree.
+
+**Not covered.**
+- No threshold, guard or exit 1 decision.
+- No generated-program timing.
+- Concurrent independent compiler processes are a separate experiment.
+- `scale` never asks for more workers than the selected physical cores, and
+  checks the reported `compilation_workers`. Since #2863 the compiler also
+  clamps its own worker count to the affinity mask.
+
+**Housekeeping core.** `--exclude-core CPU` removes the whole physical core
+containing CPU from the set, siblings included, before any other check. The
+removed CPUs are recorded as `excluded_cpus`. The CPU must be in the requested
+set, its `thread_siblings_list` must be readable, and at least one CPU must
+remain.
+
+**On the 9700X.** An owner pull request that adds or changes
+[`benchmarks/9700x/scaling.request`](../../benchmarks/9700x/scaling.request)
+runs the frozen `scaling-v1` profile on its candidate compiler inside the pull
+request comparison
+([route](../../benchmarks/9700x/README.md#multi-tu-scaling-of-a-pull-request)).
+The [dedicated-host guide](DEDICATED.md#multi-tu-scaling-series) explains the
+placement it uses.
+
 ## Measurements and their limits
 
 `wall_seconds` spans process launch through wait completion. User and system
@@ -495,7 +617,7 @@ The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
 | `simplify_passes`, `simplify_block_visits`, `simplify_empty_block_visits`, `simplify_parameter_visits`, `simplify_incoming_visits` | Fixed-point sweeps and visited blocks/parameters/incoming rows, including revisits and the initial active-block census. Empty-block visits are a subset of block visits. |
 | `value_scratch_bytes`, `value_clear_bytes`, `replacement_rows` | Value-count-sized table allocation requests, explicit memset bytes for those tables, and identity-map initialization rows. These exclude block-sized scratch, restoration tails, and sparse slots. |
 | `initialization_work_visits`, `live_work_visits` | Values popped from the definite-initialization and live-parameter queues. |
-| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the three value compaction passes and final instruction/operand/incoming remapping. |
+| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the fused dense numbering/root copy and alias resolution passes, and final instruction/operand/incoming remapping. |
 
 These share the existing saturation, calling-thread and failed-attempt rules.
 They do not add timers, histograms, per-function storage or a reporting switch.
@@ -787,6 +909,9 @@ A completed run seals the six primary machine-readable evidence files with
 SHA-256 in `complete.txt`. Comparison rechecks the seal, strict row counts,
 unique pair slots/order positions, numeric validity, invariant workload units
 and repeat output hashes, then regenerates `summary.json` and `summary.md`.
+Each telemetry replay must match its own timing variant's output bytes/hash
+and source bytes/lines/functions. Different variants may emit different artifacts;
+a zero function count remains valid when that denominator is unavailable.
 These two reports are derived outputs, not retained evidence: comparison removes
 old reports before validation and discards newly written reports on validation
 or stream failure. A failed replay therefore cannot reuse an earlier verdict or

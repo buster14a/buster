@@ -13,12 +13,15 @@ import ci_unit_tests_campaign as campaign
 ROWS = [(0, "c_frontend_tests", False), (1, "compiler_driver_tests", False), (2, "table_tests", True)]
 ENVIRONMENT = {"BUSTER_TEST_SOURCE_REVISION": "a" * 40, "BUSTER_TEST_JOBS": "2", "BUSTER_TEST_TABLE_AUDITS": "0",
                "ImageOS": "ubuntu26", "ImageVersion": "fixture-image", "RUNNER_ARCH": "X64", "RUNNER_OS": "Linux"}
+HOST_RECORD = "CI_UNIT_HOST_V1 architecture=x86_64 feature_source=cpuid-xcr0 feature_word_count=4 word0=1 word1=2 word2=3 word3=4 simd_512_base=0 simd_512=0\n"
+HOST_PROFILE = {"schema": "buster-native-host-profile-v1", "architecture": "x86_64", "feature_source": "cpuid-xcr0",
+                "feature_words": [1, 2, 3, 4], "simd_512_base": False, "simd_512": False}
 
 
-def inventory_log():
-    lines = []
+def inventory_log(host=True, primary_module="compiler_driver_tests"):
+    lines = [HOST_RECORD] if host else []
     for index, name, audit in ROWS:
-        owner = "driver" if name == "compiler_driver_tests" else "rest"
+        owner = "primary" if name == primary_module else "rest"
         lines.append(f"CI_UNIT_MODULE_V1 index={index} module={name} table_audit={int(audit)} enabled={int(not audit)} selected=0 group={owner}\n")
     lines.append("CI_UNIT_BATCH_V1 group=inventory modules=0 modules_passed=0 assertions=0 passed=0 failed=0 external=0 external_passed=0 status=inventory\n")
     lines.append("[0/0] Unit tests (0 of 3 modules selected)\n[0/0] Module tests\n[0/0] External tests\n")
@@ -34,12 +37,12 @@ def terminal(count, modules, selected=False):
     return f"[{count}/{count}] Unit tests{selection}\n[{modules}/{modules}] Module tests\n[0/0] External tests\n"
 
 
-def group_log(group, duration):
+def group_log(group, duration, primary_module="compiler_driver_tests"):
     lines = []
     for index, name, audit in ROWS:
-        owner = "driver" if name == "compiler_driver_tests" else "rest"
+        owner = "primary" if name == primary_module else "rest"
         lines.append(f"CI_UNIT_MODULE_V1 index={index} module={name} table_audit={int(audit)} enabled={int(not audit)} selected={int(not audit and owner == group)} group={owner}\n")
-    index, name, count = (1, "compiler_driver_tests", 7) if group == "driver" else (0, "c_frontend_tests", 11)
+    index, name, count = ((0, "c_frontend_tests", 11) if primary_module == "c_frontend_tests" else (1, "compiler_driver_tests", 7)) if group == "primary" else ((1, "compiler_driver_tests", 7) if primary_module == "c_frontend_tests" else (0, "c_frontend_tests", 11))
     lines.append(module(index, name, count))
     lines.append(f"CI_UNIT_BATCH_V1 group={group} modules=1 modules_passed=1 assertions={count} passed={count} failed=0 external=0 external_passed=0 status=pass\n")
     lines.append(terminal(count, 1, True))
@@ -66,8 +69,8 @@ class CampaignTests(unittest.TestCase):
     def populate(self, pairs, baseline_jobs="2"):
         binary_hash = hashlib.sha256(self.binary.read_bytes()).hexdigest()
         baseline = module(0, "c_frontend_tests", 11) + module(1, "compiler_driver_tests", 7) + terminal(18, 2)
-        candidate = f"CI_UNIT_PLAN_V1 binary_sha256={binary_hash} source_revision={'a' * 40} workers=4 groups=2 group_workers=2\n"
-        candidate += group_log("driver", 700) + group_log("rest", 600)
+        candidate = f"CI_UNIT_PLAN_V1 binary_sha256={binary_hash} source_revision={'a' * 40} workers=4 groups=2 group_workers=2 primary_module=compiler_driver_tests\n"
+        candidate += group_log("primary", 700, primary_module="compiler_driver_tests") + group_log("rest", 600, primary_module="compiler_driver_tests")
         candidate += "CI_UNIT_PARTITION_V1 workers=4 groups=2 modules=2 assertions=18 passed=18 failed=0 elapsed_us=1000 status=pass\n"
         for number in range(1, pairs * 2 + 1):
             arm = "baseline" if number % 2 else "candidate"
@@ -101,6 +104,50 @@ class CampaignTests(unittest.TestCase):
         self.assertTrue(result["screening_valid"])
         self.assertFalse(result["ci_complete"])
         self.assertFalse(result["performance_accepted"])
+        self.assertEqual(result["identity"]["native_host_profile"], HOST_PROFILE)
+
+    def test_legacy_inventory_remains_diagnostic_but_has_no_measured_profile(self):
+        path = self.directory / "inventory.log"
+        path.write_text(inventory_log(host=False))
+        self.assertEqual(campaign.inventory(path), [{"index": index, "name": name, "table_audit": audit} for index, name, audit in ROWS])
+        self.assertIsNone(campaign.host_profile(path))
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "Missing measured native host"):
+            campaign.host_profile(path, required=True)
+        self.assertNotIn("native_host_profile", self.assemble()["identity"])
+
+    def test_exact_profile_words_flags_and_aarch64_oracle_are_retained(self):
+        path = self.directory / "inventory.log"
+        path.write_text(inventory_log().replace("word3=4", "word3=18446744073709551615"))
+        self.assertEqual(campaign.host_profile(path, required=True)["feature_words"], [1, 2, 3, 2 ** 64 - 1])
+        path.write_text(inventory_log().replace("architecture=x86_64 feature_source=cpuid-xcr0", "architecture=aarch64 feature_source=target-native"))
+        self.assertEqual(campaign.host_profile(path, required=True)["architecture"], "aarch64")
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "architecture differs"):
+            self.assemble()
+
+    def test_duplicate_malformed_and_unknown_native_host_profiles_fail_closed(self):
+        path = self.directory / "inventory.log"
+        mutations = (HOST_RECORD + inventory_log(), inventory_log().replace("word0=1", "word0=-1"),
+                     inventory_log().replace("word0=1", "word0=18446744073709551616"),
+                     inventory_log().replace("feature_word_count=4", "feature_word_count=3"),
+                     inventory_log().replace("feature_source=cpuid-xcr0", "feature_source=model-guess"),
+                     inventory_log().replace("simd_512_base=0 simd_512=0", "simd_512_base=0 simd_512=1"),
+                     inventory_log().replace("word0=1", "word0=1 extra=1"),
+                     inventory_log().replace("word0=1", "word0=1 word0=2"),
+                     inventory_log().replace("CI_UNIT_HOST_V1 ", "CI_UNIT_HOST_V1"),
+                     inventory_log().replace("CI_UNIT_HOST_V1", "CI_UNIT_HOST_V2"))
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                path.write_text(mutation)
+                with self.assertRaises(campaign.measure.EvidenceError):
+                    campaign.inventory(path)
+
+    def test_invalid_host_proof_encoding_is_rejected_without_rewriting_bytes(self):
+        path = self.directory / "inventory.log"
+        raw = inventory_log().encode().replace(b"word0=1", b"word0=\xff1")
+        path.write_bytes(raw)
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "Invalid UTF-8 in machine proof"):
+            campaign.host_profile(path, required=True)
+        self.assertEqual(path.read_bytes(), raw)
 
     def test_three_pairs_require_all_six_invocations(self):
         self.populate(3)
@@ -116,6 +163,55 @@ class CampaignTests(unittest.TestCase):
                 path.write_text(mutation)
                 with self.assertRaisesRegex(campaign.measure.EvidenceError, "canonical index"):
                     self.assemble()
+
+    def test_inventory_accepts_platform_appropriate_primary_anchors(self):
+        path = self.directory / "inventory.log"
+        arm_log = inventory_log(primary_module="compiler_driver_tests").replace(
+            "architecture=x86_64 feature_source=cpuid-xcr0",
+            "architecture=aarch64 feature_source=target-native")
+        path.write_text(arm_log)
+        rows, profile, primary = campaign.inventory_proof(path)
+        self.assertEqual(profile["architecture"], "aarch64")
+        self.assertEqual(primary, "compiler_driver_tests")
+        self.assertEqual(rows, [{"index": index, "name": name, "table_audit": audit} for index, name, audit in ROWS])
+        path.write_text(inventory_log(primary_module="c_frontend_tests"))
+        rows, profile, primary = campaign.inventory_proof(path)
+        self.assertEqual(profile["architecture"], "x86_64")
+        self.assertEqual(primary, "c_frontend_tests")
+
+    def test_inventory_rejects_missing_duplicate_and_foreign_primary_anchors(self):
+        path = self.directory / "inventory.log"
+        missing = inventory_log().replace("group=primary", "group=rest")
+        duplicate = inventory_log().replace(
+            "module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=rest",
+            "module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=primary")
+        foreign = inventory_log().replace("group=primary", "group=driver")
+        for value in (missing, duplicate, foreign):
+            with self.subTest(value=value[:80]):
+                path.write_text(value)
+                with self.assertRaises(campaign.measure.EvidenceError):
+                    campaign.inventory(path)
+
+    def test_stale_driver_inventory_ownership_is_rejected(self):
+        path = self.directory / "inventory.log"
+        stale = inventory_log().replace(
+            "module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=rest",
+            "module=c_frontend_tests table_audit=0 enabled=1 selected=0 group=driver")
+        path.write_text(stale)
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "invalid module owner"):
+            campaign.inventory(path)
+
+    def test_assemble_rejects_inventory_platform_and_candidate_plan_mismatches(self):
+        path = self.directory / "inventory.log"
+        path.write_text(inventory_log(primary_module="c_frontend_tests"))
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "platform policy"):
+            self.assemble()
+        path.write_text(inventory_log(primary_module="compiler_driver_tests"))
+        candidate = self.directory / "sample-2-candidate.log"
+        candidate.write_text(candidate.read_text().replace(
+            "primary_module=compiler_driver_tests", "primary_module=c_frontend_tests"))
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "independent inventory"):
+            self.assemble()
 
     def test_inventory_policy_selection_and_failed_query_are_rejected(self):
         path = self.directory / "inventory.log"

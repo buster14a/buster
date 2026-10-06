@@ -2,7 +2,6 @@
 # Advisory under the solo-maintainer policy; approval is not mandatory.
 # Owners must have write access; authors cannot approve their own PRs.
 /.github/ @davidgmbb
-/.forgejo/ @davidgmbb
 AGENTS.md @davidgmbb
 CLAUDE.md @davidgmbb
 /docs/agents/ @davidgmbb
