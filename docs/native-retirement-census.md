@@ -532,9 +532,10 @@ Neither an archived `none` row nor its recorded fallback count may be relabeled
 as a post-cutover MIR result. The archive and its oracle remain external to
 ordinary compiler builds and tests.
 
-The post-cutover live CLI will retain v1 fallback telemetry for a transition.
-For a native codegen attempt that reaches telemetry output, a MIR-only compiler
-emits `CODEGEN_FALLBACK_CENSUS version=1 records=0` when the census flag is
+The post-cutover live CLI retains v1 fallback telemetry for a transition. The
+MIR-only cutover (#522) is on main and no production path records a fallback
+function, so for a native codegen attempt that reaches telemetry output the
+compiler emits `CODEGEN_FALLBACK_CENSUS version=1 records=0` when the census flag is
 requested, with zero `fallback_functions` and no fallback function, reason,
 opcode, or stage rows. These zeros report that no direct fallback was taken;
 they do not prove an independent comparison or turn a failed compilation into
@@ -543,15 +544,15 @@ compatibility spelling, and `-fmachine-fallback` cannot restore direct native
 emission. Any future nonzero MIR-specific diagnostic needs a separately reviewed
 version and reader binding; it must not be smuggled into a v1 fallback row.
 
-Once the cutover is accepted on main, the live census and validator must require
+With the cutover accepted on main, the live census and validator must require
 an explicit, independently pinned archived direct executable for every
 direct-versus-MIR comparison. Its revision claim alone is insufficient: compare
 the copied binary's authenticated SHA-256 with the archive receipt, and reject
 a candidate-identical binary. Keep the historical v1 reader for archived
 evidence while making the new CLI, option help, workflow commands, and active
 driver documentation describe `none` as MIR stack allocation. The live schema
-and tests change only on the accepted cutover's integration tree; this policy
-does not rewrite admitted evidence or generated retirement bindings.
+and tests change only in a separately reviewed integration under #1205; this
+policy does not rewrite admitted evidence or generated retirement bindings.
 
 All **observed fallbacks** are attributed. A fatal frontend/verifier/encoding
 error can stop compilation before later functions are visited. Its first fatal
