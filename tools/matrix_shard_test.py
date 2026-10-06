@@ -376,7 +376,7 @@ class WorkflowSetupTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", block)
         self.assertNotIn("continue-on-error:", block)
         expected = {
-            "tests/ci_tools_test.py", "tools/ci_admission_test.py", "tools/main_ci_reuse_test.py",
+            "tools/ci_admission_test.py", "tools/main_ci_reuse_test.py",
             "tools/ci_zig_test.py",
             "tools/ci_zig_cache_test.py", "tools/ci_android_sdk_test.py",
             "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
@@ -1106,9 +1106,9 @@ class CompletionGateTests(unittest.TestCase):
             observed = re.search(r"^          BUSTER_CI_CHECKS_EVIDENCE: (.+)$", step, re.M).group(1)
             self.assertEqual(observed, capture)
         self.assertEqual(re.search(r"^  BUSTER_CI_CONDITIONS_EVIDENCE: (.+)$", workflow, re.M).group(1), capture)
-        self.assertEqual(workflow.count("BUSTER_CI_CONDITIONS_EVIDENCE:"), 11)
+        self.assertEqual(workflow.count("BUSTER_CI_CONDITIONS_EVIDENCE:"), 13)
         self.assertEqual(re.findall(r"^          BUSTER_CI_CONDITIONS_EVIDENCE: (.+)$", workflow, re.M),
-                         ["${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}"] * 10)
+                         ["${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}"] * 12)
 
     def timing_sample(self, checks_layout="combined"):
         jobs = self.sample(checks_layout)
