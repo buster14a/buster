@@ -18,6 +18,18 @@ typedef enum AssemblyUnitSectionKind
     ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA,
     ASSEMBLY_UNIT_SECTION_DATA,
     ASSEMBLY_UNIT_SECTION_ZERO,
+    // Known DWARF sections retain their nonallocated object identities.
+    ASSEMBLY_UNIT_SECTION_DEBUG_INFO,
+    ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV,
+    ASSEMBLY_UNIT_SECTION_DEBUG_LINE,
+    ASSEMBLY_UNIT_SECTION_DEBUG_STR,
+    ASSEMBLY_UNIT_SECTION_DEBUG_LOC,
+    ASSEMBLY_UNIT_SECTION_DEBUG_RANGES,
+    ASSEMBLY_UNIT_SECTION_DEBUG_ADDR,
+    ASSEMBLY_UNIT_SECTION_DEBUG_STR_OFFSETS,
+    ASSEMBLY_UNIT_SECTION_DEBUG_LINE_STR,
+    ASSEMBLY_UNIT_SECTION_DEBUG_RNGLISTS,
+    ASSEMBLY_UNIT_SECTION_DEBUG_LOCLISTS,
     ASSEMBLY_UNIT_SECTION_KIND_COUNT,
 } AssemblyUnitSectionKind;
 
@@ -46,10 +58,18 @@ struct AssemblyUnitSymbol
     bool global;
     bool weak;
     bool hidden;
-    // STT_FUNC rather than STT_OBJECT. `.type name,@function` is the only
-    // producer; a label alone does not promote the kind.
+    // STT_FUNC rather than STT_OBJECT. `.type name,@function` sets it; the
+    // finished unit also sets it on a defined global or weak label in an
+    // executable section, which is an entry point the linker must call.
     bool function;
-    u8 reserved[3];
+    // `.type` named this symbol's kind, as function or object.
+    bool typed;
+    // The ELF writer states STT_NOTYPE: a defined local label in an
+    // executable section that no `.type` described, as GNU as writes it.
+    // `function` stays what consumers of the unit read; this only changes
+    // the symbol type a disassembler sees.
+    bool untyped;
+    u8 reserved[1];
 };
 
 typedef struct AssemblyUnitRelocation AssemblyUnitRelocation;

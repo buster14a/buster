@@ -245,11 +245,35 @@ struct ImageTransformResult
 
 // Defaults bound both memory and hostile-input work. Callers may choose lower
 // or higher nonzero limits through ImageDecodeOptions.
+//
+// The work budget is derived from the pixel limit so that no valid image
+// within the default pixel and decoded-byte limits is rejected for work, while
+// hostile input is cut off after a bounded, pixel-proportional amount of work.
+// The worst legitimate input is a 16-bit RGBA PNG (8 filtered bytes per pixel)
+// whose zlib stream is stored, so its IDAT size S is the filtered size F plus
+// 5 bytes per 65535 and a few header/Adler bytes. Units charged per pixel:
+//   8  CRC-32 over the IDAT bytes (1 unit per checked byte, S ~ F)
+//   8  compressed IDAT bytes read (1 unit per byte, S ~ F)
+//   8  inflated bytes emitted (1 unit per byte, F)
+//   8  unfiltered bytes (row bytes + 1 per row)
+//   4  samples expanded to RGBA8 (width * channels)
+//   = 36 units per pixel, plus well under 1 per pixel for stored-block
+//   framing, per-row filter bytes, Adam7 row rounding, chunk headers and
+//   ancillary chunks. The budget is 40 units per pixel. Every other PNG layout
+//   charges less per pixel. This derivation covers PNG; the other codecs
+//   charge a few units per pixel per pass (baseline 4:4:4 JPEG about 16), and
+//   the multi-scan JPEG block charge is not sized by it.
+// Unconsumed or ancillary bytes cost one CRC unit each, so a hostile PNG with
+// more than the budget in chunk bytes, or a decompression bomb whose emitted
+// bytes exceed it, fails with IMAGE_EXCEEDED_LIMIT_WORK. A caller that raises
+// max_pixels should raise max_work by BUSTER_IMAGE_MAX_WORK_PER_PIXEL per
+// additional pixel to keep the same guarantee.
 #define BUSTER_IMAGE_MAX_WIDTH 16384u
 #define BUSTER_IMAGE_MAX_HEIGHT 16384u
 #define BUSTER_IMAGE_MAX_PIXELS UINT64_C(67108864)
 #define BUSTER_IMAGE_MAX_DECODED_BYTES (BUSTER_IMAGE_MAX_PIXELS * UINT64_C(4))
-#define BUSTER_IMAGE_MAX_WORK UINT64_C(1073741824)
+#define BUSTER_IMAGE_MAX_WORK_PER_PIXEL UINT64_C(40)
+#define BUSTER_IMAGE_MAX_WORK (BUSTER_IMAGE_MAX_PIXELS * BUSTER_IMAGE_MAX_WORK_PER_PIXEL)
 #define BUSTER_IMAGE_MAX_FRAMES UINT64_C(4096)
 #define BUSTER_IMAGE_MAX_CHUNKS UINT64_C(16384)
 #define BUSTER_IMAGE_MAX_SEGMENTS UINT64_C(16384)
