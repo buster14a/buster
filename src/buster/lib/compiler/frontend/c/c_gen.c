@@ -19184,11 +19184,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_classifier_infinity(CIntegerIrBuilder* bui
 }
 
 // The floating type a math builtin's link name selects by its suffix: `f`
-// for float, `l` for long double, none for double.
+// for float, `l` for long double, none for double. `ceil` and `huge_val`
+// (__builtin_inf/__builtin_huge_val) are double names that end in `l`.
 BUSTER_C_INTERNAL IrTypeId c_ir_math_suffix_type(CIntegerIrBuilder* builder, String8 link_name)
 {
+    bool long_double = string_ends_with_sequence(link_name, S8("l")) && !string_equal(link_name, S8("ceil")) &&
+                       !string_equal(link_name, S8("huge_val"));
     return string_ends_with_sequence(link_name, S8("f")) ? builder->f32_type
-           : string_ends_with_sequence(link_name, S8("l")) ? c_ir_builder_scalar_type(builder, C_TYPE_LONG_DOUBLE)
+           : long_double                                 ? c_ir_builder_scalar_type(builder, C_TYPE_LONG_DOUBLE)
                                                          : builder->f64_type;
 }
 
