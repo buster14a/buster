@@ -247,6 +247,21 @@ temporary files: <path>`, and the API returns the same path in
 can leave a recognizable `.buster-gpu-*.temps` directory, but a later run
 never adopts or deletes it.
 
+Tool output is retained under a whole-invocation budget,
+`GPU_PIPELINE_LOG_LIMIT_DEFAULT_BYTES` (32 MiB; `GpuPipelineOptions.log_limit_bytes`
+overrides it). Each process step captures stdout and stderr into scratch under
+per-child limits of at most the process-capture defaults (16 MiB per stream,
+32 MiB total) and never above the budget, and only the admitted bytes are copied
+into one chunk per nonempty stream. The chunks are concatenated once, in step
+order, into `GpuPipelineResult.log`, so the work is linear in the retained
+output however many steps run. Pipes are always drained. Output past the budget
+is dropped; a failing tool's own output is kept by evicting the oldest earlier
+output, so the failure diagnostic still carries its error text. Truncation is
+observable: `log_truncated`, `log_dropped_bytes` (child capture drops, budget
+drops and evictions), and the per-child process facts `tool_output_truncated`
+and `tool_capture_limit_exceeded`. The driver reports truncation as a warning
+on success and appends it to the failure diagnostic.
+
 `GpuPipelineResult.published` records that named output replacement committed.
 `cleanup_failed` separately records failure to remove the owned workspace;
 its path remains available in `temporary_directory` for remediation. A cleanup

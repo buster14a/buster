@@ -2372,6 +2372,23 @@ else()
             COMMENT "Run headless UI UTF-8 consumer regressions"
             VERBATIM)
     endif()
+    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
+        # Counter-based scalability regressions for keyed-box lookup and focus
+        # navigation, against the production ui_core and an inert renderer.
+        executable_add(ui_scale_component_tests OFF src/buster/tests/ui_scale_component_test.c
+            MODULES os arena integer string file hash time float ui_core)
+        if (UNIX)
+            target_link_libraries(ui_scale_component_tests PRIVATE m)
+        elseif (WIN32)
+            target_link_libraries(ui_scale_component_tests PRIVATE ws2_32)
+        endif()
+        add_custom_target(test_ui_scale
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_scale_component_tests>"
+            DEPENDS ui_scale_component_tests
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run headless UI scalability regressions"
+            VERBATIM)
+    endif()
     add_custom_target(test_units
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
@@ -2445,6 +2462,11 @@ else()
     if (TARGET test_ui_utf8)
         add_dependencies(test_all test_ui_utf8)
         add_dependencies(test_units test_ui_utf8)
+    endif()
+
+    if (TARGET test_ui_scale)
+        add_dependencies(test_all test_ui_scale)
+        add_dependencies(test_units test_ui_scale)
     endif()
 
     # Desktop-only performance benchmark. Not wired up for Android/iOS:

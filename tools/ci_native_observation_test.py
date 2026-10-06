@@ -767,7 +767,7 @@ class NativeObservationTest(unittest.TestCase):
             "refs/heads/codex/2120-evidence-v2-combined-all-builds",
         )
         combined_shards = ["release", "checks"]
-        split_shards = combined_shards + ["sanitized-debug", "sanitized-release", "portability"]
+        split_shards = combined_shards + ["sanitized-release", "portability"]
         dispatch_guard = "github.event_name == 'workflow_dispatch' && (" + " || ".join(
             "github.ref == '" + ref + "'" for ref in combined_refs) + ")"
         self.assertEqual(shards.group(1), dispatch_guard + " && '" + json.dumps(combined_shards) +
@@ -908,7 +908,7 @@ class NativeObservationTest(unittest.TestCase):
             mobile.index("      - name: Mobile result and reproduction"),
             mobile.index("      - name: Retain mobile logs"),
         )
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", workflow)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", workflow)
 
     def test_log_upload_action_retries_once_and_fails_closed(self):
         repository_root = Path(__file__).resolve().parents[1]

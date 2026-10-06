@@ -48,6 +48,10 @@
 //                                                descriptors
 //   codegen_plan_module_capacity                 pure code/debug reservation
 //                                                and value-slot bound
+//   codegen_machine_canonical_block_offsets,     canonical block offsets of an
+//   codegen_resolve_label_differences            emitted function; label
+//                                                differences written into the
+//                                                data images from them
 //   codegen_machine_debug_index_build,           MIR debug values to native
 //   codegen_machine_debug_reference_timeline,    location ranges, event-driven:
 //   codegen_record_machine_locations             per-function indexes, one
@@ -6441,6 +6445,38 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_canonical_block_offsets(u32* offsets, I
     return result;
 }
 
+// Writes `function`'s label differences into `generated`'s data image as
+// little- or big-endian integers of their declared width, truncating as a
+// C conversion does. Differences owned by other functions are left for them.
+BUSTER_GLOBAL_LOCAL bool codegen_resolve_label_differences(IrProgram* program, CodegenModule* result, IrGlobal* global, CodegenModuleGlobal generated,
+                                                           IrFunction* function, u32 const* block_offsets)
+{
+    ByteSlice image = generated.is_thread_local ? result->thread_local_data : generated.read_only ? result->read_only_data : result->writable_data;
+    bool little = program->data_layout.endianness == TARGET_ENDIAN_LITTLE;
+    bool valid = true;
+    for (u32 index = 0; valid && index < global->label_difference_count; index += 1)
+    {
+        IrGlobalLabelDifference difference = global->label_differences[index];
+        if (difference.symbol.value == function->symbol.value)
+        {
+            valid = block_offsets && difference.label_block.value < function->block_count && difference.base_block.value < function->block_count &&
+                    !generated.zero_fill && difference.size <= sizeof(u64) && difference.offset <= generated.size &&
+                    difference.size <= generated.size - difference.offset && generated.offset <= image.length &&
+                    generated.size <= image.length - generated.offset;
+            if (valid)
+            {
+                u64 value = (u64)block_offsets[difference.label_block.value] - (u64)block_offsets[difference.base_block.value];
+                u8* slot = image.pointer + generated.offset + difference.offset;
+                for (u32 byte = 0; byte < difference.size; byte += 1)
+                {
+                    slot[little ? byte : difference.size - 1 - byte] = (u8)(value >> (byte * 8));
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 #if BUSTER_INCLUDE_TESTS
 bool codegen_test_canonical_block_offsets(u32* offsets, IrFunction* function, MachineSelectResult* selected,
                                           MachineEncodeResult* encoded)
@@ -6567,6 +6603,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             label_address_relocation_indices[label_address_relocation_count++] = relocation_index;
         }
     }
+    // Label differences resolve to constants, not relocations: each owning
+    // function writes them into the data image once its blocks are placed.
+    u32* label_difference_globals = module->label_difference_count ? arena_allocate(arena, u32, module->global_count) : 0;
+    u32 label_difference_global_count = 0;
+    for (u32 global_index = 0; label_difference_globals && global_index < module->global_count; global_index += 1)
+    {
+        if (module->globals[global_index].label_difference_count)
+        {
+            label_difference_globals[label_difference_global_count++] = global_index;
+        }
+    }
+    bool block_offsets_needed = label_address_relocation_count || label_difference_global_count;
     u64 instruction_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? 128 : 48;
     u64 capacity = ((u64)instruction_count * instruction_capacity + (u64)module->function_count * 64 + stack_probe_capacity + aligned_argument_capacity +
                     assembly_capacity * 4 + assembly_alignment_capacity + 64) *
@@ -6724,7 +6772,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         u32 machine_simd_operation_count = 0;
         u32 machine_stack_frame_size = 0;
         // Label relocations are resolved after machine_scratch is released.
-        u32* machine_block_offsets = label_address_relocation_count ? arena_allocate(arena, u32, function->block_count) : 0;
+        u32* machine_block_offsets = block_offsets_needed ? arena_allocate(arena, u32, function->block_count) : 0;
         bool machine_function_emitted = false;
         CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
         IrOpcode fallback_opcode = IR_OPCODE_COUNT;
@@ -6850,7 +6898,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
                             if (options.verify_invariants && !scheduled_placement.valid)
                             {
-                                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+                                // Frame capacity keeps its own diagnostic; any other
+                                // invalid placement is a verification failure.
+                                fallback_reason = scheduled_placement.capacity_exceeded ? CODEGEN_FALLBACK_PLACEMENT : CODEGEN_FALLBACK_VERIFICATION;
+                                placement.capacity_exceeded = scheduled_placement.capacity_exceeded;
                                 placement.valid = false;
                             }
                             u32 placement_saved_registers = 0;
@@ -6874,7 +6925,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 if (!placement.valid)
                 {
                     fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
-                    if (options.verify_invariants)
+                    if (options.verify_invariants && !placement.capacity_exceeded)
                     {
                         fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
                     }
@@ -7111,7 +7162,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     investigation_record(arena, options.investigation, program, function, &selected.function,
                                                          encoded.row_offsets, encoded.bytes, encoded.byte_count, descriptor->code_offset);
                                 }
-                                if (label_address_relocation_count)
+                                if (block_offsets_needed)
                                 {
                                     if (!codegen_machine_canonical_block_offsets(machine_block_offsets, function, &selected, &encoded))
                                     {
@@ -7245,7 +7296,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     investigation_record(arena, options.investigation, program, function, &selected.function,
                                                          encoded.row_offsets, encoded.bytes, encoded.byte_count, descriptor->code_offset);
                                 }
-                                if (label_address_relocation_count)
+                                if (block_offsets_needed)
                                 {
                                     if (!codegen_machine_canonical_block_offsets(machine_block_offsets, function, &selected, &encoded))
                                     {
@@ -7302,6 +7353,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
                 relocation->addend += block_addend;
                 relocation->label_address = false;
+            }
+            for (u32 side_index = 0; side_index < label_difference_global_count; side_index += 1)
+            {
+                u32 global_index = label_difference_globals[side_index];
+                if (!codegen_resolve_label_differences(program, &result, module->globals + global_index, result.globals[global_index], function,
+                                                       machine_block_offsets))
+                {
+                    result.error = CODEGEN_ERROR_INVALID_IR;
+                    return result;
+                }
             }
             // Canonical emission accounts for SIMD operations while lowering
             // each row. The machine path bypasses that code, so preserve the

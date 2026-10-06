@@ -143,6 +143,7 @@ BUSTER_GLOBAL_LOCAL bool buster_ios_did_finish_launching(id self, SEL _cmd, id a
     BUSTER_UNUSED(_cmd);
     BUSTER_UNUSED(application);
     BUSTER_UNUSED(options);
+    buster_ios_launch_trace(S8("delegate-entry"));
 
     id screen = buster_msg_id((id)objc_getClass("UIScreen"), "mainScreen");
     BusterCGRect bounds = ((BusterCGRect (*)(id, SEL))objc_msgSend)(screen, buster_sel("bounds"));
@@ -167,6 +168,7 @@ BUSTER_GLOBAL_LOCAL bool buster_ios_did_finish_launching(id self, SEL _cmd, id a
     buster_ios_view = view;
     buster_ios_metal_layer = layer;
     buster_ios_window_ready = true;
+    buster_ios_launch_trace(S8("window-ready"));
 
     pthread_attr_t attributes;
     int attributes_result = pthread_attr_init(&attributes);
@@ -196,6 +198,7 @@ BUSTER_GLOBAL_LOCAL bool buster_ios_did_finish_launching(id self, SEL _cmd, id a
     }
 
     pthread_t thread;
+    buster_ios_launch_trace(S8("worker-create"));
     int create_result = pthread_create(&thread, &attributes, buster_ios_worker_thread, 0);
     buster_ios_worker_attributes_destroy(&attributes);
     if (create_result != 0)
@@ -232,6 +235,7 @@ void buster_ios_application_main(int argc, char* argv[])
 {
     buster_ios_register_delegate_class();
     id delegate_name = buster_nsstring_from_cstring("BusterAppDelegate");
+    buster_ios_launch_trace(S8("uikit-entry"));
     UIApplicationMain(argc, argv, 0, delegate_name);
 }
 

@@ -153,8 +153,8 @@ class MainCIReuseTests(unittest.TestCase):
                 receipt = reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW,
                                               diagnostics=source_evidence)
                 current = reuse.verify_current_jobs(self.api, SHA, CURRENT_ID, diagnostics=main_evidence)
-                self.assertEqual(len(receipt["source_jobs"]), 27)
-                self.assertEqual(len(current), 21)
+                self.assertEqual(len(receipt["source_jobs"]), 23)
+                self.assertEqual(len(current), 17)
                 self.assertEqual([row["job"] for row in source_evidence["source_reconciled_checks"]],
                                  self.api.jobs[-2:])
                 self.assertEqual([row["job"] for row in main_evidence["current_reconciled_checks"]],
@@ -267,19 +267,20 @@ class MainCIReuseTests(unittest.TestCase):
 
     def test_exact_commit_source_and_main_specific_jobs(self):
         receipt = self.admit()
-        self.assertEqual(len(receipt["source_jobs"]), 27)
-        self.assertEqual(len(receipt["source_artifacts"]), 27)
+        self.assertEqual(len(receipt["source_jobs"]), 23)
+        self.assertEqual(len(receipt["source_artifacts"]), 23)
         self.assertEqual(receipt["source_run_id"], SOURCE_ID)
-        self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 21)
+        self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 17)
         self.assertRegex(reuse.receipt_digest(receipt), r"[0-9a-f]{64}\Z")
 
     def test_current_split_reuse_rejects_the_historical_combined_inventory(self):
         self.assertEqual(inventory.combination_jobs(), inventory.SPLIT_COMBINATION_JOBS)
-        self.assertEqual(len(inventory.combination_jobs()), 29)
-        self.assertEqual(len(inventory.combination_jobs("split")), 29)
-        self.assertEqual(len(reuse.RETAINED_NAMES), 21)
+        self.assertEqual(len(inventory.combination_jobs()), 25)
+        self.assertEqual(len(inventory.combination_jobs("split")), 25)
+        self.assertEqual(len(reuse.RETAINED_NAMES), 17)
         self.assertNotIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
-        self.assertIn("Windows x86-64 sanitized-debug", reuse.RETAINED_NAMES)
+        self.assertIn("Windows x86-64 sanitized-release", reuse.RETAINED_NAMES)
+        self.assertNotIn("Windows x86-64 sanitized-debug", reuse.RETAINED_NAMES)
         self.api.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs("combined")]
         with self.assertRaises(AdmissionError):
             self.admit()
@@ -411,7 +412,7 @@ class MainCIReuseTests(unittest.TestCase):
     def test_desktop_cache_only_workflow_boundary(self):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         desktop = text.split('\n  test:\n', 1)[1].split('\n  native:\n', 1)[0]
-        self.assertIn('needs: [lint, reuse]', desktop)
+        self.assertIn('needs: [queue_lint, reuse]', desktop)
         for name in reuse.VALIDATION_STEPS:
             block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             condition = next(line for line in block.splitlines() if line.startswith('        if:'))
@@ -437,12 +438,26 @@ class MainCIReuseTests(unittest.TestCase):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         analyzer = text.split('\n  analyzer:\n', 1)[1].split('\n  complete:\n', 1)[0]
         self.assertIn('needs: reuse', analyzer)
-        # Queue and main bind baseline to their exact SHA; explicit comparisons
-        # remain dispatch-only and never enter main reuse.
-        self.assertEqual(analyzer.count('BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}'), 2)
+        # Fresh queue validation analyzes the exact candidate once; main may
+        # reuse only that complete execution, never a retired reference step.
+        self.assertNotIn("BASELINE_REVISION", analyzer)
+        self.assertNotIn("--baseline-driver", analyzer)
+        # The retired dispatch input remains only as a candidate-bootstrap refusal.
+        self.assertEqual(analyzer.count("inputs.analyzer_comparison"), 1)
+        self.assertNotIn("inputs.analyzer_comparison", analyzer.split(
+            '      - name: ' + reuse.ANALYZER_STEPS[-1] + '\n', 1)[1].split('\n      - name:', 1)[0])
         for name in reuse.ANALYZER_STEPS:
             block = analyzer.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             self.assertIn("if: ${{ needs.reuse.outputs.reuse != 'true' }}", block)
+
+    def test_retired_analyzer_step_names_cannot_authorize_reuse(self):
+        source = next(job for job in self.api.jobs if job["name"] in inventory.ANALYZER)
+        old = {"Bootstrap and identify candidate build driver": "Bootstrap candidate and select reference build driver",
+               "Analyze candidate and aggregate all module shards": "Compare reference analysis and aggregate all module shards"}
+        for step in source["steps"]:
+            step["name"] = old.get(step["name"], step["name"])
+        with self.assertRaises(AdmissionError):
+            self.admit()
 
     def test_api_uncertainty_and_incomplete_pagination_fall_back(self):
         with mock.patch.object(self.api, "pages", side_effect=OSError("API unavailable")):
@@ -487,7 +502,7 @@ class MainCIReuseTests(unittest.TestCase):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         self.assertEqual(reuse.REUSED_NAMES,
                          set(inventory.NATIVE + inventory.MOBILE + inventory.UEFI))
-        self.assertEqual(len(reuse.RETAINED_NAMES), 21)
+        self.assertEqual(len(reuse.RETAINED_NAMES), 17)
         for key in ("native", "mobile", "uefi"):
             header = re.split(r"\n  [a-z][a-z_]*:\n", text.split(f"\n  {key}:\n", 1)[1], maxsplit=1)[0]
             self.assertIn("needs: reuse", header)
@@ -592,7 +607,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
         code, report, outputs, _ = self.invoke("finish", handoff)
         self.assertEqual(code, 0)
         self.assertEqual(report["status"], "verified")
-        self.assertEqual(len(report["receipt"]["main_jobs"]), 21)
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
         self.assertEqual(outputs, {})
 
     def test_transient_empty_listing_is_recollected_after_direct_lookup(self):
@@ -787,7 +802,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
         self.unexpanded_jobs()
         code, report, _, _ = self.invoke("finish", handoff)
         self.assertEqual(code, 0)
-        self.assertEqual(len(report["receipt"]["main_jobs"]), 21)
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
         skipped = report["diagnostics"]["skipped_jobs"]
         self.assertEqual([row["job_id"] for row in skipped], [4000, 4001, 4002])
         self.assertTrue(all(row["conclusion"] == "skipped" for row in skipped))
@@ -842,8 +857,8 @@ class MainCIReuseFinishTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(outputs["reuse"], "true")
         self.assertEqual(report["status"], "verified")
-        self.assertEqual(len(report["receipt"]["source_jobs"]), 27)
-        self.assertEqual(len(report["receipt"]["source_artifacts"]), 27)
+        self.assertEqual(len(report["receipt"]["source_jobs"]), 23)
+        self.assertEqual(len(report["receipt"]["source_artifacts"]), 23)
         self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
         self.sleeps.assert_called_once_with(1)
 
