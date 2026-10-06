@@ -2740,6 +2740,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // /proc stat parsing must use the final command-name parenthesis and fail
     // closed on mismatched identities or malformed group fields.
     BUSTER_TEST(arguments, os_linux_process_stat_parse_self_test());
+    // A held unread proc descriptor must classify a reaped task as vanished;
+    // empty, oversized and invalid-descriptor reads remain ordinary failures.
+    BUSTER_TEST(arguments, os_linux_proc_read_self_test());
     // An unrelated PID disappearing between readdir and stat is ordinary
     // host churn and cannot invalidate a stable target-group proof.
     BUSTER_TEST(arguments, os_linux_process_group_churn_self_test(arguments->arena));
