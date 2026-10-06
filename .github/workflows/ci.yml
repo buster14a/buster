@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/check_action_pins.py
-          python3 -B tools/ci_workflow_tools_test.py
+          python3 -B tools/ci_workflow_policy_test.py
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
@@ -203,7 +203,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/check_action_pins.py
-          python3 -B tools/ci_workflow_tools_test.py
+          python3 -B tools/ci_workflow_policy_test.py
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v

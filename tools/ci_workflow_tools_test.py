@@ -280,7 +280,7 @@ class CurrentActionPinsTests(_frozen_actions.ActionPinsTest):
     def test_github_lint_checks_policy(self):
         github = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("python3 tools/check_action_pins.py", github)
-        self.assertIn("python3 -B tools/ci_workflow_tools_test.py", github)
+        self.assertIn("python3 -B tools/ci_workflow_policy_test.py", github)
         self.assertNotIn(".forgejo/", github)
 
     def test_buster_ci_uses_native_node24_artifact_action(self):
