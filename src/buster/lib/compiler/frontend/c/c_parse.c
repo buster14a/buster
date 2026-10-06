@@ -5452,8 +5452,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                 {
                     CTypeKind kind = builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
                                          ? C_TYPE_INT : name.length && name.pointer[name.length - 1] == 'f' && !string_equal(name, S8("__builtin_inf"))
-                                         ? C_TYPE_FLOAT : C_TYPE_DOUBLE;
+                                         ? C_TYPE_FLOAT : name.length && name.pointer[name.length - 1] == 'l'
+                                         ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
                     return c_parse_expression_scalar_type(result, kind);
+                }
+                if (builtin == C_SYMBOL_BUILTIN_OVERFLOW)
+                {
+                    return c_parse_expression_scalar_type(result, C_TYPE_BOOL);
                 }
                 CIrSse2ImmediateShiftBuiltin shift = {0};
                 if (c_semantic_sse2_immediate_shift_builtin(name, &shift))
@@ -14889,6 +14894,20 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
         }
         else
         {
+            // An abstract group has no name token: its callers place the name
+            // at the group's `)`, or at its `(` for a nested group. When an
+            // array suffix follows the pointer chain, the name would stand
+            // before it instead, so `(*[3])` derives that suffix outside the
+            // pointer exactly as `(*name[3])` does (C17 6.7.7).
+            bool abstract_group = !frame->has_name && frame->kind == C_TYPE_PARSE_FRAME_PARENTHESIZED &&
+                                  nested_index > frame->declarator_start + 1 &&
+                                  (frame->name_index == frame->declarator_start ||
+                                   c_parse_matching_delimiter_indexed(result, preprocess, frame->declarator_start) == frame->name_index);
+            bool abstract_suffix = abstract_group && c_token_is_punctuator(&preprocess.tokens[nested_index], C_PUNCTUATOR_LEFT_BRACKET);
+            if (abstract_group)
+            {
+                frame->name_index = nested_index;
+            }
             // `void (*getf(int))(void)` is a function returning a pointer to
             // function: the name inside the pointer declarator carries its own
             // parameter list.  Take that group out of the way of the scan looking
@@ -14912,7 +14931,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                                  : frame->has_name                            ? frame->name_index + 1
                                                                               : frame->name_index;
             u32 bracket_depth = 0;
-            while (frame->has_name && frame->close_index < frame->end)
+            while ((frame->has_name || abstract_suffix) && frame->close_index < frame->end)
             {
                 const CToken* token = &preprocess.tokens[frame->close_index];
                 if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_BRACKET))
@@ -15142,9 +15161,12 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             }
             return;
         }
-        if (frame->has_name)
+        // An abstract group's suffixes start at its name position itself; only
+        // an abstract group with an in-group suffix leaves its `)` past that
+        // position. A function suffix frame reaches here with its own range.
+        if (frame->has_name || (frame->kind == C_TYPE_PARSE_FRAME_PARENTHESIZED && frame->close_index > frame->name_index))
         {
-            u32 array_index = frame->has_inner_parameters ? frame->inner_close + 1 : frame->name_index + 1;
+            u32 array_index = frame->has_inner_parameters ? frame->inner_close + 1 : frame->name_index + frame->has_name;
             frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &array_index, frame->close_index);
             if (array_index != frame->close_index)
             {
@@ -20260,83 +20282,6 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                                            });
 }
 
-// Records the names of the `__label__` declaration at `index` against the
-// scope that holds it and returns the token after its `;`. A malformed list
-// is diagnosed and skipped to its `;` (or the end of the body).
-BUSTER_GLOBAL_LOCAL u32 c_parse_record_local_labels(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 index,
-                                                    u32 body_end)
-{
-    u32 cursor = index + 1;
-    bool expect_name = true;
-    bool malformed = false;
-    while (cursor < body_end && !c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_SEMICOLON))
-    {
-        CToken token = preprocess.tokens[cursor];
-        if (expect_name && token.kind == C_TOKEN_IDENTIFIER)
-        {
-            if (result->local_label_count == result->local_label_capacity)
-            {
-                u32 capacity = result->local_label_capacity ? result->local_label_capacity * 2 : 16;
-                CLocalLabel* grown = arena_allocate(arena, CLocalLabel, capacity);
-                if (result->local_label_count)
-                {
-                    memcpy(grown, result->local_labels, sizeof(CLocalLabel) * result->local_label_count);
-                }
-                result->local_labels = grown;
-                result->local_label_capacity = capacity;
-            }
-            String8 name = c_token_spelling(preprocess.spelling_base, token);
-            // A space cannot appear in an identifier, so the key never
-            // collides with an ordinary label of the function.
-            result->local_labels[result->local_label_count++] = (CLocalLabel){
-                .name = name,
-                .unique_name = string_format(arena, S8("{S8} (local label {u32})"), name, cursor),
-                .declaration_token = index,
-                .scope = scope,
-            };
-            expect_name = false;
-        }
-        else if (!expect_name && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-        {
-            expect_name = true;
-        }
-        else
-        {
-            malformed = true;
-        }
-        cursor += 1;
-    }
-    if (malformed || expect_name || cursor >= body_end)
-    {
-        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
-                           S8("malformed local label declaration"));
-    }
-    return BUSTER_MIN(cursor + 1, body_end);
-}
-
-BUSTER_C_SHARED String8 c_parse_label_name(CParseResult const* result, CPreprocessResult const* preprocess, u32 token_index)
-{
-    String8 name = c_token_spelling(preprocess->spelling_base, preprocess->tokens[token_index]);
-    String8 key = name;
-    if (result->local_label_count)
-    {
-        u32 innermost = 0;
-        bool found = false;
-        for (u32 index = 0; index < result->local_label_count; index += 1)
-        {
-            CLocalLabel const* label = result->local_labels + index;
-            if (label->declaration_token < token_index && token_index < result->scopes[label->scope.value].token_end &&
-                (!found || label->declaration_token > innermost) && string_equal(label->name, name))
-            {
-                innermost = label->declaration_token;
-                key = label->unique_name;
-                found = true;
-            }
-        }
-    }
-    return key;
-}
-
 BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                        CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
                                                        u32 body_token_count);
@@ -22252,14 +22197,6 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     }
                 }
             }
-        }
-        // GNU `__label__ a, b;` declares labels scoped to the enclosing block;
-        // none of its names is a use of anything in scope.
-        if (shape == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_LOCAL_LABEL))
-        {
-            index = c_parse_record_local_labels(result_arena, result, preprocess, scope_stack[scope_count - 1], index, body_end);
-            statement_start = true;
-            continue;
         }
         // A declaration begins a statement, so the attribute skip that finds
         // its first specifier runs at statement starts alone -- the tokens
@@ -26776,9 +26713,9 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
         if (c_ir_named_label_at(&preprocess, start, index, end) &&
             (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index)))
         {
-            String8 name = c_parse_label_name(result, &preprocess, index);
+            String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
             u64 slot = c_macro_name_hash(name) & (capacity - 1);
-            while (labels[slot] && !string_equal(name, c_parse_label_name(result, &preprocess, labels[slot] - 1)))
+            while (labels[slot] && !string_equal(name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[labels[slot] - 1])))
             {
                 slot = (slot + 1) & (capacity - 1);
             }
@@ -26803,9 +26740,9 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
             c_parse_lowering_constraint_consider(diagnostic, S8("malformed goto statement"), index, index);
         if ((named_goto || label_address) && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
         {
-            String8 name = c_parse_label_name(result, &preprocess, index + 1);
+            String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]);
             u64 slot = c_macro_name_hash(name) & (capacity - 1);
-            while (labels[slot] && !string_equal(name, c_parse_label_name(result, &preprocess, labels[slot] - 1)))
+            while (labels[slot] && !string_equal(name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[labels[slot] - 1])))
             {
                 slot = (slot + 1) & (capacity - 1);
             }
@@ -26887,16 +26824,6 @@ BUSTER_C_INTERNAL bool c_parse_type_is_variably_modified(CTypeParseMachine* mach
         remaining -= 1;
     }
     return variable;
-}
-
-// Whether the token at index is the ellipsis of a GNU range designator
-// (`[lo ... hi]`) rather than the one ending a variadic parameter list in a
-// cast or compound-literal type name (#2840). The variadic ellipsis is always
-// followed by `)`, which can never close the bracket of a range designator.
-BUSTER_C_INTERNAL bool c_parse_token_is_range_designator_ellipsis(CPreprocessResult preprocess, u32 index, u32 end)
-{
-    return c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_ELLIPSIS) &&
-           !(index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS));
 }
 
 BUSTER_C_INTERNAL bool c_parse_declarator_has_initializer(CPreprocessResult preprocess, u32 start, u32 end)
@@ -27675,14 +27602,6 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
             if (!diagnostic.message.length && !address && current.value < result->type_count && result->types[current.value].kind != C_TYPE_ARRAY)
                 diagnostic.message = S8("a subscripted compound literal without an '&' is a value rather than an address");
         }
-        if (!static_storage)
-        {
-            for (u32 cursor = open + 1; !diagnostic.message.length && cursor < close; cursor += 1)
-            {
-                if (c_parse_token_is_range_designator_ellipsis(preprocess, cursor, close))
-                    diagnostic.message = S8("range designators are only supported for static aggregate initializers");
-            }
-        }
         diagnostic.token = index;
         diagnostic.container = type;
     }
@@ -27966,16 +27885,6 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             if (!simple_conversion_failure && entity->type.value < result->type_count && result->types[entity->type.value].kind == C_TYPE_NULLPTR &&
                 c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type, shape_start, shape_end, true, 0))
                 c_parse_lowering_constraint_consider(diagnostic, S8("only a value of type nullptr_t may be converted to nullptr_t"), start, shape_end);
-            if (!entity->is_static_storage)
-            {
-                for (u32 token = shape_start; token < shape_end; token += 1)
-                {
-                    if (c_parse_token_is_range_designator_ellipsis(preprocess, token, shape_end))
-                    {
-                        c_parse_lowering_constraint_consider(diagnostic, S8("range designators are only supported for static aggregate initializers"), start, location);
-                    }
-                }
-            }
             if (shape.message.length)
             {
                 String8 message = simple_conversion_failure ? simple_conversion_message
@@ -28976,9 +28885,8 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         {
         case C_SYMBOL_BUILTIN_ATOMIC: minimum = maximum = c_semantic_atomic_builtin_arity(c_ir_atomic_builtin_spelling(name)); break;
         case C_SYMBOL_BUILTIN_EXPECT: minimum = 2; break;
-        case C_SYMBOL_BUILTIN_MEMORY:
-            minimum = maximum = string_starts_with_sequence(name, S8("__builtin___")) ? 4u : 3u;
-            break;
+        case C_SYMBOL_BUILTIN_MEMORY: minimum = maximum = c_semantic_memory_builtin_arity(name); break;
+        case C_SYMBOL_BUILTIN_OVERFLOW: minimum = maximum = 3; break;
         case C_SYMBOL_BUILTIN_COMPLEX:
         case C_SYMBOL_BUILTIN_VA_ARG:
         case C_SYMBOL_BUILTIN_VA_START:
@@ -28988,6 +28896,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_ALLOCA:
         case C_SYMBOL_BUILTIN_STRLEN:
         case C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS:
+        case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
         case C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS:
         case C_SYMBOL_BUILTIN_FIND_FIRST_SET:
         case C_SYMBOL_BUILTIN_POPULATION_COUNT: minimum = maximum = 1; break;

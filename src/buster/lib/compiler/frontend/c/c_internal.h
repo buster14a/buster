@@ -468,9 +468,6 @@ struct CStringLiteralMemo
 };
 BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
-// The function-wide key of the label a token names: its own spelling, unless
-// a `__label__` declaration in force at the token renames it (see CLocalLabel).
-BUSTER_C_SHARED String8 c_parse_label_name(CParseResult const* result, CPreprocessResult const* preprocess, u32 token_index);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 
 // One language constraint, not a claim that an expression or translation unit
@@ -680,6 +677,8 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_MATH,
     C_SYMBOL_BUILTIN_MEMORY,
     C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS,
+    C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS,
+    C_SYMBOL_BUILTIN_OVERFLOW,
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_FIND_FIRST_SET,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
@@ -783,7 +782,6 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONST,
     C_SYMBOL_WELL_KNOWN_ATOMIC,
     C_SYMBOL_WELL_KNOWN_VA_OPT,
-    C_SYMBOL_WELL_KNOWN_LOCAL_LABEL,
     C_SYMBOL_WELL_KNOWN_COUNT,
 } CSymbolWellKnown;
 
@@ -1417,6 +1415,7 @@ BUSTER_C_EXTERN bool c_semantic_asm_fixed_operands_conflict(u64 const* constrain
 BUSTER_C_EXTERN String8 c_semantic_asm_x87_operands_message(u64 const* constraints, u32 count, bool stack_clobber);
 
 BUSTER_C_EXTERN String8 c_ir_math_builtin_link_name(String8 name);
+BUSTER_C_EXTERN u32 c_semantic_memory_builtin_arity(String8 name);
 
 typedef enum CIrSimdArgument
 {
