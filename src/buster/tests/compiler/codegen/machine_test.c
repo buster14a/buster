@@ -8121,6 +8121,159 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_edges(UnitTestArgument
     return result;
 }
 
+// A forward join reached only by jumps receives its general parameters in
+// registers: FAST and QUALITY publish each edge's assignment into the join's
+// contract register instead of the parameter home. A parameter consumed in
+// the join is never stored, one carried onward is stored at most once rather
+// than once per edge, a lone assignment needs no edge-copy staging, and the
+// swapped two-parameter edge still keeps parallel-copy semantics.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_join_parameter_registers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        JOIN_SINGLE = 0,
+        JOIN_PAIR = 1,
+        JOIN_PAIR_ESCAPING = 2,
+        JOIN_SHAPE_COUNT = 3,
+    };
+    MachineRef block_refs[5];
+    for (u32 block = 0; block < BUSTER_ARRAY_LENGTH(block_refs); block += 1)
+    {
+        block_refs[block] = machine_ref_make(MACHINE_REF_BLOCK, block);
+    }
+    MachineRef refs[9];
+    for (u32 value = 0; value < BUSTER_ARRAY_LENGTH(refs); value += 1)
+    {
+        refs[value] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+    }
+    MachineRef rax = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    for (u32 shape = 0; shape < JOIN_SHAPE_COUNT; shape += 1)
+    {
+        bool pair = shape != JOIN_SINGLE;
+        bool escaping = shape == JOIN_PAIR_ESCAPING;
+        // v0 = A, v1 = B. The equal arm passes (A + B, B), the other (A, A - B);
+        // a single parameter takes the first component and a pair returns p - q.
+        MachineInstruction rows[] = {
+            {.opcode = MACHINE_X64_MOV_RI, .operands = {refs[0], machine_ref_make(MACHINE_REF_IMMEDIATE, 0)}},
+            {.opcode = MACHINE_X64_MOV_RI, .operands = {refs[1], machine_ref_make(MACHINE_REF_IMMEDIATE, 1)}},
+            {.opcode = MACHINE_X64_CMP64, .operands = {refs[0], refs[1]}},
+            {.opcode = MACHINE_X64_JCC, .payload = MACHINE_X64_CONDITION_EQUAL, .operands = {block_refs[1], block_refs[2]}},
+            {.opcode = MACHINE_X64_ADD64, .operands = {refs[2], refs[0], refs[1]}},
+            {.opcode = MACHINE_X64_MOV_RR, .operands = {refs[3], refs[1]}},
+            {.opcode = MACHINE_X64_JMP, .operands = {block_refs[3]}},
+            {.opcode = MACHINE_X64_SUB64, .operands = {refs[4], refs[0], refs[1]}},
+            {.opcode = MACHINE_X64_MOV_RR, .operands = {refs[5], refs[0]}},
+            {.opcode = MACHINE_X64_JMP, .operands = {block_refs[3]}},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
+        };
+        // The join's tail: return the lone parameter, return p - q, or jump
+        // to a block that does so, which makes both parameters escape.
+        u32 join_first = 10;
+        u32 row_count = join_first;
+        u32 difference_row = escaping ? join_first + 1u : join_first;
+        if (escaping)
+        {
+            rows[row_count++] = (MachineInstruction){.opcode = MACHINE_X64_JMP, .operands = {block_refs[4]}};
+        }
+        if (pair)
+        {
+            rows[row_count++] = (MachineInstruction){.opcode = MACHINE_X64_SUB64, .operands = {refs[8], refs[6], refs[7]}};
+        }
+        rows[row_count++] = (MachineInstruction){.opcode = MACHINE_X64_MOV_RR, .operands = {rax, pair ? refs[8] : refs[6]}};
+        rows[row_count++] = (MachineInstruction){.opcode = MACHINE_X64_RET};
+        MachineBlock blocks[] = {
+            {.first_instruction = 0, .instruction_count = 4},
+            {.first_instruction = 4, .instruction_count = 3},
+            {.first_instruction = 7, .instruction_count = 3},
+            {.first_instruction = join_first, .instruction_count = escaping ? 1u : row_count - join_first,
+             .parameter_offset = 0, .parameter_count = pair ? 2u : 1u},
+            {.first_instruction = join_first + 1u, .instruction_count = row_count - join_first - 1u},
+        };
+        MachineVirtualRegister values[9] = {0};
+        u32 const definitions[] = {0, 1, 4, 5, 7, 8, UINT32_MAX, UINT32_MAX, difference_row};
+        for (u32 value = 0; value < BUSTER_ARRAY_LENGTH(values); value += 1)
+        {
+            values[value] = (MachineVirtualRegister){
+                .definition_point = definitions[value] == UINT32_MAX ? MACHINE_POINT_INVALID : machine_point_make(definitions[value], MACHINE_POINT_AFTER),
+                .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID};
+        }
+        MachineBlockParameter parameters[] = {{.virtual_register = 6}, {.virtual_register = 7}};
+        // The pair edges swap roles: (A + B, B) against (A, A - B).
+        MachineRef sources[] = {refs[2], refs[3], pair ? refs[5] : refs[4], refs[4]};
+        MachineEdge edges[] = {
+            {.source_block = 0, .destination_block = 1},
+            {.source_block = 0, .destination_block = 2},
+            {.source_block = 1, .destination_block = 3, .copy_offset = 0, .copy_count = pair ? 2u : 1u},
+            {.source_block = 2, .destination_block = 3, .copy_offset = 2, .copy_count = pair ? 2u : 1u},
+            {.source_block = 3, .destination_block = 4},
+        };
+        u64 immediates[2] = {0};
+        MachineFunction function = {
+            .instructions = rows, .instruction_count = row_count,
+            .virtual_registers = values, .virtual_register_count = pair ? 9u : 7u,
+            .blocks = blocks, .block_count = escaping ? 5u : 4u,
+            .edges = edges, .edge_count = escaping ? 5u : 4u,
+            .block_parameters = parameters, .block_parameter_count = pair ? 2u : 1u,
+            .edge_copy_sources = sources, .edge_copy_source_count = BUSTER_ARRAY_LENGTH(sources),
+            .immediates = immediates, .immediate_count = BUSTER_ARRAY_LENGTH(immediates),
+            .target = machine_target_x86_64(),
+        };
+        BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+        for (u32 variant = 0; variant < 2; variant += 1)
+        {
+            immediates[0] = variant ? 5u : 40u;
+            immediates[1] = variant ? 5u : 2u;
+            u64 a = immediates[0];
+            u64 b = immediates[1];
+            u64 expected = pair ? (variant ? a : b) : (variant ? a + b : a - b);
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                MachineStackPlacement placement =
+                    mode == 0 ? machine_fast_placement_build(arguments->arena, &function) : machine_quality_placement_build(arguments->arena, &function);
+                BUSTER_TEST(arguments, placement.valid);
+                u32 parameter_spills[2] = {0};
+                u32 staged = 0;
+                for (u32 index = 0; index < placement.edit_count; index += 1)
+                {
+                    MachineEdit edit = placement.edits[index];
+                    parameter_spills[0] += edit.kind == MACHINE_EDIT_SPILL && edit.subject == 6;
+                    parameter_spills[1] += edit.kind == MACHINE_EDIT_SPILL && edit.subject == 7;
+                    staged += edit.kind == MACHINE_EDIT_TEMP_SPILL;
+                }
+                String8 description = string_format(arguments->arena, S8("join shape {u32} mode {u32}: spills {u32}/{u32}, staged {u32}"),
+                                                    shape, mode, parameter_spills[0], parameter_spills[1], staged);
+                u32 spill_limit = escaping ? 1u : 0u;
+                BUSTER_TEST_RAW(arguments, parameter_spills[0] <= spill_limit && parameter_spills[1] <= spill_limit, description);
+                BUSTER_TEST_RAW(arguments, pair || staged == 0, description);
+                MachineEncodeResult encoded = machine_encode_x86_64(arguments->arena, &function, &placement);
+                BUSTER_TEST(arguments, encoded.valid);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                if (encoded.valid)
+                {
+                    CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = {.pointer = encoded.bytes, .length = encoded.byte_count}});
+                    BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                    if (executable.address)
+                    {
+                        typedef u64 JoinCall(void);
+                        JoinCall* call = 0;
+                        memcpy(&call, &executable.address, sizeof(call));
+                        BUSTER_TEST_RAW(arguments, call() == expected, description);
+                    }
+                    codegen_release_executable(executable);
+                }
+#else
+                BUSTER_UNUSED(expected);
+#endif
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_bank(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9455,6 +9608,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
     BUSTER_TEST_FIXTURE(arguments, machine_test_zero_idiom_flags);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_edges);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_join_parameter_registers);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_source);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_bank);
     BUSTER_TEST_FIXTURE(arguments, machine_test_win64_wide);
