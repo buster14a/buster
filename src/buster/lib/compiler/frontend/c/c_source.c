@@ -4699,7 +4699,7 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
 
 enum
 {
-    C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 256,
+    C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 512,
 };
 
 BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling);
