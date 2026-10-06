@@ -42,10 +42,15 @@ BINARIES = {"baseline": {"sha256": A256}, "candidate": {"sha256": B256}}
 MODES_ALL = ("none", "mir-stack", "fast", "quality")
 
 
+# One test per gate metric and round, as tools/throughput writes them.
+TESTS = [{"metric": metric, "round": number, "median_ratio": 1.0, "regression": False}
+         for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
+
+
 def corpus(decision: str = "no substantial regression detected", **summary_change) -> dict:
     """A complete throughput-corpus-v1 run on BINARIES, as {summary, metadata}."""
     profile = compiler_receipt.THROUGHPUT_PROFILE
-    cases = [{"name": f"{name}/{mode}", "medians": {}, "tests": [], "decision": decision}
+    cases = [{"name": f"{name}/{mode}", "medians": {}, "tests": copy.deepcopy(TESTS), "decision": decision}
              for name in profile["workloads"] for mode in MODES_ALL]
     regressions = len(cases) if decision == "regression" else 0
     result = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": regressions,
@@ -209,6 +214,51 @@ class DecideTest(unittest.TestCase):
     def test_corpus_regressions_are_reported_not_decided(self) -> None:
         conclusion, _, reasons = self.decide(throughput=corpus("regression"))
         self.assertEqual((conclusion, reasons), ("success", []))
+
+    def test_corpus_needs_the_exact_workload_mode_population(self) -> None:
+        def mutated(change) -> dict:
+            data = corpus()
+            change(data["summary"])
+            return data
+        def rows(summary: dict) -> list:
+            return summary["comparisons"]
+        def set_counts(summary: dict, regressions: int, inconclusive: int) -> None:
+            summary["confirmed_regressions"], summary["inconclusive_cases"] = regressions, inconclusive
+        cases = {
+            "only none rows": (lambda s: s.update(comparisons=[r for r in rows(s) if r["name"].endswith("/none")]),
+                               "miss 18 of 24"),
+            "bare workload names": (lambda s: s.update(comparisons=[{"name": r["name"].split("/")[0]} for r in rows(s)[::4]]),
+                                    "miss"),
+            "one missing cell": (lambda s: rows(s).pop(), "miss 1 of 24"),
+            "one allocator missing": (lambda s: s.update(comparisons=[r for r in rows(s) if not r["name"].endswith("/fast")]),
+                                      "miss 6 of 24"),
+            "duplicated": (lambda s: s.update(comparisons=rows(s) + copy.deepcopy(rows(s))), "repeat"),
+            "wrong mode": (lambda s: rows(s)[0].update(name="tiny_startup/turbo"), "outside the profile"),
+            "foreign workload": (lambda s: rows(s).append(dict(copy.deepcopy(rows(s)[0]), name="other/none")),
+                                 "outside the profile"),
+            "negative count": (lambda s: set_counts(s, -1, 0), "confirmed_regressions"),
+            "inflated count": (lambda s: set_counts(s, 0, 9999), "inconclusive_cases"),
+            "count without a case": (lambda s: set_counts(s, 1, 0), "confirmed_regressions"),
+            "unknown decision": (lambda s: rows(s)[3].update(decision="fine"), "decision"),
+            "diagnostic decision": (lambda s: rows(s)[3].update(decision="diagnostic (guard disabled)"), "decision"),
+            "malformed row": (lambda s: rows(s).__setitem__(2, "row"), "not an object"),
+            "no tests": (lambda s: rows(s)[1].update(tests=[]), "one test per"),
+            "missing medians": (lambda s: rows(s)[1].pop("medians"), "medians"),
+            "no comparisons": (lambda s: s.pop("comparisons"), "comparisons"),
+        }
+        for name, (change, text) in cases.items():
+            with self.subTest(case=name):
+                data = mutated(change)
+                reasons = compiler_receipt.classify_throughput(data["summary"], data["metadata"], BINARIES)
+                self.assertTrue(any(text in item for item in reasons), reasons)
+                conclusion, _, _ = self.decide(throughput=data)
+                self.assertEqual(conclusion, "failure")
+        # Genuine regressions and inconclusive cells stay valid and are counted, not discarded.
+        mixed = corpus()
+        rows(mixed["summary"])[0]["decision"] = "regression"
+        rows(mixed["summary"])[1]["decision"] = "inconclusive"
+        set_counts(mixed["summary"], 1, 1)
+        self.assertEqual(self.decide(throughput=mixed)[0], "success")
 
     def test_incomplete_or_unbound_corpus_is_never_success(self) -> None:
         other_binary = corpus()
@@ -412,7 +462,8 @@ workloads = ["tiny_startup", "large_function", "many_functions", "symbol_table",
 output = value("--output")
 os.makedirs(output)
 covered = workloads[:1] if behavior == "partial" else workloads
-cases = [{"name": name + "/" + mode, "decision": "no substantial regression detected"}
+tests = [{"metric": metric, "round": number} for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
+cases = [{"name": name + "/" + mode, "medians": {}, "tests": tests, "decision": "no substantial regression detected"}
          for name in covered for mode in ("none", "mir-stack", "fast", "quality")]
 summary = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": 0,
            "inconclusive_cases": 0, "valid": True}
@@ -732,7 +783,7 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("throughput_seconds", result["timings"])
 
     def test_failed_or_partial_corpus_fails_the_receipt(self) -> None:
-        for behavior, expected in (("fail", "bench_throughput run exited 3"), ("partial", "not every profile workload")):
+        for behavior, expected in (("fail", "bench_throughput run exited 3"), ("partial", "workload/mode cells")):
             with self.subTest(behavior=behavior):
                 # Each run leaves the frozen base checked out.
                 subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)

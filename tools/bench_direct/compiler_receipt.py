@@ -119,6 +119,12 @@ SCALING_PROFILE = {
                     "--shape", "tiny", "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
     },
 }
+# `--mode all` of tools/throughput (tp_modes) and the decisions its guard writes (tp_assess/decision in
+# throughput.c). The corpus's expected cells are THROUGHPUT_PROFILE workloads x these modes.
+THROUGHPUT_MODES = ("none", "mir-stack", "fast", "quality")
+THROUGHPUT_DECISIONS = ("regression", "inconclusive", "no substantial regression detected")
+# Each case's gate tests: the wall and peak-RSS metrics for every round.
+THROUGHPUT_TEST_METRICS = ("wall_seconds", "peak_rss_bytes")
 # A wall-time CI needs at least six complete pairs (uarch_lab sign_test_rank).
 MIN_PAIRS = 6
 # Every complete verdict counts, whatever its direction; "inconclusive" means
@@ -287,14 +293,54 @@ def classify_throughput(summary: object, metadata: object, binaries: object) -> 
         digest = row.get("sha256") if isinstance(row, dict) else None
         if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or digest != recorded.get("sha256"):
             reasons.append(f"throughput {role} compiler is not the measured {role} binary")
-    comparisons = summary.get("comparisons")
-    names = [row.get("name") for row in comparisons if isinstance(row, dict)] if isinstance(comparisons, list) else []
-    covered = {name.split("/", 1)[0] for name in names if isinstance(name, str)}
-    if summary and not set(profile["workloads"]) <= covered:
-        reasons.append(f"throughput comparisons cover {sorted(covered)}, not every profile workload")
-    for key in ("confirmed_regressions", "inconclusive_cases"):
-        if summary and type(summary.get(key)) is not int:
-            reasons.append(f"throughput summary has no integer {key}")
+    if summary:
+        reasons.extend(classify_throughput_cases(summary.get("comparisons")))
+        counted = {"confirmed_regressions": "regression", "inconclusive_cases": "inconclusive"}
+        comparisons = summary.get("comparisons") if isinstance(summary.get("comparisons"), list) else []
+        for key, decision in counted.items():
+            value = summary.get(key)
+            actual = sum(1 for row in comparisons if isinstance(row, dict) and row.get("decision") == decision)
+            if type(value) is not int:
+                reasons.append(f"throughput summary has no integer {key}")
+            elif value != actual:
+                reasons.append(f"throughput summary {key} {value} does not match its {actual} {decision!r} cases")
+    return reasons
+
+
+def classify_throughput_cases(comparisons: object) -> list[str]:
+    """Reasons the corpus rows are not exactly one valid row per profile workload x allocator mode."""
+    reasons: list[str] = []
+    rounds = THROUGHPUT_PROFILE["rounds"]
+    expected = [f"{name}/{mode}" for name in THROUGHPUT_PROFILE["workloads"] for mode in THROUGHPUT_MODES]
+    rows = comparisons if isinstance(comparisons, list) else []
+    if not isinstance(comparisons, list):
+        reasons.append("throughput summary has no comparisons list")
+    names = [row.get("name") if isinstance(row, dict) else None for row in rows]
+    seen: set = set()
+    duplicates = sorted({name for name in names if isinstance(name, str) and (name in seen or seen.add(name))})
+    if duplicates:
+        reasons.append(f"throughput comparisons repeat cells {duplicates}")
+    missing = [name for name in expected if name not in seen]
+    if missing:
+        reasons.append(f"throughput comparisons miss {len(missing)} of {len(expected)} workload/mode cells: {missing}")
+    foreign = sorted({str(name) for name in names if name not in expected})
+    if foreign:
+        reasons.append(f"throughput comparisons have cells outside the profile: {foreign}")
+    wanted_tests = {(metric, number) for metric in THROUGHPUT_TEST_METRICS for number in range(rounds)}
+    for row in rows:
+        if not isinstance(row, dict):
+            reasons.append("throughput comparison row is not an object")
+            continue
+        name = row.get("name")
+        if row.get("decision") not in THROUGHPUT_DECISIONS:
+            reasons.append(f"throughput cell {name!r} has decision {row.get('decision')!r}, not a guarded decision")
+        if not isinstance(row.get("medians"), dict):
+            reasons.append(f"throughput cell {name!r} has no medians")
+        tests = row.get("tests")
+        got = [(test.get("metric"), test.get("round")) for test in tests if isinstance(test, dict)] \
+            if isinstance(tests, list) else None
+        if got is None or len(got) != len(tests) or sorted(got, key=repr) != sorted(wanted_tests, key=repr):
+            reasons.append(f"throughput cell {name!r} does not have exactly one test per gate metric and round")
     return reasons
 
 
