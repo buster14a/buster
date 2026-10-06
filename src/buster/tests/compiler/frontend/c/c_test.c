@@ -42068,6 +42068,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArgumen
     return result;
 }
 
+// #2846: compare-exchange of a floating-point atomic compares object
+// representations, so -0.0 and 0.0 differ and a failure stores the current
+// value into the expected object.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_float_compare_exchange_source = S8_INITIALIZER(
+    "#define CAS(object, expected, desired) __c11_atomic_compare_exchange_strong(object, expected, desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)\n"
+    "#define CASW(object, expected, desired) __c11_atomic_compare_exchange_weak(object, expected, desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)\n"
+    "static _Atomic double dv;\n"
+    "static _Atomic float fv;\n"
+    "int main(void)\n"
+    "{\n"
+    "    int failed = 0;\n"
+    "    double de = 0.0;\n"
+    "    float fe = 0.0f;\n"
+    "    /* success */\n"
+    "    failed |= !CAS(&dv, &de, 1.5) || dv != 1.5 || de != 0.0;\n"
+    "    failed |= !CAS(&fv, &fe, 2.5f) || fv != 2.5f || fe != 0.0f;\n"
+    "    /* failure: expected receives the current value, object is unchanged */\n"
+    "    de = 9.0;\n"
+    "    failed |= CAS(&dv, &de, 7.0) || dv != 1.5 || de != 1.5;\n"
+    "    fe = 9.0f;\n"
+    "    failed |= CAS(&fv, &fe, 7.0f) || fv != 2.5f || fe != 2.5f;\n"
+    "    /* weak variant, retried until it settles */\n"
+    "    de = 1.5;\n"
+    "    while (!CASW(&dv, &de, 3.25)) { }\n"
+    "    failed |= dv != 3.25;\n"
+    "    fe = 2.5f;\n"
+    "    while (!CASW(&fv, &fe, 3.25f)) { }\n"
+    "    failed |= fv != 3.25f;\n"
+    "    /* bitwise comparison: -0.0 and 0.0 are distinct */\n"
+    "    dv = -0.0;\n"
+    "    de = 0.0;\n"
+    "    failed |= CAS(&dv, &de, 5.0) || !__builtin_signbit(de) || !__builtin_signbit(dv);\n"
+    "    de = -0.0;\n"
+    "    failed |= !CAS(&dv, &de, 5.0) || dv != 5.0;\n"
+    "    fv = -0.0f;\n"
+    "    fe = 0.0f;\n"
+    "    failed |= CAS(&fv, &fe, 5.0f) || !__builtin_signbit(fe) || !__builtin_signbit(fv);\n"
+    "    fe = -0.0f;\n"
+    "    failed |= !CAS(&fv, &fe, 5.0f) || fv != 5.0f;\n"
+    "    /* a NaN equals itself bitwise */\n"
+    "    double nan_value = __builtin_nan(\"\");\n"
+    "    dv = nan_value;\n"
+    "    de = nan_value;\n"
+    "    failed |= !CAS(&dv, &de, 1.0) || dv != 1.0;\n"
+    "    /* desired converts to the object's type */\n"
+    "    fe = 1.0f;\n"
+    "    fv = 1.0f;\n"
+    "    failed |= !CAS(&fv, &fe, 2) || fv != 2.0f;\n"
+    "    return failed;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_float_compare_exchange(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("atomic-float-compare-exchange"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_float_compare_exchange_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-float-compare-exchange-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("atomic-float-compare-exchange {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("atomic-float-compare-exchange run {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // #1261: updates retain the place and return the correct old or new value.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArguments* arguments)
 {
@@ -45363,6 +45461,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_array_bound_object_layout);
     C_TEST_FIXTURE(arguments, c_test_atomic_compound_assignment_runtime);
     C_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
+    C_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange);
     C_TEST_FIXTURE(arguments, c_test_attribute_call_roles);
     C_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
     C_TEST_FIXTURE(arguments, c_test_bfloat16_type);

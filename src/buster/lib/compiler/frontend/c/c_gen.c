@@ -22424,6 +22424,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             bool aggregate_value = unqualified->kind == IR_TYPE_STRUCT || unqualified->kind == IR_TYPE_UNION;
             bool pointer_value = unqualified->kind == IR_TYPE_POINTER;
             bool representation_value = aggregate_value || selected->builtin_atomic_generic;
+            // A floating-point exchange compares object representations, not
+            // values (C11 7.17.7.4), so it runs through the same-width integer
+            // bits like an aggregate one: -0.0 and 0.0 differ, a NaN equals
+            // itself, and the instruction stays integer-typed.
+            bool bits_compare_value = representation_value || unqualified->kind == IR_TYPE_FLOAT;
             u64 atomic_width = selected->builtin_atomic_generic
                                    ? (unqualified->layout.resolved ? unqualified->layout.size : 0)
                                    : (atomic->layout.resolved ? atomic->layout.size : 0);
@@ -22577,9 +22582,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 IrValueId comparison_place = place;
                 IrValueId comparison_expected = expected;
                 IrValueId comparison_desired = desired;
-                if (representation_value)
+                if (bits_compare_value)
                 {
-                    if (!selected->builtin_atomic_generic &&
+                    if (aggregate_value && !selected->builtin_atomic_generic &&
                         (selected->builtin_atomic_gnu || !c_ir_atomic_aggregate_access_representable(builder, atomic_type)))
                     {
                         builder->failure_message = S8("C IR lowering does not support this atomic aggregate compare-exchange width");
@@ -22638,7 +22643,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         return false;
                     }
                     IrValueId observed = c_ir_emit_load_place_raw(builder, expected_bits_place, comparison_type, source);
-                    IrValueId observed_value = representation_value
+                    IrValueId observed_value = bits_compare_value
                                                    ? c_ir_atomic_aggregate_bits_value(builder, observed, value_type_id, comparison_type, false, source)
                                                    : c_ir_emit_cast(builder, observed, value_type_id, source);
                     if (observed.value == IR_ID_UNDERLYING_INVALID || observed_value.value == IR_ID_UNDERLYING_INVALID ||
@@ -22661,7 +22666,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     instruction.failure_memory_order = (u8)failure_order;
                     instruction.result = observed;
                     c_ir_append_instruction(builder, instruction, instruction_source);
-                    IrValueId observed_value = representation_value
+                    IrValueId observed_value = bits_compare_value
                                                    ? c_ir_atomic_aggregate_bits_value(builder, observed, value_type_id, comparison_type, false, source)
                                                    : observed;
                     if (observed_value.value == IR_ID_UNDERLYING_INVALID ||
@@ -22677,7 +22682,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     comparison.operands[1] = comparison_expected;
                     comparison.operand_count = 2;
                     comparison.binary_operation =
-                        pointer_value && !representation_value ? IR_BINARY_POINTER_EQUAL : IR_BINARY_INTEGER_EQUAL;
+                        pointer_value && !bits_compare_value ? IR_BINARY_POINTER_EQUAL : IR_BINARY_INTEGER_EQUAL;
                     comparison.result = selected->result;
                     c_ir_append_instruction(builder, comparison, comparison_source);
                 }
