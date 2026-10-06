@@ -142,7 +142,8 @@ class HostedSigningBudgetTest(unittest.TestCase):
                 for untouched in WATCHED[2:]:
                     self.assertIsNone(observed[untouched])
                 self.assertEqual(observation["arguments"][::2], ["--batch", observation["arguments"][2], observation["arguments"][4]])
-                self.assertEqual(observation["arguments"][1::2], ["Debug", "Release"])
+                # Release absorbs the first launch after boot (#2819).
+                self.assertEqual(observation["arguments"][1::2], ["Release", "Debug"])
 
     def test_explicit_unrelated_deadlines_are_preserved(self) -> None:
         overrides = {**HOSTED, **{name: str(41 + index) for index, name in enumerate(WATCHED)}}

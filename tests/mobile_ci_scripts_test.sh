@@ -303,13 +303,6 @@ test_ios_batch_and_cleanup() (
     assert_count 1 'simctl shutdown FAKE-UDID' "$log"
     assert_count 2 'simctl install FAKE-UDID' "$log"
     assert_count 2 'simctl launch --console-pty FAKE-UDID' "$log"
-    # Release takes the first launch after boot (#2819); Debug runs second.
-    local install_order
-    install_order=$(grep -F 'simctl install FAKE-UDID' "$log" | sed 's|.*/\([A-Za-z]*\)/ide.app$|\1|' | tr '\n' ' ')
-    if [[ $install_order != 'Release Debug ' ]]; then
-        echo "assertion failed: expected iOS install order 'Release Debug', got '$install_order'" >&2
-        exit 1
-    fi
     assert_file_contains "$result_marker_success" "$state/console.Debug.log"
     assert_file_contains "$result_marker_success" "$state/console.Release.log"
 )

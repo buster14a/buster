@@ -248,7 +248,8 @@
   (`start_wall_us`, from `sysctl` `KERN_PROC_PID`) and `start_status`. Host
   launch to `start_wall_us` is simulator spawn scheduling. `start_wall_us` to
   the `main` wall time is loader and static-initialization work.
-  `ios/test_ci.sh` launches Release before Debug by default, so the first
+  `ios/test_ci.sh` launches Release before Debug by default (checked by
+  `ios/hosted_signing_budget_test.py`), so the first
   launch on a freshly booted device does not consume the Debug budget (#2819).
   `BUSTER_IOS_LAUNCH_OBSERVATION`
   records the host's first polled console, app trace and fixture receipt using
