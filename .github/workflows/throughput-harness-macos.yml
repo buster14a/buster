@@ -19,7 +19,6 @@ on:
       - 'tools/*.c'
       - 'tools/*.h'
       - 'tools/allocation_census.py'
-      - 'tools/bench_service/**'
       - 'tools/throughput/**'
       - '.github/workflows/throughput-harness-macos.yml'
   workflow_dispatch:

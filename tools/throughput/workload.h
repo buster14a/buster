@@ -1053,7 +1053,8 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
         TpWorkloadInput const* input = descriptor->inputs + i;
         if (!tp_workload_source_input(input)) continue;
         TpWorkloadArtifact* artifact = artifacts + artifact_count;
-        char source[TP_PATH_CAP], metrics[TP_PATH_CAP], log[TP_PATH_CAP], leaf[128];
+        char source[TP_PATH_CAP] = {0}, metrics[TP_PATH_CAP] = {0}, log[TP_PATH_CAP] = {0}, leaf[128];
+        char const* failure_predicate = "paths-or-command-preparation";
         snprintf(leaf, sizeof(leaf), "object-%03u.o", source_index);
         ok = tp_path(source, root, input->path) && tp_path(artifact->path, output, leaf);
         snprintf(leaf, sizeof(leaf), "object-%03u.metrics", source_index);
@@ -1062,6 +1063,7 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
         ok = ok && tp_path(log, output, leaf);
         TpWorkloadExpandedArguments* expanded = &state->expanded;
         TpProcess process;
+        int process_attempted = 0;
         ok = ok && tp_workload_expand_arguments(descriptor, compiler, root, descriptor->object_arguments,
                                                  descriptor->object_argument_count, source, artifact->path, metrics, NULL, expanded) &&
              (remove(artifact->path) == 0 || errno == ENOENT) && (remove(metrics) == 0 || errno == ENOENT) &&
@@ -1070,16 +1072,21 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
         if (ok)
         {
             int passed = tp_workload_process_pass(expanded, cwd, log, &process);
+            process_attempted = 1;
             int recorded = tp_workload_result_record(commands, "source-to-object", input->path, &process, identities);
+            failure_predicate = passed ? "command-result-record" : "process-pass";
             ok = passed && recorded;
         }
         TpRow metrics_row = {0};
-        if (ok) ok = tp_workload_regular_file(artifact->path) &&
-                     tp_hash_file(artifact->path, artifact->sha256, &artifact->bytes, &lines) && artifact->bytes > 0 &&
-                     tp_workload_regular_file(metrics) && tp_read_metrics(metrics, &metrics_row) &&
-                     tp_hash_file(metrics, artifact->metrics_sha256, &artifact->metrics_bytes, &lines) && artifact->metrics_bytes > 0;
-        if (ok) ok = UINT64_MAX - object_translated_bytes >= metrics_row.source_bytes &&
-                     UINT64_MAX - object_translated_lines >= metrics_row.source_lines;
+        if (ok) { failure_predicate = "artifact-regular-file"; ok = tp_workload_regular_file(artifact->path); }
+        if (ok) { failure_predicate = "artifact-hash"; ok = tp_hash_file(artifact->path, artifact->sha256, &artifact->bytes, &lines); }
+        if (ok) { failure_predicate = "artifact-nonempty"; ok = artifact->bytes > 0; }
+        if (ok) { failure_predicate = "metrics-regular-file"; ok = tp_workload_regular_file(metrics); }
+        if (ok) { failure_predicate = "metrics-parse"; ok = tp_read_metrics(metrics, &metrics_row); }
+        if (ok) { failure_predicate = "metrics-hash"; ok = tp_hash_file(metrics, artifact->metrics_sha256, &artifact->metrics_bytes, &lines); }
+        if (ok) { failure_predicate = "metrics-nonempty"; ok = artifact->metrics_bytes > 0; }
+        if (ok) { failure_predicate = "translated-byte-sum-overflow"; ok = UINT64_MAX - object_translated_bytes >= metrics_row.source_bytes; }
+        if (ok) { failure_predicate = "translated-line-sum-overflow"; ok = UINT64_MAX - object_translated_lines >= metrics_row.source_lines; }
         if (ok)
         {
             strcpy(artifact->role, "object");
@@ -1092,7 +1099,28 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
             ++artifact_count;
             ++source_index;
         }
-        else tp_error("source-to-object admission operation failed for %s", input->path);
+        else
+        {
+            tp_error("source-to-object admission operation failed for %s", input->path);
+            tp_error("THROUGHPUT_ADMISSION_FAILURE operation=source-to-object source=%s predicate=%s process_attempted=%d log=%s artifact=%s metrics=%s translated_bytes=%" PRIu64 " translated_lines=%" PRIu64,
+                     input->path, failure_predicate, process_attempted, log, artifact->path, metrics,
+                     metrics_row.source_bytes, metrics_row.source_lines);
+            if (process_attempted)
+            {
+                // TpProcess returns a group launch failure, but no raw PID/PGID observation.
+                tp_error("THROUGHPUT_ADMISSION_PROCESS exit_code=%d signal=%d timed_out=%d launch_error=%d launch_stage=%s private_group_state=not-returned wall_seconds=%.17g",
+                         process.exit_code, process.signal_number, process.timed_out, process.launch_error,
+                         tp_launch_stage_name(process.launch_stage), process.wall_seconds);
+                fputs("THROUGHPUT_ADMISSION_ARGV ", stderr);
+                fputc('[', stderr);
+                for (unsigned argument = 0; argument < expanded->count; ++argument)
+                {
+                    if (argument) fputc(',', stderr);
+                    tp_json_string(stderr, expanded->values[argument]);
+                }
+                fputs("]\n", stderr);
+            }
+        }
     }
     char executable[TP_PATH_CAP], link_metrics[TP_PATH_CAP], link_log[TP_PATH_CAP];
     if (ok)

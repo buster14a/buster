@@ -531,3 +531,40 @@ These controls are not a full-corpus one/two/four-worker timing cohort. Hosted
 policy requests four workers only after the separate #408 full-corpus
 qualification. Complete native-job, workflow latency, aggregate runner work and
 concurrent peak-memory acceptance remain separate measurements.
+
+## Seeded Python oracle controls
+
+The existing seeded Python corpus and line reducer use the same reference
+`-fwrapv -fno-strict-aliasing -funsigned-char` profile as the native runner.
+A valid reference must complete normally at both O0 and O2, with matching
+exit status and stdout. Matching crashes, missing statuses, deadlines or an
+unavailable optimized reference cannot establish equivalence. Normal nonzero
+exits remain valid because generated programs encode their hash in the exit
+status. Reference agreement screens disagreements; it does not certify that
+C execution is defined.
+
+The reducer applies that reference gate before retaining every divergence,
+including candidate rejection and compiler crash. Rejection details retain the
+candidate mode so further trials stay on the initially divergent mode. A
+reducer `ok` trial is uninteresting and deliberately leaves O2 unevaluated;
+it is not a four-way equivalence certificate. Candidate compilation
+timeout is inconclusive rather than a source rejection. Review the minimized
+source and original failure independently before making a compiler-defect claim.
+
+Original controlled observations and subprocess results exercise these
+predicates through the existing hosted differential policy suite:
+
+```sh
+python3 tools/differential_ci_policy_test.py -v
+```
+
+These controls cover comparator and reducer sensitivity without executing a
+compiler. Actual generated-program, sanitizer, mode and platform execution
+remains separate evidence.
+
+Seeded campaigns require positive `--count`, `--units` and `--jobs` plus a
+nonempty selected family list. Invalid zero-work selections fail before output
+creation or case submission. `--isolate` returns failure for any whole-case or
+isolated-unit divergence; a successful isolated check retains exit zero.
+The same registered policy suite verifies actual CLI parsing/status propagation
+with controlled case-execution boundaries, without launching a compiler.

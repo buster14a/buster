@@ -320,7 +320,7 @@ BUSTER_GLOBAL_LOCAL void metal_log_error(String8 prefix, id error)
     {
         id description = metal_msg_id(error, "localizedDescription");
         const char* c_string = metal_utf8_string(description);
-        string_print(S8("{S8}: {S8}\n"), prefix, string_from_pointer((char8*)c_string));
+        string_print_error(S8("{S8}: {S8}\n"), prefix, string_from_pointer((char8*)c_string));
     }
 }
 
@@ -332,7 +332,7 @@ BUSTER_GLOBAL_LOCAL bool metal_create_rect_pipeline(RenderingHandle* rendering)
     rendering->library =
         ((id (*)(id, SEL, id, id, id*))objc_msgSend)(rendering->device, metal_sel("newLibraryWithSource:options:error:"), vertex_source, 0, &error);
     metal_release(vertex_source);
-    string_print(S8("Metal vertex shader library creation: library={u64:x}\n"), (u64)rendering->library);
+    BUSTER_RENDERING_TRACE(S8("Metal vertex shader library creation: library={u64:x}\n"), (u64)rendering->library);
     if (!rendering->library)
     {
         metal_log_error(S8("Metal vertex shader compilation failed"), error);
@@ -345,7 +345,7 @@ BUSTER_GLOBAL_LOCAL bool metal_create_rect_pipeline(RenderingHandle* rendering)
     fragment_library =
         ((id (*)(id, SEL, id, id, id*))objc_msgSend)(rendering->device, metal_sel("newLibraryWithSource:options:error:"), fragment_source, 0, &error);
     metal_release(fragment_source);
-    string_print(S8("Metal fragment shader library creation: library={u64:x}\n"), (u64)fragment_library);
+    BUSTER_RENDERING_TRACE(S8("Metal fragment shader library creation: library={u64:x}\n"), (u64)fragment_library);
     if (!fragment_library)
     {
         metal_log_error(S8("Metal fragment shader compilation failed"), error);
@@ -362,7 +362,7 @@ BUSTER_GLOBAL_LOCAL bool metal_create_rect_pipeline(RenderingHandle* rendering)
         id fragment_function = ((id (*)(id, SEL, id))objc_msgSend)(fragment_library, metal_sel("newFunctionWithName:"), fragment_name);
         metal_release(vertex_name);
         metal_release(fragment_name);
-        string_print(S8("Metal shader functions: vertex={u64:x}, fragment={u64:x}\n"), (u64)vertex_function, (u64)fragment_function);
+        BUSTER_RENDERING_TRACE(S8("Metal shader functions: vertex={u64:x}, fragment={u64:x}\n"), (u64)vertex_function, (u64)fragment_function);
 
         if (vertex_function && fragment_function)
         {
@@ -384,7 +384,7 @@ BUSTER_GLOBAL_LOCAL bool metal_create_rect_pipeline(RenderingHandle* rendering)
             rendering->rect_pipeline =
                 ((id (*)(id, SEL, id, id*))objc_msgSend)(rendering->device, metal_sel("newRenderPipelineStateWithDescriptor:error:"), descriptor, &error);
             result = rendering->rect_pipeline != 0;
-            string_print(S8("Metal rect pipeline creation: pipeline={u64:x}\n"), (u64)rendering->rect_pipeline);
+            BUSTER_RENDERING_TRACE(S8("Metal rect pipeline creation: pipeline={u64:x}\n"), (u64)rendering->rect_pipeline);
             if (!result)
             {
                 metal_log_error(S8("Metal pipeline creation failed"), error);
@@ -395,11 +395,11 @@ BUSTER_GLOBAL_LOCAL bool metal_create_rect_pipeline(RenderingHandle* rendering)
         {
             if (!vertex_function)
             {
-                string_print(S8("Metal vertex function creation failed\n"));
+                string_print_error(S8("Metal vertex function creation failed\n"));
             }
             if (!fragment_function)
             {
-                string_print(S8("Metal fragment function creation failed\n"));
+                string_print_error(S8("Metal fragment function creation failed\n"));
             }
         }
 
@@ -472,9 +472,9 @@ RenderingHandle* rendering_initialize(Arena* arena)
         setenv("MTL_DEBUG_LAYER", "1", 1);
         setenv("MTL_SHADER_VALIDATION", "1", 1);
     }
-    string_print(S8("Metal rendering initialization: validation={u32}\n"), (u32)enable_validation);
+    BUSTER_RENDERING_TRACE(S8("Metal rendering initialization: validation={u32}\n"), (u32)enable_validation);
     rendering_handle.device = MTLCreateSystemDefaultDevice();
-    string_print(S8("Metal rendering initialization: device={u64:x}\n"), (u64)rendering_handle.device);
+    BUSTER_RENDERING_TRACE(S8("Metal rendering initialization: device={u64:x}\n"), (u64)rendering_handle.device);
     if (rendering_handle.device)
     {
         rendering_handle.command_queue = metal_msg_id(rendering_handle.device, "newCommandQueue");
@@ -496,16 +496,16 @@ RenderingHandle* rendering_initialize(Arena* arena)
         rendering_handle.blur_sampler_state =
             ((id (*)(id, SEL, id))objc_msgSend)(rendering_handle.device, metal_sel("newSamplerStateWithDescriptor:"), blur_sampler_descriptor);
         metal_release(blur_sampler_descriptor);
-        string_print(S8("Metal device objects: command_queue={u64:x}, sampler_state={u64:x}\n"), (u64)rendering_handle.command_queue,
+        BUSTER_RENDERING_TRACE(S8("Metal device objects: command_queue={u64:x}, sampler_state={u64:x}\n"), (u64)rendering_handle.command_queue,
                      (u64)rendering_handle.sampler_state);
 
         if (!rendering_handle.command_queue)
         {
-            string_print(S8("Metal command queue creation failed\n"));
+            string_print_error(S8("Metal command queue creation failed\n"));
         }
         if (!rendering_handle.sampler_state)
         {
-            string_print(S8("Metal sampler state creation failed\n"));
+            string_print_error(S8("Metal sampler state creation failed\n"));
         }
         bool rect_pipeline_created = rendering_handle.command_queue && rendering_handle.sampler_state && metal_create_rect_pipeline(&rendering_handle);
         bool blur_pipeline_created = rendering_handle.command_queue && rendering_handle.blur_sampler_state && metal_create_blur_pipeline(&rendering_handle);
@@ -516,16 +516,16 @@ RenderingHandle* rendering_initialize(Arena* arena)
     }
     else
     {
-        string_print(S8("Metal device creation failed\n"));
+        string_print_error(S8("Metal device creation failed\n"));
     }
 
     if (!result)
     {
-        string_print(S8("Metal rendering initialization failed\n"));
+        string_print_error(S8("Metal rendering initialization failed\n"));
     }
     else
     {
-        string_print(S8("Metal rendering initialization succeeded: rendering={u64:x}, device={u64:x}, command_queue={u64:x}, rect_pipeline={u64:x}\n"),
+        BUSTER_RENDERING_TRACE(S8("Metal rendering initialization succeeded: rendering={u64:x}, device={u64:x}, command_queue={u64:x}, rect_pipeline={u64:x}\n"),
                      (u64)result, (u64)result->device, (u64)result->command_queue, (u64)result->rect_pipeline);
     }
     return result;
@@ -553,7 +553,7 @@ BUSTER_GLOBAL_LOCAL void metal_window_update_drawable_size(RenderingWindowHandle
     ((void (*)(id, SEL, BusterCGSize))objc_msgSend)(window->layer, metal_sel("setDrawableSize:"), backing_size);
     if (metal_drawable_size_log_count < 3)
     {
-        string_print(S8("Metal drawable size update {u32}: layer={u64:x}, size={u32}x{u32}\n"), metal_drawable_size_log_count, (u64)window->layer,
+        BUSTER_RENDERING_TRACE(S8("Metal drawable size update {u32}: layer={u64:x}, size={u32}x{u32}\n"), metal_drawable_size_log_count, (u64)window->layer,
                      window->width, window->height);
         metal_drawable_size_log_count += 1;
     }
@@ -579,12 +579,12 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     metal_msg_void_id(result->layer, "setDevice:", rendering->device);
     metal_msg_void_ulong(result->layer, "setPixelFormat:", BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM);
     metal_msg_void_bool(result->layer, "setFramebufferOnly:", false);
-    string_print(S8("Metal render window initialization: platform=ios, layer={u64:x}, frame_count={u32}\n"), (u64)result->layer, result->frame_count);
+    BUSTER_RENDERING_TRACE(S8("Metal render window initialization: platform=ios, layer={u64:x}, frame_count={u32}\n"), (u64)result->layer, result->frame_count);
 #else
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_APPKIT);
     result->ns_window = (id)native_surface.window;
     result->content_view = metal_msg_id(result->ns_window, "contentView");
-    string_print(S8("Metal render window initialization: ns_window={u64:x}, content_view={u64:x}, frame_count={u32}\n"), (u64)result->ns_window,
+    BUSTER_RENDERING_TRACE(S8("Metal render window initialization: ns_window={u64:x}, content_view={u64:x}, frame_count={u32}\n"), (u64)result->ns_window,
                  (u64)result->content_view, result->frame_count);
 
     result->layer = metal_msg_id((id)objc_getClass("CAMetalLayer"), "layer");
@@ -602,7 +602,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     metal_msg_void_id(result->content_view, "setLayer:", result->layer);
 #endif
     metal_window_update_drawable_size(result);
-    string_print(S8("Metal layer attached: layer={u64:x}, device={u64:x}, drawable_size={u32}x{u32}\n"), (u64)result->layer, (u64)rendering->device,
+    BUSTER_RENDERING_TRACE(S8("Metal layer attached: layer={u64:x}, device={u64:x}, drawable_size={u32}x{u32}\n"), (u64)result->layer, (u64)rendering->device,
                  result->width, result->height);
 
     for (u64 frame_index = 0; frame_index < result->frame_count; frame_index += 1)
@@ -620,9 +620,9 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
         rendering_command_stream_bind_buffers(frame->commands, frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].vertex_buffer.cpu,
                                               frame->pipeline_instantiations[BUSTER_PIPELINE_RECT].index_buffer.cpu);
         rendering_command_stream_begin(frame->commands, (RenderingWindowSize){.width = result->width, .height = result->height}, result->scale);
-        string_print(S8("Metal frame resources {u32}: command_buffer={u64:x}\n"), (u32)frame_index, (u64)frame->command_buffer);
+        BUSTER_RENDERING_TRACE(S8("Metal frame resources {u32}: command_buffer={u64:x}\n"), (u32)frame_index, (u64)frame->command_buffer);
     }
-    string_print(S8("Metal render window initialization succeeded: ns_window={u64:x}, layer={u64:x}, frame_count={u32}\n"), (u64)result->ns_window,
+    BUSTER_RENDERING_TRACE(S8("Metal render window initialization succeeded: ns_window={u64:x}, layer={u64:x}, frame_count={u32}\n"), (u64)result->ns_window,
                  (u64)result->layer, result->frame_count);
     return result;
 }
@@ -762,7 +762,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
     WindowFrame* frame = rendering_window_frame(window);
     if (metal_frame_begin_log_count < 3)
     {
-        string_print(S8("Metal frame begin {u32}: frame_index={u32}, drawable_size={u32}x{u32}, old_command_buffer={u64:x}\n"), metal_frame_begin_log_count,
+        BUSTER_RENDERING_TRACE(S8("Metal frame begin {u32}: frame_index={u32}, drawable_size={u32}x{u32}, old_command_buffer={u64:x}\n"), metal_frame_begin_log_count,
                      window->frame_index, window->width, window->height, (u64)frame->command_buffer);
         metal_frame_begin_log_count += 1;
     }
@@ -1025,14 +1025,14 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     if (log_frame_end)
     {
         metal_frame_end_log_count += 1;
-        string_print(S8("Metal frame end {u32}: frame_index={u32}, drawable_size={u32}x{u32}, layer={u64:x}\n"), log_index, window->frame_index, window->width,
+        BUSTER_RENDERING_TRACE(S8("Metal frame end {u32}: frame_index={u32}, drawable_size={u32}x{u32}, layer={u64:x}\n"), log_index, window->frame_index, window->width,
                      window->height, (u64)window->layer);
     }
     if (!window->width || !window->height)
     {
         if (log_frame_end)
         {
-            string_print(S8("Metal frame end {u32}: skipped zero-sized drawable\n"), log_index);
+            BUSTER_RENDERING_TRACE(S8("Metal frame end {u32}: skipped zero-sized drawable\n"), log_index);
         }
         frame->commands->frame_active = false;
         rendering_backend_trace_finish(frame->commands, false, false, !rendering_command_stream_is_valid(frame->commands));
@@ -1045,7 +1045,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     {
         if (log_frame_end)
         {
-            string_print(S8("Metal frame end {u32}: nextDrawable returned null\n"), log_index);
+            string_print_error(S8("Metal frame end {u32}: nextDrawable returned null\n"), log_index);
         }
         frame->commands->frame_active = false;
         rendering_backend_trace_finish(frame->commands, false, false, !rendering_command_stream_is_valid(frame->commands));
@@ -1060,7 +1060,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     id drawable_texture = metal_msg_id(drawable, "texture");
     if (log_frame_end)
     {
-        string_print(S8("Metal frame end {u32}: drawable={u64:x}, texture={u64:x}, command_buffer={u64:x}\n"), log_index, (u64)drawable, (u64)drawable_texture,
+        BUSTER_RENDERING_TRACE(S8("Metal frame end {u32}: drawable={u64:x}, texture={u64:x}, command_buffer={u64:x}\n"), log_index, (u64)drawable, (u64)drawable_texture,
                      (u64)command_buffer);
     }
     metal_msg_void_id(color_attachment, "setTexture:", drawable_texture);
@@ -1072,7 +1072,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     id encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), render_pass_descriptor);
     if (log_frame_end)
     {
-        string_print(S8("Metal frame end {u32}: encoder={u64:x}, rect_pipeline={u64:x}\n"), log_index, (u64)encoder, (u64)rendering->rect_pipeline);
+        BUSTER_RENDERING_TRACE(S8("Metal frame end {u32}: encoder={u64:x}, rect_pipeline={u64:x}\n"), log_index, (u64)encoder, (u64)rendering->rect_pipeline);
     }
     BusterMTLViewport viewport = {0, 0, (double)window->width, (double)window->height, 0, 1};
     ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(encoder, metal_sel("setViewport:"), viewport);
@@ -1199,7 +1199,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     window->frame_index = (window->frame_index + 1) % BUSTER_METAL_FRAME_COUNT;
     if (log_frame_end)
     {
-        string_print(S8("Metal frame end {u32}: present+commit complete, next_frame_index={u32}\n"), log_index, window->frame_index);
+        BUSTER_RENDERING_TRACE(S8("Metal frame end {u32}: present+commit complete, next_frame_index={u32}\n"), log_index, window->frame_index);
     }
 }
 
@@ -1235,7 +1235,7 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
         return;
     }
 
-    string_print(S8("Metal render window deinitialize: ns_window={u64:x}, layer={u64:x}, frame_count={u32}\n"), (u64)window->ns_window, (u64)window->layer,
+    BUSTER_RENDERING_TRACE(S8("Metal render window deinitialize: ns_window={u64:x}, layer={u64:x}, frame_count={u32}\n"), (u64)window->ns_window, (u64)window->layer,
                  window->frame_count);
 
     u32 frame_count = window->frame_count;
@@ -1280,7 +1280,7 @@ void rendering_deinitialize(RenderingHandle* rendering)
         return;
     }
 
-    string_print(S8("Metal rendering deinitialize: texture_count={u32}, device={u64:x}, command_queue={u64:x}\n"), rendering->texture_count,
+    BUSTER_RENDERING_TRACE(S8("Metal rendering deinitialize: texture_count={u32}, device={u64:x}, command_queue={u64:x}\n"), rendering->texture_count,
                  (u64)rendering->device, (u64)rendering->command_queue);
     for (u32 i = 0; i < rendering->texture_count; i += 1)
     {
