@@ -40,9 +40,9 @@ feature author, constructs and validates the combined candidate.
 
 Build concurrency permits up to 6 queued candidates to run speculative
 combined-head validation concurrently; it does not authorize 6 merges. Since
-#2659 each `ci.yml` group needs six macOS jobs (four after #1986), so six
-groups hold at most 36 of the 50 observed macOS runners, leaving 14 for
-pull-request and main validation. That reduced headroom is not measured; the
+#2657 each `ci.yml` group needs five macOS jobs (four after #1986, six after
+#2659), so six groups hold at most 30 of the 50 observed macOS runners,
+leaving 20 for pull-request and main validation. That headroom is not measured; the
 [runner-queue guidance](ci-runner-queue.md) still says to lower build
 concurrency if macOS starvation or cancellation waste grows. A
 later candidate may have the preceding unmerged synthetic commit as its base.

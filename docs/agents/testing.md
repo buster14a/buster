@@ -212,6 +212,11 @@
   payloads cannot relaunch themselves, so they run only the in-process
   controls and report the children as `status=unsupported`. It never executes
   a false raw assumption.
+  It also requires `BUSTER_REFERENCE_CHECKS` (the reference-equivalence
+  checks once reached only in Debug) to equal that checked-contract
+  configuration. Routine CI runs this suite in the optimized sanitized
+  Release tree; sanitized Debug is compile-and-link coverage there
+  ([sanitizer execution policy](../ci-combination-shards.md#sanitizer-execution-policy-2657)).
 - **Adding a module** (`foo.c`/`foo.h` under `src/buster/lib/`) takes three
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;
