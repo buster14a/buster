@@ -42361,10 +42361,18 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             CEntityId first_entity = first.kind == C_TOKEN_IDENTIFIER ? c_ir_identifier_entity(builder, index) : C_ENTITY_ID_INVALID;
             bool first_is_typedef_name =
                 first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF;
-            bool first_is_unbound_typedef_name =
-                first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID &&
-                c_parse_type_start_token(&builder->parse, builder->preprocess,
-                    c_parse_scope_for_token(&builder->parse, c_ir_current_scope(builder), index), first);
+            // An unbound prefix reads the token's own lexical scope, but a
+            // declarator is not visible before itself: `for (T T = 0; ...)`
+            // still starts with the outer typedef name.
+            bool first_is_unbound_typedef_name = false;
+            if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID)
+            {
+                CScopeId token_scope = c_parse_scope_for_token(&builder->parse, c_ir_current_scope(builder), index);
+                CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, token_scope, index);
+                first_is_unbound_typedef_name = visible.value < builder->parse.entity_count
+                                                    ? builder->parse.entities[visible.value].kind == C_ENTITY_TYPEDEF
+                                                    : c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first);
+            }
             if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
                 c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
             {
