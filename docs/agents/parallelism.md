@@ -90,6 +90,18 @@ are shared within a TU. Serial table prewarm does not remove these dependencies.
 `compiler_parallel_prewarm()` is the complete native-C prewarm entry for a
 caller launching an external gang; idle persistent workers still count as live.
 
+`buster_x86_metadata_exact_plan_prepare` checks serial initialization only on
+an unprepared key. A prepared key validates and returns immutable process-owned
+state without writing the cache, so repeated preparation is safe on active
+lanes and after the gang parks. An uncached key still requires serial prewarm.
+The registered driver cache-lifetime fixture permutes work identities and
+batch boundaries through the same lane kernel and checks fixed encoding bytes;
+the unit-batch fixture also compiles valid input after each failed cohort.
+These tests do not require linked images to retain their layout after changing
+command-line input order. Within a fixed input/options/path cell, every byte
+and stable diagnostic must remain identical; worker counts and timing counters
+are execution telemetry, not artifact identity.
+
 Arena reuse pools are per thread (`arena_pool_head` in `arena.c`): a destroyed
 arena parks on the destroying thread and only that thread's `arena_create`
 can take it back. A pooled arena that one lane fills and another thread
