@@ -2,11 +2,14 @@
 
 `assembly_fill_executable_padding` is the shared target-aware policy for both
 `assembly_unit_directive_align` and `codegen_generate_canonical_module_attempt`,
-and the x86-64 PE/Mach-O writers' final object-text alignment before their
-import-thunk/stub tables. Those image-layout gaps are bounded to 0..15 bytes
+`link_objects` (every merged-text byte no input section's data covers: the
+alignment gap before each input, a virtual tail past its data and the tail an
+empty, more-aligned input adds; x86-64 and AArch64 only, other targets keep
+zeros), and the x86-64 PE/Mach-O writers' final object-text alignment before
+their import-thunk/stub tables. Those writer image-layout gaps are bounded to 0..15 bytes
 and filled without moving addresses, section sizes or relocations. Object-owned
 text bytes and PE raw-file alignment zeros retain their existing bytes;
-AArch64 linker gaps retain their zero fill.
+AArch64 writer gaps retain their zero fill.
 Explicit `.p2align` / `.balign` fill bytes remain user data. Non-executable
 sections retain zero fill. No target policy is inferred from byte literals.
 
@@ -29,6 +32,8 @@ storage, and overflowing section offsets. Existing assembly-unit regressions
 continue covering directives and explicit fill, including AArch64 fall-through
 code that preserves x16 when native execution is available.
 
+`link_test_merged_text_padding` checks the `link_objects` ranges for both
+targets against literal NOP goldens, with merged data gaps still zero.
 The registered linker suite separately checks range placement in in-memory
 PE and Mach-O images: every x86-64 gap length with zero/one import, immutable
 source bytes (including zero data), relocated address markers, import-stub

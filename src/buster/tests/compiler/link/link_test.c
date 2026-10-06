@@ -358,7 +358,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_section_set_edges(UnitTestArguments
         {
             BUSTER_TEST(arguments, text->data.pointer[0] == 0x10 && text->data.pointer[16] == 0x32 &&
                 text->data.pointer[17] == 0x21 && text->data.pointer[18] == 0x43);
-            for (u32 offset = 1; offset < 16; offset += 1) BUSTER_TEST(arguments, text->data.pointer[offset] == 0);
+            for (u32 offset = 1; offset < 16; offset += 1) BUSTER_TEST(arguments, text->data.pointer[offset] == 0x90);
         }
         u64 expected_bounds[] = {0, 17, 17, 19};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bounds); index += 1)
@@ -1262,7 +1262,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_single_input_alias(UnitTestArgument
         ObjectSection* section = padded.object.sections + OBJECT_SECTION_TEXT;
         BUSTER_TEST(arguments, section->data.pointer != text && section->data.length == sizeof(text) + 4);
         BUSTER_TEST(arguments, memcmp(section->data.pointer, text, sizeof(text)) == 0);
-        BUSTER_TEST(arguments, section->data.pointer[sizeof(text)] == 0 && section->data.pointer[sizeof(text) + 3] == 0);
+        BUSTER_TEST(arguments, section->data.pointer[sizeof(text)] == 0x90 && section->data.pointer[sizeof(text) + 3] == 0x90);
     }
 
     u8 first_text[] = {1, 2, 3};
@@ -3810,6 +3810,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_debug_tag(UnitTestArguments* ar
 // Merged file-backed bytes must not depend on previous arena users. Check
 // whole section contents and serialized artifacts, including both kinds of
 // unwritten span: alignment gaps and virtual bytes past an input's data.
+// Data gaps are zero; text gaps are the target's executable padding.
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3824,6 +3825,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
     u8 poison_values[] = {0, 0xa5, 0x3c};
     for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(architectures); arch += 1)
     {
+        // Text gaps [3, 32) and [34, 43) take the target NOP: x86-64 0x90
+        // bytes; AArch64 0xd503201f only in whole aligned words, zeros around.
+        u8 expected_text[sizeof(expected)];
+        u8 aarch64_nop[] = {0x1f, 0x20, 0x03, 0xd5};
+        memcpy(expected_text, expected, sizeof(expected));
+        for (u32 offset = 0; offset < sizeof(expected_text); offset += 1)
+        {
+            bool gap = (offset >= 3 && offset < 32) || (offset >= 34 && offset < 43);
+            u32 word = offset & ~3u;
+            bool whole_word = (word >= 3 && word + 4 <= 32) || (word >= 34 && word + 4 <= 43);
+            if (gap)
+            {
+                expected_text[offset] = architectures[arch] == CPU_ARCH_X86_64 ? 0x90 : whole_word ? aarch64_nop[offset & 3] : 0;
+            }
+        }
         for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
         {
             Target target = {.cpu_arch = architectures[arch], .os = systems[system]};
@@ -3872,8 +3888,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
                             BUSTER_TEST(arguments, section->data.length == sizeof(expected));
                             BUSTER_TEST(arguments, section->virtual_size == sizeof(expected));
                             BUSTER_TEST(arguments, section->alignment == 32);
+                            u8* section_expected = kinds[kind_index] == OBJECT_SECTION_TEXT ? expected_text : expected;
                             BUSTER_TEST(arguments, section->data.length == sizeof(expected) &&
-                                                       memcmp(section->data.pointer, expected, sizeof(expected)) == 0);
+                                                       memcmp(section->data.pointer, section_expected, sizeof(expected)) == 0);
                         }
                         ObjectSection* zero = merged.object.sections + OBJECT_SECTION_ZERO;
                         BUSTER_TEST(arguments, zero->data.pointer == 0 && zero->data.length == 0 && zero->virtual_size == sizeof(expected));
@@ -3901,8 +3918,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
                                 for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
                                 {
                                     ObjectSection* section = decoded.sections + kinds[kind_index];
+                                    u8* section_expected = kinds[kind_index] == OBJECT_SECTION_TEXT ? expected_text : expected;
                                     BUSTER_TEST(arguments, section->data.length >= sizeof(expected) &&
-                                                               memcmp(section->data.pointer, expected, sizeof(expected)) == 0);
+                                                               memcmp(section->data.pointer, section_expected, sizeof(expected)) == 0);
                                 }
                             }
                         }
@@ -5457,6 +5475,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_failed_publication(UnitTestArgu
     return result;
 }
 
+// link_objects owns the merged-text bytes no input covers: alignment gaps
+// between inputs, a virtual tail past an input's data and the tail an empty,
+// more-aligned input adds. Those take the target NOP (x86-64 0x90, AArch64
+// 0xd503201f) so a structural decoder meets no stray zero in code; merged data
+// gaps stay zero and input bytes are copied unchanged.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_text_padding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        bool aarch64 = architecture != 0;
+        Arena* conflicts[] = {arguments->arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        Target target = {.cpu_arch = aarch64 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS};
+        u8 text_first[8] = {0xa1, 0xa2, 0xa3, 0xa4, 0xa5};
+        u8 text_second[4] = {0xb1, 0xb2, 0xb3, 0xb4};
+        u8 text_third[4] = {0xc1, 0xc2, 0xc3, 0xc4};
+        u8 data_first[3] = {0x11, 0x22, 0x33};
+        u8 data_second[2] = {0x44, 0x55};
+        u64 first_length = aarch64 ? 4 : 5;
+        u64 third_length = aarch64 ? 4 : 2;
+        ObjectFile objects[4];
+        objects[0] = link_test_object_make(temporary.arena, target, (ByteSlice){.pointer = text_first, .length = first_length}, 0, 0, 0, 0);
+        objects[0].sections[OBJECT_SECTION_TEXT].alignment = 4;
+        objects[0].sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data_first);
+        objects[1] = link_test_object_make(temporary.arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text_second), 0, 0, 0, 0);
+        objects[1].sections[OBJECT_SECTION_TEXT].alignment = 16;
+        objects[1].sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data_second);
+        objects[1].sections[OBJECT_SECTION_DATA].alignment = 8;
+        objects[2] = link_test_object_make(temporary.arena, target, (ByteSlice){.pointer = text_third, .length = third_length}, 0, 0, 0, 0);
+        objects[2].sections[OBJECT_SECTION_TEXT].alignment = 32;
+        objects[2].sections[OBJECT_SECTION_TEXT].virtual_size = 8;
+        objects[3] = link_test_object_make(temporary.arena, target, (ByteSlice){0}, 0, 0, 0, 0);
+        objects[3].sections[OBJECT_SECTION_TEXT].alignment = 64;
+        LinkObjectResult linked = link_objects(temporary.arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){.alias_single_input_sections = true});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+        if (linked.error == LINK_ERROR_NONE)
+        {
+            ByteSlice text = linked.object.sections[OBJECT_SECTION_TEXT].data;
+            ByteSlice data = linked.object.sections[OBJECT_SECTION_DATA].data;
+            // Empty data sections at the default 16-byte alignment leave a zero tail.
+            BUSTER_TEST(arguments, text.length == 64 && data.length == 16);
+            if (text.length == 64 && data.length == 16)
+            {
+                u8 nop[4] = {0x1f, 0x20, 0x03, 0xd5};
+                u8 expected[64];
+                for (u32 offset = 0; offset < sizeof(expected); offset += 1) expected[offset] = aarch64 ? nop[offset & 3] : 0x90;
+                memcpy(expected, text_first, first_length);
+                memcpy(expected + 16, text_second, sizeof(text_second));
+                memcpy(expected + 32, text_third, third_length);
+                BUSTER_TEST(arguments, memcmp(text.pointer, expected, sizeof(expected)) == 0);
+                u8 expected_data[16] = {0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0x44, 0x55};
+                BUSTER_TEST(arguments, memcmp(data.pointer, expected_data, sizeof(expected_data)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, text_first[0] == 0xa1 && text_first[5] == 0 && text_second[0] == 0xb1 && text_third[0] == 0xc1);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // The writers own only the gap after the complete object text and before
 // their aligned stub tables. Distinctive source bytes (including zero data),
 // a relocated main-address marker and one-import boundaries locate that range
@@ -5769,6 +5848,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult failed_publication = link_test_elf_failed_publication(arguments);
     result.succeeded_test_count += failed_publication.succeeded_test_count;
     result.test_count += failed_publication.test_count;
+    UnitTestResult merged_text_padding = link_test_merged_text_padding(arguments);
+    result.succeeded_test_count += merged_text_padding.succeeded_test_count;
+    result.test_count += merged_text_padding.test_count;
     UnitTestResult final_text_padding = link_test_final_text_padding(arguments);
     result.succeeded_test_count += final_text_padding.succeeded_test_count;
     result.test_count += final_text_padding.test_count;
