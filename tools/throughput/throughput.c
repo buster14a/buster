@@ -94,6 +94,7 @@ typedef struct TpConfig
     TpCpuSet scale_workers;
     unsigned scale_shape_mask, scale_repeats, scale_max_rss_mib;
     int scale_allow_smt;
+    int scale_exclude_core; /* -1: none; else a CPU whose whole physical core is left out */
 } TpConfig;
 
 typedef struct TpWorkload
@@ -219,6 +220,7 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->guard = 1;
     config->scale_shape_mask = (1u << 4) - 1u;
     config->scale_repeats = 10;
+    config->scale_exclude_core = -1;
     int ok = 1, selected_workloads = 0, selected_shapes = 0;
     for (int i = 2; i < argc && ok; ++i)
     {
@@ -298,6 +300,12 @@ static int tp_options(int argc, char** argv, TpConfig* config)
             else if (!strcmp(key, "--scale")) ok = tp_number(value, &config->scale);
             else if (!strcmp(key, "--cpu-set")) config->cpu_set = value;
             else if (!strcmp(key, "--topology-root")) config->topology_root = value;
+            else if (!strcmp(key, "--exclude-core"))
+            {
+                unsigned cpu = 0;
+                ok = tp_number(value, &cpu) && cpu < TP_MAX_CPUS;
+                if (ok) config->scale_exclude_core = (int)cpu;
+            }
             else if (!strcmp(key, "--workers")) ok = tp_scale_workers_parse(value, &config->scale_workers);
             else if (!strcmp(key, "--repeats")) ok = tp_number(value, &config->scale_repeats);
             else if (!strcmp(key, "--max-rss-mib")) ok = tp_number(value, &config->scale_max_rss_mib);
@@ -419,9 +427,10 @@ static int tp_options(int argc, char** argv, TpConfig* config)
                  TP_SCALE_MAX_WORKERS, TP_SCALE_MAX_REPEATS);
         ok = 0;
     }
-    if (strcmp(config->command, "scale") && (config->cpu_set || config->scale_allow_smt || config->topology_root))
+    if (strcmp(config->command, "scale") &&
+        (config->cpu_set || config->scale_allow_smt || config->topology_root || config->scale_exclude_core >= 0))
     {
-        tp_error("--cpu-set, --topology-root and --allow-smt apply only to scale");
+        tp_error("--cpu-set, --exclude-core, --topology-root and --allow-smt apply only to scale");
         ok = 0;
     }
     if (!strcmp(config->command, "retirement-replay") &&
@@ -2040,7 +2049,8 @@ static void tp_help(void)
           "    --output NEW_DIR --qualification-id ID --dependency-manifest FILE --resource-manifest FILE\n"
           "    --sysroot-manifest FILE --sdk-manifest FILE --environment-manifest FILE --runtime-manifest FILE\n"
           "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH [--lease-fd N]\n"
-          "  throughput scale --compiler IDE --output NEW_DIR --cpu-set LIST|auto --workers LIST [--shape equal|skewed|tiny|count|all]\n"
+          "  throughput scale --compiler IDE --output NEW_DIR --cpu-set LIST|auto [--exclude-core CPU] --workers LIST\n"
+          "    [--shape equal|skewed|tiny|count|all]\n"
           "    [--repeats N] [--warmups N] [--allow-smt] [--max-rss-mib N] [--profile smoke|ci|full] [--timeout SECONDS]\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"

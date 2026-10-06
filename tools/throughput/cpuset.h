@@ -3,7 +3,8 @@
  * tp_process_cpus (platform.h) applies a set to a child; scaling.h selects one.
  * Map: tp_cpu_set_parse/tp_cpu_set_format (Linux cpulist syntax),
  * tp_cpu_set_permitted (whole-set check, never narrowed), tp_topology_read
- * (thread_siblings_list defines a physical core), tp_topology_physical_prefix.
+ * (thread_siblings_list defines a physical core), tp_topology_siblings
+ * (one core's CPUs, for a housekeeping exclusion), tp_topology_physical_prefix.
  * Topology is an OS report: it does not prove an idle SMT sibling or bare metal.
  */
 #ifndef BUSTER_THROUGHPUT_CPUSET_H
@@ -55,6 +56,15 @@ static void tp_cpu_set_add(TpCpuSet* set, unsigned cpu)
     {
         set->bits[cpu / 64] |= UINT64_C(1) << (cpu % 64);
         set->count += 1;
+    }
+}
+
+static void tp_cpu_set_remove(TpCpuSet* set, unsigned cpu)
+{
+    if (tp_cpu_set_has(set, cpu))
+    {
+        set->bits[cpu / 64] &= ~(UINT64_C(1) << (cpu % 64));
+        set->count -= 1;
     }
 }
 
@@ -233,6 +243,17 @@ static int tp_topology_read(char const* root, TpCpuSet const* set, TpTopology* t
         }
     }
     if (error) memset(topology, 0, sizeof(*topology));
+    return error;
+}
+
+/* Every logical CPU of the physical core that contains cpu, from its own
+ * thread_siblings_list. The list must name cpu itself. */
+static int tp_topology_siblings(char const* root, unsigned cpu, TpCpuSet* siblings)
+{
+    char text[TP_CPU_SET_TEXT_CAP];
+    int error = tp_topology_value(root, cpu, "thread_siblings_list", text, sizeof(text));
+    if (!error && (!tp_cpu_set_parse(text, siblings) || !tp_cpu_set_has(siblings, cpu))) error = EILSEQ;
+    if (error) memset(siblings, 0, sizeof(*siblings));
     return error;
 }
 

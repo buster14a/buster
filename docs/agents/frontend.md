@@ -559,3 +559,11 @@ range work continues to use task scratch and its existing rewind boundary.
 Unbound declaration prefixes use the token's lexical scope to recognize local
 typedefs, including macro-expanded `for` initializers. Existing bound entities
 remain authoritative, so a local object can shadow a typedef spelling.
+
+## Opt-in raw source reuse
+
+`CPreprocessOptions.source_cache` reuses only exact captured raw translation/lex
+results, before fresh symbol interning and preprocessing. It imports owned
+copies into the current phase/spelling arenas; no cache pointer reaches a sealed
+result or canonical IR. Read [bounded raw source reuse](../source-lex-reuse.md)
+for the input model, limits, ownership, replay contract and pending cost gates.
