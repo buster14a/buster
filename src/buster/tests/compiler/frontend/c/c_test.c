@@ -3048,6 +3048,140 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArgu
     return result;
 }
 
+// Width constraints belong to semantic analysis even when the record is
+// never used. Expected values follow the declared target type, not layout
+// success, and the same structured error must stop both lowering forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_constraints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+        u32 line;
+        u32 column;
+        bool valid;
+        bool invalid_on_windows;
+        bool dependent_diagnostics;
+    } cases[] = {
+        {S8("struct S { int x : 40; };\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 40; } g;\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 20 + 20; } g;\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { unsigned char c : 9; } g;\n"), S8("width of bit-field 'c' (9 bits) exceeds the width of its type (8 bits)"), 1, 26, false, false, false},
+        {S8("struct S { _Bool b : 2; } g;\n"), S8("width of bit-field 'b' (2 bits) exceeds the width of its type (1 bits)"), 1, 18, false, false, false},
+        {S8("struct S { int x : -1; } g;\n"), S8("bit-field 'x' has negative width (-1)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 40; };\nint main(void) { struct S s = {0}; return s.x; }\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 0; } g;\n"), S8("named bit-field 'x' has zero width"), 1, 16, false, false, false},
+        {S8("struct S { int : 40; };\n"), S8("width of unnamed bit-field (40 bits) exceeds the width of its type (32 bits)"), 1, 18, false, false, false},
+        {S8("struct S { int : -1; };\n"), S8("unnamed bit-field has negative width (-1)"), 1, 18, false, false, false},
+        {S8("struct S { _Bool : 2; };\n"), S8("width of unnamed bit-field (2 bits) exceeds the width of its type (1 bits)"), 1, 20, false, false, false},
+        {S8("struct S { int x : -1LL; };\n"), S8("bit-field 'x' has negative width (-1)"), 1, 16, false, false, false},
+        {S8("struct S { int x : (int)0x80000000; };\n"), S8("bit-field 'x' has negative width (-2147483648)"), 1, 16, false, false, false},
+        {S8("struct S { int x : (signed char)200; };\n"), S8("bit-field 'x' has negative width (-56)"), 1, 16, false, false, false},
+        {S8("struct S { int x : (unsigned __int128)1 << 64; };\n"), S8("width of bit-field 'x' (1 * 2^64 + 0 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : -((__int128)1 << 64); };\n"), S8("bit-field 'x' has negative width (-(1 * 2^64 + 0))"), 1, 16, false, false, false},
+        {S8("struct S { unsigned __int128 x : 129; };\n"), S8("width of bit-field 'x' (129 bits) exceeds the width of its type (128 bits)"), 1, 30, false, false, false},
+        {S8("struct S { int x : -1U; };\n"), S8("width of bit-field 'x' (4294967295 bits) exceeds the width of its type (32 bits)"), 1, 16, false, false, false},
+        {S8("struct S { int x : 1.0; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
+        {S8("struct S { int : 1.0; };\n"), S8("bit-field width is not an integer constant expression"), 1, 18, false, false, false},
+        {S8("struct S { int x : 1 +; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
+        {S8("int n; struct S { int x : n; };\n"), S8("bit-field width is not an integer constant expression"), 1, 23, false, false, false},
+        {S8("struct S { int a : 3 junk; };\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, false},
+        {S8("struct S { int a : 3 junk; }; int n = sizeof(struct S);\n"), S8("bit-field width is not an integer constant expression"), 1, 16, false, false, true},
+        {S8("typedef int T; struct S { T x : 33; };\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 29, false, false, false},
+        {S8("struct S { typeof(int) x : 33; };\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 24, false, false, false},
+        {S8("enum E : unsigned char { A = 0 }; struct S { const enum E x : 9; };\n"), S8("width of bit-field 'x' (9 bits) exceeds the width of its type (8 bits)"), 1, 59, false, false, false},
+        {S8("enum E { A = 0 }; struct S { enum E x : 33; };\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 37, false, false, false},
+        {S8("enum { W = 3 };\nvoid f(void) { enum { W = 40 }; struct S { unsigned x : W; }; }\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 2, 53, false, false, false},
+        {S8("enum { W = 3 };\nvoid f(void) { enum { W = -1 }; struct S { int x : W; }; }\n"), S8("bit-field 'x' has negative width (-1)"), 2, 48, false, false, false},
+        {S8("struct S { long long x : 40; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { unsigned char c : 8; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { _Bool b : 1; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { int x : 32; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { int : 0; unsigned x : 3; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { unsigned long long x : 64; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("typedef int T; struct S { const T x : 32; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { typeof(int) x : sizeof(int) * 8; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("enum E : unsigned char { A = 0 }; struct S { const enum E x : 8; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("enum E { A = 1ULL << 40 }; struct S { enum E x : 40; } g;\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 46, true, true, false},
+        {S8("enum { W = 40 };\nint f(void) { enum { W = 20 }; struct S { unsigned x : W; }; struct S s = {0}; return s.x; }\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { unsigned x : (unsigned char)261; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("struct S { long x : 33; } g;\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 17, true, true, false},
+    };
+    for (u32 target_index = 0; target_index < 4; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index & 2 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_LINUX;
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    bool valid = cases[case_index].valid &&
+                                 !(cases[case_index].invalid_on_windows && target.os == OPERATING_SYSTEM_WINDOWS);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target),
+                        .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, valid ? semantic.diagnostic_count == 0 :
+                        cases[case_index].dependent_diagnostics ? semantic.diagnostic_count >= 1 : semantic.diagnostic_count == 1,
+                        cases[case_index].source);
+                    u32 width_reports = 0;
+                    for (u32 diagnostic_index = 0; diagnostic_index < semantic.diagnostic_count; diagnostic_index += 1)
+                    {
+                        CDiagnostic diagnostic = semantic.diagnostics[diagnostic_index];
+                        if (diagnostic.kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH)
+                        {
+                            width_reports += 1;
+                            BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
+                            BUSTER_TEST_RAW(arguments, string_equal(diagnostic.message, cases[case_index].message),
+                                string_format(temporary.arena, S8("bit-field constraint source={S8} expected={S8} actual={S8}"),
+                                              cases[case_index].source, cases[case_index].message, diagnostic.message));
+                            BUSTER_TEST_RAW(arguments, diagnostic.location.line == cases[case_index].line &&
+                                                       diagnostic.location.column == cases[case_index].column, cases[case_index].source);
+                        }
+                        BUSTER_TEST(arguments, string_first_sequence(diagnostic.message, S8("cannot resolve definition")) == BUSTER_STRING_NO_MATCH &&
+                                               string_first_sequence(diagnostic.message, S8("invalid alignment")) == BUSTER_STRING_NO_MATCH &&
+                                               string_first_sequence(diagnostic.message, S8("kind=codegen.invalid-ir")) == BUSTER_STRING_NO_MATCH);
+                    }
+                    BUSTER_TEST_RAW(arguments, width_reports == (valid ? 0u : 1u), cases[case_index].source);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bit-field-width-constraints.c"), tokens, syntax,
+                        target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic semantic_row = semantic.diagnostics[diagnostic];
+                        CDiagnostic lowering_row = lowered.diagnostics[diagnostic];
+                        BUSTER_TEST(arguments, semantic_row.kind == lowering_row.kind && semantic_row.severity == lowering_row.severity &&
+                                               semantic_row.location.line == lowering_row.location.line &&
+                                               semantic_row.location.column == lowering_row.location.column);
+                        BUSTER_STRING_TEST(arguments, semantic_row.message, lowering_row.message);
+                    }
+                    if (valid)
+                    {
+                        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count && lowered.canonical_ir_certified))
+                        {
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                        }
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -45446,6 +45580,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_bfloat16_type);
     C_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
+    C_TEST_FIXTURE(arguments, c_test_bit_field_width_constraints);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
     C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
     C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
