@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Evidence-integrity controls for the opt-in offline unit-test measurement tool."""
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -33,14 +34,14 @@ def serial_log():
     return module(0, "c_frontend_tests", 11) + module(1, "compiler_driver_tests", 7) + terminal(18, 2)
 
 
-def group_log(group, duration, start=100):
+def group_log(group, duration, start=100, primary_module="c_frontend_tests"):
     lines = []
     for row in INVENTORY:
-        owner = "driver" if row["name"] == "compiler_driver_tests" else "rest"
+        owner = "primary" if row["name"] == primary_module else "rest"
         enabled = not row["table_audit"]
         selected = enabled and owner == group
         lines.append(f"CI_UNIT_MODULE_V1 index={row['index']} module={row['name']} table_audit={int(row['table_audit'])} enabled={int(enabled)} selected={int(selected)} group={owner}\n")
-    name, index, count = ("compiler_driver_tests", 1, 7) if group == "driver" else ("c_frontend_tests", 0, 11)
+    name, index, count = (primary_module, 0 if primary_module == "c_frontend_tests" else 1, 11 if primary_module == "c_frontend_tests" else 7) if group == "primary" else (("compiler_driver_tests", 1, 7) if primary_module == "c_frontend_tests" else ("c_frontend_tests", 0, 11))
     lines.append(module(index, name, count))
     lines.append(f"CI_UNIT_BATCH_V1 group={group} modules=1 modules_passed=1 assertions={count} passed={count} failed=0 external=0 external_passed=0 status=pass\n")
     lines.append(terminal(count, 1, True))
@@ -48,10 +49,10 @@ def group_log(group, duration, start=100):
     return "".join(lines)
 
 
-def parallel_log():
-    plan = f"CI_UNIT_PLAN_V1 binary_sha256={'b' * 64} source_revision={'a' * 40} workers=4 groups=2 group_workers=2\n"
+def parallel_log(primary_module="c_frontend_tests"):
+    plan = f"CI_UNIT_PLAN_V1 binary_sha256={'b' * 64} source_revision={'a' * 40} workers=4 groups=2 group_workers=2 primary_module={primary_module}\n"
     partition = "CI_UNIT_PARTITION_V1 workers=4 groups=2 modules=2 assertions=18 passed=18 failed=0 elapsed_us=1000 status=pass\n"
-    return plan + group_log("driver", 700) + group_log("rest", 600) + partition
+    return plan + group_log("primary", 700, primary_module=primary_module) + group_log("rest", 600, primary_module=primary_module) + partition
 
 
 class MeasurementTests(unittest.TestCase):
@@ -62,16 +63,21 @@ class MeasurementTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def sample(self, name="sample", arm="baseline", log=None, identity=None):
+    def sample(self, name="sample", arm="baseline", log=None, identity=None, primary_module=None):
         grouped = arm == "candidate"
         text = parallel_log() if grouped else serial_log()
         if log is not None:
             text = log
-        (self.root / f"{name}.log").write_text(text)
+        if isinstance(text, bytes):
+            (self.root / f"{name}.log").write_bytes(text)
+        else:
+            (self.root / f"{name}.log").write_text(text, encoding="utf-8")
         manifest = dict(schema="buster-ci-unit-tests-measure-v1", arm=arm, mode="groups" if grouped else "serial",
                         identity=copy.deepcopy(IDENTITY if identity is None else identity), inventory=copy.deepcopy(INVENTORY),
                         log=f"{name}.log", exit_code=0, test_workers=4 if grouped else 2,
                         elapsed_us=1000 if grouped else 1500)
+        if grouped:
+            manifest["primary_module"] = primary_module or "c_frontend_tests"
         path = self.root / f"{name}.json"
         path.write_text(json.dumps(manifest))
         return path
@@ -98,7 +104,7 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(baseline["test_workers"], 2)
         self.assertEqual(baseline["peak_declared_child_workers"], 2)
         self.assertEqual(candidate["test_workers"], 4)
-        self.assertEqual(candidate["groups"]["driver"]["test_workers"], 2)
+        self.assertEqual(candidate["groups"]["primary"]["test_workers"], 2)
         path = self.sample()
         self.mutate(path, lambda row: row.pop("test_workers"))
         self.assertIsNone(MEASURE.validate_sample(path)["peak_declared_child_workers"])
@@ -115,6 +121,98 @@ class MeasurementTests(unittest.TestCase):
         text = "".join("2026-09-30T12:00:00.0000000Z " + line + "\r\n" for line in serial_log().splitlines())
         (self.root / "sample.log").write_bytes(text.encode("utf-16"))
         self.assertEqual(MEASURE.validate_sample(path)["assertions"], 18)
+
+    def test_invalid_utf16_payload_is_not_repaired(self):
+        for suffix in (b"\x00", b"\x00\xd8"):
+            with self.subTest(suffix=suffix):
+                path = self.sample(log=serial_log().encode("utf-16") + suffix)
+                with self.assertRaises(UnicodeDecodeError):
+                    MEASURE.validate_sample(path)
+                output = self.root / "result.json"
+                self.assertEqual(MEASURE.main(["sample", str(path), "--output", str(output)]), 1)
+                self.assertFalse(json.loads(output.read_text())["measurement_review_ready"])
+
+    def test_invalid_human_utf8_retains_bytes_and_native_evidence(self):
+        diagnostic = b"command: test --\xff\xc2\n"
+        for arm, original in (("baseline", serial_log()), ("candidate", parallel_log())):
+            with self.subTest(arm=arm):
+                raw = diagnostic + original.encode("utf-8")
+                path = self.sample(arm=arm, log=raw)
+                retained = self.root / "sample.log"
+                digest = hashlib.sha256(retained.read_bytes()).hexdigest()
+                result = MEASURE.validate_sample(path)
+                self.assertEqual(result["assertions"], 18)
+                self.assertEqual(retained.read_bytes(), raw)
+                self.assertEqual(hashlib.sha256(retained.read_bytes()).hexdigest(), digest)
+                self.assertEqual(MEASURE.read_log(retained)[0].encode("utf-8", errors="surrogateescape"), diagnostic.rstrip(b"\n"))
+
+    def test_invalid_machine_proof_utf8_cannot_hide_extra_record(self):
+        markers = {line.split()[0]: line for line in parallel_log().splitlines() if line.startswith(("CI_UNIT_", "TEST_MODULE_TIMING"))}
+        markers["UNIT_TEST_FAILURE"] = "UNIT_TEST_FAILURE status=fail"
+        for marker, record in markers.items():
+            for index in range(len(marker)):
+                for replace in (False, True):
+                    with self.subTest(marker=marker, index=index, replace=replace):
+                        raw = record.encode("utf-8")
+                        corrupted = raw[:index] + b"\xff" + raw[index + int(replace):]
+                        path = self.sample(arm="candidate", log=parallel_log().encode("utf-8") + corrupted + b"\n")
+                        with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                            MEASURE.validate_sample(path)
+
+    def test_invalid_terminal_utf8_cannot_hide_extra_summary(self):
+        for original in terminal(18, 2).splitlines():
+            for index in range(len(original)):
+                for replace in (False, True):
+                    with self.subTest(original=original, index=index, replace=replace):
+                        raw = original.encode("utf-8")
+                        corrupted = raw[:index] + b"\xff" + raw[index + int(replace):]
+                        path = self.sample(log=serial_log().encode("utf-8") + corrupted + b"\n")
+                        with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                            MEASURE.validate_sample(path)
+
+    def test_invalid_utf8_in_proof_wrappers_and_fields_fails(self):
+        for extra in (b"2026-09-30T12:00:00.\xffZ " + module(0, "c_frontend_tests", 11).encode("utf-8"),
+                      b"\x1b[\xff31m" + module(0, "c_frontend_tests", 11).encode("utf-8"),
+                      b"\x1b[31\xffm" + module(0, "c_frontend_tests", 11).encode("utf-8"),
+                      module(0, "c_frontend_tests", 11).encode("utf-8").replace(b"status=pass", b"status=\xffpass"),
+                      parallel_log().encode("utf-8").replace(b"exit=0", b"exit=\xff0", 1)):
+            with self.subTest(extra=extra):
+                path = self.sample(log=serial_log().encode("utf-8") + extra)
+                with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                    MEASURE.validate_sample(path)
+
+    def test_corrupted_ansi_wrapper_cannot_hide_failed_proofs(self):
+        proofs = (module(0, "c_frontend_tests", 11).replace("status=pass", "status=fail"),
+                  "CI_UNIT_PLAN_V1 status=fail\n", "UNIT_TEST_FAILURE status=fail\n", "[0/1] Unit tests\n")
+        wrapper = b"\x1b[31m"
+        for index in range(len(wrapper)):
+            for replace in (False, True):
+                prefix = wrapper[:index] + b"\xff" + wrapper[index + int(replace):]
+                for proof in proofs:
+                    with self.subTest(index=index, replace=replace, proof=proof):
+                        path = self.sample(log=serial_log().encode("utf-8") + prefix + proof.encode("utf-8"))
+                        with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                            MEASURE.validate_sample(path)
+
+    def test_corrupted_wrapper_and_machine_prefix_cannot_hide_record(self):
+        wrapper = b"\x1b[31m"
+        proof = b"CI_UNIT_PLAN_V1 status=fail\n"
+        for wrapper_index in range(len(wrapper)):
+            prefix = wrapper[:wrapper_index] + b"\xff" + wrapper[wrapper_index + 1:]
+            for marker_index in range(len(b"CI_UNIT_PLAN_V1")):
+                with self.subTest(wrapper_index=wrapper_index, marker_index=marker_index):
+                    corrupted = proof[:marker_index] + b"\xff" + proof[marker_index + 1:]
+                    path = self.sample(log=serial_log().encode("utf-8") + prefix + corrupted)
+                    with self.assertRaisesRegex(MEASURE.EvidenceError, "Invalid UTF-8 in machine proof"):
+                        MEASURE.validate_sample(path)
+
+    def test_invalid_proof_encoding_returns_structured_cli_failure(self):
+        path = self.sample(log=serial_log().encode("utf-8") + b"CI_UNI\xff_PLAN_V1 status=fail\n")
+        output = self.root / "result.json"
+        self.assertEqual(MEASURE.main(["sample", str(path), "--output", str(output)]), 1)
+        result = json.loads(output.read_text())
+        self.assertIn("Invalid UTF-8 in machine proof", result["error"])
+        self.assertFalse(result["measurement_review_ready"])
 
     def test_missing_terminal_fails(self):
         with self.assertRaisesRegex(MEASURE.EvidenceError, "Missing terminal"):
@@ -145,9 +243,49 @@ class MeasurementTests(unittest.TestCase):
         log = parallel_log().replace(group_log("rest", 600), "")
         with self.assertRaises(MEASURE.EvidenceError):
             MEASURE.validate_sample(self.sample(arm="candidate", log=log))
-        log = parallel_log().replace("CI_UNIT_BATCH_V1 group=driver", "REMOVED group=driver")
+        log = parallel_log().replace("CI_UNIT_BATCH_V1 group=primary", "REMOVED group=primary")
         with self.assertRaisesRegex(MEASURE.EvidenceError, "batch record"):
             MEASURE.validate_sample(self.sample(arm="candidate", log=log))
+
+    def test_platform_primary_anchors_and_stale_driver_group_fail(self):
+        arm_identity = copy.deepcopy(IDENTITY)
+        arm_identity.update(architecture="aarch64", runner_image="windows-11-arm")
+        arm_path = self.sample("arm-candidate", arm="candidate",
+                               log=parallel_log("compiler_driver_tests"), identity=arm_identity, primary_module="compiler_driver_tests")
+        arm_result = MEASURE.validate_sample(arm_path)
+        self.assertEqual(arm_result["groups"]["primary"]["modules"], ["compiler_driver_tests"])
+        self.assertEqual(arm_result["groups"]["rest"]["modules"], ["c_frontend_tests"])
+        wrong_arm = self.sample("wrong-arm-anchor", arm="candidate", identity=arm_identity,
+                                log=parallel_log("c_frontend_tests"), primary_module="c_frontend_tests")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "platform policy"):
+            MEASURE.validate_sample(wrong_arm)
+        linux_identity = copy.deepcopy(IDENTITY)
+        linux_identity.update(platform="linux", runner_image="ubuntu/fixture")
+        linux_path = self.sample("linux-driver", arm="candidate", identity=linux_identity,
+                                 log=parallel_log("compiler_driver_tests"), primary_module="compiler_driver_tests")
+        self.assertEqual(MEASURE.validate_sample(linux_path)["groups"]["primary"]["modules"], ["compiler_driver_tests"])
+        wrong_windows = self.sample("wrong-windows-anchor", arm="candidate",
+                                    log=parallel_log("compiler_driver_tests"), primary_module="compiler_driver_tests")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "platform policy"):
+            MEASURE.validate_sample(wrong_windows)
+        mismatched_inventory = self.sample("inventory-plan-mismatch", arm="candidate",
+                                           log=parallel_log("compiler_driver_tests"), primary_module="c_frontend_tests")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "independent inventory"):
+            MEASURE.validate_sample(mismatched_inventory)
+        stale_anchor = parallel_log().replace("primary_module=c_frontend_tests", "primary_module=fixture")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "primary module anchor"):
+            MEASURE.validate_sample(self.sample("foreign-anchor", arm="candidate", log=stale_anchor))
+        missing_anchor = parallel_log().replace(" primary_module=c_frontend_tests", "")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "primary module anchor"):
+            MEASURE.validate_sample(self.sample("missing-anchor", arm="candidate", log=missing_anchor))
+        stale_group = parallel_log().replace("group=primary", "group=driver")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "Unknown/duplicate child group"):
+            MEASURE.validate_sample(self.sample(arm="candidate", log=stale_group))
+        stale_owner = parallel_log().replace(
+            "module=compiler_driver_tests table_audit=0 enabled=1 selected=0 group=rest",
+            "module=compiler_driver_tests table_audit=0 enabled=1 selected=0 group=driver")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "Declared module owner mismatch"):
+            MEASURE.validate_sample(self.sample(arm="candidate", log=stale_owner))
 
     def test_disabled_audit_and_unselected_module_proofs_fail(self):
         log = parallel_log().replace("module=table_tests table_audit=1 enabled=0", "module=table_tests table_audit=1 enabled=1")

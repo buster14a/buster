@@ -59,8 +59,8 @@ class CoverageManifestTests(unittest.TestCase):
         manifest = self.produce()
         consumer_environment = self.consumer_environment(manifest)
         self.assertEqual(ci_summary.validate_coverage_manifest(manifest, consumer_environment, expected_mode="self-test"), [])
-        self.assertEqual(manifest["policy"]["version"], 1)
-        self.assertEqual(manifest["partition_version"], 2)
+        self.assertEqual(manifest["policy"]["version"], 2)
+        self.assertEqual(manifest["partition_version"], 3)
         self.assertEqual(len(manifest["policy"]["fingerprint"]), 16)
         environment = {"RUNNER_TEMP": str(self.root), "BUSTER_CI_STEPS": '{"matrix":{"outcome":"success"}}',
                        "BUSTER_CI_REQUIRED": "matrix", "BUSTER_CI_COVERAGE_OUTPUT": str(self.root / "coverage.json"),
@@ -125,7 +125,7 @@ class CoverageManifestTests(unittest.TestCase):
         controls.append(("owner_spoof", owner_spoof,
                          'coverage row owner does not match the semantic partition: ' + owner_row["id"]))
 
-        for version in (None, 0, 1, 3, True, 2.0, "2"):
+        for version in (None, 0, 1, 2, 4, True, 3.0, "3"):
             wrong_partition = copy.deepcopy(manifest)
             wrong_partition["partition_version"] = version
             controls.append(("partition_version", wrong_partition, 'coverage partition version is unsupported'))

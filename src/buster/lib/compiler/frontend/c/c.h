@@ -35,8 +35,9 @@ typedef enum CTokenKind
 // Every punctuator the lexer can produce, so that recognizing one is a scalar
 // compare instead of a string compare.  The declaration order is the lexer's
 // maximal-munch scan order: a spelling must precede every spelling it starts
-// with.  Digraphs stay distinct from the punctuators they spell, because
-// callers ask about a spelling and never about a meaning.
+// with. Digraph ids identify spellings while scanning; published tokens and
+// shape sidecars carry the equivalent ordinary punctuator id. Their spelling
+// offsets and lengths still preserve the source bytes for #, ## and printing.
 typedef enum CPunctuator
 {
     C_PUNCTUATOR_NONE,
@@ -279,6 +280,10 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_INVALID_UTF8,
     C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
     C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+    C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS,
+    // A reachable direct call to a function declared with GNU
+    // `__attribute__((error("message")))`.
+    C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -562,8 +567,12 @@ struct CPreprocessOptions
     // No report will read preprocessed.bytes (the driver passes its
     // invocation's omit_spelled_bytes), so the pass over the output stream
     // that sums spelling lengths is skipped and the field stays zero. Every
-    // other metric is still gathered. It takes the last reserved byte.
+    // other metric is still gathered.
     bool omit_spelled_bytes;
+    // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
+    u8 position_independent_level;
+    // The selected position-independent spelling was a PIE flag.
+    bool position_independent_executable;
     // Optional caller-owned arena for state whose last reader is inside the
     // phase: per-file lexed rows, macro records, include tables and line
     // staging. The phase allocates above the arena's position at entry and
@@ -905,7 +914,11 @@ struct CMember
     // aggregate's own alignment.
     bool is_packed;
     bool bit_width_resolved;
-    u8 reserved;
+    // The member's struct or union type was still incomplete where the
+    // member was declared (C17 6.7.2.1p3). Its own tag and a tag defined only
+    // later both read complete once the unit is parsed, so the fact is taken
+    // at the declarator and diagnosed with the other member constraints.
+    bool has_incomplete_type;
 };
 
 // One `_Alignas(...)` or GNU `aligned(...)` request, as either the type it
@@ -1016,6 +1029,8 @@ struct CEnumMember
     // finalized once, at the closing brace, according to the selected dialect.
     CTypeId declaration_type;
     CTypeId type;
+    // The declaration-point ICE survives completion. On Microsoft targets an
+    // implicit successor's published signed-int value can differ from it.
     CIntegerConstant integer_constant;
     u64 value;
     bool is_negative;
@@ -1093,6 +1108,9 @@ struct CEntity
     // The function's only definition so far is GNU inline-only, so the unit
     // may still give its external definition.
     bool definition_is_gnu_inline_only;
+    // The file-scope entity's first declaration was written `static`, so it
+    // has internal linkage (C17 6.2.2p3) and later declarations must agree.
+    bool has_internal_linkage;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1103,6 +1121,8 @@ struct CEntity
 };
 
 // One shadowed binding, restored when the scope that shadowed it closes.
+typedef struct CParseScopeCursor CParseScopeCursor;
+
 typedef struct CParseBindingUndo CParseBindingUndo;
 struct CParseBindingUndo
 {
@@ -1155,6 +1175,15 @@ struct CDeclaration
     u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
+    // A pre-C23 function definition may name its parameters first and type
+    // them in the declarations between the closing ')' and the body.  These
+    // two immutable token ranges keep that grammar out of the ordinary
+    // prototype declarator while letting the semantic pass reuse the block
+    // declaration parser for the types.
+    u32 identifier_list_start;
+    u32 identifier_list_token_count;
+    u32 parameter_declaration_start;
+    u32 parameter_declaration_token_count;
     u32 parameter_start;
     u32 parameter_count;
     u32 alignment_start;
@@ -1168,6 +1197,7 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    bool is_identifier_list_definition;
     // A GNU `extern inline` function definition: its body is only for
     // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
     bool is_gnu_inline_only;
@@ -1231,6 +1261,10 @@ struct CParserDeclaration
     u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
+    u32 identifier_list_start;
+    u32 identifier_list_token_count;
+    u32 parameter_declaration_start;
+    u32 parameter_declaration_token_count;
     u32 name_token;
     u32 function_name_token;
     // The body's _Static_assert statements in body order; null for the
@@ -1245,7 +1279,8 @@ struct CParserDeclaration
     bool is_variadic;
     bool seen_equal;
     bool is_declarator_continuation;
-    u8 reserved[2];
+    bool is_identifier_list_definition;
+    u8 reserved[1];
 };
 
 typedef struct CNumberFacts CNumberFacts;
@@ -1490,6 +1525,10 @@ struct CParseResult
     CEntityId* binding_by_symbol;
     CParseBindingUndo* binding_undo;
     CScopeId binding_scope;
+    // Borrowed while the lowering constraints are checked: the block-scope
+    // bindings of one path of the scope tree, which those passes reposition
+    // as they walk a body. See c_parse_scope_cursor_lookup.
+    CParseScopeCursor* scope_cursor;
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
@@ -1670,6 +1709,16 @@ BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPrep
 // the mapping for the next unit on this thread. The caller must be the thread
 // that created it (docs/agents/parallelism.md).
 BUSTER_F_DECL void c_phase_arena_retire(Arena* arena);
+// Ends the use of the private arenas c_preprocess reserved for one unit (the
+// spelling space, the token rows and the token shapes). Each returns every
+// committed page beyond C_PHASE_ARENA_RETAINED_SIZE to the OS and parks its
+// reservation in the creating thread's reuse pool, so a process that compiles
+// many units in turn holds a bounded address space. Call once the unit's
+// compilation is complete: afterwards `tokens`, `spelling_base` and every
+// token spelling of the result are gone; the source map, symbols, files and
+// diagnostics live in the caller's arena and stay valid. Idempotent, and a
+// no-op for a hand-built result.
+BUSTER_F_DECL void c_preprocess_release(CPreprocessResult* result);
 BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics const* part);
 // translated_bytes minus comments and whitespace: the bytes that became
 // tokens, literal spellings included.

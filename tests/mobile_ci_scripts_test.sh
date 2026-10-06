@@ -830,14 +830,14 @@ test_ios_lifecycle_evidence() (
         codesign-exit) ;;
         codesign-native-124) status=124; native=124; export FAKE_IOS_CODESIGN_STATUS=124 ;;
         codesign-timeout)
-            status=124; native=unavailable; outcome=timeout
+            status=124; native=143; outcome=timeout
             export FAKE_IOS_CODESIGN_SLEEP_SECONDS=60 ;;
         codesign-large-output) export FAKE_IOS_LARGE_OUTPUT=1 ;;
         shutdown-exit|shutdown-timeout|app-and-shutdown|native-macos)
             phase=shutdown; label=batch; status=9; native=9; prior_status=0
             export FAKE_IOS_CODESIGN_STATUS=0 FAKE_IOS_SHUTDOWN_STATUS=9
             if [[ $case_name == shutdown-timeout ]]; then
-                status=124; native=unavailable; outcome=timeout
+                status=124; native=143; outcome=timeout
                 export FAKE_IOS_SHUTDOWN_SLEEP_SECONDS=60
             elif [[ $case_name == app-and-shutdown ]]; then
                 prior_status=1
@@ -875,6 +875,19 @@ test_ios_lifecycle_evidence() (
         assert_file_contains 'iOS ' "$state/console.log.lifecycle-context.log"
         [[ -s $state/console.Debug.log.codesign.log && -s $evidence.log ]]
         if grep -qF 'native_status=unavailable' "$evidence.status.log"; then exit 1; fi
+    fi
+    if [[ $case_name == codesign-timeout || $case_name == shutdown-timeout ]]; then
+        # These launched fake tools end with TERM143 when the command expires.
+        assert_file_contains 'capture_receipt=complete' "$evidence.status.log"
+        assert_file_contains 'BUSTER_IOS_SUPERVISOR_GATE helper_status=124 supervisor_valid=1 deadline_reached=1 cleanup_status=0' \
+            "$evidence.status.log"
+        assert_file_contains 'command_status=124 native_status=143 capture_status=0' "$evidence.supervisor-status.log"
+        assert_file_contains 'deadline_reached=1 capture_eof=1 capture_eof_late=0 cleanup_status=0 native_kind=signal' \
+            "$evidence.supervisor-status.log"
+        assert_file_contains 'keeper_reaped=1 native_reaped=1 group_authority_released=1' "$evidence.supervisor-status.log"
+    elif [[ $case_name == codesign-native-124 ]]; then
+        assert_file_contains 'deadline_reached=0' "$evidence.supervisor-status.log"
+        assert_file_contains 'native_kind=exit' "$evidence.supervisor-status.log"
     fi
     assert_file_contains 'command:' "$evidence.status.log"
     assert_file_contains 'elapsed_seconds=' "$evidence.status.log"

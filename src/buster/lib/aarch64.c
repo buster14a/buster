@@ -347,10 +347,9 @@ CpuModel cpu_detect_model_aarch64(void)
             }
         }
     }
-    else
-    {
-        string_print(S8("Error reading CPU model\n"));
-    }
+    // An unreadable MIDR_EL1 (containers, virtual machines) is a normal
+    // outcome. CPU_MODEL_ERROR resolves to the native identity, and this runs
+    // before the program state exists, so nothing may be printed here.
 #elif BUSTER_ANDROID
     result = CPU_MODEL_A64_GENERIC;
 #elif defined(__APPLE__)
