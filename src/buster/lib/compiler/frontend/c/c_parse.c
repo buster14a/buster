@@ -26389,7 +26389,21 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
                 !result->array_bounds[value.array_bound].has_inferred_count)
             {
                 u64 count = 0;
-                if (c_parse_infer_initializer_array_count(machine, result->arena, preprocess, result, literal_scope, value.element_type, open, close + 1, &count))
+                CTypeId element = value.element_type;
+                while (element.value < result->type_count && result->types[element.value].has_unqualified_type)
+                {
+                    element = result->types[element.value].unqualified_type;
+                }
+                // Braced string literals are one pointer element of an array
+                // of pointers; the character-array inference refuses them.
+                u32 body_end = close > open + 1 && c_token_is_punctuator(&preprocess.tokens[close - 1], C_PUNCTUATOR_COMMA) ? close - 1 : close;
+                bool pointer_string = element.value < result->type_count && result->types[element.value].kind == C_TYPE_POINTER &&
+                                      open + 1 < body_end && c_ir_tokens_are_string_literals(preprocess, open + 1, body_end);
+                if (pointer_string)
+                {
+                    count = 1;
+                }
+                if (pointer_string || c_parse_infer_initializer_array_count(machine, result->arena, preprocess, result, literal_scope, value.element_type, open, close + 1, &count))
                 {
                     result->array_bounds[value.array_bound].has_inferred_count = true;
                     result->array_bounds[value.array_bound].inferred_count = count;
