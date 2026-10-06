@@ -324,16 +324,10 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_parse_pam(ImageDecodeContext* context, ImageP
         }
         if (result)
         {
-            for (u64 index = 0; index < line.length; index += 1)
-            {
-                if (line.pointer[index] == '#')
-                {
-                    line.length = index;
-                    break;
-                }
-            }
+            // PAM comments are whole lines; '#' inside a value (TUPLTYPE
+            // RGB#custom) is part of an opaque identifier, not a comment.
             line = image_pnm_trim(line);
-            if (line.length)
+            if (line.length && line.pointer[0] != '#')
             {
                 u64 split = 0;
                 while (split < line.length && !image_pnm_space(line.pointer[split]))

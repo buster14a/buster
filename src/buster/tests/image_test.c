@@ -729,6 +729,33 @@ BUSTER_GLOBAL_LOCAL bool image_test_pnm_decodes_to(Arena* arena, char const* tex
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool image_test_pam_tuple_unsupported(Arena* arena, char const* tuple)
+{
+    static char const prefix[] = "P7\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE ";
+    static char const suffix[] = "\nENDHDR\n\x11\x22\x33";
+    u8 encoded_bytes[160];
+    u64 length = sizeof(prefix) - 1u;
+    memcpy(encoded_bytes, prefix, length);
+    for (u64 index = 0; tuple[index]; index += 1)
+    {
+        encoded_bytes[length] = (u8)tuple[index];
+        length += 1;
+    }
+    memcpy(encoded_bytes + length, suffix, sizeof(suffix) - 1u);
+    length += sizeof(suffix) - 1u;
+    ImageDecodeOptions options = {.format_hint = IMAGE_FORMAT_PNM};
+    ByteSlice encoded = {.pointer = encoded_bytes, .length = length};
+    ImageProbeResult probe = image_probe(encoded, options);
+    u64 position = arena->position;
+    ImageDecodeResult decoded = image_decode(arena, encoded, options);
+    bool result = probe.status == IMAGE_DECODE_UNSUPPORTED_FEATURE &&
+                  probe.unsupported_feature == IMAGE_UNSUPPORTED_FEATURE_COMPONENT_MODEL &&
+                  decoded.status == IMAGE_DECODE_UNSUPPORTED_FEATURE &&
+                  decoded.unsupported_feature == IMAGE_UNSUPPORTED_FEATURE_COMPONENT_MODEL &&
+                  image_test_image_empty(decoded.image) && arena->position == position;
+    return result;
+}
+
 #define IMAGE_TEST_TEXT(text) (text), sizeof(text) - 1u
 
 typedef struct ImageTestPngBuilder ImageTestPngBuilder;
@@ -3118,6 +3145,21 @@ UnitTestResult image_tests(UnitTestArguments* arguments)
     u8 const p6_cr_truncated[] = "P6\n1 1\n255#c\r\x01\x02";
     BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, (ByteSlice){.pointer = (u8*)p6_cr_truncated, .length = sizeof(p6_cr_truncated) - 1u},
                                                                    pnm_options, IMAGE_DECODE_TRUNCATED));
+
+    // PAM comments are whole lines; '#' inside TUPLTYPE is part of an opaque
+    // tuple identifier and must not be stripped into a supported tuple.
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB#custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB #custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "GRAYSCALE#custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB_ALPHA#custom"));
+    u8 const pam_rgb_expected[] = {17, 34, 51, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena,
+                                                     IMAGE_TEST_TEXT("P7\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n\x11\x22\x33"),
+                                                     pam_rgb_expected, sizeof(pam_rgb_expected)));
+    static char const pam_commented[] =
+        "P7\n# ordinary header comment\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\n  # indented\nTUPLTYPE RGB\nENDHDR\n\x11\x22\x33";
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, pam_commented, sizeof(pam_commented) - 1u,
+                                                     pam_rgb_expected, sizeof(pam_rgb_expected)));
 
     u8 p1_bad_digit[] = "P1\n2 1\n02\n";
     ByteSlice p1_bad_digit_bytes = {.pointer = p1_bad_digit, .length = sizeof(p1_bad_digit) - 1u};
