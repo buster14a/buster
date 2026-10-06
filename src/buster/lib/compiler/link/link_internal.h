@@ -27,6 +27,25 @@ typedef enum LinkComdatState
 } LinkComdatState;
 
 #if BUSTER_INCLUDE_TESTS
+typedef struct LinkSectionSetCounts LinkSectionSetCounts;
+struct LinkSectionSetCounts
+{
+    u64 input_rows;
+    u64 members;
+    u64 name_comparisons;
+    u64 group_rows;
+    u64 placements;
+    u64 bound_queries;
+    u64 bound_comparisons;
+};
+
+// Exact public merge path; counters cover the named-section index and bound
+// lookup only, excluding ordinary symbol tables, byte copies and image IO.
+BUSTER_F_DECL LinkObjectResult link_objects_section_sets_test(Arena* arena, ObjectFile* objects, u32 object_count,
+                                                             LinkOptions options, LinkSectionSetCounts* counts);
+// Exact production TLS-site membership with work counters, independent of image IO.
+BUSTER_F_DECL bool link_elf_test_tls_membership(Arena* temporary, ObjectFile* object, bool* matches,
+                                             u64* build_rows, u64* queries, u64* probes);
 typedef struct LinkComdatAssociationCounts LinkComdatAssociationCounts;
 struct LinkComdatAssociationCounts
 {

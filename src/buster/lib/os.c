@@ -8,6 +8,8 @@
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
 // the crash/failure printers. Replacement publication follows os_file_close.
+// Opt-in child resource witnesses in os_process_wait_deadline retain native
+// accounting scope; they do not alter process ownership or cleanup.
 // os_process_capture_step separates ordinary POSIX pipe drain transitions
 // from native observations in os_process_wait_deadline; its private replay
 // contract lives in os_internal.h, without process-group identity changes.
@@ -247,7 +249,7 @@ BUSTER_COLD bool is_debugger_present(void)
         // PTRACE_TRACEME probe left the process permanently traced by its
         // parent and blocked a real debugger from attaching later.
         bool traced = false;
-        int status_fd = open("/proc/self/status", O_RDONLY);
+        int status_fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
         if (status_fd >= 0)
         {
             char8 status_buffer[4096];
@@ -384,6 +386,25 @@ int generic_fd_to_posix(OsFileDescriptor* fd)
     return (int)((u64)fd - 1);
 }
 #elif defined(_WIN32)
+// TinyCC has neither psapi.h nor its import stubs. This is the fixed ABI of
+// PROCESS_MEMORY_COUNTERS; resolve the existing kernel32 export at runtime.
+typedef struct OsProcessMemoryCounters OsProcessMemoryCounters;
+struct OsProcessMemoryCounters
+{
+    DWORD cb;
+    DWORD page_fault_count;
+    SIZE_T peak_working_set_size;
+    SIZE_T working_set_size;
+    SIZE_T quota_peak_paged_pool_usage;
+    SIZE_T quota_paged_pool_usage;
+    SIZE_T quota_peak_non_paged_pool_usage;
+    SIZE_T quota_non_paged_pool_usage;
+    SIZE_T pagefile_usage;
+    SIZE_T peak_pagefile_usage;
+};
+
+BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error);
+
 BUSTER_GLOBAL_LOCAL DWORD os_windows_protection_flags(ProtectionFlags flags)
 {
     DWORD result;
@@ -587,18 +608,60 @@ OsPrefaultResult os_prefault(void* address, u64 size)
     return result;
 }
 
-bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault)
+#if defined(_WIN32)
+BUSTER_GLOBAL_LOCAL void os_windows_commit_failure_context(OsCommitFailureContext* context)
+{
+    // Use runtime lookup because TinyCC's kernel32 import stubs do not carry
+    // GlobalMemoryStatusEx. These observations are diagnostic only; failure to
+    // query either source must not overwrite the native commit error.
+    typedef BOOL(WINAPI* GlobalMemoryStatusExProc)(MEMORYSTATUSEX*);
+    GlobalMemoryStatusExProc global_memory_status_ex =
+        (GlobalMemoryStatusExProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GlobalMemoryStatusEx");
+    MEMORYSTATUSEX status = {0};
+    status.dwLength = sizeof(status);
+    if (global_memory_status_ex && global_memory_status_ex(&status))
+    {
+        context->system_commit_limit_bytes = status.ullTotalPageFile;
+        context->system_commit_available_bytes = status.ullAvailPageFile;
+        context->physical_available_bytes = status.ullAvailPhys;
+        context->system_memory_observed = true;
+    }
+
+    OsProcessMemoryCounters counters = {0};
+    OsError ignored_error = {0};
+    if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &ignored_error) == PROCESS_RESOURCE_OBSERVED)
+    {
+        context->process_commit_bytes = (u64)counters.pagefile_usage;
+        context->process_memory_observed = true;
+    }
+}
+#endif
+
+bool os_commit_diagnose(void* address, u64 size, ProtectionFlags protection, bool prefault, OsCommitFailureContext* failure_context)
 {
     bool result = 1;
+    OsCommitFailureContext context = {0};
 
 #if defined(__linux__) || defined(__APPLE__)
     int protection_flags = os_posix_protection_flags(protection);
     int os_result = mprotect(address, size, protection_flags);
     result = os_result == 0;
+    if (!result && failure_context)
+    {
+        context.error = os_get_last_error();
+        context.page_size = os_get_page_size();
+    }
 #elif defined(_WIN32)
     DWORD protection_flags = os_windows_protection_flags(protection);
     void* os_result = VirtualAlloc(address, size, MEM_COMMIT, protection_flags);
     result = os_result != 0;
+    if (!result && failure_context)
+    {
+        // No call may intervene between VirtualAlloc and this capture.
+        context.error = os_get_last_error();
+        context.page_size = os_get_page_size();
+        os_windows_commit_failure_context(&context);
+    }
 #endif
 
     // Strictly subordinate and strictly advisory: the request is issued only
@@ -612,7 +675,16 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefaul
 #if BUSTER_BENCH_ALLOCATIONS
     arena_benchmark_event(ARENA_BENCHMARK_OS_COMMIT, S8(__FILE__), S8(__func__), __LINE__, size, 0, 0, 0, result);
 #endif
+    if (failure_context)
+    {
+        *failure_context = context;
+    }
     return result;
+}
+
+bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault)
+{
+    return os_commit_diagnose(address, size, protection, prefault, 0);
 }
 
 bool os_protect(void* address, u64 size, ProtectionFlags protection)
@@ -2039,6 +2111,11 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             o |= (flags.truncate) * O_TRUNC;
             o |= (flags.create) * O_CREAT;
             o |= (flags.directory) * O_DIRECTORY;
+            // Every descriptor is close-on-exec from creation: a concurrent
+            // spawn on another thread must never inherit it, and a separate
+            // F_SETFD would leave a window. Children only receive the standard
+            // streams, which the spawn file actions dup2 over 0, 1 and 2.
+            o |= O_CLOEXEC;
 
             mode_t mode = permissions.execute ? 0755 : 0644;
             int fd;
@@ -2496,7 +2573,7 @@ FileStats os_file_replacement_target_stats(String8 path)
             int fd;
             do
             {
-                fd = open((char*)path_z.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+                fd = open((char*)path_z.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
             } while (fd < 0 && errno == EINTR);
             if (fd >= 0)
             {
@@ -2635,7 +2712,7 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
         {
             do
             {
-                fd = open((char*)path_z.pointer, O_WRONLY | O_CREAT | O_EXCL, mode);
+                fd = open((char*)path_z.pointer, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode);
             } while (fd < 0 && errno == EINTR);
             error = fd >= 0 ? (OsError){0} : os_get_last_error();
         }
@@ -2953,6 +3030,38 @@ BUSTER_GLOBAL_LOCAL OsError os_process_spawn_not_found_error(void)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL OsError os_process_capture_sink_error(OsFileDescriptor* file)
+{
+    OsError result = os_process_spawn_invalid_error();
+    bool query_stats = file != 0;
+#if defined(_WIN32)
+    if (query_stats)
+    {
+        SetLastError(NO_ERROR);
+        DWORD kind = GetFileType(generic_fd_to_windows(file));
+        query_stats = kind == FILE_TYPE_DISK;
+        if (kind == FILE_TYPE_UNKNOWN)
+        {
+            OsError native_error = os_get_last_error();
+            if (native_error.v) result = native_error;
+        }
+    }
+#endif
+    if (query_stats)
+    {
+        FileStats stats = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+        if (!stats.valid)
+        {
+            if (stats.error.v) result = stats.error;
+        }
+        else if (stats.kind == OS_FILE_KIND_REGULAR)
+        {
+            result = (OsError){0};
+        }
+    }
+    return result;
+}
+
 #if defined(_WIN32)
 BUSTER_GLOBAL_LOCAL OsError os_process_spawn_injected_error(void)
 {
@@ -3162,7 +3271,10 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_add_open_descriptor_closes(posix_spawn_
     {
         int directory_descriptor = dirfd(directory);
         struct dirent* entry;
-        while (!result && (entry = readdir(directory)) != 0)
+        // readdir returns null for both the end of the directory and a failure.
+        // Clear errno first so an error is reported instead of being taken as a
+        // complete set of closes.
+        while (!result && (errno = 0, entry = readdir(directory)) != 0)
         {
             u64 descriptor = 0;
             bool numeric = entry->d_name[0] != 0;
@@ -3187,6 +3299,10 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_add_open_descriptor_closes(posix_spawn_
                 }
             }
         }
+        if (!result && errno != 0)
+        {
+            result = errno;
+        }
         closedir(directory);
     }
     return result;
@@ -3204,6 +3320,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     result.capture_limits = options.capture_limits;
     result.capture_overflow_policy = options.capture_overflow_policy;
+    result.observe_resources = options.observe_resources;
     memcpy(result.capture_overflow_files, options.capture_overflow_files, sizeof(result.capture_overflow_files));
     if (options.capture_overflow_policy >= PROCESS_CAPTURE_OVERFLOW_COUNT)
     {
@@ -3215,8 +3332,18 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     }
     else
     {
+        for (StandardStream stream = STANDARD_STREAM_OUTPUT;
+             result.failure == PROCESS_SPAWN_FAILURE_NONE && stream < STANDARD_STREAM_COUNT; stream += 1)
+        {
+            if (options.capture_overflow_policy == PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE &&
+                (options.capture & ((u64)1 << stream)))
+            {
+                OsError sink_error = os_process_capture_sink_error(options.capture_overflow_files[stream]);
+                if (sink_error.v) os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_CAPTURE_SINK, sink_error);
+            }
+        }
         String8 requested = arguments.pointer[0];
-        if (options.search_path && !os_process_spawn_path_is_explicit(requested))
+        if (result.failure == PROCESS_SPAWN_FAILURE_NONE && options.search_path && !os_process_spawn_path_is_explicit(requested))
         {
             requested = executable_resolve_in_path(temp.arena, requested);
             if (!requested.length)
@@ -3706,6 +3833,10 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 // Captured pipe output is accumulated as a chunk list in scratch memory while
 // draining, because the streams are read interleaved (see below) but each
 // stream's bytes must end up contiguous in the caller's arena.
+// Retained payload is packed independently of the native read boundaries.
+// Only the final chunk of a stream can have unused capacity.
+enum { PIPE_CAPTURE_CHUNK_BYTES = 16 * 1024 };
+
 typedef struct PipeChunk PipeChunk;
 struct PipeChunk
 {
@@ -3754,21 +3885,32 @@ BUSTER_GLOBAL_LOCAL void pipe_capture_append(Arena* arena, PipeCapture* capture,
     pipe_capture_add_count(result->observed_bytes + stream, &result->observed_total, length);
     if (retained)
     {
-        PipeChunk* chunk = arena_allocate(arena, PipeChunk, 1);
-        chunk->next = 0;
-        chunk->length = retained;
-        chunk->data = arena_allocate(arena, u8, retained);
-        memcpy(chunk->data, data, retained);
-
-        if (capture->last)
+        u64 copied = 0;
+        while (copied < retained)
         {
-            capture->last->next = chunk;
+            PipeChunk* chunk = capture->last;
+            if (!chunk || chunk->length == PIPE_CAPTURE_CHUNK_BYTES)
+            {
+                chunk = arena_allocate(arena, PipeChunk, 1);
+                chunk->next = 0;
+                chunk->length = 0;
+                chunk->data = arena_allocate(arena, u8, PIPE_CAPTURE_CHUNK_BYTES);
+                if (capture->last)
+                {
+                    capture->last->next = chunk;
+                }
+                else
+                {
+                    capture->first = chunk;
+                }
+                capture->last = chunk;
+            }
+            u64 available = PIPE_CAPTURE_CHUNK_BYTES - chunk->length;
+            u64 amount = BUSTER_MIN(retained - copied, available);
+            memcpy(chunk->data + chunk->length, data + copied, amount);
+            chunk->length += amount;
+            copied += amount;
         }
-        else
-        {
-            capture->first = chunk;
-        }
-        capture->last = chunk;
         capture->total_length += retained;
         pipe_capture_add_count(result->captured_bytes + stream, &result->captured_total, retained);
     }
@@ -3956,6 +4098,50 @@ BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* ca
     BUSTER_CHECK(offset == capture->total_length);
     return (ByteSlice){pointer, capture->total_length};
 }
+
+#if BUSTER_INCLUDE_TESTS
+OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, ProcessSpawnResult spawn,
+    OsProcessCaptureTestInput const* inputs, u64 input_count)
+{
+    OsProcessCaptureTestResult result = {0};
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    u64 start = scratch.arena->position;
+    PipeCapture captures[(size_t)STANDARD_STREAM_COUNT] = {0};
+    for (u64 index = 0; index < input_count; index += 1)
+    {
+        OsProcessCaptureTestInput const* input = inputs + index;
+        BUSTER_VALIDATE(input->stream == STANDARD_STREAM_OUTPUT || input->stream == STANDARD_STREAM_ERROR);
+        BUSTER_VALIDATE(!input->bytes.length || input->bytes.pointer);
+        u64 offset = 0;
+        do
+        {
+            u64 count = input->bytes.length - offset;
+            if (input->read_size && count > input->read_size)
+            {
+                count = input->read_size;
+            }
+            pipe_capture_append(scratch.arena, captures + input->stream, spawn, &result.wait, input->stream,
+                input->bytes.pointer ? input->bytes.pointer + offset : 0, count);
+            offset += count;
+        } while (offset < input->bytes.length);
+    }
+    result.storage_bytes = scratch.arena->position - start;
+    for (u32 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+    {
+        for (PipeChunk* chunk = captures[stream].first; chunk; chunk = chunk->next)
+        {
+            result.chunk_count[stream] += 1;
+        }
+        if (stream != STANDARD_STREAM_INPUT)
+        {
+            result.wait.streams[stream] = pipe_capture_flatten(arena, captures + stream);
+        }
+    }
+    result.wait.result = result.wait.capture_failed ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+    scratch_end(scratch);
+    return result;
+}
+#endif
 
 // Milliseconds left until `deadline`, clamped into a poll/wait argument. Zero
 // when the deadline has passed, and `no_deadline` when there is none.
@@ -4340,16 +4526,26 @@ BUSTER_GLOBAL_LOCAL bool os_linux_same_file_identity(struct stat left, struct st
 
 BUSTER_GLOBAL_LOCAL bool os_linux_process_status_namespace_index(OsLinuxProcessStatus status, pid_t process_id, u32* namespace_index)
 {
-    u32 matches = 0;
-    for (u32 index = 0; index < status.namespace_depth; index += 1)
+    // self/status lists the procfs namespace first and this process's active
+    // namespace last. Namespace-local numeric IDs may repeat across levels.
+    bool result = status.valid && status.namespace_depth && status.namespace_depth <= OS_LINUX_PID_NAMESPACE_DEPTH_LIMIT;
+    if (result)
     {
-        if (status.namespace_process_ids[index] == process_id)
-        {
-            *namespace_index = index;
-            matches += 1;
-        }
+        u32 index = status.namespace_depth - 1;
+        result = process_id > 0 && status.namespace_process_ids[index] == process_id;
+        if (result) { *namespace_index = index; }
     }
-    return matches == 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_linux_proc_context_select_self(OsLinuxProcContext* context, char* bytes, u64 length, pid_t process_id)
+{
+    OsLinuxProcessStatus self = {0};
+    context->current_namespace_depth = 0;
+    context->current_namespace_index = 0;
+    context->valid = context->valid && os_linux_process_status_parse(bytes, length, 0, &self) &&
+        os_linux_process_status_namespace_index(self, process_id, &context->current_namespace_index);
+    if (context->valid) { context->current_namespace_depth = self.namespace_depth; }
 }
 
 BUSTER_GLOBAL_LOCAL OsLinuxProcContext os_linux_proc_context_open(void)
@@ -4361,15 +4557,11 @@ BUSTER_GLOBAL_LOCAL OsLinuxProcContext os_linux_proc_context_open(void)
     char bytes[16384];
     u64 length = 0;
     bool vanished = false;
-    OsLinuxProcessStatus self = {0};
     if (result.valid)
     {
-        result.valid = os_linux_proc_read_at(result.descriptor, "self/status", bytes, sizeof(bytes), &length, &vanished) &&
-            os_linux_process_status_parse(bytes, length, 0, &self);
+        result.valid = os_linux_proc_read_at(result.descriptor, "self/status", bytes, sizeof(bytes), &length, &vanished);
     }
-    pid_t self_process_id = getpid();
-    result.current_namespace_depth = self.namespace_depth;
-    result.valid = result.valid && os_linux_process_status_namespace_index(self, self_process_id, &result.current_namespace_index);
+    os_linux_proc_context_select_self(&result, bytes, length, getpid());
     return result;
 }
 
@@ -4639,6 +4831,26 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool os_linux_proc_context_select_self_test(String8 status, s32 process_id, bool identity_valid,
+                                             u32* namespace_index, u32* namespace_depth)
+{
+    OsLinuxProcContext context = {.descriptor = -1, .valid = identity_valid};
+    os_linux_proc_context_select_self(&context, (char*)status.pointer, status.length, (pid_t)process_id);
+    *namespace_index = context.current_namespace_index;
+    *namespace_depth = context.current_namespace_depth;
+    return context.valid;
+}
+
+bool os_linux_proc_context_live_self_test(void)
+{
+    OsLinuxProcContext context = os_linux_proc_context_open();
+    bool result = context.valid && context.current_namespace_depth &&
+        context.current_namespace_index == context.current_namespace_depth - 1;
+    bool closed = os_linux_proc_context_close(&context);
+    result = result && closed && context.descriptor == -1 && !context.valid;
+    return result;
+}
+
 bool os_linux_process_group_churn_self_test(Arena* arena)
 {
     pid_t leader = fork();
@@ -4724,10 +4936,11 @@ bool os_linux_process_stat_parse_self_test(void)
         .valid = true,
     };
     u32 namespace_index = 0;
-    result = os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && namespace_index == 1 && result;
+    result = os_linux_process_status_namespace_index(mapping, 7, &namespace_index) && namespace_index == 2 && result;
+    result = !os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && result;
     result = !os_linux_process_status_namespace_index(mapping, 8, &namespace_index) && result;
     mapping.namespace_process_ids[2] = 12;
-    result = !os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && result;
+    result = os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && namespace_index == 2 && result;
     OsLinuxProcessGroupMember members[] = {
         {.proc_process_id = 999, .local_process_id = 12, .namespace_process_ids = {999, 12}, .namespace_depth = 2},
     };
@@ -5063,6 +5276,36 @@ bool os_process_group_ownership_loss_self_test(void)
 #endif
 #endif
 
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error)
+{
+    ProcessResourceStatus result = PROCESS_RESOURCE_UNSUPPORTED;
+    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
+    GetProcessMemoryInfoProc get_process_memory_info =
+        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
+    counters->cb = sizeof(*counters);
+    if (get_process_memory_info)
+    {
+        if (get_process_memory_info(handle, counters, sizeof(*counters))) { result = PROCESS_RESOURCE_OBSERVED; }
+        else
+        {
+            *error = os_get_last_error();
+            if (!error->v) { error->v = ERROR_GEN_FAILURE; }
+            result = PROCESS_RESOURCE_ERROR;
+        }
+    }
+    return result;
+}
+#else
+BUSTER_GLOBAL_LOCAL bool os_process_usage_microseconds(struct timeval value, u64* output)
+{
+    bool result = value.tv_sec >= 0 && value.tv_usec >= 0 && value.tv_usec < 1000000 &&
+        (u64)value.tv_sec <= ((u64)-1 - (u64)value.tv_usec) / 1000000;
+    if (result) { *output = (u64)value.tv_sec * 1000000 + (u64)value.tv_usec; }
+    return result;
+}
+#endif
+
 ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds)
 {
     ProcessWaitResult result = {0};
@@ -5248,6 +5491,25 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 result.process_tree_cleanup_failed = 1;
             }
             CloseHandle((HANDLE)spawn.process_tree);
+        }
+        if (spawn.observe_resources && wait_result == WAIT_OBJECT_0)
+        {
+            FILETIME created, exited, kernel, user;
+            if (GetProcessTimes((HANDLE)spawn.handle, &created, &exited, &kernel, &user))
+            {
+                result.resources.user_cpu_us = (((u64)user.dwHighDateTime << 32) | (u64)user.dwLowDateTime) / 10;
+                result.resources.system_cpu_us = (((u64)kernel.dwHighDateTime << 32) | (u64)kernel.dwLowDateTime) / 10;
+                result.resources.cpu_status = PROCESS_RESOURCE_OBSERVED;
+            }
+            else
+            {
+                result.resources.cpu_status = PROCESS_RESOURCE_ERROR;
+                result.resources.cpu_error = os_get_last_error();
+                if (!result.resources.cpu_error.v) { result.resources.cpu_error.v = ERROR_GEN_FAILURE; }
+            }
+            OsProcessMemoryCounters counters = {0};
+            result.resources.memory_status = os_windows_process_memory_counters((HANDLE)spawn.handle, &counters, &result.resources.memory_error);
+            if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)counters.peak_working_set_size; }
         }
         CloseHandle(spawn.handle);
         if (result.process_tree_cleanup_failed)
@@ -5599,6 +5861,26 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 } while (wait_result < 0 && errno == EINTR);
                 if (wait_result != pid) { wait_failed = true; }
             }
+        }
+
+        if (spawn.observe_resources && wait_result == pid)
+        {
+            bool cpu_valid = os_process_usage_microseconds(usage.ru_utime, &result.resources.user_cpu_us) &&
+                os_process_usage_microseconds(usage.ru_stime, &result.resources.system_cpu_us);
+            result.resources.cpu_status = cpu_valid ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (!cpu_valid) { result.resources.cpu_error.v = (u32)EOVERFLOW; }
+#if BUSTER_LINUX
+            bool memory_valid = usage.ru_maxrss >= 0 && (u64)usage.ru_maxrss <= (u64)-1 / 1024;
+            result.resources.memory_status = memory_valid ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (memory_valid) { result.resources.peak_memory_bytes = (u64)usage.ru_maxrss * 1024; }
+            else { result.resources.memory_error.v = (u32)EOVERFLOW; }
+#elif BUSTER_MACOS
+            result.resources.memory_status = usage.ru_maxrss >= 0 ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)usage.ru_maxrss; }
+            else { result.resources.memory_error.v = (u32)EOVERFLOW; }
+#else
+            result.resources.memory_status = PROCESS_RESOURCE_UNSUPPORTED;
+#endif
         }
 
         if (program_flag_get(PROGRAM_FLAG_VERBOSE))
@@ -6069,17 +6351,28 @@ u64 os_get_page_size(void)
     return page_size;
 }
 
-// Resident set size of this process, right now. Used to budget a memory limit
-// against what a process has *already* used rather than from zero; returns 0
-// where the platform does not report it, which every caller has to treat as
-// "no information" rather than "no memory".
-u64 os_get_resident_memory_size(void)
+// Resident set size of this process: the current value, or the process
+// peak when `peak` is set. Apple reports only the peak through this path, so
+// both queries answer the peak there. Returns 0 where the platform does not
+// report it, which every caller has to treat as "no information" rather than
+// "no memory".
+BUSTER_GLOBAL_LOCAL u64 os_resident_memory(bool peak)
 {
     u64 result = 0;
 #if defined(__linux__)
+    if (peak)
+    {
+        // ru_maxrss is the process high water, in kilobytes on Linux.
+        struct rusage usage;
+        memset(&usage, 0, sizeof(usage));
+        if (getrusage(RUSAGE_SELF, &usage) == 0)
+        {
+            result = (u64)usage.ru_maxrss * 1024;
+        }
+    }
     // /proc/self/statm is "size resident shared ..." in pages. The second
     // field is what /proc/self/status calls VmRSS, without the string parse.
-    int statm_fd = open("/proc/self/statm", O_RDONLY);
+    int statm_fd = peak ? -1 : open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
     if (statm_fd >= 0)
     {
         char statm_buffer[128];
@@ -6120,6 +6413,7 @@ u64 os_get_resident_memory_size(void)
 #elif defined(__APPLE__)
     // ru_maxrss is a peak rather than the current value, and is in bytes on
     // Apple where Linux reports kilobytes.
+    BUSTER_UNUSED(peak);
     struct rusage usage;
     memset(&usage, 0, sizeof(usage));
     if (getrusage(RUSAGE_SELF, &usage) == 0)
@@ -6127,39 +6421,26 @@ u64 os_get_resident_memory_size(void)
         result = (u64)usage.ru_maxrss;
     }
 #else
-    // Resolved at runtime for the same reason GlobalMemoryStatusEx is below:
-    // tcc's bundled import stubs do not carry it. K32GetProcessMemoryInfo is
-    // the kernel32 export, so no psapi import library is needed either.
-    //
-    // The counters are declared here rather than taken from psapi.h, which
-    // tcc's bundled headers do not ship: build.c includes this file and is
-    // bootstrapped with tcc, so naming PROCESS_MEMORY_COUNTERS is an "invalid
-    // type" there long before any Windows compiler sees it. The layout is
-    // fixed by the ABI, and `cb` tells the callee which version it received.
-    typedef struct
-    {
-        DWORD cb;
-        DWORD page_fault_count;
-        SIZE_T peak_working_set_size;
-        SIZE_T working_set_size;
-        SIZE_T quota_peak_paged_pool_usage;
-        SIZE_T quota_paged_pool_usage;
-        SIZE_T quota_peak_non_paged_pool_usage;
-        SIZE_T quota_non_paged_pool_usage;
-        SIZE_T pagefile_usage;
-        SIZE_T peak_pagefile_usage;
-    } OsProcessMemoryCounters;
-    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
-    GetProcessMemoryInfoProc get_process_memory_info =
-        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
     OsProcessMemoryCounters counters = {0};
-    counters.cb = sizeof(counters);
-    if (get_process_memory_info && get_process_memory_info(GetCurrentProcess(), &counters, sizeof(counters)))
+    OsError error = {0};
+    if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &error) == PROCESS_RESOURCE_OBSERVED)
     {
-        result = (u64)counters.working_set_size;
+        result = (u64)(peak ? counters.peak_working_set_size : counters.working_set_size);
     }
 #endif
     return result;
+}
+
+// Used to budget a memory limit against what a process has *already* used
+// rather than from zero.
+u64 os_get_resident_memory_size(void)
+{
+    return os_resident_memory(false);
+}
+
+u64 os_get_peak_resident_memory_size(void)
+{
+    return os_resident_memory(true);
 }
 
 u64 os_get_physical_memory_size(void)

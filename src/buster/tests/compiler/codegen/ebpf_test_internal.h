@@ -400,6 +400,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_scalars(UnitTestArguments* 
     return result;
 }
 
+// Caller register bits outside a narrow integer's width are not part of its
+// value. Check consumers that cannot be repaired by normalizing their result.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_argument_images(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 types[] = {S8("signed char"), S8("unsigned char"), S8("short"), S8("unsigned short"),
+                       S8("int"), S8("unsigned int"), S8("long long"), S8("unsigned long long"), S8("_Bool")};
+    u32 widths[] = {8, 8, 16, 16, 32, 32, 64, 64, 1};
+    String8 expressions[] = {S8("a == b"), S8("a < b"),
+        S8("(unsigned long long)a / ((unsigned long long)b | 1ull)"),
+        S8("(unsigned long long)a % ((unsigned long long)b | 1ull)"),
+        S8("a >> (b & 3)"), S8("a")};
+    Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    CodegenTestEbpfOracle oracle = codegen_test_ebpf_oracle(arguments->arena);
+    for (u32 type_index = 0; type_index < BUSTER_ARRAY_LENGTH(types); type_index += 1)
+    {
+        u32 width = widths[type_index];
+        bool signed_value = (type_index & 1) == 0 && width != 1;
+        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        u64 sign = UINT64_C(1) << (width - 1);
+        u64 values[] = {0, 1, 7, sign - 1, sign, mask,
+                        UINT64_C(0xffffffff00000000) & ~mask,
+                        (UINT64_C(0x123456789abcdef0) & ~mask) | 7};
+        for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(expressions); operation += 1)
+        {
+            for (u32 ssa = 0; ssa < 2; ssa += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 source = string_format(temporary.arena,
+                    S8("unsigned long long probe({S8} a, {S8} b) {{ (void)b; return {S8}; }}"),
+                    types[type_index], types[type_index], expressions[operation]);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("ebpf-argument-images.c"), tokens, parsed, target,
+                    (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
+                if (BUSTER_REQUIRE(arguments, !tokens.error_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+                {
+                    IrValidationResult validation = ir_validate_canonical_module(lowered.program, lowered.program->modules);
+                    if (BUSTER_REQUIRE(arguments, validation.error == IR_VALIDATION_NONE))
+                    {
+                        EbpfArtifact artifact = ebpf_emit_program(temporary.arena, lowered.program);
+                        if (!artifact.success)
+                            arguments->show(arguments, S8("eBPF argument type={u32}, operation={u32}, SSA={u32}: {S8}\n"),
+                                type_index, operation, ssa, artifact.error.message);
+                        if (BUSTER_REQUIRE(arguments, artifact.success))
+                        {
+                            for (u32 first = 0; first < BUSTER_ARRAY_LENGTH(values); first += 1)
+                            {
+                                for (u32 second = 0; second < BUSTER_ARRAY_LENGTH(values); second += 1)
+                                {
+                                    u64 a = values[first] & mask;
+                                    u64 b = values[second] & mask;
+                                    if (signed_value && (a & sign)) a |= ~mask;
+                                    if (signed_value && (b & sign)) b |= ~mask;
+                                    u64 expected;
+                                    switch (operation)
+                                    {
+                                    case 0: expected = a == b; break;
+                                    case 1: expected = signed_value ? (s64)a < (s64)b : a < b; break;
+                                    case 2: expected = a / (b | 1); break;
+                                    case 3: expected = a % (b | 1); break;
+                                    case 4: expected = signed_value ? (u64)((s64)a >> (b & 3)) : a >> (b & 3); break;
+                                    default: expected = a; break;
+                                    }
+                                    bool agreed = codegen_test_ebpf_check(arguments, &oracle, artifact.bytes,
+                                        values[first], values[second], expected);
+                                    if (!agreed)
+                                        arguments->show(arguments, S8("eBPF argument type={u32}, operation={u32}, SSA={u32}\n"),
+                                            type_index, operation, ssa);
+                                    BUSTER_TEST(arguments, agreed);
+                                }
+                            }
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_argument_images"));
+    return result;
+}
+
 // Integer images the eBPF writer builds from canonical constants: a signed
 // switch compares every label in the condition's normalized image, whatever
 // the caller left in the argument register's upper bits, and an integer
