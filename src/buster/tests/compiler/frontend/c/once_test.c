@@ -231,7 +231,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_import_growth(UnitTestArguments* 
         c_once_test_numbers(arguments, &result, preprocess, C_ONCE_TEST_IMPORT_COUNT);
         c_once_test_single_lexed_rows(arguments, &result, preprocess, C_ONCE_TEST_IMPORT_COUNT + 2);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -257,7 +257,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_pragma_growth(UnitTestArguments* 
         c_once_test_numbers(arguments, &result, preprocess, C_ONCE_TEST_PRAGMA_COUNT);
         c_once_test_single_lexed_rows(arguments, &result, preprocess, C_ONCE_TEST_PRAGMA_COUNT + 2);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -285,7 +285,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_duplicate_imports(UnitTestArgumen
         c_once_test_numbers(arguments, &result, preprocess, C_ONCE_TEST_LOOKUP_COUNT);
         c_once_test_single_lexed_rows(arguments, &result, preprocess, C_ONCE_TEST_LOOKUP_COUNT + 2);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -351,7 +351,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_failures(UnitTestArguments* argum
         }
         BUSTER_TEST(arguments, depth.token_count == 1);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -379,7 +379,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_table_hashes(UnitTestArguments* a
     }
     BUSTER_TEST(arguments, even_hashes != 0);
     BUSTER_TEST(arguments, table.count == 128);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -434,7 +434,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_table_probe_scaling(UnitTestArgum
         }
         arguments->show(arguments, S8("C_ONCE_PROBES_V1 entries={u32} operations={u64} probes={u64}\n"), count, operations, table.probe_count);
         previous_probes = table.probe_count;
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -554,7 +554,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_table_identity(UnitTestArguments*
     BUSTER_TEST(arguments, status == C_INCLUDE_FILE_OK && table.count == 3);
     status = c_test_include_file_entry(&table, (CIncludeFileIdentity){.physical = true, .device = 3, .index = 8}, S8("other-index.h"), &entry);
     BUSTER_TEST(arguments, status == C_INCLUDE_FILE_OK && table.count == 4);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -706,7 +706,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_filesystem_aliases(UnitTestArgume
         BUSTER_TEST(arguments, lexed_once == 4);
         BUSTER_TEST(arguments, detail->include_file_probe_count != 0);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -802,7 +802,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_root_identity(UnitTestArguments* 
             BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[1]), S8("1852"));
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -877,7 +877,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_preprocess_probe_scaling(UnitTest
             arguments->show(arguments, S8("C_ONCE_PREPROCESS_PROBES_V1 entries={u32} operations={u64} probes={u64}\n"),
                             count + C_ONCE_TEST_SCALE_DEPTH + 1, operations, probes);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -885,17 +885,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_preprocess_probe_scaling(UnitTest
 UnitTestResult c_once_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_import_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_pragma_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_duplicate_imports);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_failures);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_table_hashes);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_table_probe_scaling);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_table_allocation_failure);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_table_identity);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_filesystem_aliases);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_root_identity);
-    BUSTER_TEST_FIXTURE(arguments, c_once_test_preprocess_probe_scaling);
+    C_TEST_FIXTURE(arguments, c_once_test_import_growth);
+    C_TEST_FIXTURE(arguments, c_once_test_pragma_growth);
+    C_TEST_FIXTURE(arguments, c_once_test_duplicate_imports);
+    C_TEST_FIXTURE(arguments, c_once_test_failures);
+    C_TEST_FIXTURE(arguments, c_once_test_table_hashes);
+    C_TEST_FIXTURE(arguments, c_once_test_table_probe_scaling);
+    C_TEST_FIXTURE(arguments, c_once_test_table_allocation_failure);
+    C_TEST_FIXTURE(arguments, c_once_test_table_identity);
+    C_TEST_FIXTURE(arguments, c_once_test_filesystem_aliases);
+    C_TEST_FIXTURE(arguments, c_once_test_root_identity);
+    C_TEST_FIXTURE(arguments, c_once_test_preprocess_probe_scaling);
     return result;
 }
 

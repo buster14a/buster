@@ -716,6 +716,48 @@ BUSTER_GLOBAL_LOCAL bool image_test_rejected_at_without_allocation(Arena* arena,
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool image_test_pnm_decodes_to(Arena* arena, char const* text, u64 length, u8 const* expected, u64 expected_length)
+{
+    ImageDecodeOptions options = {.format_hint = IMAGE_FORMAT_PNM};
+    ByteSlice encoded = {.pointer = (u8*)text, .length = length};
+    ImageProbeResult probe = image_probe(encoded, options);
+    u64 position = arena->position;
+    ImageDecodeResult decoded = image_decode(arena, encoded, options);
+    bool result = probe.status == IMAGE_DECODE_SUCCESS && decoded.status == IMAGE_DECODE_SUCCESS &&
+                  decoded.image.pixels.length == expected_length && !memcmp(decoded.image.pixels.pointer, expected, expected_length);
+    arena_set_position(arena, position);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool image_test_pam_tuple_unsupported(Arena* arena, char const* tuple)
+{
+    static char const prefix[] = "P7\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE ";
+    static char const suffix[] = "\nENDHDR\n\x11\x22\x33";
+    u8 encoded_bytes[160];
+    u64 length = sizeof(prefix) - 1u;
+    memcpy(encoded_bytes, prefix, length);
+    for (u64 index = 0; tuple[index]; index += 1)
+    {
+        encoded_bytes[length] = (u8)tuple[index];
+        length += 1;
+    }
+    memcpy(encoded_bytes + length, suffix, sizeof(suffix) - 1u);
+    length += sizeof(suffix) - 1u;
+    ImageDecodeOptions options = {.format_hint = IMAGE_FORMAT_PNM};
+    ByteSlice encoded = {.pointer = encoded_bytes, .length = length};
+    ImageProbeResult probe = image_probe(encoded, options);
+    u64 position = arena->position;
+    ImageDecodeResult decoded = image_decode(arena, encoded, options);
+    bool result = probe.status == IMAGE_DECODE_UNSUPPORTED_FEATURE &&
+                  probe.unsupported_feature == IMAGE_UNSUPPORTED_FEATURE_COMPONENT_MODEL &&
+                  decoded.status == IMAGE_DECODE_UNSUPPORTED_FEATURE &&
+                  decoded.unsupported_feature == IMAGE_UNSUPPORTED_FEATURE_COMPONENT_MODEL &&
+                  image_test_image_empty(decoded.image) && arena->position == position;
+    return result;
+}
+
+#define IMAGE_TEST_TEXT(text) (text), sizeof(text) - 1u
+
 typedef struct ImageTestPngBuilder ImageTestPngBuilder;
 struct ImageTestPngBuilder
 {
@@ -805,9 +847,272 @@ BUSTER_GLOBAL_LOCAL bool image_test_decode_limit(Arena* arena, ByteSlice encoded
     return result;
 }
 
+// PNG work accounting. These fixtures are generated in memory: a stored-deflate
+// writer produces the incompressible worst case, and a fixed-Huffman writer
+// produces a decompression bomb. A full-size decode (64 Mpx of 16-bit RGBA)
+// needs about 1.3 GiB of memory, so the budget is verified at 1/256 scale with
+// the same ratios as the defaults: max_decoded_bytes is 4 per pixel and
+// max_work is BUSTER_IMAGE_MAX_WORK_PER_PIXEL per pixel.
+#define IMAGE_TEST_PNG_WORK_SIDE 512u
+#define IMAGE_TEST_PNG_WORK_WORST_UNITS_PER_PIXEL 36u
+
+typedef struct ImageTestBitWriter ImageTestBitWriter;
+struct ImageTestBitWriter
+{
+    u8* bytes;
+    u64 position;
+    u64 bit_buffer;
+    u32 bit_count;
+};
+
+BUSTER_GLOBAL_LOCAL void image_test_bits_write(ImageTestBitWriter* writer, u32 value, u32 count)
+{
+    writer->bit_buffer |= (u64)value << writer->bit_count;
+    writer->bit_count += count;
+    while (writer->bit_count >= 8u)
+    {
+        writer->bytes[writer->position] = (u8)writer->bit_buffer;
+        writer->position += 1;
+        writer->bit_buffer >>= 8u;
+        writer->bit_count -= 8u;
+    }
+}
+
+// Huffman codes are packed most-significant bit first.
+BUSTER_GLOBAL_LOCAL void image_test_bits_write_code(ImageTestBitWriter* writer, u32 code, u32 count)
+{
+    u32 reversed = 0;
+    for (u32 bit = 0; bit < count; bit += 1)
+    {
+        reversed |= ((code >> bit) & 1u) << (count - 1u - bit);
+    }
+    image_test_bits_write(writer, reversed, count);
+}
+
+BUSTER_GLOBAL_LOCAL u32 image_test_adler32(u8 const* bytes, u64 size)
+{
+    u32 s1 = 1;
+    u32 s2 = 0;
+    for (u64 index = 0; index < size; index += 1)
+    {
+        s1 = (s1 + bytes[index]) % 65521u;
+        s2 = (s2 + s1) % 65521u;
+    }
+    return s2 << 16u | s1;
+}
+
+typedef struct ImageTestPngSpec ImageTestPngSpec;
+struct ImageTestPngSpec
+{
+    u32 width;
+    u32 height;
+    u8 bit_depth;
+    u8 color_type;
+    u8 channel_count;
+    // Compress zero-filled scanlines with fixed-Huffman matches instead of
+    // storing pseudo-random scanlines.
+    bool bomb;
+    // Size of an ancillary private chunk placed before IDAT; zero omits it.
+    u32 ancillary_size;
+};
+
+BUSTER_GLOBAL_LOCAL ByteSlice image_test_png_make(Arena* arena, ImageTestPngSpec spec)
+{
+    ByteSlice result = {0};
+    u64 row_bytes = ((u64)spec.width * spec.channel_count * spec.bit_depth + 7u) / 8u;
+    u64 filtered_size = (u64)spec.height * (row_bytes + 1u);
+    u8* filtered = arena_allocate_zeroed(arena, u8, filtered_size);
+    u64 zlib_capacity = spec.bomb ? filtered_size / 128u + 1024u : filtered_size + filtered_size / 65535u * 5u + 64u;
+    u8* zlib = arena_allocate_zeroed(arena, u8, zlib_capacity);
+    u64 png_capacity = 8u + 25u + (u64)spec.ancillary_size + 12u + zlib_capacity + 12u + 12u + 12u;
+    u8* png = arena_allocate_zeroed(arena, u8, png_capacity);
+    u8* ancillary = spec.ancillary_size ? arena_allocate_zeroed(arena, u8, spec.ancillary_size) : 0;
+    if (filtered && zlib && png && (ancillary || !spec.ancillary_size))
+    {
+        u32 random = 1;
+        for (u64 row = 0; row < spec.height && !spec.bomb; row += 1)
+        {
+            for (u64 index = 0; index < row_bytes; index += 1)
+            {
+                random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+                filtered[row * (row_bytes + 1u) + 1u + index] = (u8)(random >> 24u);
+            }
+        }
+        u32 adler = image_test_adler32(filtered, filtered_size);
+        ImageTestBitWriter bits = {.bytes = zlib};
+        image_test_bits_write(&bits, 0x78u, 8);
+        image_test_bits_write(&bits, 0x01u, 8);
+        if (spec.bomb)
+        {
+            image_test_bits_write(&bits, 1u, 1);
+            image_test_bits_write(&bits, 1u, 2);
+            // Literal zero, then maximum-length matches at distance one.
+            image_test_bits_write_code(&bits, 0x30u, 8);
+            u64 remaining = filtered_size - 1u;
+            while (remaining >= 258u)
+            {
+                image_test_bits_write_code(&bits, 0xc5u, 8);
+                image_test_bits_write_code(&bits, 0u, 5);
+                remaining -= 258u;
+            }
+            for (; remaining; remaining -= 1u)
+            {
+                image_test_bits_write_code(&bits, 0x30u, 8);
+            }
+            image_test_bits_write_code(&bits, 0u, 7);
+            image_test_bits_write(&bits, 0u, (8u - bits.bit_count) % 8u);
+        }
+        else
+        {
+            for (u64 offset = 0; offset < filtered_size; offset += 65535u)
+            {
+                u64 length = BUSTER_MIN((u64)65535u, filtered_size - offset);
+                bool final = offset + length >= filtered_size;
+                image_test_bits_write(&bits, final ? 1u : 0u, 8);
+                image_test_bits_write(&bits, (u32)length, 16);
+                image_test_bits_write(&bits, (u32)length ^ 0xffffu, 16);
+                memcpy(zlib + bits.position, filtered + offset, length);
+                bits.position += length;
+                if (final)
+                {
+                    break;
+                }
+            }
+        }
+        u64 zlib_size = bits.position;
+        image_test_u32_be(zlib + zlib_size, adler);
+        zlib_size += 4u;
+
+        u8 ihdr[13] = {0};
+        image_test_u32_be(ihdr, spec.width);
+        image_test_u32_be(ihdr + 4, spec.height);
+        ihdr[8] = spec.bit_depth;
+        ihdr[9] = spec.color_type;
+        static u8 const signature[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+        memcpy(png, signature, sizeof(signature));
+        ImageTestPngBuilder builder = {.bytes = png, .capacity = png_capacity, .position = sizeof(signature), .valid = true};
+        image_test_png_append_chunk(&builder, IMAGE_TEST_PNG_CHUNK_TYPE('I', 'H', 'D', 'R'), ihdr, sizeof(ihdr));
+        if (spec.ancillary_size)
+        {
+            image_test_png_append_chunk(&builder, IMAGE_TEST_PNG_CHUNK_TYPE('p', 'r', 'V', 't'), ancillary, spec.ancillary_size);
+        }
+        image_test_png_append_chunk(&builder, IMAGE_TEST_PNG_CHUNK_TYPE('I', 'D', 'A', 'T'), zlib, (u32)zlib_size);
+        image_test_png_append_chunk(&builder, IMAGE_TEST_PNG_CHUNK_TYPE('I', 'E', 'N', 'D'), 0, 0);
+        if (builder.valid)
+        {
+            result = (ByteSlice){.pointer = png, .length = builder.position};
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult image_test_png_work_budget(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+
+    // The default budget must cover the worst valid PNG at the default pixel
+    // limit: 36 units per pixel of 16-bit RGBA, plus framing slack.
+    BUSTER_TEST(arguments, BUSTER_IMAGE_MAX_WORK == BUSTER_IMAGE_MAX_PIXELS * BUSTER_IMAGE_MAX_WORK_PER_PIXEL);
+    BUSTER_TEST(arguments, BUSTER_IMAGE_MAX_WORK_PER_PIXEL > IMAGE_TEST_PNG_WORK_WORST_UNITS_PER_PIXEL);
+    BUSTER_TEST(arguments, BUSTER_IMAGE_MAX_DECODED_BYTES == BUSTER_IMAGE_MAX_PIXELS * 4u);
+
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = true}});
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        u64 pixels = (u64)IMAGE_TEST_PNG_WORK_SIDE * IMAGE_TEST_PNG_WORK_SIDE;
+        u64 position = arena->position;
+        // Worst valid case: 16-bit RGBA, incompressible (stored) scanlines.
+        ByteSlice worst = image_test_png_make(arena, (ImageTestPngSpec){.width = IMAGE_TEST_PNG_WORK_SIDE,
+                                                                        .height = IMAGE_TEST_PNG_WORK_SIDE,
+                                                                        .bit_depth = 16,
+                                                                        .color_type = 6,
+                                                                        .channel_count = 4});
+        u64 worst_position = arena->position;
+        if (BUSTER_REQUIRE(arguments, worst.length != 0))
+        {
+            ImageDecodeOptions scaled = {
+                .format_hint = IMAGE_FORMAT_PNG,
+                .max_pixels = pixels,
+                .max_decoded_bytes = pixels * 4u,
+                .max_work = pixels * BUSTER_IMAGE_MAX_WORK_PER_PIXEL,
+            };
+            ImageDecodeResult accepted = image_decode(arena, worst, scaled);
+            BUSTER_TEST(arguments, accepted.status == IMAGE_DECODE_SUCCESS && accepted.image.width == IMAGE_TEST_PNG_WORK_SIDE &&
+                                       accepted.image.height == IMAGE_TEST_PNG_WORK_SIDE &&
+                                       accepted.image.pixels.length == pixels * 4u);
+            arena_set_position(arena, worst_position);
+
+            // The accounting is tight enough to be meaningful: 36 units per
+            // pixel plus a small framing allowance suffice, and 30 do not.
+            scaled.max_work = pixels * IMAGE_TEST_PNG_WORK_WORST_UNITS_PER_PIXEL + pixels / 16u;
+            ImageDecodeResult tight = image_decode(arena, worst, scaled);
+            BUSTER_TEST(arguments, tight.status == IMAGE_DECODE_SUCCESS);
+            arena_set_position(arena, worst_position);
+            scaled.max_work = pixels * 30u;
+            BUSTER_TEST(arguments, image_test_rejected_without_allocation(arena, worst, scaled, IMAGE_DECODE_LIMIT_EXCEEDED));
+            ImageDecodeResult rejected = image_decode(arena, worst, scaled);
+            BUSTER_TEST(arguments, rejected.exceeded_limit == IMAGE_EXCEEDED_LIMIT_WORK && rejected.limit_value == scaled.max_work &&
+                                       rejected.observed_value > scaled.max_work);
+            arena_set_position(arena, worst_position);
+
+            // A decompression bomb: a few KiB of fixed-Huffman matches expand
+            // to the same scanlines. The work budget, not the compressed size,
+            // bounds it.
+            arena_set_position(arena, position);
+            ByteSlice bomb = image_test_png_make(arena, (ImageTestPngSpec){.width = IMAGE_TEST_PNG_WORK_SIDE,
+                                                                           .height = IMAGE_TEST_PNG_WORK_SIDE,
+                                                                           .bit_depth = 16,
+                                                                           .color_type = 6,
+                                                                           .channel_count = 4,
+                                                                           .bomb = true});
+            u64 bomb_position = arena->position;
+            if (BUSTER_REQUIRE(arguments, bomb.length != 0 && bomb.length < pixels / 8u))
+            {
+                scaled.max_work = pixels * BUSTER_IMAGE_MAX_WORK_PER_PIXEL;
+                ImageDecodeResult bomb_accepted = image_decode(arena, bomb, scaled);
+                BUSTER_TEST(arguments, bomb_accepted.status == IMAGE_DECODE_SUCCESS);
+                arena_set_position(arena, bomb_position);
+                // Fewer units than the inflated size alone.
+                scaled.max_work = pixels * 4u;
+                ImageDecodeResult bomb_rejected = image_decode(arena, bomb, scaled);
+                BUSTER_TEST(arguments, bomb_rejected.status == IMAGE_DECODE_LIMIT_EXCEEDED &&
+                                           bomb_rejected.exceeded_limit == IMAGE_EXCEEDED_LIMIT_WORK &&
+                                           bomb_rejected.limit_value == scaled.max_work);
+                arena_set_position(arena, bomb_position);
+            }
+        }
+
+        // Chunk bytes cost one unit each (CRC), so a valid PNG whose chunks
+        // exceed 1/8 of the budget is not rejected, and one exceeding the
+        // whole budget is.
+        arena_set_position(arena, position);
+        u32 ancillary_size = (u32)BUSTER_MB(1);
+        ByteSlice heavy = image_test_png_make(arena, (ImageTestPngSpec){.width = 1,
+                                                                        .height = 1,
+                                                                        .bit_depth = 8,
+                                                                        .color_type = 0,
+                                                                        .channel_count = 1,
+                                                                        .ancillary_size = ancillary_size});
+        if (BUSTER_REQUIRE(arguments, heavy.length > ancillary_size))
+        {
+            ImageDecodeOptions options = {.format_hint = IMAGE_FORMAT_PNG, .max_work = ancillary_size + 256u};
+            ImageDecodeResult heavy_accepted = image_decode(arena, heavy, options);
+            BUSTER_TEST(arguments, heavy_accepted.status == IMAGE_DECODE_SUCCESS && heavy_accepted.image.width == 1);
+            options.max_work = ancillary_size / 2u;
+            ImageDecodeResult heavy_rejected = image_decode(arena, heavy, options);
+            BUSTER_TEST(arguments, heavy_rejected.status == IMAGE_DECODE_LIMIT_EXCEEDED &&
+                                       heavy_rejected.exceeded_limit == IMAGE_EXCEEDED_LIMIT_WORK &&
+                                       heavy_rejected.limit_value == options.max_work);
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 UnitTestResult image_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, image_test_png_work_budget);
     u8 png[] = {137, 80, 78, 71, 13, 10, 26, 10};
     u8 jpeg[] = {0xff, 0xd8, 0xff};
     u8 gif[] = {'G', 'I', 'F', '8', '9', 'a'};
@@ -1576,7 +1881,7 @@ UnitTestResult image_tests(UnitTestArguments* arguments)
     // After the signature, one loop step and the IHDR CRC consume exactly this
     // budget. The second chunk must exceed max_chunks before its own work is
     // charged, and decode must still roll back its output arena.
-    u64 png_first_chunk_work = 8u + 1u + (13u + 4u) * 8u;
+    u64 png_first_chunk_work = 8u + 1u + (13u + 4u);
     ImageStructuralLimitCase structural_limits[] = {
         {image_test_png, sizeof(image_test_png),
          {.format_hint = IMAGE_FORMAT_PNG, .max_work = png_first_chunk_work, .max_chunks = 1},
@@ -3076,6 +3381,81 @@ UnitTestResult image_tests(UnitTestArguments* arguments)
                            p1_packed_decode.image.pixels.length == sizeof(p1_packed_expected) &&
                            !memcmp(p1_packed_decode.image.pixels.pointer, p1_packed_expected, sizeof(p1_packed_expected)));
     arena_set_position(arguments->arena, p1_packed_position);
+    // A comment ends at CR as well as LF; the CR is then the single raster
+    // separator when the comment follows maxval, so an LF sample survives.
+    u8 const pnm_cr_header_expected[] = {17, 32, 35, 255};
+    u8 const pnm_cr_sample_expected[] = {10, 32, 35, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\r#c\r1 1\r255\r\x11\x20\x23"),
+                                                     pnm_cr_header_expected, sizeof(pnm_cr_header_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1\n255#c\r\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1\n255\r\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1#c\r255\n\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    u8 const pnm_cr_gray_expected[] = {10, 10, 10, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P5\n1 1\n255#c\r\x0a"),
+                                                     pnm_cr_gray_expected, sizeof(pnm_cr_gray_expected)));
+    u8 const pnm_cr_p4_expected[] = {0, 0, 0, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P4\r#c\r1 1#d\r\x80"),
+                                                     pnm_cr_p4_expected, sizeof(pnm_cr_p4_expected)));
+    u8 const pnm_cr_p2_expected[] = {7, 7, 7, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P2\r1 1\r255#c\r7"),
+                                                     pnm_cr_p2_expected, sizeof(pnm_cr_p2_expected)));
+    u8 const pnm_cr_raster_zero[] = {0, 0, 0, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P5\n1 1\n255#c\r\x00"),
+                                                     pnm_cr_raster_zero, sizeof(pnm_cr_raster_zero)));
+    u8 const p6_cr_truncated[] = "P6\n1 1\n255#c\r\x01\x02";
+    BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, (ByteSlice){.pointer = (u8*)p6_cr_truncated, .length = sizeof(p6_cr_truncated) - 1u},
+                                                                   pnm_options, IMAGE_DECODE_TRUNCATED));
+
+    // PAM comments are whole lines; '#' inside TUPLTYPE is part of an opaque
+    // tuple identifier and must not be stripped into a supported tuple.
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB#custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB #custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "GRAYSCALE#custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB_ALPHA#custom"));
+    u8 const pam_rgb_expected[] = {17, 34, 51, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena,
+                                                     IMAGE_TEST_TEXT("P7\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n\x11\x22\x33"),
+                                                     pam_rgb_expected, sizeof(pam_rgb_expected)));
+    static char const pam_commented[] =
+        "P7\n# ordinary header comment\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\n  # indented\nTUPLTYPE RGB\nENDHDR\n\x11\x22\x33";
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, pam_commented, sizeof(pam_commented) - 1u,
+                                                     pam_rgb_expected, sizeof(pam_rgb_expected)));
+
+    // Plain PBM may carry whitespace-introduced trailing material after its
+    // raster; it is ignored rather than parsed as another image.
+    u8 const p1_white_expected[] = {255, 255, 255, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0\nignored"),
+                                                     p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0"), p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0 \n"), p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0 # note\nPX trailer"),
+                                                     p1_white_expected, sizeof(p1_white_expected)));
+    u8 p1_trailer[] = "P1\n1 1\n0\nignored";
+    ByteSlice p1_trailer_bytes = {.pointer = p1_trailer, .length = sizeof(p1_trailer) - 1u};
+    ImageProbeResult p1_trailer_probe = image_probe(p1_trailer_bytes, pnm_options);
+    BUSTER_TEST(arguments, p1_trailer_probe.status == IMAGE_DECODE_SUCCESS && !p1_trailer_probe.information.has_more_images);
+    // A frame limit counts only a real following image, never ignored text.
+    ImageDecodeOptions p1_one_frame = {.format_hint = IMAGE_FORMAT_PNM, .max_frames = 1};
+    ImageProbeResult p1_limited_probe = image_probe(p1_trailer_bytes, p1_one_frame);
+    BUSTER_TEST(arguments, p1_limited_probe.status == IMAGE_DECODE_SUCCESS);
+    // A following P1-P7 image is still reported, and non-whitespace trailers,
+    // missing samples and raw-format junk stay malformed.
+    u8 p1_concatenated[] = "P1\n1 1\n0\nP1\n1 1\n1\n";
+    ImageProbeResult p1_concatenated_probe = image_probe((ByteSlice){.pointer = p1_concatenated, .length = sizeof(p1_concatenated) - 1u}, pnm_options);
+    BUSTER_TEST(arguments, p1_concatenated_probe.status == IMAGE_DECODE_SUCCESS && p1_concatenated_probe.information.has_more_images);
+    u8 p1_glued[] = "P1\n1 1\n0x";
+    BUSTER_TEST(arguments, image_test_rejected_at_without_allocation(arguments->arena, (ByteSlice){.pointer = p1_glued, .length = sizeof(p1_glued) - 1u},
+                                                                      pnm_options, IMAGE_DECODE_MALFORMED, 8));
+    u8 p1_missing[] = "P1\n2 1\n0\nignored";
+    BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, (ByteSlice){.pointer = p1_missing, .length = sizeof(p1_missing) - 1u},
+                                                                   pnm_options, IMAGE_DECODE_MALFORMED));
+    u8 p2_trailer[] = "P2\n1 1\n255\n7\nignored";
+    BUSTER_TEST(arguments, image_test_rejected_at_without_allocation(arguments->arena, (ByteSlice){.pointer = p2_trailer, .length = sizeof(p2_trailer) - 1u},
+                                                                      pnm_options, IMAGE_DECODE_MALFORMED, 13));
+
     u8 p1_bad_digit[] = "P1\n2 1\n02\n";
     ByteSlice p1_bad_digit_bytes = {.pointer = p1_bad_digit, .length = sizeof(p1_bad_digit) - 1u};
     ImageProbeResult p1_bad_digit_probe = image_probe(p1_bad_digit_bytes, pnm_options);

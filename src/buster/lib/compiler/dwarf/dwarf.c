@@ -4,9 +4,10 @@
 // .debug_abbrev/.debug_info/.debug_line and friends through the dwarf_model_*
 // family, while dwarf_build_legacy remains for the callers that still
 // produce the older flat function records. The dwarf_emit_* primitives at
-// the top are the shared byte/LEB128 writers -- with dwarf_dense_uleb128 and
-// dwarf_dense_sleb128 beside them for the one loop that writes through a raw
-// cursor, the line program's rows -- and dwarf_cfi_* translates
+// the top are the shared byte/LEB128 writers; dwarf_model_measure_locations
+// counts the emitted scope lists before allocating their exact storage.
+// dwarf_dense_uleb128 and dwarf_dense_sleb128 serve the line program's raw
+// cursor, while dwarf_cfi_* translates
 // codegen unwind actions into CFI. Relocations against code addresses are
 // recorded through dwarf_model_relocation rather than patched, so the
 // object writer and linker place the final values.
@@ -127,7 +128,8 @@ struct DwarfBuffer
     u64 count;
     u64 capacity;
     bool error;
-    u8 reserved[7];
+    bool measure_only;
+    u8 reserved[6];
 };
 
 BUSTER_GLOBAL_LOCAL void dwarf_emit_bytes(DwarfBuffer* buffer, void const* source, u64 size)
@@ -139,7 +141,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_emit_bytes(DwarfBuffer* buffer, void const* sourc
             buffer->error = true;
             return;
         }
-        if (size)
+        if (size && !buffer->measure_only)
         {
             memcpy(buffer->bytes + buffer->count, source, size);
         }
@@ -244,6 +246,21 @@ BUSTER_GLOBAL_LOCAL u8* dwarf_dense_sleb128(u8* out, s64 value)
         out += 1;
     }
     return out;
+}
+
+BUSTER_GLOBAL_LOCAL void dwarf_write_u16_at(DwarfBuffer* buffer, u64 offset, u16 value)
+{
+    if (!buffer->error)
+    {
+        if (offset > buffer->count || sizeof(value) > buffer->count - offset)
+        {
+            buffer->error = true;
+        }
+        else if (!buffer->measure_only)
+        {
+            memcpy(buffer->bytes + offset, &value, sizeof(value));
+        }
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void dwarf_write_u32_at(DwarfBuffer* buffer, u64 offset, u32 value)
@@ -1076,7 +1093,7 @@ BUSTER_GLOBAL_LOCAL u32 dwarf_model_emit_location_expression(DwarfModelWriter* w
     {
         if (location.kind == DEBUG_LOCATION_PIECEWISE)
         {
-            for (u32 piece_index = 0; piece_index < location.piece_count; piece_index += 1)
+            for (u32 piece_index = 0; !writer->loc.error && piece_index < location.piece_count; piece_index += 1)
             {
                 DebugLocationPiece* piece = location.pieces + piece_index;
                 if (piece->kind == DEBUG_LOCATION_REGISTER)
@@ -1126,7 +1143,7 @@ BUSTER_GLOBAL_LOCAL u32 dwarf_model_emit_location_expression(DwarfModelWriter* w
 BUSTER_GLOBAL_LOCAL u32 dwarf_model_emit_location_list(DwarfModelWriter* writer, DebugVariable* variable)
 {
     u32 offset = (u32)writer->loc.count;
-    for (u32 range_index = 0; range_index < variable->location_count; range_index += 1)
+    for (u32 range_index = 0; !writer->loc.error && range_index < variable->location_count; range_index += 1)
     {
         DebugLocationRange* range = variable->locations + range_index;
         if (range->end <= range->start || range->location.kind == DEBUG_LOCATION_UNAVAILABLE)
@@ -1139,9 +1156,13 @@ BUSTER_GLOBAL_LOCAL u32 dwarf_model_emit_location_list(DwarfModelWriter* writer,
         u64 length_offset = writer->loc.count;
         dwarf_emit_u16(&writer->loc, 0);
         u64 before = writer->loc.count;
+        // DWARF v4 uses a two-byte expression length. Refuse an expression
+        // before either pass can advance beyond that representable extent.
+        u64 capacity = writer->loc.capacity;
+        writer->loc.capacity = BUSTER_MIN(capacity, before + UINT16_MAX);
         dwarf_model_emit_location_expression(writer, range->location);
-        u16 length = (u16)BUSTER_MIN(writer->loc.count - before, UINT16_MAX);
-        memcpy(writer->loc.bytes + length_offset, &length, sizeof(length));
+        writer->loc.capacity = capacity;
+        dwarf_write_u16_at(&writer->loc, length_offset, (u16)(writer->loc.count - before));
     }
     dwarf_emit_u64(&writer->loc, 0);
     dwarf_emit_u64(&writer->loc, 0);
@@ -1187,15 +1208,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_abbrev(DwarfBuffer* buffer, u32 number, u32
 
 BUSTER_GLOBAL_LOCAL bool dwarf_model_base_is_float(DebugType* type)
 {
-    if (!type || type->kind != DEBUG_TYPE_BASE || !type->name.length)
-    {
-        return false;
-    }
-    // Buster's builtin names use f32/f64-style spellings.  C frontend scalar
-    // types retain their source spellings, including the padded SysV
-    // long-double name, so recognize those exact names too.
-    return type->name.pointer[0] == 'f' || type->name.pointer[0] == 'F' || string_equal(type->name, S8("float")) ||
-           string_equal(type->name, S8("double")) || string_equal(type->name, S8("long double"));
+    return type && type->kind == DEBUG_TYPE_BASE && type->is_float;
 }
 
 BUSTER_GLOBAL_LOCAL bool dwarf_model_base_has_bit_size(DebugType* type)
@@ -1470,14 +1483,21 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_global(DwarfModelWriter* writer, Debug
 
 BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_variables(DwarfModelWriter* writer, DebugScope* scope)
 {
-    for (u32 variable_index = 0; variable_index < scope->variable_count; variable_index += 1)
+    for (u32 variable_index = 0; !writer->loc.error && variable_index < scope->variable_count; variable_index += 1)
     {
         DebugVariable* variable = writer->model->variables + scope->variables[variable_index];
         if (variable->kind == DEBUG_VARIABLE_GLOBAL)
         {
             continue;
         }
-        dwarf_model_emit_variable(writer, variable, variable->kind == DEBUG_VARIABLE_PARAMETER);
+        if (writer->loc.measure_only)
+        {
+            dwarf_model_emit_location_list(writer, variable);
+        }
+        else
+        {
+            dwarf_model_emit_variable(writer, variable, variable->kind == DEBUG_VARIABLE_PARAMETER);
+        }
     }
 }
 
@@ -1562,7 +1582,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
     DwarfModelScopeFrame* stack = writer->scope_stack;
     u32 stack_count = 1;
     stack[0] = (DwarfModelScopeFrame){.scope = root, .next_child = writer->scope_child_offsets[root]};
-    for (;;)
+    while (!writer->loc.error)
     {
         DwarfModelScopeFrame* frame = stack + stack_count - 1;
         u32 child = UINT32_MAX;
@@ -1580,8 +1600,11 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
         {
             DebugScope* child_scope = writer->model->scopes + child;
             bool has_child = child_scope->variable_count != 0 || dwarf_model_scope_has_child(writer, child);
-            dwarf_emit_uleb128(&writer->info, has_child ? 14 : 24);
-            dwarf_model_emit_ranges_attribute(writer, child_scope->start, child_scope->end);
+            if (!writer->loc.measure_only)
+            {
+                dwarf_emit_uleb128(&writer->info, has_child ? 14 : 24);
+                dwarf_model_emit_ranges_attribute(writer, child_scope->start, child_scope->end);
+            }
             dwarf_model_emit_scope_variables(writer, child_scope);
             if (has_child)
             {
@@ -1589,7 +1612,10 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
             }
             continue;
         }
-        dwarf_emit_u8(&writer->info, 0);
+        if (!writer->loc.measure_only)
+        {
+            dwarf_emit_u8(&writer->info, 0);
+        }
         stack_count -= 1;
         if (!stack_count)
         {
@@ -1678,6 +1704,21 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_function(DwarfModelWriter* writer, u32
     }
 }
 
+// Count the same lists that function/scope emission will write, including
+// repeated variable references, rather than estimating from variable_count.
+BUSTER_GLOBAL_LOCAL void dwarf_model_measure_locations(DwarfModelWriter* writer)
+{
+    for (u32 function_index = 0; !writer->loc.error && function_index < writer->model->function_count; function_index += 1)
+    {
+        DebugScopeId root = writer->model->functions[function_index].scope;
+        if (root < writer->model->scope_count)
+        {
+            dwarf_model_emit_scope_variables(writer, writer->model->scopes + root);
+            dwarf_model_emit_scope_tree(writer, root);
+        }
+    }
+}
+
 DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
 {
     DwarfResult result = {0};
@@ -1760,7 +1801,6 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
             string_entry_capacity += model->variable_count + model->inline_site_count;
             u64 info_capacity = 1024 + string_capacity * 12 + reference_capacity * 12;
             u64 range_capacity = 32 + ((u64)model->function_count + model->scope_count + model->inline_site_count) * 32;
-            u64 location_capacity = 32 + (u64)model->variable_count * 128;
             u64 relocation_capacity = 64 + (u64)model->function_count * 20 + (u64)model->scope_count * 8 + (u64)model->variable_count * 12 +
                                       (u64)model->type_count * 16;
             DwarfModelWriter writer = {
@@ -1770,7 +1810,8 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
                 .str = {.bytes = arena_allocate(arena, u8, string_capacity), .capacity = string_capacity},
                 .abbrev = {.bytes = arena_allocate(arena, u8, 2048), .capacity = 2048},
                 .info = {.bytes = arena_allocate(arena, u8, info_capacity), .capacity = info_capacity},
-                .loc = {.bytes = arena_allocate(arena, u8, location_capacity), .capacity = location_capacity},
+                // DW_FORM_sec_offset is four bytes in this DWARF32 writer.
+                .loc = {.capacity = UINT32_MAX, .measure_only = true},
                 .ranges = {.bytes = arena_allocate(arena, u8, range_capacity), .capacity = range_capacity},
                 .relocations = arena_allocate(arena, DwarfRelocation, relocation_capacity),
                 .refs = arena_allocate(arena, DwarfModelRefPatch, reference_capacity),
@@ -1780,98 +1821,108 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
                 .function_offsets = arena_allocate(arena, u32, model->function_count ? model->function_count : 1),
             };
             dwarf_model_build_scope_children(&writer);
-            writer.strings = dwarf_string_table_make(arena, &writer.str, (u32)BUSTER_MIN(string_entry_capacity, UINT32_MAX));
-            bool include_padded_float = false;
-            for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
+            dwarf_model_measure_locations(&writer);
+            u64 location_capacity = writer.loc.count;
+            if (!writer.loc.error)
             {
-                include_padded_float |= dwarf_model_base_has_bit_size(model->types + type_index);
-            }
-            dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float);
-            dwarf_emit_u32(&writer.info, 0);
-            dwarf_emit_u16(&writer.info, DWARF_VERSION);
-            dwarf_model_relocation(&writer, (DwarfRelocation){
-                                                  .offset = writer.info.count,
-                                                  .section = DWARF_SECTION_INFO,
-                                                  .target = DWARF_SECTION_ABBREV,
-                                              });
-            dwarf_emit_u32(&writer.info, 0);
-            dwarf_emit_u8(&writer.info, DWARF_ADDRESS_SIZE);
-            dwarf_emit_uleb128(&writer.info, 1);
-            dwarf_model_string(&writer, line_input.file_paths[0]);
-            dwarf_emit_u16(&writer.info, line_input.language ? line_input.language : 0x0002);
-            dwarf_model_string(&writer, line_input.file_paths[0]);
-            dwarf_model_string(&writer, line_input.comp_dir);
-            dwarf_model_relocation(&writer, (DwarfRelocation){
-                                                  .offset = writer.info.count,
-                                                  .section = DWARF_SECTION_INFO,
-                                                  .address = true,
-                                              });
-            dwarf_emit_u64(&writer.info, 0);
-            dwarf_emit_u64(&writer.info, line_input.code_size);
-            dwarf_model_relocation(&writer, (DwarfRelocation){
-                                                  .offset = writer.info.count,
-                                                  .section = DWARF_SECTION_INFO,
-                                                  .target = DWARF_SECTION_LINE,
-                                              });
-            dwarf_emit_u32(&writer.info, 0);
-            for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
-            {
-                dwarf_model_emit_type(&writer, type_index);
-            }
-            for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
-            {
-                DebugVariable* variable = model->variables + variable_index;
-                if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+                writer.loc = (DwarfBuffer){
+                    .bytes = location_capacity ? arena_allocate(arena, u8, location_capacity) : 0,
+                    .capacity = location_capacity,
+                };
+                writer.strings = dwarf_string_table_make(arena, &writer.str, (u32)BUSTER_MIN(string_entry_capacity, UINT32_MAX));
+                bool include_padded_float = false;
+                for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
                 {
-                    dwarf_model_emit_global(&writer, variable);
+                    include_padded_float |= dwarf_model_base_has_bit_size(model->types + type_index);
                 }
-            }
-            for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
-            {
-                dwarf_model_emit_function(&writer, function_index);
-            }
-            dwarf_emit_u8(&writer.info, 0);
-            if (writer.info.count >= 4 && writer.info.count - 4 <= UINT32_MAX)
-            {
-                dwarf_write_u32_at(&writer.info, 0, (u32)(writer.info.count - 4));
-            }
-            for (u32 patch_index = 0; patch_index < writer.ref_count; patch_index += 1)
-            {
-                DwarfModelRefPatch patch = writer.refs[patch_index];
-                u32 target_offset = 0;
-                if (patch.function)
+                dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float);
+                dwarf_emit_u32(&writer.info, 0);
+                dwarf_emit_u16(&writer.info, DWARF_VERSION);
+                dwarf_model_relocation(&writer, (DwarfRelocation){
+                                                      .offset = writer.info.count,
+                                                      .section = DWARF_SECTION_INFO,
+                                                      .target = DWARF_SECTION_ABBREV,
+                                                  });
+                dwarf_emit_u32(&writer.info, 0);
+                dwarf_emit_u8(&writer.info, DWARF_ADDRESS_SIZE);
+                dwarf_emit_uleb128(&writer.info, 1);
+                dwarf_model_string(&writer, line_input.file_paths[0]);
+                dwarf_emit_u16(&writer.info, line_input.language ? line_input.language : 0x0002);
+                dwarf_model_string(&writer, line_input.file_paths[0]);
+                dwarf_model_string(&writer, line_input.comp_dir);
+                dwarf_model_relocation(&writer, (DwarfRelocation){
+                                                      .offset = writer.info.count,
+                                                      .section = DWARF_SECTION_INFO,
+                                                      .address = true,
+                                                  });
+                dwarf_emit_u64(&writer.info, 0);
+                dwarf_emit_u64(&writer.info, line_input.code_size);
+                dwarf_model_relocation(&writer, (DwarfRelocation){
+                                                      .offset = writer.info.count,
+                                                      .section = DWARF_SECTION_INFO,
+                                                      .target = DWARF_SECTION_LINE,
+                                                  });
+                dwarf_emit_u32(&writer.info, 0);
+                for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
                 {
-                    if (patch.target < model->function_count)
+                    dwarf_model_emit_type(&writer, type_index);
+                }
+                for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
+                {
+                    DebugVariable* variable = model->variables + variable_index;
+                    if (variable->kind == DEBUG_VARIABLE_GLOBAL)
                     {
-                        target_offset = writer.function_offsets[patch.target];
+                        dwarf_model_emit_global(&writer, variable);
                     }
                 }
-                else if (patch.target < model->type_count)
+                for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
                 {
-                    target_offset = writer.type_offsets[patch.target];
+                    dwarf_model_emit_function(&writer, function_index);
                 }
-                // DW_FORM_ref4 is relative to the beginning of the compilation unit,
-                // including its four-byte length field.  The writer's offsets already
-                // use that same section-relative origin.
-                dwarf_write_u32_at(&writer.info, patch.offset, target_offset);
-            }
-            for (u32 relocation_index = 0; relocation_index < line_result.relocation_count; relocation_index += 1)
-            {
-                DwarfRelocation relocation = line_result.relocations[relocation_index];
-                if (relocation.section == DWARF_SECTION_LINE)
+                dwarf_emit_u8(&writer.info, 0);
+                if (writer.info.count >= 4 && writer.info.count - 4 <= UINT32_MAX)
                 {
-                    dwarf_model_relocation(&writer, relocation);
+                    dwarf_write_u32_at(&writer.info, 0, (u32)(writer.info.count - 4));
                 }
+                for (u32 patch_index = 0; patch_index < writer.ref_count; patch_index += 1)
+                {
+                    DwarfModelRefPatch patch = writer.refs[patch_index];
+                    u32 target_offset = 0;
+                    if (patch.function)
+                    {
+                        if (patch.target < model->function_count)
+                        {
+                            target_offset = writer.function_offsets[patch.target];
+                        }
+                    }
+                    else if (patch.target < model->type_count)
+                    {
+                        target_offset = writer.type_offsets[patch.target];
+                    }
+                    // DW_FORM_ref4 is relative to the beginning of the compilation unit,
+                    // including its four-byte length field.  The writer's offsets already
+                    // use that same section-relative origin.
+                    dwarf_write_u32_at(&writer.info, patch.offset, target_offset);
+                }
+                for (u32 relocation_index = 0; relocation_index < line_result.relocation_count; relocation_index += 1)
+                {
+                    DwarfRelocation relocation = line_result.relocations[relocation_index];
+                    if (relocation.section == DWARF_SECTION_LINE)
+                    {
+                        dwarf_model_relocation(&writer, relocation);
+                    }
+                }
+                result.sections[DWARF_SECTION_INFO] = (ByteSlice){.pointer = writer.info.bytes, .length = writer.info.count};
+                result.sections[DWARF_SECTION_ABBREV] = (ByteSlice){.pointer = writer.abbrev.bytes, .length = writer.abbrev.count};
+                result.sections[DWARF_SECTION_LINE] = line_result.sections[DWARF_SECTION_LINE];
+                result.sections[DWARF_SECTION_STR] = (ByteSlice){.pointer = writer.str.bytes, .length = writer.str.count};
+                result.sections[DWARF_SECTION_LOC] = (ByteSlice){.pointer = writer.loc.bytes, .length = writer.loc.count};
+                result.sections[DWARF_SECTION_RANGES] = (ByteSlice){.pointer = writer.ranges.bytes, .length = writer.ranges.count};
+                result.relocations = writer.relocations;
+                result.relocation_count = writer.relocation_count;
+                result.valid = !writer.str.error && !writer.abbrev.error && !writer.info.error && !writer.loc.error &&
+                               writer.loc.count == location_capacity && !writer.ranges.error;
             }
-            result.sections[DWARF_SECTION_INFO] = (ByteSlice){.pointer = writer.info.bytes, .length = writer.info.count};
-            result.sections[DWARF_SECTION_ABBREV] = (ByteSlice){.pointer = writer.abbrev.bytes, .length = writer.abbrev.count};
-            result.sections[DWARF_SECTION_LINE] = line_result.sections[DWARF_SECTION_LINE];
-            result.sections[DWARF_SECTION_STR] = (ByteSlice){.pointer = writer.str.bytes, .length = writer.str.count};
-            result.sections[DWARF_SECTION_LOC] = (ByteSlice){.pointer = writer.loc.bytes, .length = writer.loc.count};
-            result.sections[DWARF_SECTION_RANGES] = (ByteSlice){.pointer = writer.ranges.bytes, .length = writer.ranges.count};
-            result.relocations = writer.relocations;
-            result.relocation_count = writer.relocation_count;
-            result.valid = !writer.str.error && !writer.abbrev.error && !writer.info.error && !writer.loc.error && !writer.ranges.error;
         }
     }
 

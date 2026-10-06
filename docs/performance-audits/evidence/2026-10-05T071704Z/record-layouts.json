@@ -1,0 +1,16 @@
+{
+  "base": {
+    "string_record": 40,
+    "function_record": 104,
+    "emitter": 144,
+    "context": 800
+  },
+  "candidate": {
+    "string_record": 48,
+    "function_record": 112,
+    "emitter": 152,
+    "context": 808
+  },
+  "alignment": 8,
+  "method": "Clang 23.1.1 -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -Xclang -fdump-record-layouts -fsyntax-only exact current-main and e35806c C unity sources"
+}

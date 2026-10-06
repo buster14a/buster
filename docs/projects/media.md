@@ -122,7 +122,7 @@ All zero-valued public numeric options select these defaults:
 | `max_height` | 16,384 | Maximum decoded height in pixels. |
 | `max_pixels` | 67,108,864 | Maximum `width * height`. |
 | `max_decoded_bytes` | 268,435,456 | Maximum canonical RGBA8 output size. |
-| `max_work` | 1,073,741,824 | Maximum codec-charged work units; this is deterministic accounting, not elapsed time. |
+| `max_work` | 2,684,354,560 | Maximum codec-charged work units (`max_pixels` x 40, `BUSTER_IMAGE_MAX_WORK`); this is deterministic accounting, not elapsed time. The factor admits the worst valid PNG (16-bit RGBA with stored deflate, 36 units per pixel); see `image.h`. |
 | `max_frames` | 4,096 | Maximum declared or encountered image/frame records. |
 | `max_chunks` | 16,384 | Maximum PNG chunks. |
 | `max_segments` | 16,384 | Maximum JPEG marker segments. |
