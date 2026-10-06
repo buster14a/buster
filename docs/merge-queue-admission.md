@@ -40,9 +40,11 @@ feature author, constructs and validates the combined candidate.
 
 Build concurrency permits up to 6 queued candidates to run speculative
 combined-head validation concurrently; it does not authorize 6 merges. Since
-#1986 each `ci.yml` group needs four macOS jobs, so six groups hold at most 24
-of the 50 observed macOS runners and leave room for pull-request and main
-validation. A
+#2659 each `ci.yml` group needs six macOS jobs (four after #1986), so six
+groups hold at most 36 of the 50 observed macOS runners, leaving 14 for
+pull-request and main validation. That reduced headroom is not measured; the
+[runner-queue guidance](ci-runner-queue.md) still says to lower build
+concurrency if macOS starvation or cancellation waste grows. A
 later candidate may have the preceding unmerged synthetic commit as its base.
 Both admission jobs keep that exact group pending until the base lands on main;
 they never grant success while the predecessor is speculative. The merge limit
@@ -69,8 +71,8 @@ wait policy from independently checked-out main, checks that the predecessor
 did not change admission or rebinding policy, and requires the queue ref to
 retain the same group identity at admission. Its bounded 310-minute job accommodates the
 five-hour wait.
-The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
-not a `merge_group` workflow, so the queue does not schedule it.
+The self-hosted 9700X direct workload workflow runs only for the owner's
+pull requests, not as a `merge_group` workflow, so the queue does not schedule it.
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed
