@@ -24,6 +24,7 @@
 // uses demand-paged commits, so this headroom does not eagerly consume 8 GiB
 // of physical memory.
 #define COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE BUSTER_GB(32)
+#define COMPILER_DRIVER_SOURCE_CACHE_BYTE_LIMIT BUSTER_MB(16)
 
 // Bounds of `@path` response-file expansion in compiler_driver_parse_arguments:
 // the bytes read from all response files of one invocation together, and the
@@ -99,6 +100,20 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
+typedef enum CompilerDriverLinkOperationKind
+{
+    COMPILER_DRIVER_LINK_OPERATION_FILE,
+    COMPILER_DRIVER_LINK_OPERATION_LIBRARY,
+    COMPILER_DRIVER_LINK_OPERATION_COUNT,
+} CompilerDriverLinkOperationKind;
+
+typedef struct CompilerDriverLinkOperation CompilerDriverLinkOperation;
+struct CompilerDriverLinkOperation
+{
+    u32 index;
+    CompilerDriverLinkOperationKind kind;
+};
+
 typedef struct CompilerDriverInvocation CompilerDriverInvocation;
 struct CompilerDriverInvocation
 {
@@ -108,6 +123,10 @@ struct CompilerDriverInvocation
     // and contains exactly input_count entries. API-built legacy
     // invocations leave it null and continue to use language globally.
     CompilerDriverLanguage* input_languages;
+    // Parsed native links apply files and libraries in this CLI order. Each
+    // index selects the next entry of input_paths or libraries. A zero count
+    // retains the API's legacy file-then-library order.
+    CompilerDriverLinkOperation* link_operations;
     String8* include_paths;
     String8* system_include_paths;
     // Parsed command lines populate only this ordered stream. The separate
@@ -125,6 +144,11 @@ struct CompilerDriverInvocation
     String8 output_path;
     String8 entry_symbol;
     String8 sysroot;
+    // Source text of the `-` input. A parsed command line names it with the
+    // path `-`; the cc command reads standard input into it before execution
+    // and embedding callers supply it themselves. A null pointer means it was
+    // not supplied; an empty translation unit has a nonnull pointer.
+    String8 standard_input;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
@@ -154,10 +178,18 @@ struct CompilerDriverInvocation
     u32 input_count;
     // Zero when input_languages is null; otherwise exactly input_count.
     u32 input_language_count;
+    // A nonzero stream covers every input and library occurrence exactly once.
+    u32 link_operation_count;
     // -fcompile-jobs=N: opt-in lanes for consecutive native C link inputs.
     // Zero/default is one. The caller owns its total process/thread budget;
     // this does not infer available RAM from the TU's virtual reservation.
     u32 compile_jobs;
+    // API-only raw lex reuse across serial units/invocations. Caller owns the
+    // cache, exclusively on this thread. Presence clamps TU workers to one.
+    CSourceCache* source_cache;
+    // -fsource-cache creates an invocation-local cache when the API pointer
+    // is null; -fno-source-cache cancels that request. Default is disabled.
+    bool enable_source_cache;
     u32 include_path_count;
     u32 system_include_path_count;
     u32 macro_operation_count;
@@ -198,6 +230,10 @@ struct CompilerDriverInvocation
     // -shared` will place. A PIE takes the same model; the image writer
     // relaxes the GOT loads of the definitions it binds.
     bool position_independent;
+    // 0: none, 1: lowercase PIC spelling, 2: uppercase PIC spelling.
+    u8 position_independent_level;
+    // The selected position-independent spelling was a PIE flag.
+    bool position_independent_executable;
     // -shared or -pie: the NativeImageKind a link produces. Accepted for a
     // link only on x86-64 Linux, the one target with a writer for it.
     NativeImageKind image_kind;
@@ -394,6 +430,8 @@ struct CompilerDriverResult
     u32 lexed_file_count;
     u32 lexed_files_reserved;
     CPreprocessedMetrics preprocessed;
+    // Cumulative cache counters at invocation exit, separate from SOURCE metrics.
+    CSourceCacheStats source_cache;
     CompilerDriverError error;
     CodegenError codegen_error;
     ObjectError object_error;

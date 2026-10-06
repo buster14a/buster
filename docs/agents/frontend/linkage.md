@@ -31,6 +31,35 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
+- **Executable TLS definitions participate in dynamic lookup.** Fixed-address
+  Linux x86-64/AArch64 executables and x86-64 PIEs export public `.tdata` and
+  `.tbss` definitions requested by a linked DSO, or all public TLS definitions
+  under `-rdynamic`. Their dynamic symbols carry `STT_TLS`, their loaded
+  section index and size, and an offset in the module's TLS block: initialized
+  data first, then zero-fill at its required alignment. A runtime image address
+  cannot serve as that offset. Fixed images reuse `link_elf_thread_local_offset`
+  and the packed loaded-section map shared with the section table. The TLS
+  block starts at the maximum `.tdata`/`.tbss` alignment so that each section's
+  address agrees with its block-relative symbol offsets. Fixed writers align
+  both TLS class starts by final virtual address, including an alignment larger
+  than the image base; file-offset alignment alone leaves the base's residue. Local-exec relocations
+  round the whole block to that same alignment before computing x86-64 TP
+  offsets. AArch64 places its block after the 16-byte TCB rounded to this
+  alignment before adding the module offset and relocation addend.
+  The PIE emitter uses the same map, including copy-created `.bss` and omitted
+  empty sections. Hidden definitions remain private, undefined hidden references
+  fail, and TLS/non-TLS object identities retain their mismatch diagnostic.
+  `compiler_driver_tls_export_tests` uses a configured host-built DSO to read
+  and modify both initialized and zero-fill executable TLS. Source/object,
+  fixed/PIE, and demand/`-rdynamic` routes have host-linker/runtime controls
+  and independent raw ELF checks for type, binding, visibility, section index,
+  size, block-relative value, initialized bytes and `PT_TLS` bounds. Sole-class
+  `.tdata`/`.tbss` controls check `p_align`, `sh_addralign`, initialized-template
+  load coverage and native DSO/local-exec pointer identity at 32 bytes and
+  8 MiB; weak definitions preserve binding 2. An unused
+  public TLS symbol distinguishes demand export from `-rdynamic`; a hidden
+  definition stays absent in both modes. Linux AArch64 covers its supported
+  fixed-address routes; other image writers retain their existing TLS scope.
 - **AArch64 ELF variant procedure-call metadata is refused explicitly.**
   `object_read_elf64` refuses every non-null, non-FILE symbol carrying
   `STO_AARCH64_VARIANT_PCS` (st_other bit 0x80), naming the symbol and table
@@ -66,6 +95,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed
   arena allocation clears only the dirty overlap. BSS and thread-local BSS
   keep their virtual sizes without allocating serialized storage (GitHub #303).
+- **AMD64 COFF TLS-index REL32 fields use the ordinary inline addend convention.**
+  The reader normalizes the signed inline displacement B to canonical A=B-4,
+  including references named `__tls_index`. The writer restores B=A+4 for
+  `OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32`, just as for ordinary PC32.
+  The registered object regression constructs raw COFF bytes independently,
+  checks both signed boundaries and a near-name ordinary-symbol control,
+  and inspects serialized fields across repeated read/write cycles. This
+  preserves addends within the current TLS model; platform TLS symbol spelling,
+  section conventions and runtime interoperability remain separate contracts
+  tracked by GitHub #1323.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
@@ -166,6 +205,23 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   marker attribute has no argument shape to recognise it by, and `weak` and
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
+- **LLVM weak linkage distinguishes definitions from imports.**
+  `llvm_bc_linkage` emits weak definitions as wire linkage 16 (`weak`) and
+  unresolved declarations as 7 (`extern_weak`), for both data and functions.
+  Ordinary external symbols keep linkage 0; internal definitions keep 3 and
+  default visibility. Hidden external symbols retain their separate visibility
+  operand. These encodings follow LLVM 23.1.2
+  [getEncodedLinkage](https://github.com/llvm/llvm-project/blob/85ac560262434c9ccfc0c183ec22d4138ed647fb/llvm/lib/Bitcode/Writer/BitcodeWriter.cpp#L1333-L1360),
+  whose legacy weak value 1 implies old COMDAT behavior and is not emitted.
+  Registered `llvm_bitcode_test_weak_records` checks both ELF target triples,
+  deterministic bytes, definition/import and visibility controls. On Linux
+  x86-64/AArch64, `llvm_bitcode_test_weak_consumers` requires independent Clang
+  O0/O2 consumers and llvm-readelf/readelf: missing and supplied optional data
+  and functions, direct/indirect guarded use, strong overrides, repeated weak
+  definitions, ordinary/internal controls, and required-import/duplicate-strong
+  negative controls. LLVM's inspected source is
+  [Apache-2.0 WITH LLVM-exception](https://github.com/llvm/llvm-project/blob/85ac560262434c9ccfc0c183ec22d4138ed647fb/llvm/LICENSE.TXT);
+  no LLVM implementation is copied into this serializer.
 - **`__attribute__((constructor))` and `__attribute__((destructor))`** run a
   function before and after `main`. They are read out of the declaration's
   attribute list by the same `c_declaration_binding` walk as `weak` and
@@ -179,9 +235,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unit whose only function is a static constructor came out with an empty
   `.text`. The registration is a module-level list, `IrModule.initializers`,
   for the reason aliases are: it is a relation, not a property of a symbol,
-  and nearly every module has none. And the two targets with no initializer
-  array at all -- core Wasm, which starts one function of its own, and eBPF,
-  which has no startup -- **diagnose** the attribute rather than dropping it.
+  and nearly every module has none. And the targets with no initializer
+  array at all -- wasm32 and wasm64, whose direct output is a finished module
+  that starts one function of its own, and eBPF, which has no startup --
+  **diagnose** the attribute rather than dropping it. The message names the
+  actual target (`wasm32`, `wasm64` or `eBPF`; issue 2679, covered by
+  `c_test_gnu_attribute_queries`). Clang accepts the attribute on Wasm by
+  recording `InitFunctions` (subsection 6, priority then symbol index) in the
+  relocatable object's `linking` custom section for `wasm-ld` to turn into
+  `__wasm_call_ctors`; Buster refuses instead because `wasm.c` writes no
+  relocatable object, so there is no `linking` section, symbol table or
+  `wasm-ld` step to carry the entries. Destructors stay refused: the object
+  format has no finalizer list, and Buster has no atexit-registration lowering.
 - **`__attribute__((section("name")))` places a definition in a section of
   its own name on ELF and is refused elsewhere** (issue #1276). The frontend
   records it in `IrSymbol.section_name`: from the definition, else from any
@@ -477,7 +542,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   staging and patches them after layout; imported data uses its dynamic
   symbol's copy-slot address, including aliases. Untyped exported AArch64
   ELF text labels can serve as assembly entry points; explicit object types
-  remain data. Mach-O, PE and TLS relocation contracts remain separate.
+  remain data. `ELF_ADR_PREL_LO21` (relocation 274, an assembly `adr` to a
+  target the unit could not fold, #2706) rides the same family: its REL addend
+  is the unscaled signed imm21 byte displacement and the relocated value is
+  S + A - P with no page truncation. Mach-O, PE and TLS relocation contracts
+  remain separate.
 
 - AArch64 ELF `ELF_GOT_PAGE21`/`ELF_GOT_LD64_LO12` (types 311/312)
   use `GDAT(S)` and require zero addends under AAELF64. The importer rejects
