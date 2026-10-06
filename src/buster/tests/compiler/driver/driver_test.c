@@ -3361,7 +3361,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("struct S{int x;};void g(int);void f(struct S s,int x,int*p){int a=((double)p)?1:2;}\n"), false, true},
         {S8("void f(void){__builtin_buster_simd_load();}\n"), false, true},
         {S8("void f(void){__builtin_buster_simd_load(1);}\n"), false, true},
-        {S8("void f(void){__builtin_buster_simd_sign_byte(1);}\n"), false, true},
+        {S8("void f(void){__builtin_buster_simd_sign_u8(1);}\n"), false, true},
         {S8("struct S{int x;};void f(struct S s){int a={s};}\n"), false, true},
         {S8("struct S{int x;};struct T{int x;};void f(struct S s){struct T t=s;}\n"), false, true},
         {S8("void g(void); void f(int c){c?g():(void)0;}\n"), true, true},
@@ -3384,7 +3384,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_psradi128(v,99);}\n"), true, true},
         {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_psrldi128(v,-1);}\n"), true, true},
         {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_pslldi128(__builtin_ia32_pslldi128(v,1),2);}\n"), true, true},
-        {S8("typedef unsigned char V __attribute__((vector_size(64))); V x=__builtin_buster_simd_splat_byte(1);\n"), false, true},
+        {S8("typedef unsigned char V __attribute__((vector_size(64))); V x=__builtin_buster_simd_splat_u8(1);\n"), false, true},
         {S8("typedef int V __attribute__((vector_size(16))); V x=__builtin_ia32_pslldi128((V){1,2,3,4},1);\n"), false, true},
         {S8("int x=__builtin_popcount(3);\n"), false, true},
         {S8("int x=__builtin_expect(1,1);\n"), false, true},
@@ -6207,6 +6207,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frame_address_rematerial
     return result;
 }
 
+// Forward joins receive their parameters in registers under FAST and QUALITY.
+// The program covers ternary and switch-arm joins, a swapped pair of loop-body
+// joins, joins whose values cross a call or carry onward through later
+// blocks, and wide-integer, floating and vector joins that keep the memory
+// form. Every target must select without fallback, and the host runs the
+// program under every allocator and both frontend forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_join_parameter_registers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "typedef int v4i __attribute__((vector_size(16)));\n"
+        "static volatile int opaque = 3;\n"
+        "static int sink;\n"
+        "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
+        "static __attribute__((noinline)) long pick(long a, long b, int c) { return c ? a + b : a - b; }\n"
+        "static __attribute__((noinline)) int arms(int k)\n"
+        "{\n"
+        "    int r;\n"
+        "    switch (k & 7)\n"
+        "    {\n"
+        "    case 0: r = k * 3; break;\n"
+        "    case 1: r = k + 11; break;\n"
+        "    case 2: r = bump(k); break;\n"
+        "    case 5: r = -k; break;\n"
+        "    default: r = k ^ 0x55; break;\n"
+        "    }\n"
+        "    return r + 1;\n"
+        "}\n"
+        "static __attribute__((noinline)) long swaps(int n)\n"
+        "{\n"
+        "    long x = 1, y = 2;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long t;\n"
+        "        if (i % 3 == 0) { t = x; x = y; y = t + i; } else { x += y; }\n"
+        "    }\n"
+        "    return x * 31 + y;\n"
+        "}\n"
+        "static __attribute__((noinline)) int across(int c, int v)\n"
+        "{\n"
+        "    int a = c ? v * 2 : v + 7;\n"
+        "    int b = bump(a);\n"
+        "    int d = c > 1 ? a : b;\n"
+        "    if (opaque > 1) d += a;\n"
+        "    return d + b + a;\n"
+        "}\n"
+        "static __attribute__((noinline)) __int128 wide(int c, __int128 a)\n"
+        "{\n"
+        "    __int128 r = c ? a << 70 : a * 3;\n"
+        "    return r + 1;\n"
+        "}\n"
+        "static __attribute__((noinline)) double real(int c, double a)\n"
+        "{\n"
+        "    double r = c ? a * 0.5 : a + 4.0;\n"
+        "    return r - 1.0;\n"
+        "}\n"
+        "static __attribute__((noinline)) int vector(int c, int a)\n"
+        "{\n"
+        "    v4i v = {a, a + 1, a + 2, a + 3};\n"
+        "    v4i r = c ? v + v : v * v;\n"
+        "    return r[0] + r[3];\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = pick(7, 5, 1) != 12 || pick(7, 5, 0) != 2;\n"
+        "    int total = 0;\n"
+        "    for (int k = 0; k < 16; k += 1) total += arms(k);\n"
+        "    bad |= total != 764;\n"
+        "    long x = 1, y = 2;\n"
+        "    for (int i = 0; i < 10; i += 1) { long t; if (i % 3 == 0) { t = x; x = y; y = t + i; } else { x += y; } }\n"
+        "    bad |= swaps(10) != x * 31 + y;\n"
+        "    bad |= across(0, 5) != 50 || across(1, 5) != 42 || across(2, 5) != 41;\n"
+        "    bad |= wide(1, 3) != ((__int128)3 << 70) + 1 || wide(0, 3) != 10;\n"
+        "    bad |= real(1, 8.0) != 3.0 || real(0, 8.0) != 11.0;\n"
+        "    bad |= vector(1, 2) != 4 + 10 || vector(0, 2) != 4 + 25;\n"
+        "    return bad | (sink != 44);\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-join-parameter-registers"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 2; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-join-parameter-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("join parameter object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-join-parameter-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = allocator != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("join parameter native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vector_casts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6553,7 +6685,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
                                     bool native = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS);
                                     bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
                                     if (native && runnable && clang.length && compiled->error_none)
                                     {
                                         String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-run"), S8(".exe"));
@@ -6659,7 +6791,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
                                     bool native = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS);
                                     bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
                                     if (native && runnable && frontend == 1 && pic == 1 && clang.length &&
                                         compiled->error_none)
                                     {
@@ -6679,7 +6811,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #endif
 #if BUSTER_CPU_ARCH_X86_64 && BUSTER_WINDOWS
                                     bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                                        : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
                                     if (target == 4 && runnable && frontend == 1 && pic == 1 &&
                                         compiled->error_none)
                                     {
@@ -6862,7 +6994,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
         for (u32 cpu = 0; cpu < BUSTER_ARRAY_LENGTH(cpus); cpu += 1)
         {
             bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8));
             for (u32 host_provider = 0; runnable && host_provider < 2; host_provider += 1)
             {
                 TemporalArena host_temporary = scratch_begin(&arguments->arena, 1);
@@ -7291,7 +7423,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         u32 observer = fixture == 9 ? 3u : fixture >= 4 && fixture <= 6 ? fixture - 4 : UINT32_MAX;
         bool executable_cpu = cpu == 0 || (fixture >= 7 &&
             (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
-                      : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE)));
+                      : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_U8)));
         if (host_observer_available && native_target && executable_cpu && fixture != 3 &&
             cell->error_none && (observer == UINT32_MAX || host_compiled[observer]))
         {
@@ -23926,6 +24058,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_float16_codegen);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_count_signatures);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frame_address_rematerialization);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_join_parameter_registers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
@@ -25546,7 +25679,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_object.codegen_statistics.function_count > 0);
     BUSTER_TEST(arguments, c_object.codegen_statistics.instruction_count > 0);
     BUSTER_TEST(arguments, c_object.codegen_statistics.value_count > 0);
-    BUSTER_TEST(arguments, c_object.codegen_statistics.stack_value_bytes > 0);
+    // FAST keeps every value of this fixture in registers, so no value
+    // bytes are required; the frame still accounts for whatever it reserves.
+    BUSTER_TEST(arguments, c_object.codegen_statistics.stack_frame_bytes >= c_object.codegen_statistics.stack_value_bytes);
     BUSTER_TEST(arguments, c_object.codegen_statistics.stack_frame_bytes >= c_object.codegen_statistics.maximum_stack_frame_bytes);
     BUSTER_TEST(arguments, c_object.codegen_statistics.code_bytes > 0);
     FileMapRead c_object_map = file_map_read(c_object_arena, c_object_path, (FileReadOptions){0});
@@ -30223,6 +30358,54 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, translate.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, (translate.codegen_statistics.simd_operation_count != 0) == (cpu_index != 0));
         scratch_end(translate_temporary);
+    }
+    // The u32 add/permute pair behind the C lexer's row writer, through the
+    // same header: execute it under every allocator on this host, then check
+    // that each x86 tier compiles it and only the vector tiers emit SIMD.
+    String8 simd_u32_fixture = S8("src/buster/tests/compiler/driver/fixtures/simd_u32.c");
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(translate_allocators); allocator_index += 1)
+    {
+        TemporalArena simd_u32_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* simd_u32_arena = simd_u32_temporary.arena;
+        String8 simd_u32_path = buster_test_temporary_path(simd_u32_arena, S8("buster-c-simd-u32"),
+#if BUSTER_WINDOWS
+                                                           S8(".exe"));
+#else
+                                                           S8(""));
+#endif
+        String8 allocator = string_format(simd_u32_arena, S8("-fregister-allocator={S8}"), translate_allocators[allocator_index]);
+        String8 simd_u32_command_line[] = {S8("-Isrc"), allocator, S8("-o"), simd_u32_path, simd_u32_fixture};
+        CompilerDriverResult simd_u32 = compiler_driver_execute_invocation(
+            simd_u32_arena, compiler_driver_parse_arguments(simd_u32_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(simd_u32_command_line)));
+        BUSTER_TEST(arguments, simd_u32.error == COMPILER_DRIVER_ERROR_NONE);
+        if (simd_u32.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run_arguments[] = {simd_u32_path};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                          (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult waited = os_process_wait_sync(simd_u32_arena, spawned);
+                BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(simd_u32_temporary);
+    }
+    for (u32 cpu_index = 0; cpu_index < BUSTER_ARRAY_LENGTH(translate_cpus); cpu_index += 1)
+    {
+        TemporalArena simd_u32_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* simd_u32_arena = simd_u32_temporary.arena;
+        String8 simd_u32_path = buster_test_temporary_path(simd_u32_arena, S8("buster-c-simd-u32-tier"), S8(".o"));
+        String8 simd_u32_command_line[] = {
+            S8("-Isrc"), S8("-c"), S8("--target=x86_64-linux"), string_format(simd_u32_arena, S8("-march={S8}"), translate_cpus[cpu_index]),
+            S8("-o"), simd_u32_path, simd_u32_fixture,
+        };
+        CompilerDriverResult simd_u32 = compiler_driver_execute_invocation(
+            simd_u32_arena, compiler_driver_parse_arguments(simd_u32_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(simd_u32_command_line)));
+        BUSTER_TEST(arguments, simd_u32.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, (simd_u32.codegen_statistics.simd_operation_count != 0) == (cpu_index != 0));
+        scratch_end(simd_u32_temporary);
     }
     // The 512-bit vocabulary. The fixture is self-contained and guards itself
     // on the predefined feature macros, so it builds for every target and
