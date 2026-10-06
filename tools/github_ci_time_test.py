@@ -19,6 +19,50 @@ import merge_queue_admission as admission
 ROOT = Path(__file__).resolve().parents[1]
 
 
+
+class InactiveLintTests(unittest.TestCase):
+    def test_only_the_inactive_event_branch_may_be_skipped(self):
+        for event in ("pull_request", "merge_group", "push", "workflow_dispatch"):
+            name = ("Ordinary lint (inactive)" if event == "merge_group"
+                    else "Queue lint preflight (inactive)")
+            inactive = {"name": name, "run_id": 1, "head_sha": "a" * 40,
+                        "run_attempt": 1, "status": "completed", "conclusion": "skipped"}
+            active = {"name": "Workflow lint", "status": "completed", "conclusion": "failure"}
+            jobs, errors = github_ci_time.separate_reuse_job(
+                [active, inactive], 1, 1, "a" * 40, event=event)
+            self.assertEqual(errors, [])
+            self.assertEqual(jobs, [active])
+            self.assertEqual(jobs[0]["conclusion"], "failure")
+            aliases = (github_ci_time.ORDINARY_INACTIVE_LINT_NAMES if event == "merge_group"
+                       else github_ci_time.QUEUE_INACTIVE_LINT_NAMES)
+            for spelling in aliases:
+                observed = dict(inactive, name=spelling)
+                jobs, errors = github_ci_time.separate_reuse_job(
+                    [active, observed], 1, 1, "a" * 40, event=event)
+                self.assertEqual((jobs, errors), ([active], []))
+            for field, values in (
+                    ("conclusion", ("success", "failure", "cancelled", None)),
+                    ("status", ("in_progress", "queued", None)),
+                    ("name", ("Queue lint preflight (inactive)" if event == "merge_group"
+                              else "Ordinary lint (inactive)",)),
+                    ("run_id", (2,)), ("head_sha", ("b" * 40,)),
+                    ("run_attempt", (0, 2, True))):
+                for value in values:
+                    with self.subTest(event=event, field=field, value=value):
+                        invalid = dict(inactive, **{field: value})
+                        _, errors = github_ci_time.separate_reuse_job(
+                            [active, invalid], 1, 1, "a" * 40, event=event)
+                        self.assertTrue(errors)
+            _, errors = github_ci_time.separate_reuse_job(
+                [active, inactive, inactive], 1, 1, "a" * 40, event=event)
+            self.assertTrue(errors)
+
+    def test_historical_inventory_remains_readable_without_inactive_branch(self):
+        active = {"name": "Workflow lint", "status": "completed", "conclusion": "success"}
+        for event in ("pull_request", "merge_group", "push", "workflow_dispatch"):
+            jobs, errors = github_ci_time.separate_reuse_job([active], 1, 1, "a" * 40, event=event)
+            self.assertEqual((jobs, errors), ([active], []))
+
 class ChecksLayoutCLITests(unittest.TestCase):
     def test_gate_cli_uses_the_split_default_and_keeps_explicit_layouts(self):
         for arguments, expected in (([], "split"), (["--checks-layout", "combined"], "combined"),
@@ -382,6 +426,24 @@ class AnalyzerCampaignTimingTests(unittest.TestCase):
         finally:
             sys.path.remove(str(ROOT / "tests"))
         return ci_tools_test.TimingTests().current_sample()
+
+
+    def test_dependency_queue_execution_and_workflow_latency_are_separate(self):
+        run = self.current_sample()
+        for job in run["jobs"]:
+            job["created_at"] = "2026-09-07T12:00:06Z"
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertEqual(sample["job_dependency_seconds"]["Workflow lint"], 6)
+        self.assertEqual(sample["job_queue_seconds"]["Workflow lint"], 4)
+        self.assertEqual(sample["job_seconds"]["Workflow lint"], 60)
+        self.assertEqual(sample["elapsed_seconds"], 70)
+        for job in run["jobs"]:
+            del job["created_at"]
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertIsNone(sample["job_dependency_seconds"]["Workflow lint"])
+        self.assertIsNone(sample["job_queue_seconds"]["Workflow lint"])
 
     def test_candidate_only_and_historical_analyzer_steps_remain_distinct(self):
         old = "Compare reference analysis and aggregate all module shards"
