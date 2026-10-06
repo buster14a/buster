@@ -2910,6 +2910,11 @@ struct CIntegerIrBuilder
 {
     CIrDirectSsa* direct_ssa;
     bool direct_ssa_enabled;
+    // A named label or case/default in any body of this function can enter a
+    // scope past a declaration; c_ir_ssa_finish then cannot assume that a
+    // declaration's initializer dominates the reads in its scope. Also set by
+    // CIRLowerOptions.disable_declaration_shortcut.
+    bool ssa_declaration_shortcut_disabled;
     Arena* arena;
     Arena* scratch_arena;
     Arena* temporary_arena;
@@ -5492,6 +5497,10 @@ struct CIrSsaLocal
     bool temporary;
     bool initialized_entry;
     bool single_entry_definition;
+    // The only write so far is the declaration's own initializer: it directly
+    // follows the local's first event, LOCAL, in the same block. Without jumps
+    // into scope it dominates every later read. A later write revokes it.
+    bool declaration_definition;
 };
 
 typedef struct CIrSsaEvent CIrSsaEvent;
@@ -5595,8 +5604,11 @@ BUSTER_C_INTERNAL u32 c_ir_ssa_event(CIntegerIrBuilder* builder, u32 local, u32 
                 // mistaken for a defined value.
                 ssa->locals[local].initialized_entry = true;
             }
-            // A later write permanently revokes the single-definition shortcut.
+            // A later write permanently revokes both definition shortcuts.
             ssa->locals[local].single_entry_definition = initializes_entry;
+            ssa->locals[local].declaration_definition = previous != UINT32_MAX && previous == ssa->locals[local].first_event &&
+                                                        ssa->events[previous].opcode == IR_OPCODE_LOCAL &&
+                                                        ssa->events[previous].block.value == builder->current_block.value;
         }
         ssa->events[index] = (CIrSsaEvent){
             .source = source, .after = builder->last_instruction, .block = builder->current_block,
@@ -6384,6 +6396,13 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_parameters(CIntegerIrBuilder* builder, u8
     CIrDirectSsa* ssa = builder->direct_ssa;
     u32* offsets = ssa->predecessor_offsets;
     u32* predecessors = ssa->predecessors;
+    // When nothing jumps into a scope, a declaration's initializer dominates
+    // every reachable read in its scope. An edge out of an unreachable block
+    // can still carry an undefined value into a reachable one, but publication
+    // decides a parameter from the edges that can run, and every reachable
+    // block has one that carries the initializer, so the general walk's merges
+    // of such values were already trivial.
+    bool declaration_shortcut = !builder->ssa_declaration_shortcut_disabled;
     // Reads of predecessors may append more unresolved parameters. The
     // linked work queue stays valid when the sparse current-value map grows.
     for (CIrSsaParameter* pending = ssa->first_parameter; pending && !ssa->scratch_exhausted; pending = pending->next)
@@ -6395,11 +6414,14 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_parameters(CIntegerIrBuilder* builder, u8
             continue;
         }
         CIrSsaLocal* local = ssa->locals + pending->local;
-        if (local->single_entry_definition && ssa->reachable[pending->block])
+        bool dominating_definition = local->single_entry_definition ||
+                                     (local->declaration_definition && !local->temporary && declaration_shortcut);
+        if (dominating_definition && ssa->reachable[pending->block])
         {
-            // With all writes known, one entry definition dominates every
-            // reachable read. Skip predecessor discovery for this owner;
-            // initialization still checks its store RHS before substitution.
+            // With all writes known, one entry or declaration definition
+            // dominates every reachable read. Skip predecessor discovery for
+            // this owner; initialization still checks its store RHS before
+            // substitution.
             u32 initializer = ssa->events[local->first_event].next_local;
             pending->forwarded = ssa->events[initializer].value;
             continue;
@@ -40031,6 +40053,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         builder->labels = state->labels;
         builder->label_count = state->label_count;
     }
+    builder->ssa_declaration_shortcut_disabled |= state->label_count != 0 || builder->label_count != 0;
     if (state->label_count && !c_ir_predeclare_labeled_automatic_locals(builder, declaration.body_start, body_end))
     {
         return false;
@@ -40087,6 +40110,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
     state->substatement_case_count = 0;
     state->task_capacity = (u32)task_capacity;
     state->switch_case_capacity = switch_case_capacity;
+    builder->ssa_declaration_shortcut_disabled |= switch_case_capacity != 0;
     state->task_count = 1;
     state->tasks[0] = (CIrBodyTask){
         .start = declaration.body_start,
@@ -54857,6 +54881,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         function->entry = block->id;
         CIntegerIrBuilder builder = {
             .direct_ssa_enabled = direct_ssa_enabled,
+            .ssa_declaration_shortcut_disabled = options.disable_declaration_shortcut,
             .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,

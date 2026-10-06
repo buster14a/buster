@@ -36873,6 +36873,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(Uni
     return result;
 }
 
+// A local written only by its declaration's initializer, outside the entry
+// block, skips the predecessor walk in the SSA finish: with no jump into a
+// scope the initializer dominates every reachable read. The shortcut must not
+// change the IR: each shape lowers with and without it to the same parameters,
+// values and instructions. Eligible shapes must create fewer provisional
+// parameters; labels, case/default and statement-expression labels disable it.
+// The dead `r-=y` after a braced `break` sends an unreachable edge into the
+// loop latch, whose undefined merge the general walk already discards.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_declaration_definition(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct DeclarationDefinitionCase
+    {
+        String8 source;
+        bool eligible;
+    } cases[] = {
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}return r;}"), true},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}done:return r;}"), false},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}switch(c){default:r+=1;}return r;}"), false},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=({int z=x;l:z;});else r-=y;n-=1;}}return r;}"), false},
+        {S8("int test(int c,int n){int r=0;if(c)goto in;{int x=n*3;in:while(n>0){r+=x;n-=1;}}return r;}"), false},
+        {S8("int test(int k,int n){int r=0;switch(k){int x=n*3;case 1:while(n>0){r+=x;n-=1;}}return r;}"), false},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){{r+=x;break;}r-=y;}}return r;}"), true},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){r+=(int){x};r+=c?x:y;n-=1;}}return r;}"), true},
+        {S8("int test(int c,int n){int r=0;if(c){int y;int x=y;while(n>0){r+=x;n-=1;}}return r;}"), true},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;while(n>0){r+=x;if(r>9)x=1;n-=1;}}return r;}"), false},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        struct DeclarationDefinitionCase test = cases[case_index];
+        CPreprocessResult tokens = c_preprocess(temporary.arena, test.source, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parse.diagnostic_count, test.source);
+        CIRLowerResult lowered[2];
+        IrFunction* functions[2] = {0};
+        for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(lowered); variant += 1)
+        {
+            lowered[variant] = c_lower_to_ir_with_options(temporary.arena, S8("declaration-definition.c"), tokens, parse, target_native,
+                (CIRLowerOptions){.disable_declaration_shortcut = variant == 1});
+            bool valid = lowered[variant].program && !lowered[variant].diagnostic_count &&
+                         ir_validate_canonical_module(lowered[variant].program, lowered[variant].program->modules).error == IR_VALIDATION_NONE;
+            BUSTER_TEST_RAW(arguments, valid, test.source);
+            functions[variant] = valid ? c_test_find_ir_function(lowered[variant].program->modules, S8("test")) : 0;
+        }
+        CIRDirectSsaStatistics shortcut = lowered[0].direct_ssa;
+        CIRDirectSsaStatistics walk = lowered[1].direct_ssa;
+        BUSTER_TEST_RAW(arguments, shortcut.parameters_created - shortcut.parameters_removed == walk.parameters_created - walk.parameters_removed,
+                        test.source);
+        BUSTER_TEST_RAW(arguments, test.eligible ? shortcut.parameters_created < walk.parameters_created
+                                                 : shortcut.parameters_created == walk.parameters_created, test.source);
+        IrFunction* left = functions[0];
+        IrFunction* right = functions[1];
+        bool same = left && right && left->block_count == right->block_count && left->value_count == right->value_count &&
+                    left->instruction_count == right->instruction_count;
+        for (u32 block = 0; same && block < left->block_count; block += 1)
+        {
+            IrBlockParameter* a = left->blocks[block].first_parameter;
+            IrBlockParameter* b = right->blocks[block].first_parameter;
+            same = left->blocks[block].parameter_count == right->blocks[block].parameter_count;
+            for (; same && a && b; a = a->next, b = b->next)
+            {
+                same = a->value.value == b->value.value && a->incoming_count == b->incoming_count;
+            }
+            same = same && !a && !b;
+        }
+        for (u32 index = 0; same && index < left->instruction_count; index += 1)
+        {
+            IrInstruction* a = left->instructions + index;
+            IrInstruction* b = right->instructions + index;
+            same = a->opcode == b->opcode && a->result.value == b->result.value && a->operand_count == b->operand_count &&
+                   a->target_count == b->target_count;
+            for (u32 operand = 0; same && operand < a->operand_count; operand += 1)
+            {
+                same = a->operands[operand].value == b->operands[operand].value;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, same, test.source);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42519,6 +42602,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_digraphs);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_declaration_definition);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     BUSTER_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
