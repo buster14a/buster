@@ -29,7 +29,7 @@ def summary(outcome: str = "slower") -> dict:
         "schema": compiler_receipt.LAB_SCHEMA,
         "baseline": {"sha256": A256, "runs": 12, "failed": 0, "deterministic": True},
         "candidate": {"sha256": B256, "runs": 12, "failed": 0, "deterministic": True},
-        "plan": {"complete_pairs": 12},
+        "plan": {"pairs": 12, "complete_pairs": 12},
         "verdict": {"metric": "wall", "outcome": outcome, "ratio": 1.02, "ci_low": 1.01, "ci_high": 1.03,
                     "text": "Candidate is SLOWER."},
         "metrics": {"wall": {"a_median": 1.0, "b_median": 1.02, "ratio": 1.02, "ci_low": 1.01, "ci_high": 1.03,
@@ -119,6 +119,41 @@ class ReceiptTest(unittest.TestCase):
         for value in (None, [], "summary"):
             self.assertTrue(compiler_receipt.classify(value, BINARIES))
         self.assertTrue(compiler_receipt.classify(summary(), {}))
+
+    def test_sample_accounting_matches_the_declared_plan(self) -> None:
+        def change(**fields) -> dict:
+            data = summary()
+            for path, value in fields.items():
+                head, _, leaf = path.partition("__")
+                data[head][leaf] = value
+            return data
+        cases = {
+            "one run per side claiming twelve pairs": change(baseline__runs=1, candidate__runs=1),
+            "mismatched sides": change(candidate__runs=11),
+            "runs beyond the claim": change(baseline__runs=13, candidate__runs=13),
+            "truncated claiming completion": change(plan__pairs=20),
+            "shortened plan": change(plan__pairs=8),
+            "no declared plan": change(plan__pairs=None),
+            "plan below the floor": change(plan__pairs=5, plan__complete_pairs=5, baseline__runs=5, candidate__runs=5),
+            "fewer complete pairs than planned": change(plan__complete_pairs=10),
+            "non-integer runs": change(baseline__runs=12.0),
+        }
+        for name, data in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.classify(data, BINARIES))
+        data = summary()
+        del data["plan"]["pairs"]
+        self.assertTrue(compiler_receipt.classify(data, BINARIES))
+        # The minimum and larger completed experiments are accepted.
+        for count in (6, 12, 40):
+            with self.subTest(count=count):
+                data = change(plan__pairs=count, plan__complete_pairs=count, baseline__runs=count, candidate__runs=count)
+                self.assertEqual(compiler_receipt.classify(data, BINARIES), [])
+        # A complete experiment with an inconclusive verdict is distinct from one that did not finish.
+        complete = summary("inconclusive")
+        reasons = compiler_receipt.classify(complete, BINARIES)
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("verdict", reasons[0])
 
     def test_wall_ratio_domain_and_interval_are_validated(self) -> None:
         def mutate(**verdict) -> dict:
@@ -441,7 +476,7 @@ variant = lambda path: {"sha256": digest(path), "runs": 12, "failed": 0, "determ
 import os
 os.makedirs(value("--output"))
 summary = {"schema": "buster-uarch-lab-compare-v2", "baseline": variant(value("--baseline")),
-           "candidate": variant(value("--candidate")), "plan": {"complete_pairs": 12},
+           "candidate": variant(value("--candidate")), "plan": {"pairs": 12, "complete_pairs": 12},
            "verdict": {"metric": "wall", "outcome": "no detectable difference", "ratio": 1.0, "ci_low": 0.99,
                        "ci_high": 1.01, "text": "NO DETECTABLE DIFFERENCE"},
            "metrics": {"wall": {"outcome": "no detectable difference", "ratio": 1.0, "ci_low": 0.99, "ci_high": 1.01}},

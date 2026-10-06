@@ -242,6 +242,28 @@ def classify(summary: object, binaries: object) -> list[str]:
     pairs = plan.get("complete_pairs")
     if type(pairs) is not int or pairs < MIN_PAIRS:
         reasons.append(f"{pairs!r} complete pairs; at least {MIN_PAIRS} are required")
+    # uarch_lab compare runs one A and one B member per planned pair (warmups and the fresh-copy reference
+    # are not timed runs), keeps going after a failed member, and counts a pair complete when both succeeded.
+    # A finished experiment therefore has runs == plan.pairs == complete_pairs on both sides; a failure
+    # or truncation leaves fewer, and a shortened plan is not a completed one.
+    planned = plan.get("pairs")
+    if type(planned) is not int or planned < MIN_PAIRS:
+        reasons.append(f"declared plan has {planned!r} pairs; the declared sample plan is required and needs "
+                       f"at least {MIN_PAIRS}")
+    counts = {role: summary.get(role, {}).get("runs") if isinstance(summary.get(role), dict) else None
+              for role in ("baseline", "candidate")}
+    if type(counts["baseline"]) is int and type(counts["candidate"]) is int and \
+            counts["baseline"] != counts["candidate"]:
+        reasons.append(f"baseline ran {counts['baseline']} times but candidate {counts['candidate']}; "
+                       "every pair has one run of each")
+    for role, count in counts.items():
+        if type(count) is int and type(pairs) is int and count != pairs:
+            reasons.append(f"{role} has {count} timed runs but {pairs} complete pairs are claimed")
+        if type(count) is int and type(planned) is int and count != planned:
+            reasons.append(f"{role} has {count} timed runs but the plan declares {planned} pairs; "
+                           "the experiment did not complete as declared")
+    if type(pairs) is int and type(planned) is int and pairs != planned:
+        reasons.append(f"{pairs} complete pairs do not match the {planned} planned pairs")
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
     metrics = summary.get("metrics")
     if verdict.get("metric") != "wall" or verdict.get("outcome") not in MEASURED_OUTCOMES:
