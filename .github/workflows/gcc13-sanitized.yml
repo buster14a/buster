@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-24.04
@@ -43,7 +43,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -84,14 +84,18 @@ jobs:
           BUSTER_CI_REPRO: See the Release string fixtures section in docs/gcc13-sanitized-acceptance.md.
         run: python3 tools/ci_summary.py
 
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Retain Release string fixture evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gcc13-release-strings-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/buster-ci/
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: ${{ runner.temp }}/buster-ci/
           if-no-files-found: error
           retention-days: 14
 
@@ -104,7 +108,7 @@ jobs:
     timeout-minutes: 240
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-24.04
@@ -116,7 +120,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -238,13 +242,18 @@ jobs:
           BUSTER_CI_REPRO: See docs/gcc13-sanitized-acceptance.md for the exact GCC 13 fatal-sanitizer and ELF alias commands.
         run: python3 tools/ci_summary.py
 
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Retain GCC 13 acceptance evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gcc13-sanitized-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
             ${{ runner.temp }}/buster-ci/
             ${{ runner.temp }}/elf-data-alias/
           if-no-files-found: error

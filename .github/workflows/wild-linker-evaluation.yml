@@ -24,7 +24,7 @@ jobs:
       BUSTER_TEST_JOBS: '2'
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -36,7 +36,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -102,13 +102,17 @@ jobs:
         run: |
           clang -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic tools/wild_linker_bench.c -o "$RUNNER_TEMP/wild-evaluation/bench"
           "$RUNNER_TEMP/wild-evaluation/bench" "$RUNNER_TEMP/wild-evaluation/build-driver" "$RUNNER_TEMP/wild-evaluation/evidence"
+      - name: Retain machine records in existing evidence
+        if: ${{ always() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/wild-evaluation/evidence
       - name: Retain original evidence including setup failures
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wild-linker-evaluation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/wild-evaluation/evidence
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: ${{ runner.temp }}/wild-evaluation/evidence
           if-no-files-found: error
           retention-days: 30

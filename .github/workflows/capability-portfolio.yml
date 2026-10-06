@@ -24,7 +24,7 @@ jobs:
       BUSTER_MATRIX_THREADS: '2'
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 10
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -45,7 +45,7 @@ jobs:
           path: external/cjson
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: external/cjson
@@ -57,7 +57,7 @@ jobs:
           path: external/zlib
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: external/zlib
@@ -69,7 +69,7 @@ jobs:
           path: external/stb
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: external/stb
@@ -81,7 +81,7 @@ jobs:
           path: external/lua-git
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: external/lua-git
@@ -93,7 +93,7 @@ jobs:
           path: external/quickjs
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: external/quickjs
@@ -232,6 +232,12 @@ jobs:
           mkdir -p evidence
           printf 'compiler=%s\nselfhost=%s\ncjson=%s\nzlib=%s\nstb=%s\nlua=%s\nquickjs=%s\nsqlite=%s\nunits=%s\n' "$COMPILER" "$SELFHOST" "$CJSON" "$ZLIB" "$STB" "$LUA" "$QUICKJS" "$SQLITE" "$UNITS" | tee evidence/outcomes.txt
           cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -239,7 +245,6 @@ jobs:
           retention-days: 30
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
             evidence
             build/cjson-*
             build/zlib-*
@@ -256,7 +261,7 @@ jobs:
       BUSTER_TEST_JOBS: '2'
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -265,7 +270,7 @@ jobs:
           ref: 133e11167a0e6818a6e226aedab68560add0673c
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -303,6 +308,12 @@ jobs:
         run: |
           set -euo pipefail
           .ci-tools/build test_sqlite --config Release "$PWD/external/sqlite-amalgamation-3530400" "$PWD/external/sqlite-src-3530400" 2>&1 | tee evidence/sqlite.log
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -310,6 +321,5 @@ jobs:
           retention-days: 30
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
             evidence
             build/sqlite-*

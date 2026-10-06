@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-24.04
@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -99,13 +99,17 @@ jobs:
           sha256sum "$evidence"/probe.c "$evidence"/reference*.inc "$evidence"/probe-clang "$evidence"/probe-gcc "$evidence"/probe-sanitized "$evidence"/*.csv > "$evidence/sha256.txt"
           cat "$evidence/identity.txt"
           cat "$evidence/sha256.txt"
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/codeview-provenance-evidence
       - name: Retain exact-source correctness and count evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: codeview-provenance-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/codeview-provenance-evidence
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: ${{ runner.temp }}/codeview-provenance-evidence
           if-no-files-found: error
           retention-days: 14

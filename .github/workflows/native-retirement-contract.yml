@@ -92,7 +92,7 @@ jobs:
         working-directory: candidate
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -103,7 +103,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate
@@ -117,7 +117,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: trusted
@@ -157,7 +157,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate/external/cjson
@@ -171,7 +171,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate/external/doom
@@ -185,7 +185,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate/external/lz4
@@ -199,7 +199,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate/external/yyjson
@@ -213,7 +213,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate/external/stb
@@ -227,7 +227,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate/external/zlib
@@ -243,7 +243,7 @@ jobs:
       # Archives are content-addressed and re-verified against the pinned
       # sha256 before use, so a cache entry can only skip the download.
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate/external/musl
@@ -357,14 +357,18 @@ jobs:
           git rev-parse HEAD 'HEAD^{tree}' > evidence/binding-source/revision.txt
           cp tools/native_retirement_performance_schema.py tools/native_retirement_performance_eligibility_test.py tools/native_retirement_performance_binding.py tools/native_retirement_performance_binding_test.py tools/native_retirement_performance_identity_test.py tools/native_retirement_result_input.py tools/native_retirement_result_input_test.py tools/native_retirement_contract.py evidence/binding-source/tools/
           cp docs/native-retirement-support-v1.tsv docs/native-retirement-performance-contract.md evidence/binding-source/docs/
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: candidate/evidence
       - name: Retain seven-day contract diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-retirement-contract-${{ github.run_id }}
-          path: |
-            candidate/evidence/
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: candidate/evidence/
           retention-days: 7
           if-no-files-found: error
       - name: State durable evidence boundary

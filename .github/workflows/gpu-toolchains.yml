@@ -30,7 +30,7 @@ jobs:
       BUSTER_GPU_TEST_SPIRV_VAL: /usr/bin/spirv-val
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -47,7 +47,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -85,13 +85,18 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/buster-build" test_gpu_toolchains --ide build/Debug/ide --out "$RUNNER_TEMP/gpu-evidence" --profile spirv-dxc-2025.07 --profile ptx-llvm18-cuda12.4 --profile amdgcn-llvm18 --profile dxil-dxc-2025.07 --profile spirv-direct-vulkan1.2
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/gpu-evidence
       - name: Retain commands, diagnostics, versions and hashes
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gpu-linux-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
             ${{ runner.temp }}/gpu-evidence
             ${{ runner.temp }}/gpu-apt
             build/gpu-toolchains-self-test-*
@@ -110,7 +115,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ${{ vars.GPU_METAL_RUNNER }}
@@ -118,7 +123,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -131,13 +136,18 @@ jobs:
           "$RUNNER_TEMP/buster-build" generate --ci --linker DEFAULT --fuzz OFF --include-tests OFF
           "$RUNNER_TEMP/buster-build" build --config Debug -t ide
           "$RUNNER_TEMP/buster-build" test_gpu_toolchains --ide build/Debug/ide --out "$RUNNER_TEMP/gpu-evidence" --profile metal-xcode16.4
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/gpu-evidence
       - name: Retain Metal evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gpu-metal-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
             ${{ runner.temp }}/gpu-evidence
             build/gpu-toolchains-self-test-*
           if-no-files-found: warn

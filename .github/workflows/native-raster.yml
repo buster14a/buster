@@ -69,7 +69,7 @@ jobs:
     name: XCB raster (${{ matrix.cc }}, ${{ matrix.config }}, ${{ matrix.sanitize }})
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -79,7 +79,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -105,6 +105,11 @@ jobs:
         run: xvfb-run -a -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_image_browser_native
       - name: Unavailable-display failure path
         run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster_no_display'
+      - name: Retain machine records in existing evidence
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: build/${{ matrix.config }}/image_browser
       - name: Preserve tested runnable slice
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # existing repository v7.0.1 pin
         with:
@@ -112,7 +117,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
             build/${{ matrix.config }}/image_browser
             docs/projects/image-browser.md
             src/buster/tests/image_browser/fixtures/*.ppm

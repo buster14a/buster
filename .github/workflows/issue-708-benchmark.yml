@@ -41,7 +41,7 @@ jobs:
       CANDIDATE_SHA: ${{ inputs.candidate || 'b03bdf762f5271076fdf5ff485c4870a2e88bfea' }}
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             windows-2025
@@ -62,7 +62,7 @@ jobs:
           path: baseline
 
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: baseline
@@ -76,7 +76,7 @@ jobs:
           path: candidate
 
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate
@@ -222,13 +222,17 @@ jobs:
           'Both arms succeeded with matching driver assertion inventories. Timing requires separate analysis.' |
             Tee-Object -FilePath (Join-Path $PairRoot 'pair-validation.txt')
 
+      - name: Retain machine records in existing evidence
+        if: ${{ always() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/issue-708
       - name: Retain paired benchmark evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: issue-708-pair-${{ matrix.trial }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/issue-708/
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: ${{ runner.temp }}/issue-708/
           if-no-files-found: warn
           retention-days: 14

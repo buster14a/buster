@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             macos-26
@@ -49,7 +49,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -65,12 +65,17 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_BENCH_ALLOCATIONS=1 build.c -o build/build-census
           BUSTER_ALLOCATION_CENSUS=1 ./build/build-census self_host_audit_self_test 2> build/allocation-census.log
           python3 tools/allocation_census.py --input build/allocation-census.log --output build/allocation-census-report --label 'build-driver CI smoke'
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: build/throughput-tool-tests
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: throughput-harness-macos-26
           path: |
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
             build/throughput-tool-tests
             build/allocation-census.log
             build/allocation-census-report

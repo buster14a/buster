@@ -14,11 +14,11 @@ import re
 import sys
 
 
-MACHINE_REPORTER_REFERENCE = "buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed"
-MACHINE_REPORTER_BLOBS = {".github/actions/machine-specifications/action.yml":"60b87230f858e285ba971ca3b3209d21e5c08658","tools/machine_specifications.c":"d84b438344c58bdb713b3eaced4d5e3702a91510"}
+MACHINE_REPORTER_REFERENCE = "buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283"
+MACHINE_REPORTER_BLOBS = {".github/actions/machine-specifications/action.yml":"ca7b8666a9cc5fedc1189fd09cc666863f90571a","tools/machine_specifications.c":"78592d143dfaff77f3bdfb9d59bbc01884b66dc0"}
 
 APPROVED = {
-    "buster14a/buster/.github/actions/machine-specifications": {"da8f2b576b595160b3f811c7ae49e9719d61b1ed"},
+    "buster14a/buster/.github/actions/machine-specifications": {"6f2ab3357f1e0f359fbf9f40621906171c026283"},
     "actions/upload-pages-artifact": {"fc324d3547104276b827a68afc52ff2a11cc49c9"},
     "actions/deploy-pages": {"368f82528645a54fb793d4d04e342629a3f51346"},
     "actions/checkout": {"11bd71901bbe5b1630ceea73d27597364c9af683"},
@@ -181,7 +181,7 @@ def check_machine_reporting(text, path):
         startup_count = 0
         for index, step in enumerate(parts):
             reporter = "        uses: " + MACHINE_REPORTER_REFERENCE in step
-            if reporter and "          mode: source" not in step:
+            if reporter and not any(line in step for line in ("          mode: source", "          mode: retain")):
                 startup_count += 1
                 if index != 0:
                     errors.append(prefix + "startup reporting must precede all work")

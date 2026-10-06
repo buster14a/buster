@@ -45,7 +45,7 @@ jobs:
       LAB_PROCESSES: ${{ inputs.processes || '3' }}
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -54,7 +54,7 @@ jobs:
           persist-credentials: false
 
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -169,13 +169,17 @@ jobs:
           callgrind_annotate --inclusive=yes "$RUNNER_TEMP/lab/callgrind-object-ll2m.out" > "$RUNNER_TEMP/lab/callgrind-object-ll2m-annotate.txt"
           head -n 80 "$RUNNER_TEMP/lab/callgrind-object-ll2m-annotate.txt"
 
+      - name: Retain machine records in existing evidence
+        if: ${{ always() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/lab
       - name: Retain evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ir-layout-lab-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/lab/
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: ${{ runner.temp }}/lab/
           if-no-files-found: warn
           retention-days: 30

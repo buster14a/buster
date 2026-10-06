@@ -263,7 +263,7 @@ def remove_reviewed_machine_steps(text: str) -> str:
     Strip only the reviewed literal reference before applying the unchanged
     workload/checkouts/authority contract; never strip arbitrary uses or runs.
     """
-    pin = "buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed"
+    pin = "buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283"
     pieces = re.split(r"(?=^      - (?:name|uses|id):)", text, flags=re.MULTILINE)
     result = []
     for piece in pieces:

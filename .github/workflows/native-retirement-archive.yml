@@ -45,7 +45,7 @@ jobs:
             census_asset: native-retirement-2bb4ce9-34718946098.zip
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -56,7 +56,7 @@ jobs:
           path: validation
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: validation
@@ -68,7 +68,7 @@ jobs:
           path: replay-validation
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: replay-validation
@@ -80,7 +80,7 @@ jobs:
           path: candidate
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: candidate
@@ -92,7 +92,7 @@ jobs:
           path: reference
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: reference
@@ -161,13 +161,16 @@ jobs:
           --rebuilt-reference "$GITHUB_WORKSPACE/reference/build/Release/ide"
           --run-id "${{ github.run_id }}"
           --output "$RUNNER_TEMP/census-replay-${{ matrix.label }}-${{ github.run_id }}.json"
+      - name: Retain machine records in existing evidence
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
       - name: Retain census replay receipt with the CI run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: census-replay-${{ matrix.label }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/census-replay-${{ matrix.label }}-${{ github.run_id }}.json
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: ${{ runner.temp }}/census-replay-${{ matrix.label }}-${{ github.run_id }}.json
           retention-days: 7
           if-no-files-found: error
 
@@ -192,7 +195,7 @@ jobs:
             strict_pattern: strict-retirement-2bb4ce9-34718946098.zip.part-*
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -203,7 +206,7 @@ jobs:
           path: validation
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: validation
@@ -264,12 +267,15 @@ jobs:
           --replay "$GITHUB_WORKSPACE/evidence/strict-differential"
           --run-id "${{ github.run_id }}"
           --output "$RUNNER_TEMP/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json"
+      - name: Retain machine records in existing evidence
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
       - name: Retain strict replay receipt with the CI run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: strict-replay-${{ matrix.label }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: ${{ runner.temp }}/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json
           retention-days: 7
           if-no-files-found: error

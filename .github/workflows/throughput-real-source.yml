@@ -37,7 +37,7 @@ jobs:
       BUSTER_MATRIX_THREADS: '1'
     steps:
       - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           requested-runner: >-
             ubuntu-26.04
@@ -46,7 +46,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: .
@@ -62,12 +62,15 @@ jobs:
           git rev-parse 'HEAD^{tree}' > evidence/tree.txt
           git archive --format=tar HEAD > evidence/source.tar
           sha256sum evidence/source.tar > evidence/source.tar.sha256
+      - name: Retain machine records in existing evidence
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: real-source-qualification-source-${{ github.event.pull_request.head.sha || github.sha }}
-          path: |
-            evidence
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
+          path: evidence
           retention-days: 14
           if-no-files-found: error
       - name: Prepare pristine cJSON input outside timing
@@ -79,7 +82,7 @@ jobs:
           path: external/cjson
           persist-credentials: false
       - name: Record actual checkout identity
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: external/cjson
@@ -95,7 +98,7 @@ jobs:
           persist-credentials: false
       - name: Record actual checkout identity
         if: ${{ !cancelled() }}
-        uses: buster14a/buster/.github/actions/machine-specifications@da8f2b576b595160b3f811c7ae49e9719d61b1ed
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
         with:
           mode: source
           source-directory: external/lua-git
@@ -451,12 +454,17 @@ jobs:
           assert any(item["source"] == "sqlite3.c" and item["role"] == "object"
                      for item in receipts[2]["artifacts"])
           PY
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@6f2ab3357f1e0f359fbf9f40621906171c026283
+        with:
+          mode: retain
+          retention-directory: evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: real-source-qualification-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/buster-machine-specifications/*.json*
             evidence
             build/cjson-v1.7.19-*
             build/lua-v5.4.8-*
