@@ -7927,10 +7927,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_join_parameter_registers(UnitTes
             {.opcode = MACHINE_X64_SUB64, .operands = {refs[4], refs[0], refs[1]}},
             {.opcode = MACHINE_X64_MOV_RR, .operands = {refs[5], refs[0]}},
             {.opcode = MACHINE_X64_JMP, .operands = {block_refs[3]}},
-            {0},
-            {0},
-            {0},
-            {0},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
         };
         // The join's tail: return the lone parameter, return p - q, or jump
         // to a block that does so, which makes both parameters escape.
