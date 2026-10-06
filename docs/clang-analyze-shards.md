@@ -108,6 +108,28 @@ rejected rather than silently ignored. Existing
 exact queue-to-main reuse remains separate: a valid reuse receipt can replace
 fresh execution, but never an incomplete candidate run.
 
+Negative controls print their rejection evidence on purpose, so the self-test
+scopes it. Each operation-running check first prints
+`ANALYZE_SELF_TEST_BEGIN name=... expect=reject` (or `expect=accept`); its
+`ANALYZE_SELF_TEST name=... status=...` verdict closes the scope. Inside a
+rejection scope the driver's diagnostics read `expected-error:` and failed
+`ANALYZE_UNIT`, `ANALYZE_SHARD`, `ANALYZE_AGGREGATE`, `ANALYZE_RUN` and
+`ANALYZE_WORKER_SAMPLE` records end their status with ` expected=1`. Shard
+workers launched inside the scope receive the internal `--expect-rejection`
+argument, which is accepted only with `--shard` and changes text, not results.
+Raw analyzer logs, `+` command lines, shard reports and unit logs are
+unchanged; a self-test `run.txt` or `qualification.txt` repeats its printed
+record. An accept scope, an unscoped check, a real run and a failed check keep
+plain `error:` and `status=fail`; a failed check also prints
+`error: analyzer self-test check failed: name=...`. The final
+`ANALYZE_SELF_TEST_RESULT` line (`checks`, `expected_rejections`, `failures`,
+`evidence`, `status`) is the self-test verdict and decides its exit status. The
+real analysis verdict remains the unqualified `ANALYZE_RUN` and
+`ANALYZE_AGGREGATE` records of the split-tree run.
+`python3 tools/analyzer_worker_budget_test.py -v` checks that a passing
+self-test prints no unqualified failure, that qualified lines appear only in
+rejection scopes, and that a failing real campaign still prints plain `error:`.
+
 `Bootstrap and identify candidate build driver` compiles one driver with Clang's
 `-MMD` dependency output. The existing `tools/analyzer_reference.py` helper now
 owns candidate provenance only: it verifies compiler-selected repository inputs
