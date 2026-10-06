@@ -181,7 +181,10 @@ BUSTER_GLOBAL_LOCAL bool png_chunk_crc_is_valid(ImageDecodeContext* context, Png
     u64 checked_size = (u64)chunk.length + 4u;
     if (result)
     {
-        result = image_decode_add_work(context, checked_size * 8u, chunk.header_offset + 4u);
+        // One unit per checked byte, like every other per-byte PNG charge. A
+        // per-bit charge would let chunk bytes alone exhaust the default
+        // budget (see BUSTER_IMAGE_MAX_WORK).
+        result = image_decode_add_work(context, checked_size, chunk.header_offset + 4u);
     }
     if (result)
     {

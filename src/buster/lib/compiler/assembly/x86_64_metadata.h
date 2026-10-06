@@ -740,6 +740,9 @@ struct BusterX86MetadataPhysicalQuery
     bool include_not64;
     bool include_implicit;
     bool source_semantics;
+    // Source `movabs` between the accumulator and an absolute address names the
+    // MOV moffs row even when a ModRM disp32 form would be shorter.
+    bool source_moffs;
     u8 reserved;
 };
 
