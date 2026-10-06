@@ -844,6 +844,12 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Initialize native observation
         id: native_observation
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -1038,12 +1044,6 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_producer_check --sequence 70 --             "$driver" build --config Release -t ide
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_corpus --sequence 80 -- "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle --jobs 4
 
-      - name: Retain machine records in existing evidence
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
-        with:
-          mode: retain
-          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Native result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
