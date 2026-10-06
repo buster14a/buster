@@ -59,7 +59,7 @@ import time
 from pathlib import Path
 
 from compiler_receipt import APPROVED_HOST, observed_cpu_model
-from workload_selection import WORKLOAD_DIRECTORY, WORKLOAD_NAME, git_changes, select
+from workload_selection import WORKLOAD_DIRECTORY, WORKLOAD_NAME, git_changes, select as select_workloads
 
 SOURCE_LIMIT = 256 * 1024
 DATA_LIMIT = 8 * 1024 * 1024
@@ -90,7 +90,7 @@ def changed_workloads(candidate: Path, base: str, head: str) -> tuple[list[str],
         ["git", "-C", str(candidate), "diff", "--name-status", "--no-renames", "-z",
          f"{base}...{head}", "--", WORKLOAD_DIRECTORY],
         check=True, capture_output=True, timeout=60).stdout.decode("utf-8")
-    return select(git_changes(listing))
+    return select_workloads(git_changes(listing))
 
 
 def source_problem(candidate: Path, name: str) -> str:
