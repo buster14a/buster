@@ -1,0 +1,89 @@
+name: Machine specifications
+description: Bounded C startup collection and actual checkout identities
+inputs:
+  requested-runner:
+    description: Configured runs-on expression or labels, separate from observations
+    required: false
+  matrix-index:
+    description: Strategy job index; empty for non-matrix jobs
+    required: false
+  mode:
+    description: startup or source
+    default: startup
+  source-directory:
+    description: Directory just checked out
+    default: .
+  source-repository:
+    description: Repository just checked out
+    default: buster14a/buster
+outputs:
+  directory:
+    description: Machine-readable evidence directory
+    value: ${{ runner.temp }}/buster-machine-specifications
+runs:
+  using: composite
+  steps:
+    - name: Machine specifications (Unix)
+      if: ${{ runner.os != 'Windows' && inputs.mode == 'startup' }}
+      shell: bash
+      env:
+        MS_ACTION_PATH: ${{ github.action_path }}
+        MS_REQUESTED_RUNNER: ${{ inputs.requested-runner }}
+        MS_MATRIX_INDEX: ${{ inputs.matrix-index }}
+        MS_RUNNER_CLASS: ${{ runner.environment }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/buster-machine-specifications"
+        clang -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char \
+          "$MS_ACTION_PATH/../../../tools/machine_specifications.c" \
+          -o "$RUNNER_TEMP/buster-machine-specifications/reporter"
+        "$RUNNER_TEMP/buster-machine-specifications/reporter" --self-test
+        "$RUNNER_TEMP/buster-machine-specifications/reporter" --collect "$RUNNER_TEMP/buster-machine-specifications/report.json"
+    - name: Machine specifications (Windows)
+      if: ${{ runner.os == 'Windows' && inputs.mode == 'startup' }}
+      shell: pwsh
+      env:
+        MS_ACTION_PATH: ${{ github.action_path }}
+        MS_REQUESTED_RUNNER: ${{ inputs.requested-runner }}
+        MS_MATRIX_INDEX: ${{ inputs.matrix-index }}
+        MS_RUNNER_CLASS: ${{ runner.environment }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $directory = Join-Path $env:RUNNER_TEMP 'buster-machine-specifications'
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+        $compiler = Get-Command clang -ErrorAction SilentlyContinue
+        if ($compiler) { $compilerPath = $compiler.Source }
+        elseif (Test-Path 'C:\Program Files\LLVM\bin\clang.exe') { $compilerPath = 'C:\Program Files\LLVM\bin\clang.exe' }
+        else { throw 'Machine specifications: no preinstalled C bootstrap compiler; installing tools is forbidden.' }
+        $source = Join-Path $env:MS_ACTION_PATH '../../../tools/machine_specifications.c'
+        $reporter = Join-Path $directory 'reporter.exe'
+        & $compilerPath -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char $source -ladvapi32 -o $reporter
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        & $reporter --self-test
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        & $reporter --collect (Join-Path $directory 'report.json')
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    - name: Actual checkout identity (Unix)
+      if: ${{ runner.os != 'Windows' && inputs.mode == 'source' }}
+      shell: bash
+      env:
+        MS_SOURCE_DIRECTORY: ${{ inputs.source-directory }}
+        MS_SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+      run: |
+        set -euo pipefail
+        source_sha=$(git -C "$MS_SOURCE_DIRECTORY" rev-parse --verify 'HEAD^{commit}')
+        "$RUNNER_TEMP/buster-machine-specifications/reporter" --source "$source_sha" "$MS_SOURCE_REPOSITORY" \
+          "$RUNNER_TEMP/buster-machine-specifications/sources.jsonl"
+    - name: Actual checkout identity (Windows)
+      if: ${{ runner.os == 'Windows' && inputs.mode == 'source' }}
+      shell: pwsh
+      env:
+        MS_SOURCE_DIRECTORY: ${{ inputs.source-directory }}
+        MS_SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $directory = Join-Path $env:RUNNER_TEMP 'buster-machine-specifications'
+        $sourceSha = & git -C $env:MS_SOURCE_DIRECTORY rev-parse --verify 'HEAD^{commit}'
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        & (Join-Path $directory 'reporter.exe') --source $sourceSha.Trim() $env:MS_SOURCE_REPOSITORY (Join-Path $directory 'sources.jsonl')
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
