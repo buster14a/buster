@@ -158,6 +158,21 @@ buster_bootstrap_manifest_valid()
     [[ $valid == 1 ]]
 }
 
+# Distribution TinyCC 0.9.27 rejects shared library sources (docs/agents/build.md);
+# name that cause when a compile fails instead of leaving only its parse error.
+buster_bootstrap_tcc_failure_note()
+{
+    local tcc_path=$1
+    local version
+    version=$("$tcc_path" -v 2>/dev/null | sed -n 's/^tcc version \([0-9][0-9.]*\).*/\1/p' | head -n 1) || version=
+    case "$version" in
+    0.[0-8]|0.[0-8].*|0.9.[0-9]|0.9.1[0-9]*|0.9.2[0-7]|0.9.2[0-7].*)
+        printf 'note: %s is TinyCC %s; this tree needs TinyCC 0.9.28rc or newer.\n' "$tcc_path" "$version" >&2
+        printf 'note: build the pinned commit named in docs/agents/build.md and put it first in PATH.\n' >&2
+        ;;
+    esac
+}
+
 buster_bootstrap_driver()
 {
     repository_root=$1
@@ -204,11 +219,19 @@ buster_bootstrap_driver()
         fi
     done
 
-    "$tcc_path" "${bootstrap_flags[@]}" -MF "$dependency_raw" build.c -o "$temporary_probe"
+    "$tcc_path" "${bootstrap_flags[@]}" -MF "$dependency_raw" build.c -o "$temporary_probe" || {
+        status=$?
+        buster_bootstrap_tcc_failure_note "$tcc_path"
+        return "$status"
+    }
     buster_bootstrap_dependencies "$dependency_raw" "$dependency_list"
     buster_bootstrap_snapshot "$repository_root" "$dependency_list" "$dependency_snapshot"
 
-    "$tcc_path" "${bootstrap_flags[@]}" -MF "$dependency_raw" build.c -o "$temporary_artifact"
+    "$tcc_path" "${bootstrap_flags[@]}" -MF "$dependency_raw" build.c -o "$temporary_artifact" || {
+        status=$?
+        buster_bootstrap_tcc_failure_note "$tcc_path"
+        return "$status"
+    }
     buster_bootstrap_dependencies "$dependency_raw" "$dependency_list"
     buster_bootstrap_snapshot "$repository_root" "$dependency_list" "$post_snapshot"
     if ! cmp -s "$dependency_snapshot" "$post_snapshot"; then
