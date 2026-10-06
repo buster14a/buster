@@ -102,12 +102,11 @@ class DirectWorkloadTest(unittest.TestCase):
         cwd = self.root / "elsewhere"
         cwd.mkdir()
         seen: list[str] = []
-        real_run, real_once = subprocess.run, run_workloads.run_once
+        real_compile, real_once = run_workloads.compile_bounded, run_workloads.run_once
 
-        def fake_run(command, **keywords):
-            if command[0] != "git":
-                seen.append(command[command.index("-o") + 1])
-            return real_run(command, **keywords)
+        def fake_compile(command, cwd):
+            seen.append(command[command.index("-o") + 1])
+            return real_compile(command, cwd)
 
         def fake_once(program, scratch, cpu):
             seen.append(str(program))
@@ -121,7 +120,7 @@ class DirectWorkloadTest(unittest.TestCase):
         try:
             with open(os.devnull, "w") as quiet, patch.object(sys, "argv", arguments), \
                     patch.object(run_workloads, "observed_cpu_model", lambda: APPROVED_CPU), \
-                    patch.object(run_workloads.subprocess, "run", fake_run), \
+                    patch.object(run_workloads, "compile_bounded", fake_compile), \
                     patch.object(run_workloads, "run_once", fake_once), \
                     patch.object(sys, "stdout", quiet):
                 status = run_workloads.main()
@@ -363,6 +362,44 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("Captured output is limited to 1024 bytes per run", out)
         self.assertIn("truncated", out)
+
+    def fake_compiler(self, body: str) -> str:
+        path = self.root / "noisy-cc"
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def test_compiler_diagnostics_are_bounded_while_running(self) -> None:
+        import run_workloads
+        import time
+        script = ("#!/usr/bin/env python3\nimport os, subprocess, sys\n"
+                  "for _ in range(30):\n    os.write(1, b'o' * 100000)\n    os.write(2, b'e' * 100000)\n"
+                  "subprocess.Popen(['sleep', '30'])\nsys.exit(3)\n")
+        cc = self.fake_compiler(script)
+        started = time.monotonic()
+        with patch.object(run_workloads, "OUTPUT_CAPTURE_LIMIT", 4096):
+            result = run_workloads.compile_bounded([cc], self.root)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result["exit"], 3)
+        self.assertEqual(len(result["output"]), 4096)
+        self.assertEqual(result["output_bytes"], 6_000_000)
+
+    def test_large_compiler_diagnostics_do_not_fail_a_good_compile_or_hide_a_bad_one(self) -> None:
+        import run_workloads
+        noise = "import sys; sys.stderr.write('w' * 3000000)"
+        good = self.fake_compiler(f'#!/bin/sh\npython3 -c "{noise}"\nexec {COMPILER} "$@"\n')
+        head = self.commit({"benchmarks/9700x/aa_ok.c": PASSING})
+        with patch.object(run_workloads, "OUTPUT_CAPTURE_LIMIT", 4096):
+            status, out = self.run_in_process(head, cc=good)
+        self.assertEqual(status, 0, out)
+        bad = self.fake_compiler(f'#!/bin/sh\npython3 -c "{noise}"\nexit 1\n')
+        shutil.rmtree(self.root / "work")
+        with patch.object(run_workloads, "OUTPUT_CAPTURE_LIMIT", 4096):
+            status, out = self.run_in_process(head, cc=bad)
+        self.assertEqual(status, 1)
+        self.assertIn("Compilation failed:", out)
+        self.assertIn("compiler printed 3000000 bytes; at most 4096 kept, 2000 shown", out)
+        self.assertNotIn("INCOMPLETE", out)
 
     def test_every_run_starts_without_predecessor_files(self) -> None:
         marker = ('#include <stdio.h>\nint main(void) { FILE* f = fopen("marker", "rb"); int existed = f != 0;\n'

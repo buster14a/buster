@@ -32,7 +32,7 @@ heads the report (#2761). On any host other than the approved Zen 5 host
 nothing is compiled or run and the run fails, so a workload can only be
 reported as measured on the Ryzen 7 9700X.
 
-Map: changed_workloads, source_problem, run_once, run_sample, render, main.
+Map: changed_workloads, source_problem, compile_bounded, run_once, run_sample, render, main.
 """
 
 from __future__ import annotations
@@ -137,6 +137,43 @@ def drain(descriptor: int, stop: threading.Event, sink: dict) -> None:
                 sink["data"] += chunk[:room]
         elif stop.is_set():
             break
+
+
+def compile_bounded(command: list[str], cwd: Path) -> dict:
+    """Run the compiler with stdout and stderr drained as they arrive.
+
+    Only the first OUTPUT_CAPTURE_LIMIT bytes are kept; the total is counted. The
+    compiler's process group is killed on timeout and once it has exited (#2940).
+    """
+    sink = {"data": bytearray(), "total": 0}
+    stop = threading.Event()
+    read_end, write_end = os.pipe()
+    reader = threading.Thread(target=drain, args=(read_end, stop, sink))
+    reader.start()
+    try:
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=write_end,
+                                 stderr=subprocess.STDOUT, cwd=cwd, start_new_session=True)
+        os.close(write_end)
+        write_end = -1
+        try:
+            returncode = child.wait(timeout=COMPILE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            returncode = None
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if returncode is None:
+            child.wait()
+    finally:
+        if write_end >= 0:
+            os.close(write_end)
+        stop.set()
+        reader.join()
+        os.close(read_end)
+    if returncode is None:
+        raise subprocess.TimeoutExpired(command, COMPILE_TIMEOUT_SECONDS, bytes(sink["data"]))
+    return {"exit": returncode, "output": bytes(sink["data"]), "output_bytes": sink["total"]}
 
 
 def run_once(program: Path, scratch: Path, cpu: int) -> dict:
@@ -368,12 +405,13 @@ def main() -> int:
             staged.parent.mkdir()
             staged.write_bytes(source_bytes)
             stage = "compilation"
-            build = subprocess.run(
-                [compiler, *COMPILE_FLAGS, "-o", str(program), str(staged)],
-                cwd=scratch, capture_output=True, timeout=COMPILE_TIMEOUT_SECONDS, check=False)
-            if build.returncode != 0:
+            build = compile_bounded([compiler, *COMPILE_FLAGS, "-o", str(program), str(staged)], scratch)
+            if build["exit"] != 0:
                 failures.append(f"{name}: compilation failed")
-                diagnostics = (build.stdout + build.stderr)[:OUTPUT_SHOWN].decode("utf-8", "replace")
+                diagnostics = build["output"][:OUTPUT_SHOWN].decode("utf-8", "replace")
+                if build["output_bytes"] > OUTPUT_SHOWN:
+                    diagnostics += (f"\n[compiler printed {build['output_bytes']} bytes; "
+                                    f"at most {OUTPUT_CAPTURE_LIMIT} kept, {OUTPUT_SHOWN} shown]")
                 publish([f"### `{name}`", "", "Compilation failed:", "",
                          "The source is compiled alone: only system headers resolve, not neighbouring files.", "", "```text",
                          diagnostics.replace("```", "'''").rstrip("\n"), "```", ""])
