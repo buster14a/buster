@@ -20719,7 +20719,7 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_list_parameter_declarations(CType
             break;
         }
         u32 entity_start = result->entity_count;
-        bool parsed = c_parse_local_declarations(machine, arena, result, preprocess, scope, declaration_index, cursor, statement_end);
+        bool parsed = c_parse_local_declarations(machine, arena, result, preprocess, scope, declaration_index, cursor, statement_end, false);
         for (u32 entity_index = entity_start; parsed && entity_index < result->entity_count; entity_index += 1)
         {
             CEntity* entity = result->entities + entity_index;
