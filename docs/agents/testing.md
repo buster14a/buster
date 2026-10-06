@@ -974,6 +974,20 @@ inventory remain unchanged.
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
+The first Node launch in a job pages the Node executable in from disk; every later launch starts warm. On hosted Linux AArch64 that cold page-in has taken between 0.1 s and 2.1 s in passing jobs. In one incident it stalled for about a minute at near-zero CPU (#2194). The incident looked like this:
+
+- The bit-field oracle's first attempt timed out silently.
+- Its retry printed `WASM_NODE_READY` with under a second of budget left.
+- Together, the two attempts paged in about one normal cold start (roughly 76,500 blocks).
+
+`compiler_driver_test_wasm_node_cold_start` therefore runs immediately before the first real oracle in module order. It starts Node once, compiles and instantiates an empty Wasm module, synchronously writes `WASM_NODE_COLD_START_DONE` and exits.
+
+- It has its own bounded 120-second budget and logs a `WASM_NODE_COLD_START` line with its elapsed time.
+- It fails on a timeout, a nonzero exit, any stderr output or a missing marker.
+- Each oracle's deadline then measures a warm start plus the oracle's own work.
+
+This fixture accounts for a cold start the runner was charging to an oracle. It does not relax any oracle's deadline, retry or success rule. A test or module selection that skips the fixture gets the previous behavior.
+
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 
 The startup shim also stamps the rest of the integer run, so a post-summary timeout (#2066) can be located. It writes the frozen oracle's console output synchronously, restoring `console.log` even when loading or checking throws. Only after the oracle returns successfully does it synchronously write `WASM_NODE_DONE uptime_us=<n> resources=<active Node resources>` and explicitly exit zero. This prevents the observed post-summary `PipeWrap` event-loop stall (#1793/#2066) without dropping buffered success output. From Node's `exit` event it writes `WASM_NODE_EXIT uptime_us=<n>` synchronously. For readiness oracles the harness strips well-formed trailing stamps before the terminal-marker check. It logs `node_done`, `done_uptime_us`, `node_exit`, `exit_uptime_us` and `post_done_us` (elapsed harness time minus the DONE uptime, an upper bound on the time spent after the oracle returned). A timed-out run with the summary becomes `summary-then-teardown-stall` when EXIT was written, `summary-then-event-loop-stall` when only DONE was written, and stays `summary-before-timeout` otherwise. All three still fail without retry. Stamps are evidence only: they never replace the summary, a zero exit or empty stderr, and a malformed stamp fails the terminal-marker check.
