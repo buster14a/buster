@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -248,6 +249,47 @@ class EvidenceTest(unittest.TestCase):
             with self.subTest(rows=rows):
                 self.assertTrue(compiler_publish.read_evidence(FakeApi(b"", rows), "92",
                                                                "buster-9700x-compiler-x-1")[2])
+
+    def evidence(self, members: dict) -> tuple:
+        return compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+
+    def unique_members(self) -> dict:
+        return {"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
+                "throughput/summary.json": json.dumps(corpus()["summary"]),
+                "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+
+    def test_duplicate_members_and_aliases_are_rejected(self) -> None:
+        base = self.unique_members()
+        for alias in ("receipt.json", "./receipt.json", "receipt.json/", "\\receipt.json", "/receipt.json",
+                      ".//receipt.json"):
+            for value in (base["receipt.json"], "{}"):
+                with self.subTest(alias=alias, identical=value == base["receipt.json"]):
+                    stream = io.BytesIO()
+                    with zipfile.ZipFile(stream, "w") as output:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            for name, text in base.items():
+                                output.writestr(name, text)
+                            output.writestr(alias, value)
+                    got = compiler_publish.read_evidence(FakeApi(stream.getvalue()), "92", "buster-9700x-compiler-x-1")
+                    self.assertIn("duplicate member", got[2])
+                    self.assertIsNone(got[0])
+
+    def test_duplicate_json_keys_are_rejected_at_every_level(self) -> None:
+        for member, text in (("receipt.json", '{"a": 1, "a": 1}'), ("receipt.json", '{"a": 1, "a": 2}'),
+                             ("lab/summary.json", '{"x": {"y": [{"k": 1, "k": 2}]}}'),
+                             ("throughput/summary.json", '{"x": {"y": 1, "y": 1}}'),
+                             ("throughput/metadata.json", '{"n": {"m": {"q": 1, "q": 1}}}')):
+            with self.subTest(member=member, text=text):
+                members = self.unique_members()
+                members[member] = text
+                got = self.evidence(members)
+                self.assertIn("duplicate JSON key", got[2])
+                self.assertIn(member, got[2])
+
+    def test_unique_archive_still_validates(self) -> None:
+        got = self.evidence(self.unique_members())
+        self.assertEqual(got[:3], (receipt(), summary(), ""))
 
 
 FAKE_BUILD = """#!/usr/bin/env bash
