@@ -33680,13 +33680,19 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-fregister-allocator=mir-stack"),
         S8("-fregister-allocator=quality"),
     };
-    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_complex_allocators); allocator_index += 1)
+    // basic_c_complex_division.c adds the scaled division and its Annex G
+    // recoveries, in static initializers and in run-time code, whose branches
+    // and stack slots each allocator places differently.
+    String8 c_complex_fixtures[] = {S8("tests/basic_c_complex_arithmetic.c"), S8("tests/basic_c_complex_division.c")};
+    for (u64 complex_case = 0; complex_case < BUSTER_ARRAY_LENGTH(c_complex_fixtures) * BUSTER_ARRAY_LENGTH(c_complex_allocators); complex_case += 1)
     {
+        u64 fixture_index = complex_case / BUSTER_ARRAY_LENGTH(c_complex_allocators);
+        u64 allocator_index = complex_case % BUSTER_ARRAY_LENGTH(c_complex_allocators);
         TemporalArena complex_temporary = scratch_begin(&arguments->arena, 1);
         String8 complex_path = buster_test_temporary_path(complex_temporary.arena, S8("buster-c-complex-arithmetic"),
-                                                          string_format(complex_temporary.arena, S8("-{u32}"), (u32)allocator_index));
+                                                          string_format(complex_temporary.arena, S8("-{u32}-{u32}"), (u32)fixture_index, (u32)allocator_index));
         String8 complex_command_line[] = {
-            c_complex_allocators[allocator_index], S8("-o"), complex_path, S8("tests/basic_c_complex_arithmetic.c"),
+            c_complex_allocators[allocator_index], S8("-o"), complex_path, c_complex_fixtures[fixture_index],
         };
         CompilerDriverResult complex_result = compiler_driver_execute_invocation(
             complex_temporary.arena,
