@@ -462,7 +462,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   whose libraries are never read, Android today, is unchanged.
 - **Linux x86-64 fixed-address imported function pointers preserve provider
   identity** (#1275). GOT address references use separate loader-filled
-  `GLOB_DAT` slots; lazy `.got.plt` slots remain call-only. Pointer-wide
+  `GLOB_DAT` slots; the PLT's `.got.plt` slots (eagerly bound, `DF_BIND_NOW`) remain call-only. Pointer-wide
   literals use `R_X86_64_64`, preserving the signed addend, including weak
   and protected providers. Read-only literal sites publish `DT_TEXTREL` so
   the loader can write them during relocation. A direct `PC32`, `PC64`, or

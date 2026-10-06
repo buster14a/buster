@@ -1039,6 +1039,22 @@ On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
 
+The default fixed-address dynamic executable
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
+dynamic writers also build on) is hardened the way GNU ld's default is
+(#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
+`.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
+`.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
+with the `PT_GNU_RELRO` range, `.got.plt` then `.dynamic`, padded to a page
+boundary because the loader seals whole pages; `.data`, TLS and `.bss` follow.
+`DT_FLAGS` `DF_BIND_NOW` and `DT_FLAGS_1` `DF_1_NOW` request eager binding, so
+the sealed range covers the PLT slots too. No page is both writable and
+executable. Each load starts on a page boundary, so images grow by up to three
+pages of zero padding against the earlier single R+X load. The static
+(no-import) writers have no GOT and keep their single R+X load; separating
+their `.rodata` is not done yet. `link_test_elf_hardened_layout` checks the
+structure on both machines without `readelf`.
+
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
 
