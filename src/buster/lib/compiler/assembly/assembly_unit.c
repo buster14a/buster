@@ -615,13 +615,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
         String8 flags = string_slice(parts[1], 1, parts[1].length - 1);
         bool writable = false;
         bool executable = false;
-        bool thread_local = false;
+        bool thread_local_section = false;
         for (u64 index = 0; index < flags.length && flags_valid; index += 1)
         {
             char8 letter = flags.pointer[index];
             writable = writable || letter == 'w';
             executable = executable || letter == 'x';
-            thread_local = thread_local || letter == 'T';
+            thread_local_section = thread_local_section || letter == 'T';
             // `a`, `M`, `S` and `R` change no byte this object model stores:
             // merging and retention only let a linker do more or less.
             flags_valid = letter == 'a' || letter == 'w' || letter == 'x' || letter == 'T' || letter == 'M' || letter == 'S' || letter == 'R';
@@ -652,7 +652,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
                                                    directive));
         }
         bool array = init_array || fini_array || preinit_array;
-        if (flags_valid && ((array && (executable || thread_local || no_bits)) || (thread_local && executable)))
+        if (flags_valid && ((array && (executable || thread_local_section || no_bits)) || (thread_local_section && executable)))
         {
             flags_valid = false;
             assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
@@ -669,7 +669,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
         }
         kind = init_array || preinit_array ? ASSEMBLY_UNIT_SECTION_INIT_ARRAY
                : fini_array                ? ASSEMBLY_UNIT_SECTION_FINI_ARRAY
-               : thread_local              ? (no_bits ? ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO : ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA)
+               : thread_local_section      ? (no_bits ? ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO : ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA)
                : executable                ? ASSEMBLY_UNIT_SECTION_TEXT
                : no_bits                   ? ASSEMBLY_UNIT_SECTION_ZERO
                : writable                  ? ASSEMBLY_UNIT_SECTION_DATA
