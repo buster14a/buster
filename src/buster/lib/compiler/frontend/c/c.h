@@ -569,6 +569,10 @@ struct CPreprocessOptions
     // that sums spelling lengths is skipped and the field stays zero. Every
     // other metric is still gathered.
     bool omit_spelled_bytes;
+    // Publish GNU `__label__` declarations and their labels as spelled, for
+    // -E text, instead of the block-unique respelling the parser consumes
+    // (c_preprocess_rename_local_labels).
+    bool preserve_local_labels;
     // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
     u8 position_independent_level;
     // The selected position-independent spelling was a PIE flag.
