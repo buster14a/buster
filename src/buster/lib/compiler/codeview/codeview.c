@@ -173,9 +173,31 @@ BUSTER_GLOBAL_LOCAL u32 codeview_model_simple_type(DebugType* type)
     {
         result = 0x0003;
     }
-    else if (type->kind == DEBUG_TYPE_BASE && type->name.length && (type->name.pointer[0] == 'f' || type->name.pointer[0] == 'F'))
+    else if (type->kind == DEBUG_TYPE_BASE && type->is_float)
     {
-        result = type->size > 4 ? 0x0041 : 0x0040;
+        // CodeView simple real types: T_REAL16 0x46, T_REAL32 0x40, T_REAL64 0x41,
+        // T_REAL80 0x42, T_REAL128 0x43.  A 16-byte slot holds either a padded
+        // x87 value (semantic width 80) or IEEE binary128.
+        if (type->size <= 2)
+        {
+            result = 0x0046;
+        }
+        else if (type->size <= 4)
+        {
+            result = 0x0040;
+        }
+        else if (type->size <= 8)
+        {
+            result = 0x0041;
+        }
+        else if (type->size == 16 && type->bit_width != 80 && type->bit_width != 0)
+        {
+            result = 0x0043;
+        }
+        else
+        {
+            result = 0x0042;
+        }
     }
     else if (type->size <= 1)
     {
@@ -259,6 +281,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_function_address(ByteWriter* symbols, Cod
         .offset = symbols->count,
         .function = function_index,
         .kind = CODEVIEW_RELOCATION_SECREL32,
+        .addend = addend,
     };
     byte_writer_emit_u32_le(symbols, addend);
     relocations[(*relocation_count)++] = (CodeviewRelocation){

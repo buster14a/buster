@@ -175,7 +175,9 @@ BUSTER_GLOBAL_LOCAL Generate matrix_phase_tree(Arena* arena, Generate generate, 
         for (u32 i = 0; i < tree.row_count; i += 1)
         {
             MatrixCoverageRow row = coverage->plan.rows[tree.row_indices[i]];
-            if (tree.compiler == BUILD_COMPILER_CLANG)
+            // Build-only rows (sanitized Clang Debug since #2657) have no
+            // nested test phase; only runtime rows execute test_all.
+            if (string_equal(row.execution, S8("runtime")))
             {
                 matrix_phase_task(arena, record->id, S8("test"), row.configuration, S8(""), S8("nested"), S8(""), 0, (SliceString8){0});
             }
@@ -464,6 +466,48 @@ BUSTER_GLOBAL_LOCAL bool matrix_unit_observation_finish(Arena* arena, MatrixUnit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 matrix_phase_resource_status(ProcessResourceStatus status)
+{
+    String8 result;
+    switch (status)
+    {
+        case PROCESS_RESOURCE_OBSERVED: result = S8("observed"); break;
+        case PROCESS_RESOURCE_ERROR: result = S8("error"); break;
+        case PROCESS_RESOURCE_UNSUPPORTED: result = S8("unsupported"); break;
+        default: result = S8("unknown"); break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 matrix_phase_resource_value(Arena* arena, ProcessResourceStatus status, u64 value)
+{
+    String8 result = status == PROCESS_RESOURCE_OBSERVED ? string_format(arena, S8("{u64}"), value) : S8("\"unknown\"");
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 matrix_phase_resources(Arena* arena, ProcessResourceUsage usage)
+{
+#if BUSTER_WINDOWS
+    String8 cpu_source = S8("get-process-times"), memory_source = S8("k32-get-process-memory-info");
+    String8 scope = S8("process"), kind = S8("peak-working-set");
+#elif BUSTER_LINUX || BUSTER_MACOS
+    String8 cpu_source = S8("wait4"), memory_source = S8("wait4-ru_maxrss");
+    String8 scope = S8("process-and-waited-descendants"), kind = S8("largest-individual-high-water");
+#else
+    String8 cpu_source = S8("wait4"), memory_source = S8("unsupported");
+    String8 scope = S8("process-and-waited-descendants"), kind = S8("unknown");
+#endif
+    String8 result = string_format(arena,
+        S8(",\"resources\":{{\"schema\":\"buster-process-resources-v1\",\"cpu\":{{\"status\":{S8},\"source\":{S8},\"scope\":{S8},\"unit\":\"microseconds\",\"user\":{S8},\"system\":{S8},\"error\":{u32}}},\"peak_memory\":{{\"status\":{S8},\"source\":{S8},\"scope\":{S8},\"unit\":\"bytes\",\"kind\":{S8},\"value\":{S8},\"error\":{u32}}}}}"),
+        matrix_coverage_json_escape(arena, matrix_phase_resource_status(usage.cpu_status)), matrix_coverage_json_escape(arena, cpu_source),
+        matrix_coverage_json_escape(arena, scope), matrix_phase_resource_value(arena, usage.cpu_status, usage.user_cpu_us),
+        matrix_phase_resource_value(arena, usage.cpu_status, usage.system_cpu_us), usage.cpu_error.v,
+        matrix_coverage_json_escape(arena, matrix_phase_resource_status(usage.memory_status)), matrix_coverage_json_escape(arena, memory_source),
+        matrix_coverage_json_escape(arena, scope), matrix_coverage_json_escape(arena, kind),
+        matrix_phase_resource_value(arena, usage.memory_status, usage.peak_memory_bytes), usage.memory_error.v);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_run(Arena* arena, SliceString8 args)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
@@ -492,6 +536,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_run(Arena* arena, SliceString8 ar
             ProcessSpawnOptions options = observation.enabled ? matrix_unit_capture_options(MATRIX_UNIT_LOG_LIMIT) :
                 (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = timeout != 0, .search_path = 1};
             options.use_process_environment = 1;
+            options.observe_resources = string_equal(os_get_environment_variable(S8("BUSTER_CI_CHECKS_EVIDENCE")), S8("1"));
             ProcessSpawnResult spawn = os_process_spawn(argv, (SliceString8){0}, (SliceString8){0}, options);
             ProcessWaitResult wait = {.result = PROCESS_RESULT_NOT_EXISTENT};
             if (spawn.handle) { wait = os_process_wait_deadline(arena, spawn, timeout * 1000000); }
@@ -499,12 +544,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_run(Arena* arena, SliceString8 ar
             bool observed = matrix_unit_observation_finish(arena, observation, id, epoch, pid, argv, spawn, wait);
             if (!observed && wait.result == PROCESS_RESULT_SUCCESS) { wait.result = PROCESS_RESULT_FAILED; }
             String8 status = wait.timed_out ? S8("timeout") : wait.result == PROCESS_RESULT_SUCCESS ? S8("success") : S8("failure");
+            String8 resources = options.observe_resources ? matrix_phase_resources(arena, wait.resources) : S8("");
             String8 completed = string_format(arena,
-                S8("{{{S8},\"state\":{S8},\"child_start_us\":{u64},\"end_us\":{u64},\"publication_start_us\":{u64},\"result\":{u32},\"platform_status\":{u32},\"spawned\":{u32},\"timed_out\":{u32},\"termination_requested\":{u32},\"forcibly_terminated\":{u32},\"cpu_time\":\"unknown\",\"peak_rss\":\"unknown\",\"test_jobs\":{S8},\"ctest_jobs\":\"not-applicable\"}}\n"),
+                S8("{{{S8},\"state\":{S8},\"child_start_us\":{u64},\"end_us\":{u64},\"publication_start_us\":{u64},\"result\":{u32},\"platform_status\":{u32},\"spawned\":{u32},\"timed_out\":{u32},\"termination_requested\":{u32},\"forcibly_terminated\":{u32},\"cpu_time\":\"unknown\",\"peak_rss\":\"unknown\",\"test_jobs\":{S8},\"ctest_jobs\":\"not-applicable\"{S8}}}\n"),
                 common, matrix_coverage_json_escape(arena, status), child_start, end, os_now_microseconds(), (u32)wait.result,
                 wait.platform_status, spawn.handle ? 1u : 0u, (u32)wait.timed_out, (u32)wait.termination_requested, (u32)wait.forcibly_terminated,
                 matrix_coverage_json_escape(arena, os_get_environment_variable(S8("BUSTER_TEST_JOBS")).length ?
-                    os_get_environment_variable(S8("BUSTER_TEST_JOBS")) : S8("unknown")));
+                    os_get_environment_variable(S8("BUSTER_TEST_JOBS")) : S8("unknown")), resources);
             bool published = matrix_phase_write(arena, root, string_format(arena, S8("{S8}.end.json"), stem), completed);
             result = published && observed && !wait.timed_out ? wait.result : PROCESS_RESULT_FAILED;
         }

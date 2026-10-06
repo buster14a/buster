@@ -42,6 +42,16 @@ function(buster_add_ios_test_assets target)
         endif()
     endforeach()
 
+    # The direct SPIR-V fixture lives outside the frozen root test inventory.
+    file(GLOB_RECURSE ios_spirv_fixtures
+        LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/spirv/fixtures/*")
+    list(APPEND ios_test_fixtures ${ios_spirv_fixtures})
+    file(GLOB_RECURSE ios_codegen_fixtures
+        LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/codegen/fixtures/*")
+    list(APPEND ios_test_fixtures ${ios_codegen_fixtures})
+
     set(ios_test_inventory
         "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${target}-ios-test-fixtures.txt")
     string(REPLACE ";" "\n" ios_test_inventory_content "${ios_test_fixtures}")
@@ -81,14 +91,34 @@ function(buster_add_ios_test_assets target)
                 COMMAND "${CMAKE_COMMAND}" -E rm -f ${ios_dormant_test_assets})
         endif()
 
+        set(ios_spirv_commands)
+        if (ios_spirv_fixtures)
+            list(APPEND ios_spirv_commands
+                COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/spirv/fixtures"
+                    "${ios_bundle_content_dir}/src/buster/tests/compiler/spirv/fixtures")
+        endif()
+
+        set(ios_codegen_commands)
+        if (ios_codegen_fixtures)
+            list(APPEND ios_codegen_commands
+                COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/codegen/fixtures"
+                    "${ios_bundle_content_dir}/src/buster/tests/compiler/codegen/fixtures")
+        endif()
+
         add_custom_command(
             OUTPUT "${ios_test_stamp}"
             COMMAND "${CMAKE_COMMAND}" -E rm -rf
                 "${ios_bundle_content_dir}/tests"
+                "${ios_bundle_content_dir}/src/buster/tests/compiler/spirv/fixtures"
+                "${ios_bundle_content_dir}/src/buster/tests/compiler/codegen/fixtures"
             COMMAND "${CMAKE_COMMAND}" -E copy_directory
                 "${IOS_ASSETS_SOURCE_DIR}"
                 "${ios_bundle_content_dir}/tests"
             ${ios_filter_commands}
+            ${ios_spirv_commands}
+            ${ios_codegen_commands}
             COMMAND "${CMAKE_COMMAND}" -E touch "${ios_test_stamp}"
             DEPENDS "${ios_test_inventory}" ${ios_test_fixtures}
             COMMENT "Staging active test fixtures into ${target}.app (${config})"

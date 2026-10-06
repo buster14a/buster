@@ -101,9 +101,10 @@ BUSTER_GLOBAL_LOCAL void debug_fill_ir_type(Arena* arena, DebugModel* model, IrP
     // intentionally erases C qualifiers, and treating the zero-initialized
     // field on ordinary canonical types as a DWARF/CodeView qualifier would
     // manufacture const types (and often point them at type zero).
+    String8 name = debug_string(arena, source->name);
     *result = (DebugType){
-        .name = debug_string(arena, source->name),
-        .declaration_name = debug_string(arena, source->name),
+        .name = name,
+        .declaration_name = name,
         .canonical_type = source->id,
         .unqualified_type = source->is_atomic && source->unqualified_type.value != IR_ID_UNDERLYING_INVALID ? source->unqualified_type.value
                                                                                                                 : DEBUG_ID_INVALID,
@@ -118,6 +119,7 @@ BUSTER_GLOBAL_LOCAL void debug_fill_ir_type(Arena* arena, DebugModel* model, IrP
         .parameter_count = source->parameter_count,
         .bit_width = source->bit_width,
         .is_signed = source->is_signed,
+        .is_float = source->kind == IR_TYPE_FLOAT,
         .is_variadic = source->is_variadic,
         .is_const = false,
     };
