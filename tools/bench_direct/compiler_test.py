@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import warnings
 import zipfile
@@ -661,6 +662,64 @@ class ScratchPlanTest(unittest.TestCase):
         with mock.patch("sys.stderr", new_callable=io.StringIO):
             self.assertEqual(compiler_compare.main(argv), 2)
         self.assertEqual(self.snapshot(), before)
+
+
+class RunLifecycleTest(unittest.TestCase):
+    """compiler_compare.run owns and reaps the whole process group of a command (#2926)."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.log = self.root / "log"
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def late(self, script: str, timeout: int = 5) -> tuple[int, bool]:
+        status = compiler_compare.run(["/bin/sh", "-c", script], self.root, self.log, timeout)
+        time.sleep(0.8)
+        return status, (self.root / "late-marker").exists()
+
+    def test_timeout_kills_descendants_before_returning(self) -> None:
+        status, late = self.late('(sleep 0.3; printf x > late-marker) & wait', timeout=0)
+        self.assertEqual((status, late), (124, False))
+        self.assertIn("exit=124", self.log.read_text())
+
+    def test_nested_children_are_killed_on_timeout(self) -> None:
+        status, late = self.late('/bin/sh -c "(sleep 0.4; printf x > late-marker) & wait" & wait', timeout=0)
+        self.assertEqual((status, late), (124, False))
+
+    def test_normal_completion_reaps_background_leftovers(self) -> None:
+        status, late = self.late('(sleep 0.3; printf x > late-marker) &')
+        self.assertEqual((status, late), (0, False))
+
+    def test_exit_status_is_preserved(self) -> None:
+        self.assertEqual(self.late("exit 3"), (3, False))
+
+    def test_launch_failure_is_127(self) -> None:
+        self.assertEqual(compiler_compare.run(["/nonexistent/tool"], self.root, self.log, 5), 127)
+
+    def test_exception_while_waiting_still_reaps_the_group(self) -> None:
+        real, calls = subprocess.Popen.wait, []
+
+        def interrupted(process: subprocess.Popen, timeout: float | None = None) -> int:
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise KeyboardInterrupt()
+            return real(process, timeout)
+
+        with mock.patch.object(subprocess.Popen, "wait", interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                compiler_compare.run(["/bin/sh", "-c", "(sleep 0.3; printf x > late-marker) & sleep 5"],
+                                     self.root, self.log, 5)
+        time.sleep(0.8)
+        self.assertFalse((self.root / "late-marker").exists())
+
+    def test_unprovable_cleanup_is_a_failure_not_a_pass(self) -> None:
+        with mock.patch.object(compiler_compare, "reap_group", return_value=False):
+            self.assertEqual(compiler_compare.run(["/bin/sh", "-c", "exit 0"], self.root, self.log, 5),
+                             compiler_compare.CLEANUP_STATUS)
+        self.assertIn("could not be proven (original exit=0)", self.log.read_text())
 
 
 class HarnessTest(unittest.TestCase):

@@ -42,6 +42,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -69,19 +70,87 @@ TOOLS = (("clang", "--version"), ("cmake", "--version"), ("ninja", "--version"),
          ("perf", "--version"), ("taskset", "--version"), ("git", "--version"))
 
 
+CLEANUP_STATUS = 125
+CLEANUP_SECONDS = 10.0
+
+
+def group_members(group: int) -> bool:
+    """Whether any process of the group is still running (a zombie awaiting reaping is not)."""
+    alive = False
+    try:
+        os.killpg(group, 0)
+        alive = True
+    except (ProcessLookupError, PermissionError):
+        alive = False
+    if alive and sys.platform.startswith("linux"):
+        alive = False
+        for entry in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                fields = entry.read_text(encoding="utf-8", errors="replace").rpartition(")")[2].split()
+            except OSError:
+                continue
+            if len(fields) > 2 and fields[0] != "Z" and fields[2] == str(group):
+                alive = True
+                break
+    return alive
+
+
+def reap_group(group: int) -> bool:
+    """Kill every process of this attempt's own process group and wait until none runs; False if unproven.
+
+    Only the group created for one command is signalled, never by executable name. Descendants that
+    left the group (setsid or a new process group) are outside what this attempt owns and cannot be
+    reached; they are not claimed as cleaned.
+    """
+    deadline = time.monotonic() + CLEANUP_SECONDS
+    while group_members(group):
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            break
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    return not group_members(group)
+
+
 def run(argv: list[str], cwd: Path, log: Path, timeout: int) -> int:
-    """Run argv with output appended to log; returns the exit status (124 on timeout)."""
+    """Run argv in its own process group with output appended to log; returns the exit status.
+
+    On timeout (124), on any exception such as cancellation by SIGTERM, and after normal completion the
+    whole group is killed and awaited before returning, so no descendant outlives the command or touches
+    scratch/evidence during the next phase. The original status is logged first; if the group cannot be
+    proven empty the status is CLEANUP_STATUS (125) so no later measurement begins.
+    """
     with log.open("ab") as stream:
         stream.write(("$ " + " ".join(argv) + "\n").encode())
         stream.flush()
+        status = 127
+        process = None
+        group = 0
         try:
-            status = subprocess.run(argv, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT,
-                                    stdin=subprocess.DEVNULL, timeout=timeout, check=False).returncode
-        except subprocess.TimeoutExpired:
-            status = 124
+            process = subprocess.Popen(argv, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT,
+                                       stdin=subprocess.DEVNULL, start_new_session=True)
+            group = process.pid
+            try:
+                status = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                status = 124
         except OSError as error:
             stream.write(f"{error}\n".encode())
             status = 127
+        finally:
+            if process is not None:
+                cleaned = reap_group(group)
+                try:
+                    process.wait(timeout=CLEANUP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    cleaned = False
+                if not cleaned:
+                    stream.write(f"cleanup of process group {group} could not be proven (original exit={status})\n".encode())
+                    status = CLEANUP_STATUS
         stream.write(f"exit={status}\n".encode())
     return status
 
@@ -419,5 +488,11 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if receipt["state"] in ("measured", "superseded") else 1
 
 
+def cancel(number: int, frame: object) -> None:
+    """Turn SIGTERM into an exception so the running command's group is reaped on the way out."""
+    raise SystemExit(128 + number)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, cancel)
     sys.exit(main())
