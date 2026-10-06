@@ -125,9 +125,6 @@ import sys
 import time
 
 arguments = sys.argv[1:]
-if arguments == ["-v"]:
-    print(os.environ.get("BUSTER_FAKE_TCC_VERSION", "tcc version 0.9.28rc (x86_64 Linux)"))
-    sys.exit(0)
 log = Path(os.environ["BUSTER_FAKE_TCC_LOG"])
 with log.open("ab", buffering=0) as output:
     output.write((" ".join(arguments) + "\n").encode())
@@ -275,16 +272,6 @@ class BootstrapWrapperTests(unittest.TestCase):
         self.assertEqual(self.launch_count(), 4)
         cache_root = self.root / ".cache/bootstrap-driver"
         self.assertEqual(list(cache_root.rglob(".bootstrap-*")), [])
-
-    @unittest.skipIf(os.name == "nt", "the version note is in the POSIX bootstrap helper")
-    def test_compile_failure_names_an_unsupported_tcc_version(self):
-        old = self.run_wrapper(*self.success_arguments("version-marker"), environment={
-            "BUSTER_FAKE_TCC_FAIL": "1", "BUSTER_FAKE_TCC_VERSION": "tcc version 0.9.27 (x86_64 Linux)"})
-        self.assertEqual(old.returncode, 1, old.stderr)
-        self.assertIn("is TinyCC 0.9.27; this tree needs TinyCC 0.9.28rc or newer", old.stderr)
-        current = self.run_wrapper(*self.success_arguments("version-marker"), environment={"BUSTER_FAKE_TCC_FAIL": "1"})
-        self.assertEqual(current.returncode, 1, current.stderr)
-        self.assertNotIn("TinyCC", current.stderr)
 
     def test_source_change_during_compile_is_not_published(self):
         result = self.run_wrapper(*self.success_arguments("mutation-marker"), environment={"BUSTER_FAKE_TCC_MUTATE": "1"})
