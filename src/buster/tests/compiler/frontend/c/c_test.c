@@ -5248,7 +5248,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_obsolete_designator_labels(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 path = S8("src/buster/tests/compiler/frontend/c/fixtures/label_discovery_initializers.c");
     String8 rejected[] = {
         S8("struct P { int member; }; int f(void) { struct P p = { member: 7 }; return p.member; }"),
         S8("struct P { int member; }; int f(void) { return ((struct P){ member: 7 }).member; }"),
@@ -5279,6 +5278,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_obsolete_designator_labels(UnitTestArg
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = S8("src/buster/tests/compiler/frontend/c/fixtures/label_discovery_initializers.c");
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
