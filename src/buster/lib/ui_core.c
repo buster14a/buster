@@ -2519,6 +2519,7 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         {
             sig.f |= UI_SignalFlag_KeyboardPressed;
             sig.clicked_left = 1;
+            sig.activation_count += 1;
             sig.key = event->key;
             sig.modifiers = event->modifiers;
             ui_eat_event(event);
@@ -2575,6 +2576,7 @@ UI_Signal ui_signal_from_box(UI_Box* box)
                 {
                     sig.f |= UI_SignalFlag_LeftClicked;
                     sig.clicked_left = 1;
+                    sig.activation_count += 1;
                     sig.left_click_position = event->pos;
                 }
             }
@@ -2587,6 +2589,7 @@ UI_Signal ui_signal_from_box(UI_Box* box)
         {
             sig.f |= UI_SignalFlag_KeyboardPressed;
             sig.clicked_left = 1;
+            sig.activation_count += 1;
             sig.key = event->key;
             sig.modifiers = event->modifiers;
             ui_eat_event(event);

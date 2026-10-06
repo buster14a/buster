@@ -1,6 +1,6 @@
 // Slider component regressions owned by ui_slider_tests. The fixture helpers
-// below cover horizontal-arrow ownership, completed-click coordinates and text-edit
-// selection state;
+// below cover horizontal-arrow ownership, completed-click coordinates, text-edit
+// selection state and checkbox activation parity;
 // ui_slider_component_test.c runs this module against the real UI front doors.
 #include <buster/tests/ui_slider_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -458,6 +458,95 @@ BUSTER_GLOBAL_LOCAL void ui_test_slider_keyboard_activation_ignores_pointer(Unit
     result->test_count += result_local.test_count;
 }
 
+BUSTER_GLOBAL_LOCAL UI_WidgetResult ui_test_positioned_checkbox(bool checked)
+{
+    ui_set_next_fixed_x(20.0f);
+    ui_set_next_fixed_y(20.0f);
+    ui_set_next_fixed_width(100.0f);
+    ui_set_next_fixed_height(30.0f);
+    ui_set_next_flags(UI_BoxFlag_Floating);
+    return ui_checkbox(S8("parity_checkbox"), checked);
+}
+
+// Appends one accepted activation: a Return press/release pair, or a left
+// click inside the checkbox.
+BUSTER_GLOBAL_LOCAL void ui_test_checkbox_push_activation(UnitTestArguments* arguments, UI_EventList* events, bool mouse)
+{
+    if (mouse)
+    {
+        UI_Event press = {.kind = UI_EventKind_Press, .key = WM_KEY_MOUSE_LEFT, .pos = float2_make(70, 35)};
+        UI_Event release = press;
+        release.kind = UI_EventKind_Release;
+        ui_event_list_push(arguments->arena, events, &press);
+        ui_event_list_push(arguments->arena, events, &release);
+    }
+    else
+    {
+        UI_Event press = {.kind = UI_EventKind_Press, .key = WM_KEY_RETURN};
+        UI_Event release = press;
+        release.kind = UI_EventKind_Release;
+        ui_event_list_push(arguments->arena, events, &press);
+        ui_event_list_push(arguments->arena, events, &release);
+    }
+}
+
+// mode 0: Return pairs, 1: mouse clicks, 2: alternating Return and mouse.
+BUSTER_GLOBAL_LOCAL void ui_test_checkbox_parity_case(UnitTestArguments* arguments, UnitTestResult* output, u32 mode, u32 count, bool initial, bool split)
+{
+    UnitTestResult result_local = {0};
+#define result result_local
+    UI_State* state = ui_state_allocate(0, 0);
+    ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+    UI_WidgetResult checkbox = ui_test_positioned_checkbox(initial);
+    ui_build_end();
+    UI_Key key = checkbox.box->key;
+    UI_EventList events = ui_test_key_event(arguments->arena, UI_EventKind_Press, WM_KEY_TAB, 0, float2_make(0, 0), S8(""));
+    ui_test_frame(state, arguments->arena, events, 0.016);
+    checkbox = ui_test_positioned_checkbox(initial);
+    ui_build_end();
+    BUSTER_TEST(arguments, ui_key_match(state->focus_active_key, key) && !checkbox.changed);
+
+    bool value = initial;
+    u32 frame_count = split ? count : (count ? 1u : 0u);
+    u32 next = 0;
+    for (u32 frame = 0; frame < frame_count; frame += 1)
+    {
+        events = (UI_EventList){0};
+        u32 in_frame = split ? 1u : count;
+        for (u32 index = 0; index < in_frame; index += 1)
+        {
+            ui_test_checkbox_push_activation(arguments, &events, mode == 1 || (mode == 2 && (next & 1u)));
+            next += 1;
+        }
+        ui_test_frame(state, arguments->arena, events, 0.016);
+        checkbox = ui_test_positioned_checkbox(value);
+        ui_build_end();
+        bool expected = value ^ !!(in_frame & 1u);
+        BUSTER_TEST(arguments, checkbox.value == expected && checkbox.changed == !!(in_frame & 1u));
+        value = checkbox.value;
+    }
+    BUSTER_TEST(arguments, value == (initial ^ !!(count & 1u)) && ui_key_match(state->focus_active_key, key));
+    ui_state_deinitialize(state);
+#undef result
+    output->succeeded_test_count += result_local.succeeded_test_count;
+    output->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_checkbox_activation_parity(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    for (u32 mode = 0; mode < 3; mode += 1)
+    {
+        for (u32 count = 0; count <= 4; count += 1)
+        {
+            for (u32 initial = 0; initial < 2; initial += 1)
+            {
+                ui_test_checkbox_parity_case(arguments, result, mode, count, !!initial, false);
+                ui_test_checkbox_parity_case(arguments, result, mode, count, !!initial, true);
+            }
+        }
+    }
+}
+
 UnitTestResult ui_slider_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -466,6 +555,7 @@ UnitTestResult ui_slider_tests(UnitTestArguments* arguments)
     ui_test_slider_keyboard_activation_ignores_pointer(arguments, &result);
     ui_test_slider_preserves_editor_arrows(arguments, &result);
     ui_test_text_edit_destructive_shift(arguments, &result);
+    ui_test_checkbox_activation_parity(arguments, &result);
     return result;
 }
 #endif

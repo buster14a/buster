@@ -125,8 +125,10 @@ UI_WidgetResult ui_checkbox(String8 string, bool checked)
     ui_box_set_display_string(box, display);
     UI_Signal signal = ui_signal_from_box(box);
     UI_WidgetResult result = ui_widget_result(box, signal);
-    result.value = checked ^ ui_clicked(signal);
-    result.changed = ui_clicked(signal);
+    // Every accepted activation toggles; consumed events leave only their count.
+    bool toggled = !!(signal.activation_count & 1u);
+    result.value = checked ^ toggled;
+    result.changed = toggled;
     return result;
 }
 

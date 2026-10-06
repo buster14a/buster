@@ -490,6 +490,10 @@ struct UI_Signal
     // when UI_SignalFlag_LeftClicked is set. Later moves/outside releases
     // do not replace the completed click coordinate.
     float2 left_click_position;
+    // Number of activations accepted and consumed in this build (owned left
+    // clicks, Return/Space and fast-path text). ui_clicked() is only their
+    // union; non-idempotent widgets such as ui_checkbox use its parity.
+    u32 activation_count;
     u32 clicked_left : 1;
     u32 pressed_left : 1;
     u32 released_left : 1;
