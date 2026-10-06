@@ -3,7 +3,9 @@
 
 Run from trusted `main` by `.github/workflows/9700x-direct-bench.yml` (#2704).
 The candidate checkout supplies only workload sources: single C files directly
-under `benchmarks/9700x/` that the pull request added or modified. This file,
+under `benchmarks/9700x/` that the pull request added or modified. Each is
+compiled from a staged copy of that one file, so only system headers resolve;
+a quoted include of a neighbouring header fails to compile (#2935). This file,
 the compile command, the pinned CPU and the sample plan come from `main`.
 
 A workload may bring one input file, `<name>.data` beside `<name>.c`, of at
@@ -295,14 +297,22 @@ def main() -> int:
         program = scratch / "program"
         try:
             scratch.mkdir(parents=True)
+            stage = "staging the source"
+            # Only this one file is visible to the compiler, so a quoted include of a
+            # neighbouring candidate header fails instead of becoming an untracked input.
+            source_bytes = source.read_bytes()
+            staged = scratch / "source" / source.name
+            staged.parent.mkdir()
+            staged.write_bytes(source_bytes)
             stage = "compilation"
             build = subprocess.run(
-                [compiler, *COMPILE_FLAGS, "-o", str(program), str(source.resolve())],
+                [compiler, *COMPILE_FLAGS, "-o", str(program), str(staged)],
                 cwd=scratch, capture_output=True, timeout=COMPILE_TIMEOUT_SECONDS, check=False)
             if build.returncode != 0:
                 failures.append(f"{name}: compilation failed")
                 diagnostics = (build.stdout + build.stderr)[:OUTPUT_SHOWN].decode("utf-8", "replace")
-                publish([f"### `{name}`", "", "Compilation failed:", "", "```text",
+                publish([f"### `{name}`", "", "Compilation failed:", "",
+                         "The source is compiled alone: only system headers resolve, not neighbouring files.", "", "```text",
                          diagnostics.replace("```", "'''").rstrip("\n"), "```", ""])
                 continue
             stage = "reading the input data"
@@ -314,7 +324,7 @@ def main() -> int:
                 rows.append(run_sample(program, scratch, arguments.cpu, index, data_bytes))
             stage = "reporting"
             section, passed = render(
-                name, hashlib.sha256(source.read_bytes()).hexdigest(),
+                name, hashlib.sha256(source_bytes).hexdigest(),
                 hashlib.sha256(program.read_bytes()).hexdigest(), rows, data_sha)
             publish(section)
             if not passed:

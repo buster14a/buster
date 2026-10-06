@@ -325,7 +325,21 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("All 11 runs printed identical output:", result.stdout)
         self.assertIn("existed=0", result.stdout)
-        self.assertEqual(os.listdir(self.root / "work" / "marker"), ["program"])
+        self.assertEqual(sorted(os.listdir(self.root / "work" / "marker")), ["program", "source"])
+
+    def test_neighbouring_local_headers_are_not_compile_inputs(self) -> None:
+        user = '#include "helper.h"\nint main(void) { return RESULT; }\n'
+        head = self.commit({"benchmarks/9700x/uses_header.c": user, "benchmarks/9700x/helper.h": "#define RESULT 0\n"})
+        result = self.run_harness(head)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Compilation failed", result.stdout)
+        self.assertIn("helper.h", result.stdout)
+        self.assertNotIn("| sample ", result.stdout)
+        # Sibling headers elsewhere, and system headers, stay irrelevant to a standalone source.
+        shutil.rmtree(self.root / "work")
+        self.base = head
+        result = self.run_harness(self.commit({"benchmarks/9700x/standalone.c": PASSING, "benchmarks/9700x/helper.h": "x\n"}))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_input_mutation_is_reported_invalid(self) -> None:
         mutate = ('#include <stdio.h>\n#include <sys/stat.h>\n#include <unistd.h>\n'
