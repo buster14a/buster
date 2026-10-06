@@ -1,0 +1,5 @@
+$ taskset -c 2 /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/build-perf/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -fmetrics-out=/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-uarch/b/probe.ccmetrics -o /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/2493-vendor-uarch/b/out.exe
+exit=0
+--- stdout
+
+--- stderr

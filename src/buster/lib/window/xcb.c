@@ -1,3 +1,8 @@
+// XCB owns native event translation, XIM callbacks and XDND transactions.
+// wm_platform_poll_events scopes callback destinations; wm_x11_xim_commit_begin
+// and wm_x11_xim_publish_commit admit text before copying. XDND atom negotiation
+// bounds replies/work; wm_x11_xdnd_append_transfer owns one bounded staging arena
+// which wm_x11_xdnd_reset releases on completion, cancellation and shutdown.
 #include <buster/lib/window/internal.h>
 
 #define BUSTER_X11_XDND_MAX_TRANSFER_BYTES BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES
@@ -761,6 +766,55 @@ BUSTER_GLOBAL_LOCAL void wm_xim_set_event_mask_callback(xcb_xim_t* im, xcb_xic_t
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool wm_x11_xim_commit_begin(WmHandle* handle, u64 input_length)
+{
+    bool result = handle && handle->poll_arena && handle->poll_event_list == &handle->event_list &&
+                  handle->event_arena == handle->poll_arena && input_length != 0 && input_length <= BUSTER_X11_XIM_MAX_INPUT_BYTES &&
+                  handle->poll_commit_count < BUSTER_X11_XIM_MAX_POLL_COMMITS;
+    if (result)
+    {
+        // Count attempts before compound-text conversion, including refused output.
+        handle->poll_commit_count += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_xim_publish_commit(WmHandle* handle, WmWindowHandle* window, String8 text)
+{
+    Arena* arena = handle->poll_arena;
+    bool result = text.pointer && text.length != 0 && text.length <= BUSTER_X11_XIM_MAX_OUTPUT_BYTES &&
+                  handle->poll_commit_bytes <= BUSTER_X11_XIM_MAX_POLL_BYTES &&
+                  text.length <= BUSTER_X11_XIM_MAX_POLL_BYTES - handle->poll_commit_bytes &&
+                  arena->position >= arena_minimum_position && arena->position <= arena->os_position &&
+                  arena->os_position <= arena->reserved_size && text.length <= arena->os_position - arena->position;
+    u64 event_position = 0;
+    if (result)
+    {
+        result = align_forward_checked(arena->position + text.length, BUSTER_ALIGN_OF(WmEvent), &event_position) &&
+                 event_position <= arena->os_position && sizeof(WmEvent) <= arena->os_position - event_position && wm_utf8_string_is_valid(text);
+    }
+    if (result)
+    {
+        char8* destination = arena_allocate(arena, char8, text.length);
+        memcpy(destination, text.pointer, text.length);
+        wm_event_push(handle, (WmEvent){.kind = WM_EVENT_TEXT_INPUT, .window = window, .text = {destination, text.length}});
+        handle->poll_commit_bytes += text.length;
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool wm_x11_xim_commit_for_test(WmHandle* handle, WmWindowHandle* window, u64 input_length, String8 text)
+{
+    bool result = wm_x11_xim_commit_begin(handle, input_length);
+    if (result)
+    {
+        result = wm_x11_xim_publish_commit(handle, window, text);
+    }
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL void wm_xim_commit_string_callback(xcb_xim_t* im, xcb_xic_t ic, uint32_t flag, char* str, uint32_t length, uint32_t* keysym,
                                                        size_t keysym_count, void* user_data)
 {
@@ -769,7 +823,7 @@ BUSTER_GLOBAL_LOCAL void wm_xim_commit_string_callback(xcb_xim_t* im, xcb_xic_t 
     BUSTER_UNUSED(keysym_count);
 
     WmHandle* handle = (WmHandle*)user_data;
-    if (str && length && handle->poll_arena && handle->poll_event_list)
+    if (str && wm_x11_xim_commit_begin(handle, length))
     {
         char* converted = 0;
         String8 text = {0};
@@ -795,12 +849,7 @@ BUSTER_GLOBAL_LOCAL void wm_xim_commit_string_callback(xcb_xim_t* im, xcb_xic_t 
                 window = handle->focused_window;
             }
 
-            text = string_duplicate_arena(handle->poll_arena, text, false);
-            wm_event_push(handle, (WmEvent){
-                                      .kind = WM_EVENT_TEXT_INPUT,
-                                      .window = window,
-                                      .text = text,
-                                  });
+            BUSTER_UNUSED(wm_x11_xim_publish_commit(handle, window, text));
         }
 
         free(converted);
@@ -1276,7 +1325,8 @@ BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_clear_transfer_data(WmHandle* windowing)
 {
     if (windowing->xdnd_transfer_arena)
     {
-        arena_reset_to_start(windowing->xdnd_transfer_arena);
+        arena_destroy(windowing->xdnd_transfer_arena, 1);
+        windowing->xdnd_transfer_arena = 0;
     }
     windowing->xdnd_transfer_data = (String8){0};
     windowing->xdnd_transfer_capacity = 0;
@@ -1365,36 +1415,43 @@ BUSTER_GLOBAL_LOCAL void wm_x11_xdnd_reset(WmHandle* windowing)
 
 BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_append_transfer(WmHandle* windowing, const u8* bytes, u64 length)
 {
-    bool result = windowing->xdnd_transfer_arena != 0 &&
-                  wm_x11_xdnd_transfer_length_allowed(windowing->xdnd_transfer_data.length, length);
+    bool result = (!length || bytes) && wm_x11_xdnd_transfer_length_allowed(windowing->xdnd_transfer_data.length, length);
     if (result && length != 0)
     {
-        u64 required = windowing->xdnd_transfer_data.length + length;
-        if (required > windowing->xdnd_transfer_capacity)
+        if (!windowing->xdnd_transfer_arena)
         {
-            u64 capacity = windowing->xdnd_transfer_capacity ? windowing->xdnd_transfer_capacity : 4096;
-            while (capacity < required)
+            // One precommitted buffer avoids cumulative arena reallocations and
+            // makes reservation/commit refusal recoverable before publishing it.
+            windowing->xdnd_transfer_arena = arena_create((ArenaCreation){
+                .reserved_size = BUSTER_X11_XDND_MAX_RETAINED_BYTES,
+                .initial_size = BUSTER_X11_XDND_MAX_RETAINED_BYTES,
+                .flags = {.no_pool = true},
+            });
+            if (windowing->xdnd_transfer_arena)
             {
-                if (capacity > UINT64_MAX / 2)
-                {
-                    capacity = required;
-                    break;
-                }
-                capacity *= 2;
+                windowing->xdnd_transfer_data.pointer = arena_allocate(windowing->xdnd_transfer_arena, char8, BUSTER_X11_XDND_MAX_TRANSFER_BYTES);
+                windowing->xdnd_transfer_capacity = BUSTER_X11_XDND_MAX_TRANSFER_BYTES;
             }
-            char8* destination = arena_allocate(windowing->xdnd_transfer_arena, char8, capacity);
-            if (windowing->xdnd_transfer_data.length != 0)
-            {
-                memcpy(destination, windowing->xdnd_transfer_data.pointer, windowing->xdnd_transfer_data.length);
-            }
-            windowing->xdnd_transfer_data.pointer = destination;
-            windowing->xdnd_transfer_capacity = capacity;
         }
-        memcpy(windowing->xdnd_transfer_data.pointer + windowing->xdnd_transfer_data.length, bytes, length);
-        windowing->xdnd_transfer_data.length = required;
+        result = windowing->xdnd_transfer_arena &&
+                 windowing->xdnd_transfer_arena->reserved_size <= BUSTER_X11_XDND_MAX_RETAINED_BYTES &&
+                 windowing->xdnd_transfer_data.length <= windowing->xdnd_transfer_capacity &&
+                 length <= windowing->xdnd_transfer_capacity - windowing->xdnd_transfer_data.length;
+        if (result)
+        {
+            memcpy(windowing->xdnd_transfer_data.pointer + windowing->xdnd_transfer_data.length, bytes, length);
+            windowing->xdnd_transfer_data.length += length;
+        }
     }
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool wm_x11_xdnd_append_for_test(WmHandle* handle, String8 bytes)
+{
+    return wm_x11_xdnd_append_transfer(handle, (const u8*)bytes.pointer, bytes.length);
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL u32 wm_x11_xdnd_property_request_length(u64 remaining_bytes)
 {
@@ -1406,16 +1463,30 @@ BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_property_contains_atom(WmHandle* windowing,
 {
     bool result = false;
     u32 offset = 0;
-    while (!result)
+#if BUSTER_INCLUDE_TESTS
+    windowing->xdnd_type_test_reply_count = 0;
+    windowing->xdnd_type_test_max_reply_atoms = 0;
+    windowing->xdnd_type_test_scanned_atoms = 0;
+#endif
+    while (!result && offset < BUSTER_X11_XDND_MAX_TYPE_ATOMS)
     {
-        xcb_get_property_cookie_t cookie = xcb_get_property(windowing->connection, false, window, property, XCB_ATOM_ATOM, offset, UINT32_MAX);
+        u32 remaining = BUSTER_X11_XDND_MAX_TYPE_ATOMS - offset;
+        u32 request_length = BUSTER_MIN(remaining, BUSTER_X11_XDND_TYPE_REPLY_ATOMS);
+        xcb_get_property_cookie_t cookie = xcb_get_property(windowing->connection, false, window, property, XCB_ATOM_ATOM, offset, request_length);
         xcb_get_property_reply_t* reply = xcb_get_property_reply(windowing->connection, cookie, 0);
         if (!reply)
         {
             break;
         }
         int value_length = xcb_get_property_value_length(reply);
-        if (reply->type != XCB_ATOM_ATOM || reply->format != 32 || value_length < 0 || (value_length % (int)sizeof(u32)) != 0)
+#if BUSTER_INCLUDE_TESTS
+        windowing->xdnd_type_test_reply_count += 1;
+        u32 observed_atoms = value_length > 0 ? (u32)value_length / (u32)sizeof(u32) : 0;
+        windowing->xdnd_type_test_max_reply_atoms = BUSTER_MAX(windowing->xdnd_type_test_max_reply_atoms, observed_atoms);
+#endif
+        if (reply->type != XCB_ATOM_ATOM || reply->format != 32 || value_length < 0 || (value_length % (int)sizeof(u32)) != 0 ||
+            (u32)value_length > request_length * sizeof(u32) ||
+            reply->bytes_after > remaining * sizeof(u32) - (u32)value_length)
         {
             free(reply);
             break;
@@ -1424,6 +1495,9 @@ BUSTER_GLOBAL_LOCAL bool wm_x11_xdnd_property_contains_atom(WmHandle* windowing,
         u32 value_count = (u32)value_length / (u32)sizeof(u32);
         for (u32 index = 0; index < value_count; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            windowing->xdnd_type_test_scanned_atoms += 1;
+#endif
             if (values[index] == wanted)
             {
                 result = true;
@@ -1823,6 +1897,10 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
 {
     xcb_generic_event_t* event;
     xcb_connection_t* connection = windowing->connection;
+    windowing->poll_arena = arena;
+    windowing->poll_event_list = &windowing->event_list;
+    windowing->poll_commit_bytes = 0;
+    windowing->poll_commit_count = 0;
 
     while ((!windowing->native_poll_limit ||
             (windowing->native_poll_count < windowing->native_poll_limit && wm_bounded_poll_has_headroom(arena))) &&
@@ -1836,7 +1914,7 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
         if (event_type == 0)
         {
             xcb_generic_error_t* error = (xcb_generic_error_t*)event;
-            string_print(S8("XCB error: code {u8}, major {u8}, minor {u16}\n"), error->error_code, error->major_code, error->minor_code);
+            string_print_error(S8("XCB error: code {u8}, major {u8}, minor {u16}\n"), error->error_code, error->major_code, error->minor_code);
             free(event);
             continue;
         }
@@ -4265,7 +4343,11 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                 break;
                 default:
                 {
-                    string_print(S8("Unknown event type: {u8:x}\n"), event_type);
+                    // Unhandled event types are normal; report them only on request.
+                    if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+                    {
+                        string_print(S8("Unknown event type: {u8:x}\n"), event_type);
+                    }
                 }
                 }
             }
@@ -4276,6 +4358,8 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
     }
     windowing->poll_arena = 0;
     windowing->poll_event_list = 0;
+    windowing->poll_commit_bytes = 0;
+    windowing->poll_commit_count = 0;
 }
 
 BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
@@ -4296,7 +4380,6 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
                 .setup = setup,
                 .screen_id = screen_id,
                 .key_symbols = xcb_key_symbols_alloc(connection),
-                .xdnd_transfer_arena = arena_create((ArenaCreation){0}),
             };
             wm_x11_xdnd_reset(&windowing_handle);
             wm_x11_xkb_initialize(&windowing_handle);
@@ -4425,7 +4508,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
     }
     else
     {
-        string_print(S8("No screen found\n"));
+        string_print_error(S8("No screen found\n"));
     }
     return result;
 }

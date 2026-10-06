@@ -1,0 +1,5 @@
+[1m/home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2622/src/buster/lib/compiler/codegen/register_allocator_fast.c:1818:9: [0m[0;1;31merror: [0m[1mcall to undeclared function 'WORK_LEDGER_RECORD'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration][0m
+ 1818 |         WORK_LEDGER_RECORD(MACHINE_LIVENESS_WORD_UPDATES, (u64)words * ([0;32m1u[0m + limit - first));[0m
+      | [0;1;32m        ^
+[0m[0;1;31mfatal error: [0m[1mtoo many errors emitted, stopping now [-ferror-limit=][0m
+2 errors generated.
