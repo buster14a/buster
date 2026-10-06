@@ -35,6 +35,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrB
 #include <buster/tests/compiler/ir/ir_label_owner_test.c>
 #include <buster/tests/compiler/ir/ir_label_sets_test.c>
 #include <buster/tests/compiler/ir/ir_label_paths_test.c>
+#include <buster/tests/compiler/ir/ir_label_transfer_test.c>
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_wide_float_constant(Arena* arena, u32 bit_width, u64 low, u64 high,
                                                                                      u32 immediate_count, u32 target_count,
@@ -1535,6 +1536,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_sets);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_paths);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_label_transfer);
     UnitTestResult fast = ir_fast_tests(arguments);
     result.test_count += fast.test_count;
     result.succeeded_test_count += fast.succeeded_test_count;
