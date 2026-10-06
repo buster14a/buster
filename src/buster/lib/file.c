@@ -5,7 +5,8 @@
 // reads; file_map_read and file_map_unmap own optional mappings; file_copy_checked
 // streams into a staging file beside its destination and publishes it with
 // os_file_replace. The staging path and publication boundary are kept together
-// so callers can validate the complete artifact before replacement.
+// so callers can validate the complete artifact before replacement. Publication
+// closes and renames without flushing: completion, not crash durability.
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
 #include <buster/lib/system_headers.h>
@@ -210,10 +211,9 @@ FilePublishResult file_publish_slices_checked(String8 path, ByteSlice const* sli
                 result.status = FILE_PUBLISH_INVALID_STAGING;
             }
         }
-        if (!result.error.v && result.status != FILE_PUBLISH_INVALID_STAGING)
-        {
-            result.error = os_file_flush(staging.file);
-        }
+        // Close then rename: publication promises completion and atomic
+        // replacement, not crash durability, so the staging file is not
+        // flushed (os_file_flush documents that contract).
         file_publish_record(&result, os_file_close_checked(staging.file));
         if (!result.error.v && result.status != FILE_PUBLISH_INVALID_STAGING)
         {
