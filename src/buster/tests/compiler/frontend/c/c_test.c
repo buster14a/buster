@@ -38332,6 +38332,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_compound_values(UnitTestArgu
     return result;
 }
 
+// #1561: explicit alignment requests must agree before canonical lowering,
+// including tentative and extern-only declarations. Omitted later tentative
+// specifiers retain Buster's existing aligned-first merging policy.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignment_redeclarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+        u32 line;
+        u32 column;
+        u32 alignment;
+    } cases[] = {
+        {S8("_Alignas(16) int x;\n_Alignas(32) int x;\n"), S8("conflicting alignment for 'x': 32 differs from previous alignment 16"), 2, 18, 0},
+        {S8("_Alignas(32) int x;\n_Alignas(16) int x;\n"), S8("conflicting alignment for 'x': 16 differs from previous alignment 32"), 2, 18, 0},
+        {S8("_Alignas(16) int x;\n_Alignas(32) int x;\n_Alignas(64) int x = 1;\n"),
+         S8("conflicting alignment for 'x': 32 differs from previous alignment 16"), 2, 18, 0},
+        {S8("extern _Alignas(32) int x;\n_Alignas(16) int x = 1;\n"),
+         S8("conflicting alignment for 'x': 16 differs from previous alignment 32"), 2, 18, 0},
+        {S8("_Alignas(16) int x = 1;\nextern _Alignas(32) int x;\n"),
+         S8("conflicting alignment for 'x': 32 differs from previous alignment 16"), 2, 25, 0},
+        {S8("extern _Alignas(16) int x;\nextern _Alignas(32) int x;\n"),
+         S8("conflicting alignment for 'x': 32 differs from previous alignment 16"), 2, 25, 0},
+        {S8("_Alignas(0) int x;\n_Alignas(16) int x;\n"),
+         S8("conflicting alignment for 'x': 16 differs from previous alignment 4"), 2, 18, 0},
+        {S8("_Alignas(16) int x;\nint x = 1;\n"), S8("invalid object alignment"), 2, 5, 0},
+        {S8("int x = 1;\nextern _Alignas(16) int x;\n"), S8("invalid object alignment"), 1, 5, 0},
+        {S8("_Alignas(3) int x;\n_Alignas(16) int x = 1;\n"),
+         S8("alignment specifier requests 3, which is not a power of two the target can align to"), 1, 17, 0},
+        {S8("_Alignas(2) int x;\n_Alignas(16) int x = 1;\n"),
+         S8("_Alignas requests alignment 2, which is less than the minimum alignment of 4 for the declared type"), 1, 17, 0},
+        {S8("_Alignas(16) int x;\n_Alignas(16) int x;\n"), {0}, 0, 0, 16},
+        {S8("_Alignas(16) int x;\nint x;\n"), {0}, 0, 0, 16},
+        {S8("int x;\n_Alignas(16) int x = 1;\n"), {0}, 0, 0, 16},
+        {S8("extern int x;\n_Alignas(16) int x;\n"), {0}, 0, 0, 16},
+        {S8("extern _Alignas(16) int x;\n_Alignas(16) int x = 1;\n"), {0}, 0, 0, 16},
+        {S8("_Alignas(16) int x = 1;\nextern int x;\n"), {0}, 0, 0, 16},
+        {S8("_Alignas(16) _Alignas(32) int x;\n_Alignas(32) int x;\n"), {0}, 0, 0, 32},
+        {S8("_Alignas(0) _Alignas(16) int x;\n_Alignas(16) int x;\n"), {0}, 0, 0, 16},
+        {S8("_Alignas(0) int x;\n_Alignas(int) int x;\n"), {0}, 0, 0, 4},
+        {S8("_Alignas(int) int x;\n_Alignas(_Alignof(int)) int x;\n"), {0}, 0, 0, 4},
+        {S8("extern int x __attribute__((aligned(16)));\nint x = 1;\n"), {0}, 0, 0, 16},
+        {S8("extern int x __attribute__((aligned(16)));\nextern int x __attribute__((aligned(16)));\nint x = 1;\n"), {0}, 0, 0, 16},
+        {S8("int x __attribute__((aligned(16)));\nint x __attribute__((aligned(32)));\n"),
+         S8("conflicting alignment for 'x': 32 differs from previous alignment 16"), 2, 5, 0},
+        {S8("_Alignas(16) int x;\nint x __attribute__((aligned(16)));\n"), {0}, 0, 0, 16},
+        {S8("_Alignas(16) int x;\n_Alignas(32) int y;\n"), {0}, 0, 0, 16},
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            for (u32 mode = 0; mode < 3; mode += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                Target target = targets[target_index];
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+                u32 diagnostic_count = 0;
+                CDiagnostic const* diagnostics = 0;
+                IrProgram* program = 0;
+                bool accepted = false;
+                if (mode == 2)
+                {
+                    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    diagnostic_count = analysis.diagnostic_count;
+                    diagnostics = analysis.diagnostics;
+                    accepted = analysis.analysis_complete && !diagnostic_count;
+                }
+                else
+                {
+                    CIRLowerResult checked = c_analyze_with_options(temporary.arena, S8("alignment-redeclarations.c"), tokens, syntax,
+                        target, (CIRLowerOptions){.disable_direct_ssa = mode != 0});
+                    diagnostic_count = checked.diagnostic_count;
+                    diagnostics = checked.diagnostics;
+                    program = checked.program;
+                    accepted = program != 0 && checked.canonical_ir_certified;
+                }
+                bool invalid = cases[case_index].message.length != 0;
+                BUSTER_TEST_RAW(arguments, diagnostic_count == (invalid ? 1u : 0u), cases[case_index].source);
+                BUSTER_TEST_RAW(arguments, accepted == !invalid, cases[case_index].source);
+                if (invalid && BUSTER_REQUIRE(arguments, diagnostic_count == 1))
+                {
+                    CDiagnostic diagnostic = diagnostics[0];
+                    BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
+                    BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
+                    BUSTER_TEST(arguments, diagnostic.location.line == cases[case_index].line && diagnostic.location.column == cases[case_index].column);
+                    BUSTER_STRING_TEST(arguments, diagnostic.message, cases[case_index].message);
+                    BUSTER_TEST(arguments, program == 0);
+                }
+                if (!invalid && mode != 2 && BUSTER_REQUIRE(arguments, program != 0 && program->module_count == 1))
+                {
+                    IrModule* module = program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    bool found = false;
+                    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+                    {
+                        IrGlobal* global = module->globals + global_index;
+                        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+                        if (symbol && string_equal(symbol->name, S8("x")))
+                        {
+                            found = true;
+                            BUSTER_TEST(arguments, global->alignment == cases[case_index].alignment);
+                        }
+                    }
+                    BUSTER_TEST(arguments, found);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // Parameter objects need the same effective alignment as ordinary local
 // declarations. Checking IR on every native target catches the frontend loss
 // even when a machine backend independently recovers the type's alignment.
@@ -48371,6 +48496,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
     C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     C_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
+    C_TEST_FIXTURE(arguments, c_test_alignment_redeclarations);
     C_TEST_FIXTURE(arguments, c_test_alignof_member);
     C_TEST_FIXTURE(arguments, c_test_alignof_object);
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
