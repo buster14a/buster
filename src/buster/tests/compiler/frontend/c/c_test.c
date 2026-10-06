@@ -17265,14 +17265,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, repeated_queries.token_count == (u64)repeated_query_count * 2 + 1);
     BUSTER_TEST(arguments, repeated_query_mapped == repeated_query_unmapped);
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    // Each unit maps the __has_include probe, the included header and its
-    // __has_include_next probe.
-    BUSTER_TEST(arguments, repeated_query_mapped == (u64)repeated_query_count * 3);
+    // The per-TU probe cache maps the __has_include and __has_include_next
+    // probes once; the unguarded header is mapped by every inclusion that
+    // lexes it.
+    BUSTER_TEST(arguments, repeated_query_mapped == (u64)repeated_query_count + 2);
 #endif
     for (u32 query_index = 0; query_index < repeated_query_count; query_index += 1)
     {
         c_test_preprocessed_token(arguments, &result, repeated_queries, (u64)query_index * 2, C_TOKEN_PREPROCESSING_NUMBER, S8("1"));
         c_test_preprocessed_token(arguments, &result, repeated_queries, (u64)query_index * 2 + 1, C_TOKEN_PREPROCESSING_NUMBER, S8("41"));
+    }
+    // A re-inclusion suppressed by #pragma once or a proven guard maps nothing
+    // (issue 2722); undefining the guard makes the next inclusion lex again.
+    String8 suppressed_include_paths[] = {
+        S8("tests/include_first"),
+        S8("tests"),
+    };
+    String8 suppressed_unit = S8("#include <basic_c_guarded_include.h>\n"
+                                 "#include <frame_vectors.h>\n"
+                                 "GUARDED_VALUE\n");
+    u32 suppressed_count = 16;
+    String8 suppressed_tail = S8("#undef BASIC_C_GUARDED_INCLUDE_H\n"
+                                 "#undef GUARDED_VALUE\n"
+                                 "#include <basic_c_guarded_include.h>\n"
+                                 "GUARDED_VALUE\n");
+    u64 suppressed_length = suppressed_unit.length * suppressed_count + suppressed_tail.length;
+    char8* suppressed_bytes = arena_allocate(arguments->arena, char8, suppressed_length);
+    for (u32 unit_index = 0; unit_index < suppressed_count; unit_index += 1)
+    {
+        memcpy(suppressed_bytes + (u64)unit_index * suppressed_unit.length, suppressed_unit.pointer, suppressed_unit.length);
+    }
+    memcpy(suppressed_bytes + (u64)suppressed_count * suppressed_unit.length, suppressed_tail.pointer, suppressed_tail.length);
+    FileMapTestCounters suppressed_maps_before = file_map_test_counters();
+    CPreprocessResult suppressed_includes = c_preprocess(arguments->arena,
+                                                         (String8){.pointer = suppressed_bytes, .length = suppressed_length},
+                                                         (CPreprocessOptions){
+                                                             .include_paths = suppressed_include_paths,
+                                                             .source_path = S8("tests/suppressed_includes.c"),
+                                                             .include_path_count = BUSTER_ARRAY_LENGTH(suppressed_include_paths),
+                                                         });
+    FileMapTestCounters suppressed_maps_after = file_map_test_counters();
+    u64 suppressed_mapped = suppressed_maps_after.mapped - suppressed_maps_before.mapped;
+    BUSTER_TEST(arguments, suppressed_includes.diagnostic_count == 0);
+    BUSTER_TEST(arguments, suppressed_mapped == suppressed_maps_after.unmapped - suppressed_maps_before.unmapped);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // The guarded header, the once header, and the guarded header again after
+    // its guard was undefined.
+    BUSTER_TEST(arguments, suppressed_mapped == 3);
+#endif
+    // The final token ends the file; each unit and the tail end in one 41.
+    for (u32 unit_index = 0; unit_index <= suppressed_count; unit_index += 1)
+    {
+        u64 token_index = suppressed_includes.token_count - 2 - (u64)(suppressed_count - unit_index);
+        c_test_preprocessed_token(arguments, &result, suppressed_includes, token_index, C_TOKEN_PREPROCESSING_NUMBER, S8("41"));
     }
     String8 builtin_include_next_system_paths[] = {
         S8("tests/include_second"),
