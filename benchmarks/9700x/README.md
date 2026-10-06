@@ -64,6 +64,9 @@ group is unavailable. Report either instead of working around it.
   ten-second limit per run.
 - A nonzero exit, a signal, a timeout or a compile error fails the run. Print
   a self-check line and exit nonzero when it does not hold.
+- The report's `Observed host:` line is the CPU model the kernel reports
+  (#2761). On any CPU other than the AMD Ryzen 7 9700X nothing is compiled
+  or run and the run fails, whatever runner label selected the job.
 
 ## Compiler comparison of a pull request
 

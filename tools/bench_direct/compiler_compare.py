@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 from compiler_receipt import IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, classify, dumps, host_problem, render
+from compiler_receipt import observed_cpu_model as cpu_model
 
 BUILD_TIMEOUT_SECONDS = 1800
 LAB_TIMEOUT_SECONDS = 3000
@@ -129,18 +130,6 @@ def toolchain() -> dict:
     versions["python"] = platform.python_version()
     versions["kernel"] = platform.release()
     return versions
-
-
-def cpu_model() -> str:
-    model = "NA"
-    try:
-        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("model name"):
-                model = line.split(":", 1)[1].strip()
-                break
-    except OSError:
-        pass
-    return model
 
 
 def collect_evidence(lab: Path, evidence: Path) -> None:
