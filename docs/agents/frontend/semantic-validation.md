@@ -19,6 +19,30 @@ and floating representation; they are not canonical values or instructions.
 
 ## Declaration constraints
 
+Before C23, a `for` initializer declaration may introduce only automatic or
+register objects (C17 6.8.5p3 and WG14 DR277). The local declaration binder
+uses its for-initializer context to reject typedefs, static/extern/thread-local
+objects, function declarations, and tags or enumerators introduced by direct
+aggregate specifiers. References to existing tags and typedefs remain valid,
+as do automatic function pointers. C23 removes this contextual restriction.
+Wrapped `_Atomic` and GNU `typeof` specifiers also check their direct tag tokens
+against the existing tag index, so newly introduced incomplete tags cannot
+escape the rule merely because the specifier returns a pointer type.
+The diagnostic belongs to the declaration's first specifier; binding continues
+so uses of the rejected declaration do not create secondary name diagnostics.
+Initializer-nested expression declarations retain their separate context.
+`c_test_for_declaration_constraints` freezes rejection/acceptance on both sides
+of the C17/GNU17 versus C23/GNU23 boundary, through semantics-only analysis and
+both canonical frontend forms on three target layouts.
+
+The binder and canonical body lowerer find `for` header separators only outside
+parentheses, brackets and braces. Member-declaration semicolons in a direct
+aggregate definition or initializer compound literal therefore stay inside the
+first clause. Anonymous aggregate objects remain valid before C23; a named
+aggregate definition still follows the contextual tag rule above. The same
+regression pins acceptance and canonical validity of these clauses through
+both frontend forms.
+
 Declaration-specifier parsing rejects repeated or conflicting storage classes
 before publishing an entity. `c_parse_storage_classes_valid` normalizes GNU
 thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
@@ -167,6 +191,12 @@ controller or discarded values. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 
+Prepared `_Generic` lowering consumes the selected token range and lets its
+ordinary child expression produce the value and canonical type. It does not
+predict a selected type that the caller discards. Association duplicate checks
+keep up to sixteen type IDs locally; larger lists grow on accepted typed arms,
+independently of their expression token spans, and rewind at query completion.
+
 `c_test_type_identity_authority` inspects the independent expected return
 constants in raw canonical IR for both frontend forms on six native layouts.
 The `fixtures/type_identity.c` fixture beside the frontend tests repeats qualifier, decay, function
@@ -217,6 +247,22 @@ on both paths; C17 6.7.3p10 qualifies its element instead.
 The embedded modification-destination sources in `compiler_driver_tests`
 run these shapes under every allocator and both frontend forms; the
 equivalence table holds their rejected neighbours.
+
+The indexing scan distinguishes an array declarator from a subscript by its
+parsed `CArrayBound` bracket identity. One scratch bit per source token records
+the real opening brackets before body validation; synthetic inferred bounds
+have no bracket identity, and cloned bounds retain the original one. Expression
+record prebinding also recognizes leading type qualifiers before `struct` or
+`union`, so their member bounds exist before this role snapshot. The mask
+outlives each body's scratch checkpoint and skips only the declarator opener,
+so `int c; struct T { char c[8]; };` respects the separate member namespace
+(C17 6.2.3p1). Expression subscripts also bypass the broader local-declarator
+mask, so invalid subscripts inside a bound remain checked even when body
+binding recorded a declaration inside an expression record's brace scope.
+`c_test_member_array_declarators` covers tag-only and object declarations,
+unions, shadowing, macros, derived members and expression neighbours through
+semantics-only analysis and both canonical frontend forms. Its runtime source
+checks member storage under all four native allocators and both forms.
 
 `c_parse_validate_label_values` walks a body's assignment, return and call
 values -- one scope-chain entity lookup per identifier -- only when

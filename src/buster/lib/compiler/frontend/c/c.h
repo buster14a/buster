@@ -903,7 +903,8 @@ struct CMember
     // and the IR layout in c_gen.c -- asks bit_width_resolved and reads this
     // number; none re-evaluates [bit_width_token_start, +count), which remain
     // only for diagnostics. An unresolved width holds a layout unresolved
-    // rather than reading as zero.
+    // rather than reading as zero. An unresolved width of UINT32_MAX was
+    // already diagnosed where it was declared.
     u32 bit_width;
     u32 bit_width_token_start;
     u32 bit_width_token_count;

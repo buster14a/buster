@@ -7,6 +7,8 @@
 // caps and truncation, and the `ide cc -fmetrics-out` process record.
 // compiler_driver_test_input_metrics_lanes checks input order and link
 // suppression on the serial and -fcompile-jobs link paths.
+// compiler_driver_test_affinity_worker_clamp checks that a narrowed CPU
+// affinity mask clamps the -fcompile-jobs worker count (#2863).
 
 #include <buster/lib/compiler/driver/driver_internal.h>
 
@@ -709,5 +711,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics_lanes(Unit
     (void)os_file_delete(bad_path);
     (void)os_file_delete(output);
     scratch_end(temporary);
+    return result;
+}
+
+// #2863: a thread confined to one CPU reports one logical CPU and clamps
+// -fcompile-jobs to one worker. Linux affinity is per thread and inherited by
+// threads it creates, so narrowing this thread's mask cannot disturb other
+// test lanes; the original mask is restored before returning.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_affinity_worker_clamp(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    cpu_set_t original;
+    CPU_ZERO(&original);
+    bool saved = sched_getaffinity(0, sizeof(original), &original) == 0;
+    u32 first = 0;
+    while (saved && first < CPU_SETSIZE && !CPU_ISSET(first, &original))
+    {
+        first += 1;
+    }
+    cpu_set_t narrowed;
+    CPU_ZERO(&narrowed);
+    if (BUSTER_REQUIRE(arguments, saved && first < CPU_SETSIZE))
+    {
+        CPU_SET(first, &narrowed);
+    }
+    String8 paths[] = {
+        buster_test_temporary_path(arena, S8("buster-affinity-main"), S8(".c")),
+        buster_test_temporary_path(arena, S8("buster-affinity-left"), S8(".c")),
+        buster_test_temporary_path(arena, S8("buster-affinity-right"), S8(".c")),
+    };
+    String8 output = buster_test_temporary_path(arena, S8("buster-affinity"), S8(".out"));
+    bool written = file_write(paths[0], BUSTER_SLICE_TO_BYTE_SLICE(S8("int left(void);\nint right(void);\nint main(void) { return left() + right() - 3; }\n"))) &&
+                   file_write(paths[1], BUSTER_SLICE_TO_BYTE_SLICE(S8("int left(void) { return 1; }\n"))) &&
+                   file_write(paths[2], BUSTER_SLICE_TO_BYTE_SLICE(S8("int right(void) { return 2; }\n")));
+    if (BUSTER_REQUIRE(arguments, written && saved && first < CPU_SETSIZE && sched_setaffinity(0, sizeof(narrowed), &narrowed) == 0))
+    {
+        u32 permitted = os_get_logical_thread_count();
+        String8 command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-o"), output, paths[0], paths[1], paths[2]};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        invocation.compile_jobs = 3;
+        CompilerDriverResult confined = compiler_driver_execute_invocation(arena, invocation);
+        BUSTER_TEST(arguments, sched_setaffinity(0, sizeof(original), &original) == 0);
+        BUSTER_TEST(arguments, permitted == 1);
+        BUSTER_TEST_RAW(arguments, confined.error == COMPILER_DRIVER_ERROR_NONE, confined.diagnostic);
+        BUSTER_TEST(arguments, confined.compilation_workers == 1);
+        BUSTER_TEST(arguments, os_get_logical_thread_count() == (u32)CPU_COUNT(&original));
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths); index += 1)
+    {
+        (void)os_file_delete(paths[index]);
+    }
+    (void)os_file_delete(output);
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
     return result;
 }

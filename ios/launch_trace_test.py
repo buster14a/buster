@@ -12,6 +12,7 @@ HARNESS = r'''
 #include <buster/lib/entry_point.h>
 #include <buster/lib/system_headers.h>
 void buster_ios_launch_trace(String8 stage);
+void buster_ios_launch_process_trace(void);
 #if TRACE_CLOCK_FAILURE
 static int trace_clock_failure(clockid_t clock, struct timespec* value)
 {
@@ -32,6 +33,7 @@ static int trace_cpu_failure(int who, struct rusage* value)
 int main(void)
 {
     buster_ios_launch_trace(S8("main"));
+    buster_ios_launch_process_trace();
     struct timespec delay = {.tv_nsec = 100000000};
     nanosleep(&delay, 0);
     buster_ios_launch_trace(S8("fixtures-ready"));
@@ -80,7 +82,8 @@ class LaunchTraceTests(unittest.TestCase):
             with self.subTest(enabled=enabled):
                 self.assertEqual(self.run_trace(enabled), [])
         lines = self.run_trace("1")
-        self.assertEqual(len(lines), 2)
+        self.assertEqual(len(lines), 3)
+        process = self.process_record(lines.pop(1))
         records = []
         for line in lines:
             self.assertTrue(line.startswith("BUSTER_IOS_LAUNCH_V1 "))
@@ -95,10 +98,28 @@ class LaunchTraceTests(unittest.TestCase):
                 self.assertGreater(int(record[field]), 0)
         self.assertGreaterEqual(int(records[1]["monotonic_us"]) - int(records[0]["monotonic_us"]), 90000)
         self.assertGreaterEqual(int(records[1]["process_cpu_us"]), int(records[0]["process_cpu_us"]))
+        self.assertEqual(process["pid"], records[0]["pid"])
+        if sys.platform == "darwin":
+            # The kernel start time precedes main; the split is the #2819 attribution.
+            self.assertEqual(process["start_status"], "0")
+            start = int(process["start_wall_us"])
+            self.assertGreater(start, 0)
+            self.assertLessEqual(start, int(records[0]["wall_us"]))
+        else:
+            self.assertEqual(process["start_status"], "-1")
+            self.assertEqual(process["start_wall_us"], "0")
+
+    def process_record(self, line):
+        self.assertTrue(line.startswith("BUSTER_IOS_PROCESS_V1 "))
+        self.assertLess(len(line) + 1, 256)
+        record = dict(field.split("=", 1) for field in line.split()[1:])
+        self.assertEqual(sorted(record), ["pid", "start_status", "start_wall_us"])
+        return record
 
     def test_failed_queries_are_explicit(self):
         lines = self.run_trace("1", fault=1)
-        self.assertEqual(len(lines), 2)
+        self.assertEqual(len(lines), 3)
+        self.process_record(lines.pop(1))
         for line in lines:
             for field in ("monotonic_status", "wall_status", "cpu_status"):
                 self.assertIn(f"{field}=-1", line)
