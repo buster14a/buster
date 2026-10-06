@@ -1582,7 +1582,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachi
 BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index);
 
 BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index, bool parameter,
-                                                          u32 segment_start, u32 segment_end);
+                                                          u32 segment_start, u32 segment_end, bool declares_no_storage);
 
 BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling);
 
@@ -12632,7 +12632,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             {
                 type_name = c_parse_skip_attributes(preprocess, type_name + 1, frame->end);
             }
-            c_parse_diagnose_unknown_type_name(result, preprocess, type_name, false, frame->start, frame->end);
+            c_parse_diagnose_unknown_type_name(result, preprocess, type_name, false, frame->start, frame->end, false);
             c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
             return;
         }
@@ -16237,8 +16237,66 @@ BUSTER_C_INTERNAL bool c_parse_token_in_c23_attribute(CPreprocessResult preproce
     return false;
 }
 
+BUSTER_C_INTERNAL bool c_parse_is_unmodeled_float_type_spelling(String8 spelling)
+{
+    return string_equal(spelling, S8("__float128")) || string_equal(spelling, S8("_Float128")) || string_equal(spelling, S8("_Float64x")) ||
+           string_equal(spelling, S8("_Float128x"));
+}
+
+// True for a declaration that creates no storage and no function body:
+// a typedef, a function prototype that is not a definition, or an `extern`
+// object declaration without an initializer. Such a declaration may mention a
+// type this frontend does not model and still be dropped, which is what glibc's
+// <bits/floatn.h> (`typedef __float128 _Float128;`) and its _GNU_SOURCE
+// `_Float128` prototypes and externs need.
+BUSTER_C_INTERNAL bool c_parse_declaration_declares_no_storage(CPreprocessResult preprocess, const CDeclaration* declaration)
+{
+    bool result = declaration->kind == C_DECLARATION_TYPEDEF || (declaration->kind == C_DECLARATION_FUNCTION && !declaration->is_definition);
+    if (!result && declaration->kind == C_DECLARATION_OBJECT)
+    {
+        bool is_extern = false;
+        bool has_initializer = false;
+        u32 end = declaration->token_start + declaration->token_count;
+        for (u32 index = declaration->token_start; index < end; index += 1)
+        {
+            CToken token = preprocess.tokens[index];
+            is_extern |= token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("extern"));
+            has_initializer |= c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN);
+        }
+        result = is_extern && !has_initializer;
+    }
+    return result;
+}
+
+// A declaration whose type failed to parse without any diagnostic would be
+// dropped silently. When it defines something and spells an unmodeled float
+// type (a function-pointer object whose parameter is `_Float128`, where the
+// nested parameter frame fails without context), report that spelling.
+BUSTER_C_INTERNAL void c_parse_diagnose_dropped_unmodeled_float(CParseResult* result, CPreprocessResult preprocess, const CDeclaration* declaration,
+                                                                u32 diagnostic_start)
+{
+    bool dropped = result->diagnostic_count == diagnostic_start && declaration->type.value >= result->type_count &&
+                   (declaration->kind == C_DECLARATION_OBJECT || declaration->kind == C_DECLARATION_FUNCTION) &&
+                   !c_parse_declaration_declares_no_storage(preprocess, declaration);
+    if (dropped)
+    {
+        u32 end = declaration->token_start + declaration->token_count;
+        for (u32 index = declaration->token_start; index < end; index += 1)
+        {
+            CToken token = preprocess.tokens[index];
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_is_unmodeled_float_type_spelling(spelling))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   string_format(result->arena, S8("unsupported type '{S8}'"), spelling));
+                break;
+            }
+        }
+    }
+}
+
 BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index,
-                                                            bool parameter, u32 segment_start, u32 segment_end)
+                                                            bool parameter, u32 segment_start, u32 segment_end, bool declares_no_storage)
 {
     bool unknown = false;
     if (token_index < preprocess.token_count && preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
@@ -16252,12 +16310,11 @@ BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, 
         }
         bool is_typedef = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
         // GCC and Clang accept these floating-point spellings as builtin type
-        // words, although this frontend does not model them yet. Preserve
-        // their prior unsupported type behavior instead of reporting them as
-        // unknown identifiers.
+        // words, although this frontend does not model them yet. Report them
+        // as unsupported types rather than unknown identifiers, and never
+        // drop the declaration silently.
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        bool is_unmodeled_builtin_type = string_equal(spelling, S8("__float128")) || string_equal(spelling, S8("_Float128")) ||
-                                        string_equal(spelling, S8("_Float64x")) || string_equal(spelling, S8("_Float128x"));
+        bool is_unmodeled_builtin_type = c_parse_is_unmodeled_float_type_spelling(spelling);
         // A one-word identifier segment in a function declarator is the
         // legacy identifier-list form, not a parameter declaration with a
         // missing type specifier. Keep it out of the unknown-type diagnostic;
@@ -16265,7 +16322,12 @@ BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, 
         bool is_old_style_identifier = parameter && token_index == segment_start && segment_end == segment_start + 1;
         bool is_attribute_identifier = c_parse_token_in_c23_attribute(preprocess, token_index, segment_start, segment_end);
         unknown = !is_typedef && !is_unmodeled_builtin_type && !is_old_style_identifier && !is_attribute_identifier;
-        if (unknown)
+        if (is_unmodeled_builtin_type && !is_typedef && !declares_no_storage)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               string_format(result->arena, S8("unsupported type '{S8}'"), spelling));
+        }
+        else if (unknown)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
                                string_format(result->arena, S8("unknown type name '{S8}'"), spelling));
@@ -16295,7 +16357,8 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     {
         if (declarator_start < end || result->diagnostic_count == type_diagnostic_start)
         {
-            c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, true, start, end);
+            c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, true, start, end,
+                                               c_parse_declaration_declares_no_storage(preprocess, &declaration));
         }
         return false;
     }
@@ -16645,7 +16708,8 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 (declarator_start < name_index ||
                  (declarator_start == name_index && result->diagnostic_count == type_diagnostic_start)))
             {
-                c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, false, declaration->token_start, name_index);
+                c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, false, declaration->token_start, name_index,
+                                                   c_parse_declaration_declares_no_storage(preprocess, declaration));
             }
             base = c_parse_apply_vector_attribute(result, preprocess, declaration->scope, base, declaration->token_start, name_index);
         }
@@ -18524,6 +18588,11 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
                                string_format(arena, S8("unknown type name '{S8}'"), spelling));
+        }
+        else if (c_parse_is_unmodeled_float_type_spelling(spelling))
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               string_format(arena, S8("unsupported type '{S8}'"), spelling));
         }
         else if (unmodeled_builtin_type)
         {
@@ -29596,7 +29665,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             // of them parsed. The syntax list keeps them consecutive, so the
             // leader's base type is still the one in hand.
             CTypeId inherited_base = declaration->is_declarator_continuation ? declarator_list_base : C_TYPE_ID_INVALID;
+            u32 declaration_diagnostic_start = result.diagnostic_count;
             c_parse_declaration_type(&machine, &result, preprocess, declaration, inherited_base);
+            c_parse_diagnose_dropped_unmodeled_float(&result, preprocess, declaration, declaration_diagnostic_start);
             if (!declaration->is_declarator_continuation)
             {
                 declarator_list_base = declaration->base_type;

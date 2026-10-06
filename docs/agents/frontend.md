@@ -227,6 +227,22 @@ is unimplemented. `c_test_gnu_common_predefined_macros` pins the reference
 spellings for thirteen target triples in GNU17 and C23, plus type/limit
 consistency, GNU89 inline, and PIC/PIE behavior.
 
+`__float128`, `_Float128`, `_Float64x` and `_Float128x` are recognized as builtin
+type words but have no lowering. A declaration that would define something with
+one fails with `unsupported type '<name>'`: file-scope object definitions
+(tentative and static included), struct/union members, block-scope declarations,
+function definitions (return or parameter type) and function-pointer objects.
+Declarations that create no storage stay accepted and are silently ignored, as
+before: typedefs, function prototypes that are not definitions, and `extern`
+object declarations without an initializer. glibc requires this: `bits/floatn.h`
+contains `typedef __float128 _Float128;` and `_GNU_SOURCE` adds `_Float128`
+prototypes (`strtof128`, the math functions) to `<stdlib.h>`, `<math.h>` and
+`<Python.h>` users. The ignored typedef declares no name, so a later
+`typedef __float128 T; T x;` fails with `unknown type name 'T'`, and a use of
+the spelling itself is diagnosed as above. A function-pointer member of a struct
+whose parameter has one of these types is still dropped silently, like an
+unknown type there. `c_test_unsupported_float_extension_diagnostics` pins this.
+
 ## Trigraph translation policy
 
 Raw root and included source in strict C99, C11 and C17 modes replaces all

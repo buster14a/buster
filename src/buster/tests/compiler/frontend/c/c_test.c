@@ -38051,10 +38051,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         S8("typedef int T; int shadow_parameter(T T) { return T; }\n"),
         S8("typedef int U; int shadow_object(void) { int U = 0; return U; }\n"),
         S8("int source; __typeof__(source) copy;\n"),
-        S8("__float128 host_extension;\n"),
-        S8("_Float128 host_extension;\n"),
-        S8("_Float64x host_extension;\n"),
-        S8("_Float128x host_extension;\n"),
         S8("[[maybe_unused]];\n"),
         S8("__attribute__((unused)) int attributed; __declspec(noinline) int decorated(void) { return 1; }\n"),
         S8("int legacy(old_style_argument); int unspecified();\n"),
@@ -38076,6 +38072,133 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, valid[case_index]);
         BUSTER_TEST_RAW(arguments, !unknown_type_diagnostic, valid[case_index]);
         scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unsupported_float_extension_diagnostics(UnitTestArguments* arguments)
+{
+    // These spellings are builtin type words in GCC but have no lowering here.
+    // A declaration that would define something with one must fail with a
+    // diagnostic naming the type; none may be dropped silently or empty a
+    // struct. Declarations that create no storage (typedefs, prototypes and
+    // extern objects) stay accepted: glibc's <bits/floatn.h> declares
+    // `typedef __float128 _Float128;` and _GNU_SOURCE adds `_Float128`
+    // prototypes such as strtof128 to <stdlib.h> and <math.h>.
+    UnitTestResult result = {0};
+    String8 names[] = {S8("__float128"), S8("_Float128"), S8("_Float64x"), S8("_Float128x")};
+    struct
+    {
+        String8 before;
+        String8 after;
+    } rejected[] = {
+        {S8(""), S8(" object;\nint following;\n")},
+        {S8(""), S8(" table[4] = {1, 2, 3, 4};\nint following;\n")},
+        {S8("static "), S8(" local_object = 1;\nint following;\n")},
+        {S8("extern "), S8(" external_object = 1;\nint following;\n")},
+        {S8(""), S8(" first, second;\nint following;\n")},
+        {S8("struct S { int a; "), S8(" q; int b; };\nint following;\n")},
+        {S8("int f(void) { "), S8(" x = 2.5; return (int)x; }\nint following;\n")},
+        {S8("int f(void) { extern "), S8(" x; return 0; }\nint following;\n")},
+        {S8(""), S8(" return_type(void) { return 0; }\nint following;\n")},
+        {S8("int parameter_type("), S8(" a) { return 0; }\nint following;\n")},
+        {S8("void (*function_pointer_object)("), S8(");\nint following;\n")},
+    };
+    struct
+    {
+        String8 before;
+        String8 after;
+    } accepted[] = {
+        {S8("typedef "), S8(" wide_t;\nint following;\n")},
+        // The _GNU_SOURCE prototypes in <stdlib.h> and <math.h>.
+        {S8("extern "), S8(" strtof_wide (const char *__restrict __nptr, char **__restrict __endptr);\nint following;\n")},
+        {S8("extern "), S8(" acos_wide (double __x);\nint following;\n")},
+        {S8("extern double fma_wide ("), S8(" __x);\nint following;\n")},
+        {S8("extern int mixed_parameters (const char *, "), S8(", double);\nint following;\n")},
+        {S8("typedef void (*callback_t)("), S8(");\nint following;\n")},
+        {S8("extern "), S8(" external_object;\nint following;\n")},
+        {S8("extern "), S8(" external_table[4];\nint following;\n")},
+    };
+    // Exactly what glibc's bits/floatn.h and its _GNU_SOURCE prototypes put in
+    // front of every program that includes <stdlib.h> or <math.h>.
+    String8 glibc_pattern = S8(
+        "#define __GNUC_PREREQ(maj, min) ((__GNUC__ << 16) + __GNUC_MINOR__ >= ((maj) << 16) + (min))\n"
+        "#if !__GNUC_PREREQ (7, 0) || (defined __cplusplus && !__GNUC_PREREQ (13, 0))\n"
+        "#endif\n"
+        "#if 1\n"
+        "typedef __float128 _Float128;\n"
+        "#endif\n"
+        "extern _Float128 strtof128 (const char *__restrict __nptr, char **__restrict __endptr);\n"
+        "extern _Float128 acosf128 (_Float128 __x);\n"
+        "extern _Float128 fmaf128 (_Float128 __x, _Float128 __y, _Float128 __z);\n"
+        "extern _Float128 glibc_extern_object;\n"
+        "int following;\n");
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, glibc_pattern,
+            (CPreprocessOptions){.source_path = S8("unsupported-float-extension.c"), .target = target_native,
+                                 .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, glibc_pattern);
+        BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, glibc_pattern);
+        scratch_end(temporary);
+    }
+    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(rejected); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"), rejected[case_index].before, names[name_index],
+                                           rejected[case_index].after);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.source_path = S8("unsupported-float-extension.c"), .target = target_native,
+                                     .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            String8 expected_message = string_format(temporary.arena, S8("unsupported type '{S8}'"), names[name_index]);
+            bool diagnosed = false;
+            bool unknown_type = false;
+            for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+            {
+                CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+                diagnosed |= diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS && diagnostic.severity == C_DIAGNOSTIC_ERROR &&
+                             string_equal(diagnostic.message, expected_message);
+                unknown_type |= diagnostic.kind == C_DIAGNOSTIC_UNKNOWN_TYPE_NAME;
+            }
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, diagnosed, source);
+            BUSTER_TEST_RAW(arguments, !unknown_type, source);
+            scratch_end(temporary);
+        }
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(accepted); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"), accepted[case_index].before, names[name_index],
+                                           accepted[case_index].after);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.source_path = S8("unsupported-float-extension.c"), .target = target_native,
+                                     .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, source);
+            scratch_end(temporary);
+        }
+        // A typedef naming one of these types is accepted but unmodeled, so a
+        // later use of the alias must fail rather than create a dropped object.
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena, S8("typedef {S8} alias_t;\nalias_t object;\nint following;\n"), names[name_index]);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.source_path = S8("unsupported-float-extension.c"), .target = target_native,
+                                     .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            bool errored = false;
+            for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+            {
+                errored |= parse.diagnostics[diagnostic_index].severity == C_DIAGNOSTIC_ERROR;
+            }
+            BUSTER_TEST_RAW(arguments, errored, source);
+            scratch_end(temporary);
+        }
     }
     return result;
 }
@@ -42782,6 +42905,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ucn_semantic);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unsupported_float_extension_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unnamed_initializer_places);
     BUSTER_TEST_FIXTURE(arguments, c_test_unneeded_prototyped_definitions);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
