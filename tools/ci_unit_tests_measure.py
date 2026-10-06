@@ -19,6 +19,9 @@ Campaign format: schema="buster-ci-unit-tests-campaign-v1", samples=[manifest
 paths in execution order]. All paths resolve against their declaring JSON file.
 Binary hashes/source/image are recorded provenance, not independently attested
 by this parser. An optional binary path verifies the actual retained file hash.
+Raw logs are never rewritten: human diagnostic bytes may be non-UTF-8, while
+every recognizable machine-proof line must retain valid UTF-8. BOM-marked
+UTF-16 logs retain their strict decoding contract.
 """
 import argparse
 import collections
@@ -38,6 +41,8 @@ TERMINAL = re.compile(r"^\[(\d+)/(\d+)\] (Unit|Module|External) tests"
                       r"(?: \((\d+) of (\d+) modules selected\))?$")
 PREFIX = re.compile(r"^\ufeff?\d{4}-\d{2}-\d{2}T\S+Z ")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+INVALID_UTF8 = re.compile(r"[\udc80-\udcff]")
+PROOF_MARKERS = ("TEST_MODULE_TIMING", "CI_UNIT_", "UNIT_TEST_", "Unit tests", "Module tests", "External tests")
 
 
 class EvidenceError(ValueError):
@@ -71,10 +76,49 @@ def number(fields, name):
     return int(value)
 
 
+def possible_proof_marker(line, marker):
+    # Invalid octets may replace or interrupt marker letters. Classify that
+    # claim before decoding/normalizing could hide an extra failed record.
+    positions = {0: 0}
+    claimed = False
+    # This cheap necessary condition avoids running the marker matcher over
+    # long binary diagnostic spans with no literal proof information at all.
+    if sum(character in marker for character in line) > len(marker) // 2:
+        for character in line:
+            next_positions = {0: 0}
+            if INVALID_UTF8.fullmatch(character):
+                for position, count in positions.items():
+                    for end in range(position, len(marker) + 1):
+                        next_positions[end] = max(next_positions.get(end, 0), count)
+            else:
+                for position, count in positions.items():
+                    if position < len(marker) and marker[position] == character:
+                        next_positions[position + 1] = max(next_positions.get(position + 1, 0), count + 1)
+            # An arbitrary human octet alone does not claim a proof marker.
+            # More than half the marker must remain literally and in order.
+            if next_positions.get(len(marker), 0) > len(marker) // 2:
+                claimed = True
+                break
+            positions = {position: count for position, count in next_positions.items() if position < len(marker)}
+    return claimed
+
+
+def malformed_proof_claim(line):
+    # Inspect the original line as well as its display-normalized form. In
+    # particular, invalid bytes inside an ANSI/Actions prefix cannot disappear.
+    return any(possible_proof_marker(candidate, marker) for candidate in (line, ANSI.sub("", line)) for marker in PROOF_MARKERS)
+
+
 def read_log(path):
     raw = path.read_bytes()
-    encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
-    return [PREFIX.sub("", ANSI.sub("", line)).strip() for line in raw.decode(encoding).splitlines()]
+    utf16 = raw.startswith((b"\xff\xfe", b"\xfe\xff"))
+    text = raw.decode("utf-16") if utf16 else raw.decode("utf-8-sig", errors="surrogateescape")
+    lines = []
+    for number, line in enumerate(text.splitlines(), 1):
+        require(not INVALID_UTF8.search(line) or not malformed_proof_claim(line),
+                f"Invalid UTF-8 in machine proof record at log line {number}")
+        lines.append(PREFIX.sub("", ANSI.sub("", line)).strip())
+    return lines
 
 
 def inventory_rows(manifest):
@@ -161,7 +205,7 @@ def native_records(lines, prefix):
     return [record(line, prefix) for line in lines if line.startswith(prefix)]
 
 
-def validate_groups(lines, inventory, expected, provenance):
+def validate_groups(lines, inventory, expected, provenance, inventory_primary):
     plans = native_records(lines, "CI_UNIT_PLAN_V1")
     partitions = native_records(lines, "CI_UNIT_PARTITION_V1")
     processes = native_records(lines, "CI_UNIT_PROCESS_V1")
@@ -169,6 +213,12 @@ def validate_groups(lines, inventory, expected, provenance):
     plan, partition = plans[0], partitions[0]
     require(plan.get("binary_sha256") == provenance["binary_sha256"] and
             plan.get("source_revision") == provenance["source_revision"], "Parent binary/source identity mismatch")
+    primary_module = plan.get("primary_module")
+    require(primary_module in {"c_frontend_tests", "compiler_driver_tests"} and primary_module in inventory and
+            primary_module in expected, "Unsupported/missing primary module anchor")
+    require(primary_module == inventory_primary, "Plan primary module differs from independent inventory")
+    expected_primary = "c_frontend_tests" if provenance["platform"] == "windows" and provenance["architecture"] == "x86_64" else "compiler_driver_tests"
+    require(primary_module == expected_primary, "Plan primary module differs from platform policy")
     require(number(plan, "workers") == provenance["cpu_budget"] and number(plan, "groups") == 2, "Parent plan CPU/group mismatch")
     group_workers = number(plan, "group_workers")
     require(group_workers >= 1 and group_workers * 2 <= provenance["cpu_budget"], "Declared child quota exceeds CPU budget")
@@ -184,7 +234,7 @@ def validate_groups(lines, inventory, expected, provenance):
         require(len(batches) == 1, "Missing/duplicate child terminal batch record")
         batch = batches[0]
         group = batch.get("group")
-        require(group in {"driver", "rest"} and group not in groups, "Unknown/duplicate child group")
+        require(group in {"primary", "rest"} and group not in groups, "Unknown/duplicate child group")
         declared = native_records(block, "CI_UNIT_MODULE_V1")
         require(len(declared) == len(inventory), "Incomplete registered child inventory")
         seen = set()
@@ -196,7 +246,7 @@ def validate_groups(lines, inventory, expected, provenance):
             require(number(row, "index") == inventory[name]["index"], "Declared canonical index mismatch")
             require(number(row, "table_audit") == int(inventory[name]["table_audit"]), "Declared table-audit flag mismatch")
             require(number(row, "enabled") == int(name in expected), "Disabled audit inventory mismatch")
-            owner = "driver" if name == "compiler_driver_tests" else "rest"
+            owner = "primary" if name == primary_module else "rest"
             require(row.get("group") == owner, "Declared module owner mismatch")
             require(number(row, "selected") == int(name in expected and owner == group), "Child selected inventory mismatch")
             if number(row, "selected"):
@@ -214,7 +264,7 @@ def validate_groups(lines, inventory, expected, provenance):
         combined.update(modules)
         external_total += terminals["External"]["total"]
         groups[group] = {"modules": sorted(modules), "assertions": assertions}
-    require(set(groups) == {"driver", "rest"}, "Missing required child group")
+    require(set(groups) == {"primary", "rest"}, "Missing required child group")
     exact_modules(combined, expected, inventory)
     process_names = set()
     intervals = []
@@ -274,7 +324,7 @@ def validate_sample(path):
         native_group_wall = None
         runner_work, peak, external, groups = wall, test_workers, terminals["External"]["total"], {}
     else:
-        modules, wall, runner_work, peak, external, groups = validate_groups(lines, inventory, expected, provenance)
+        modules, wall, runner_work, peak, external, groups = validate_groups(lines, inventory, expected, provenance, manifest.get("primary_module"))
         require(test_workers is None or test_workers == provenance["cpu_budget"], "Candidate invocation workers differ from native parent plan")
         test_workers = provenance["cpu_budget"]
         native_group_wall = wall

@@ -7,8 +7,10 @@ lowercase commit SHA. Mutable branches/tags, unlisted paths and unapproved
 revisions fail. Local and container references require a separate policy
 decision before use; approved same-commit references are listed below.
 
-The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
-actionlint. The checker now lives under `tools/` because the Forgejo workflows
+The `Workflow lint` job runs the checker and the maintained
+`tools/ci_workflow_policy_test.py` entry before actionlint. It delegates to the complete maintained `tools/ci_workflow_tools_test.py` suite, which inherits
+the frozen `tests/action_pins_test.py` cases and replaces only the current
+lint entry point and artifact-reference inventory assertions. The checker now lives under `tools/` because the Forgejo workflows
 and their script directory were removed. Its allowlist preserves existing revisions and records staged migrations; an
 older pin remains approved only while at least one reviewed workflow still uses it.
 
@@ -91,7 +93,7 @@ still fail CI.
    including runtime requirements, authentication handling and post-job cleanup.
 2. Update workflow literals and `APPROVED` in the checker together. Record
    the action path, full commit, tag/date and compatibility changes here.
-3. Run `python3 tools/check_action_pins.py`, `python3 tests/action_pins_test.py`
+3. Run `python3 tools/check_action_pins.py`, `python3 tools/ci_workflow_policy_test.py`
    and `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.
    Mutable references and unapproved SHAs must still fail.
 4. Validate the submitted revision on the affected GitHub jobs before claiming
@@ -110,3 +112,43 @@ mapping keys, mapping anchors/aliases/merges and multiline action references
 are rejected. Literal/folded script blocks are skipped. It is not a general
 YAML parser; adding syntax requires a reviewed scanner change and regression.
 General GitHub workflow validation continues to use actionlint independently.
+
+## GitHub Pages actions
+
+Added for the static-site integration (#2436), with immutable upstream tag
+resolution, manifests, source entry points and license files inspected on
+2026-10-03. Existing action permissions and revisions are unchanged.
+
+| Action path | Approved commit | Version / runtime | License source |
+|---|---|---|---|
+| `actions/upload-pages-artifact` | `fc324d3547104276b827a68afc52ff2a11cc49c9` | v5.0.0; composite, Node 24 upload | [MIT](https://github.com/actions/upload-pages-artifact/blob/fc324d3547104276b827a68afc52ff2a11cc49c9/LICENSE) |
+| `actions/deploy-pages` | `368f82528645a54fb793d4d04e342629a3f51346` | v5.0.1; Node 24 | [MIT](https://github.com/actions/deploy-pages/blob/368f82528645a54fb793d4d04e342629a3f51346/LICENSE) |
+
+The upload action's [pinned manifest](https://github.com/actions/upload-pages-artifact/blob/fc324d3547104276b827a68afc52ff2a11cc49c9/action.yml)
+creates `artifact.tar` from its selected directory, dereferences links, excludes
+hidden files by default, and fails if the archive is missing. Buster validates
+its exact two-file `site/` payload and rejects symlinks/hardlinks before calling
+it. Its transitive upload is already immutable:
+`actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f` (v7.0.0;
+[Node 24 manifest](https://github.com/actions/upload-artifact/blob/bbbca2ddaa5d8feaa63e36b76fdaad77386f024f/action.yml),
+[MIT license](https://github.com/actions/upload-artifact/blob/bbbca2ddaa5d8feaa63e36b76fdaad77386f024f/LICENSE)).
+That nested revision is not an additional approved direct reference in Buster;
+existing direct upload-artifact pins stay unchanged. Upload retention is one day.
+
+The deploy action's [manifest](https://github.com/actions/deploy-pages/blob/368f82528645a54fb793d4d04e342629a3f51346/action.yml)
+selects `dist/index.js`. Its [source entry point](https://github.com/actions/deploy-pages/blob/368f82528645a54fb793d4d04e342629a3f51346/src/index.js)
+requests an OIDC token; the [API client](https://github.com/actions/deploy-pages/blob/368f82528645a54fb793d4d04e342629a3f51346/src/internal/api-client.js)
+requires exactly one matching artifact from the current workflow run and sends
+its ID, build version and OIDC token to the Pages deployment API. The
+[deployment controller](https://github.com/actions/deploy-pages/blob/368f82528645a54fb793d4d04e342629a3f51346/src/internal/deployment.js)
+polls for success with capped backoff/jitter, reports errors, and attempts
+cancellation on timeout or a workflow cancellation signal. There is no post-job
+checkout cleanup or arbitrary build command in Buster's privileged job. Its
+only permissions are `pages: write` and `id-token: write`; site activation is an
+administrator prerequisite, not an action-side privilege escalation.
+
+This is a source/manifest provenance review, not an independent reproducible-build
+attestation of the bundled JavaScript dependency graph. These MIT licenses cover
+the named upstream action projects, not all transitive packages or Buster's
+first-party code. No upstream source, theme, or license text is copied into the
+published site. See [Pages setup and acceptance](github-pages.md).

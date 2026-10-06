@@ -44,6 +44,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
         [C_DIAGNOSTIC_INVALID_UTF8] = S8_INITIALIZER("c.invalid-utf8"),
         [C_DIAGNOSTIC_UNKNOWN_TYPE_NAME] = S8_INITIALIZER("c.unknown-type-name"),
         [C_DIAGNOSTIC_SOURCE_TOO_LARGE] = S8_INITIALIZER("c.source-too-large"),
+        [C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS] = S8_INITIALIZER("c.extra-directive-tokens"),
+        [C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL] = S8_INITIALIZER("c.error-attribute-call"),
+        [C_DIAGNOSTIC_OBSOLETE_DESIGNATOR] = S8_INITIALIZER("c.obsolete-designator"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == C_DIAGNOSTIC_KIND_COUNT);
     return (u32)kind < (u32)BUSTER_ARRAY_LENGTH(names) ? names[kind] : S8("not-applicable");
@@ -420,6 +423,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_error_code(CompilerDriverError error
         [COMPILER_DRIVER_ERROR_OBJECT] = S8_INITIALIZER("driver.object"),
         [COMPILER_DRIVER_ERROR_LINK] = S8_INITIALIZER("driver.link"),
         [COMPILER_DRIVER_ERROR_FILE_WRITE] = S8_INITIALIZER("driver.file-write"),
+        [COMPILER_DRIVER_ERROR_SPIRV] = S8_INITIALIZER("driver.spirv"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == COMPILER_DRIVER_ERROR_COUNT);
     return (u32)error < (u32)BUSTER_ARRAY_LENGTH(names) ? names[error] : S8("driver.unknown");

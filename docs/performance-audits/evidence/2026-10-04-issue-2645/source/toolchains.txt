@@ -1,0 +1,29 @@
+Ubuntu clang version 21.1.8 (6ubuntu1)
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/lib/llvm-21/bin
+gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+Copyright (C) 2025 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+cmake version 4.4.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+Wild 0.10.0 non-git-build (compatible with GNU linkers)
+mold 2.42.1 (9b376bc6a9899d4a16b41777de1f013989459fbc; compatible with GNU ld)
+GNU gdb (Ubuntu 17.1-2ubuntu1) 17.1
+Copyright (C) 2025 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Ubuntu LLVM version 21.1.8
+  Optimized build.
+gdb	17.1-2ubuntu1
+libc6:amd64	2.43-2ubuntu2.4
+libc6-dev:amd64	2.43-2ubuntu2.4
+libclang-rt-21-dev	1:21.1.8-6ubuntu1
+llvm-21	1:21.1.8-6ubuntu1
+c3aef5b3a216ddac3e0da0178f64ff0911710605f5777783ba5ff726aa9d0725  /home/runner/work/_temp/wild-evaluation/bin/wild
+9f91904afde25b1d7d16c11b8cff2b6f54299872e8b890657f004b9c3a11f2c9  /home/runner/work/_temp/wild-evaluation/bin/mold
+78e9dd2ccc9e88859b3a29109a44bfab00e3d6cb70f00f3daae063eed3d05251  /usr/lib/llvm-21/bin/clang

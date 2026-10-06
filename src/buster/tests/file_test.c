@@ -940,11 +940,14 @@ struct FileTestPublishFault
     bool any_error;
     bool staging_left;
     bool posix_replacement;
+    // The steps target an operation publication must not perform.
+    bool unconsumed;
 };
 
 // Every fallible staging boundary leaves an old destination byte-identical or
 // a new destination absent. A successful interrupted write publishes only the
-// complete bytes, and cleanup failures stay secondary.
+// complete bytes, and cleanup failures stay secondary. An armed flush refusal
+// is never reached: publication closes and renames without flushing.
 BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_faults(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -961,13 +964,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_faults(UnitTestArguments* a
                    {OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 3}},
          .step_count = 4,
          .status = FILE_PUBLISH_PUBLISHED},
-        {.steps = {{OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
+        {.unconsumed = true, .steps = {{OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .status = FILE_PUBLISH_PUBLISHED},
         {.steps = {{OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}}, .step_count = 1, .error = 23456},
         {.steps = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
-         .step_count = 2,
-         .error = 12345,
-         .cleanup_error = 23456},
-        {.steps = {{OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
          .step_count = 2,
          .error = 12345,
          .cleanup_error = 23456},
@@ -1018,7 +1017,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_faults(UnitTestArguments* a
                     u32 consumed = os_file_test_end();
                     bool succeeded = fault->status == FILE_PUBLISH_PUBLISHED;
                     bool error_matches = fault->any_error ? published.error.v != 0 : published.error.v == fault->error;
-                    bool matches = consumed == fault->step_count && published.status == fault->status && error_matches &&
+                    u32 expected_consumed = fault->unconsumed ? 0 : fault->step_count;
+                    bool matches = consumed == expected_consumed && published.status == fault->status && error_matches &&
                                    published.cleanup_error.v == fault->cleanup_error;
                     if (!matches)
                     {

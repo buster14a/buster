@@ -1,0 +1,5 @@
+$ taskset -c 2 /home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-matched/candidate-ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -fmetrics-out=/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-uarch/b/warmup.ccmetrics -o /home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-uarch/b/out.exe
+exit=0
+--- stdout
+
+--- stderr

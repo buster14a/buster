@@ -1,0 +1,93 @@
+name: 9700X compiler benchmark report recovery
+
+# Publication-only recovery of the main compiler comparison's commit report
+# (#2804). The owner names one past attempt of 9700x-direct-bench.yml; nothing
+# is built, measured or re-run. validate (read-only) re-derives the attempt's
+# identity from GitHub's records exactly as authorize-compiler does, reads its
+# retained evidence artifact as bounded data and re-validates it with main's
+# publisher; expired or unverifiable evidence is reported and not published.
+# comment (contents: write, for the commit-comment API) downloads nothing and
+# upserts the validated entry into the same owned comment that
+# 9700x-direct-bench.yml maintains, sharing its per-commit concurrency group.
+# Also the one-commit backfill of c5faf05e (run 37486885378, attempt 1).
+# Main supplies the code; credentials never persist: persist-credentials: false
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 9700X direct workload benchmark run ID
+        required: true
+        type: string
+      run_attempt:
+        description: Its measurement attempt
+        required: true
+        type: string
+
+# Zero token capabilities are stricter than the repository-wide static
+# read-only policy marker retained for common workflow tooling: contents: read
+permissions: {}
+
+concurrency:
+  group: buster-9700x-compiler-report-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Revalidate the retained comparison evidence
+    if: ${{ github.ref == 'refs/heads/main' && github.actor == 'davidgmbb' && github.triggering_actor == 'davidgmbb' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    outputs:
+      comment: ${{ steps.validate.outputs.comment }}
+      head: ${{ steps.validate.outputs.head }}
+    steps:
+      - name: Check out the trusted publisher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Revalidate the evidence of that attempt
+        id: validate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_RECOVER_RUN_ID: ${{ inputs.run_id }}
+          BQ_RECOVER_ATTEMPT: ${{ inputs.run_attempt }}
+          BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}
+        run: python3 -B tools/bench_direct/compiler_publish.py
+
+  comment:
+    name: Publish the compiler benchmark commit report
+    needs: validate
+    if: ${{ github.ref == 'refs/heads/main' && github.actor == 'davidgmbb' && github.triggering_actor == 'davidgmbb' && needs.validate.outputs.comment != '' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-compiler-comment-${{ needs.validate.outputs.head }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out the trusted comment writer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tools/bench_direct
+          persist-credentials: false
+      - name: Upsert the report comment on the main commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_COMMENT: ${{ needs.validate.outputs.comment }}
+          BQ_PUBLISHER_RUN_ID: ${{ github.run_id }}
+          BQ_PUBLISHER_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+        run: python3 -B tools/bench_direct/compiler_comment.py

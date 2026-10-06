@@ -44,6 +44,7 @@ RESERVED_MATERIALIZATION_ROOTS = (
 )
 TRUST_IMPLEMENTATION_PATHS = frozenset((
     ".github/workflows/api-migration-policy.yml",
+    ".github/workflows/native-retirement-admission.yml",
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
     ".github/workflows/native-retirement-automation.yml",
