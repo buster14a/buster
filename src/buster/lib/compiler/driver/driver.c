@@ -4614,6 +4614,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                     .omit_spelled_bytes = invocation.omit_spelled_bytes,
                                                     .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
+                                                    .preserve_spellings = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of
