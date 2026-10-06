@@ -7607,6 +7607,10 @@ struct CParseConstant
     // zero or a shift count outside the promoted width -- as opposed to an
     // operand shape this evaluator does not model.
     bool faulted;
+    // A GNU imaginary literal: `valid` stays false so no operator consumes it,
+    // `floating` holds the imaginary half, and only an explicit cast to a
+    // real type reads it (the real half is zero).
+    bool imaginary;
 };
 
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
@@ -23761,6 +23765,31 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_member_address(CTypeParseMachi
     return value;
 }
 
+// An imaginary literal under an explicit cast to a real type: _Bool tests the
+// imaginary half (C 6.3.1.2), any other real type takes the zero real half
+// (C 6.3.1.7p2). A complex destination stays unevaluated.
+BUSTER_C_INTERNAL CParseConstant c_parse_constant_imaginary_cast(CParseResult* result, Target target, CParseConstant value,
+                                                                  CTypeId destination, CConstantEvaluationMode mode)
+{
+    CTypeKind kind = destination.value < result->type_count ? c_parse_expression_value_kind(result, destination) : C_TYPE_INVALID;
+    CParseConstant converted = {.type = C_TYPE_ID_INVALID};
+    if (kind != C_TYPE_INVALID && !c_type_kind_is_complex(kind))
+    {
+        // The imaginary half is a real element-typed value for the truth test.
+        value.type = c_parse_expression_scalar_type(result, c_type_kind_complex_element(c_parse_expression_value_kind(result, value.type)));
+        value.imaginary = false;
+        value.valid = true;
+        if (kind != C_TYPE_BOOL)
+        {
+            value.integer = 0;
+            value.integer_high = 0;
+            value.floating = 0.0;
+        }
+        converted = c_parse_constant_convert(result, target, value, destination, mode);
+    }
+    return converted;
+}
+
 BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                        CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
@@ -23781,7 +23810,23 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         {
             CNumberFact fact = c_number_fact(result->number_facts, preprocess.tokens, start);
             value.is_float = fact.present ? (fact.flags & C_NUMBER_FACT_FLOATING) != 0 : c_number_is_float(spelling);
-            if (value.is_float)
+            CTypeKind imaginary_kind = value.type.value < result->type_count ? c_parse_expression_value_kind(result, value.type) : C_TYPE_INVALID;
+            if (value.is_float && c_type_kind_is_complex(imaginary_kind))
+            {
+                IrType scalar = {0};
+                u32 alignment = 0;
+                String8 real_spelling = {0};
+                CIrConstantValue folded = {0};
+                c_ir_scalar_type_properties(preprocess.target, c_type_kind_complex_element(imaginary_kind), &scalar.kind, &scalar.bit_width,
+                                            &scalar.is_signed, &alignment);
+                value.imaginary = c_ir_number_imaginary_spelling(arena, spelling, &real_spelling) &&
+                                  c_ir_constant_float_literal_for_type(&scalar, real_spelling, &folded);
+                value.floating = folded.floating;
+                value.integer = folded.integer;
+                value.integer_high = folded.integer_high;
+                value.float_width = (u8)scalar.bit_width;
+            }
+            else if (value.is_float)
             {
                 IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, value.type);
                 CIrConstantValue folded = {0};
@@ -24202,7 +24247,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             }
             else if (task->state == 3)
             {
-                last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
+                last = last.imaginary ? c_parse_constant_imaginary_cast(result, preprocess.target, last, task->cast_type,
+                                                                        machine->constant_evaluation_mode)
+                                      : c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
             }
             else if (task->state == 4)
             {
@@ -26517,7 +26564,19 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
     {
         CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, start, end);
         CParseConstant converted = c_parse_constant_convert(result, preprocess.target, value, destination, machine->constant_evaluation_mode);
-        if (!converted.valid || unknown)
+        // This evaluator has no complex values. A GNU imaginary literal in a
+        // real destination's initializer (`static int i = 5.0 + 7.0i;`) is
+        // folded, or refused, by the lowering evaluator, which owns complex
+        // constants.
+        bool imaginary = false;
+        for (u32 cursor = start; !converted.valid && !imaginary && cursor < end; cursor += 1)
+        {
+            String8 real_spelling = {0};
+            imaginary = preprocess.tokens[cursor].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+                        c_ir_number_imaginary_spelling(machine->scratch_arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]),
+                                                       &real_spelling);
+        }
+        if ((!converted.valid && !imaginary) || unknown)
         {
             diagnostic.message = string_format(result->arena, S8("cannot fold '{S8}' in a static initializer"),
                                                c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]));

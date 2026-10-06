@@ -1347,10 +1347,22 @@ other real targets and never receives `_Bool`; an explicit `(_Bool)(double)z`
 still projects first. `c_test_complex_bool_conversion` checks that canonical
 shape on six target layouts in both frontend forms and runs literal
 float/double/long double rows (signed zeros, subnormal, infinite and NaN
-halves, projection controls) in every native allocator at O0/O2. Imaginary
-constants remain outside parse-side integer constant expressions
-(`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
-not folded to real targets. Boolean bit-field accesses use an unsigned raw
+halves, projection controls) in every native allocator at O0/O2. An imaginary
+literal that is the direct operand of a cast to a real type folds in integer
+constant expressions (`enum { E = (_Bool)2.0i }`, `_Static_assert`, `case`):
+`c_parse_constant_imaginary_cast` in the parse-side evaluator and the cast
+operand arm of `c_ir_constant_evaluate_impl` in the lowering walker, `_Bool`
+testing the imaginary half and other real types taking the zero real half. A
+complex constant in a real static initializer (`static int i = 5.0 + 7.0i;`)
+folds through `c_ir_global_complex_real_value`, which reuses the complex
+initializer evaluator; `c_ir_constant_complex_initializer_cast` tests both
+halves for `_Bool`, and an implicit complex-to-`_Bool` initializer stays
+refused because GCC refuses it. Any other imaginary operand (`-2.0i`, `1.0i +
+3`) is still not an integer constant expression. `c_parse_validate_static_scalar` skips the
+parse-side complex-initializer diagnostic and leaves it to lowering.
+`src/buster/tests/compiler/driver/fixtures/basic_c_complex_constant_conversion.c` checks every folded value
+against the run-time conversion under both frontend forms and every allocator.
+Boolean bit-field accesses use an unsigned raw
 integer storage unit; canonical validation admits that unit at the recorded
 field access size even when the layout did not narrow it.
 

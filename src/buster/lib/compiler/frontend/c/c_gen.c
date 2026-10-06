@@ -132,6 +132,8 @@
 //   c_ir_constant_float_* ..                     source-format-preserving
 //   c_ir_constant_wide_float_*                    x87/binary128 constants
 //   c_ir_global_initializer                       globals
+//   c_ir_global_complex_real_value                complex constant to a real
+//                                                 static destination
 //   CIrRowStreams, c_ir_row_streams_trim          dense, line-aligned
 //                                                 construction rows shared by
 //                                                 the functions of one module
@@ -10666,7 +10668,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, u32 to
 // one. Reports the spelling with the imaginary letter removed, which is an
 // ordinary real literal the parser below already understands; `arena` is only
 // touched when that letter is not the last one.
-BUSTER_C_INTERNAL bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out)
+BUSTER_C_SHARED bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out)
 {
     u64 suffix_start = spelling.length;
     u64 imaginary_index = spelling.length;
@@ -50968,8 +50970,24 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_cast(CIntegerIrBuilder*
         return false;
     }
     CIrConstantValue real = {0};
-    if (!c_ir_constant_cast(builder, &source->real, target_type, &real))
+    if (source->is_complex && target->kind == IR_TYPE_BOOLEAN)
     {
+        // C 6.3.1.2: a complex value is false only when both halves compare
+        // equal to zero, so the real half alone cannot answer.
+        CIrConstantTruth real_truth = c_ir_constant_truth(builder, &source->real);
+        CIrConstantTruth imaginary_truth = c_ir_constant_truth(builder, &source->imaginary);
+        bool known = (real_truth == C_IR_CONSTANT_TRUTH_TRUE || real_truth == C_IR_CONSTANT_TRUTH_FALSE) &&
+                     (imaginary_truth == C_IR_CONSTANT_TRUTH_TRUE || imaginary_truth == C_IR_CONSTANT_TRUTH_FALSE);
+        if (!known)
+        {
+            return false;
+        }
+        real = c_ir_constant_integer(target_type, real_truth == C_IR_CONSTANT_TRUTH_TRUE || imaginary_truth == C_IR_CONSTANT_TRUTH_TRUE);
+    }
+    else if (!c_ir_constant_cast(builder, &source->real, target_type, &real))
+    {
+        // C 6.3.1.7p2: a complex value converts to a real type through its
+        // real half.
         return false;
     }
     *result = (CIrConstantComplexInitializerValue){.real = real, .type = target_type};
@@ -51980,12 +51998,40 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 {
                     // This evaluator has no complex value, and folding an
                     // imaginary literal as its magnitude would answer
-                    // `1.0i == 1.0` with true. Refuse instead.
-                    String8 ignored_real_spelling = {0};
+                    // `1.0i == 1.0` with true. Refuse instead, except as the
+                    // direct operand of a cast to a real type, which GCC and
+                    // Clang fold: _Bool tests the imaginary half (C 6.3.1.2)
+                    // and any other real type takes the zero real half
+                    // (C 6.3.1.7p2).
+                    String8 imaginary_real_spelling = {0};
                     if (c_ir_number_imaginary_spelling(builder->arena, c_token_spelling(builder->preprocess.spelling_base, token),
-                                                       &ignored_real_spelling))
+                                                       &imaginary_real_spelling))
                     {
-                        return false;
+                        IrType* cast_target = operator_count && operators[operator_count - 1].operation == C_CONDITIONAL_CAST
+                                                  ? ir_type_from_id(&builder->program->types, operators[operator_count - 1].cast_type) : 0;
+                        CIrConstantValue magnitude = {0};
+                        CIrConstantValue real_zero = c_ir_constant_integer(builder->s32_type, 0);
+                        bool real_target = cast_target && value_count < capacity &&
+                                           (cast_target->kind == IR_TYPE_FLOAT || c_ir_constant_type_is_integer(cast_target)) &&
+                                           c_ir_constant_float_literal(builder, imaginary_real_spelling, &magnitude);
+                        CIrConstantTruth imaginary_truth = real_target ? c_ir_constant_truth(builder, &magnitude) : C_IR_CONSTANT_TRUTH_INVALID;
+                        if (!real_target || (cast_target->kind == IR_TYPE_BOOLEAN && imaginary_truth != C_IR_CONSTANT_TRUTH_TRUE &&
+                                             imaginary_truth != C_IR_CONSTANT_TRUTH_FALSE))
+                        {
+                            return false;
+                        }
+                        if (cast_target->kind == IR_TYPE_BOOLEAN)
+                        {
+                            real_zero = c_ir_constant_integer(builder->s32_type, imaginary_truth == C_IR_CONSTANT_TRUTH_TRUE);
+                        }
+                        if (!c_ir_constant_cast(builder, &real_zero, operators[operator_count - 1].cast_type, &value))
+                        {
+                            return false;
+                        }
+                        operator_count -= 1;
+                        values[value_count++] = value;
+                        expect_operand = false;
+                        continue;
                     }
                     if (!c_ir_constant_float_literal(builder, c_token_spelling(builder->preprocess.spelling_base, token), &value)) return false;
                 }
@@ -52621,10 +52667,36 @@ BUSTER_C_INTERNAL void c_ir_constant_store_bits(IrProgram* program, IrType* type
     c_ir_constant_store_unit_bits(program, type->layout.size, bytes, offset, bits, sign_extend);
 }
 
+// A complex constant under a real static destination (`static int i = 5.0 +
+// 7.0i;`) folds through the complex initializer evaluator to the converted real
+// value, which the scalar path then stores. GCC refuses an implicit complex to
+// _Bool initializer, so only an explicit cast, whose result is no longer
+// complex, reaches a _Bool destination.
+BUSTER_C_INTERNAL bool c_ir_global_complex_real_value(CIntegerIrBuilder* builder, IrType* type, IrTypeId type_id, u32 start, u32 end,
+                                                      CIrConstantValue* value)
+{
+    CIrConstantComplexInitializerValue complex = {0};
+    CIrConstantComplexInitializerValue converted = {0};
+    bool folded = (type->kind == IR_TYPE_FLOAT || c_ir_constant_type_is_integer(type)) &&
+                  c_ir_constant_complex_initializer_evaluate(builder, start, end, &complex) &&
+                  !(complex.is_complex && type->kind == IR_TYPE_BOOLEAN) &&
+                  c_ir_constant_complex_initializer_cast(builder, &complex, type_id, &converted);
+    if (folded)
+    {
+        *value = converted.real;
+    }
+    return folded;
+}
+
 BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, u32 start, u32 end, IrGlobal* global)
 {
     CIrConstantValue value = {0};
-    if (c_ir_constant_evaluate(builder, start, end, &value))
+    bool evaluated = c_ir_constant_evaluate(builder, start, end, &value);
+    if (!evaluated && type->kind != IR_TYPE_POINTER)
+    {
+        evaluated = c_ir_global_complex_real_value(builder, type, global->type, start, end, &value);
+    }
+    if (evaluated)
     {
         if (type->kind == IR_TYPE_POINTER)
         {
