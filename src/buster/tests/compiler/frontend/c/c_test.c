@@ -34901,6 +34901,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArgu
     return result;
 }
 
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
 // Regression for #2846: compare-exchange on an `_Atomic` floating object
 // compares object representations, so it lowers through an integer view.
 // Negative zero must not match positive zero, and a NaN must match its own
@@ -34928,6 +34929,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_float_compare_exchange_source = 
     "    if (__c11_atomic_load(&f, __ATOMIC_SEQ_CST) != 1.5f) r |= 64;\n"
     "    return r;\n"
     "}\n");
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_float_compare_exchange_runtime(UnitTestArguments* arguments)
 {
