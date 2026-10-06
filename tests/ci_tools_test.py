@@ -852,6 +852,26 @@ class NativeRetirementCensusTextTests(unittest.TestCase):
 
 
 class WorkflowPolicyTests(unittest.TestCase):
+
+    def test_ordinary_desktop_has_no_full_lint_ancestor(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        blocks = dict(re.findall(r"(?ms)^  (\w+):\n(.*?)(?=^  \w+:|\Z)",
+                                 text.split("\njobs:\n", 1)[1]))
+        desktop = blocks["test"].split("    steps:", 1)[0]
+        self.assertIn("needs: [queue_lint, reuse]", desktop)
+        self.assertIn("github.event_name != 'merge_group' || needs.queue_lint.result == 'success'", desktop)
+        self.assertNotIn("needs.lint", desktop)
+        self.assertIn("needs: reuse", blocks["native"])
+        for root in ("queue_lint", "reuse"):
+            self.assertNotRegex(blocks[root], r"(?m)^    needs:")
+        self.assertIn("github.event_name == 'merge_group'", blocks["queue_lint"])
+        self.assertIn("github.event_name != 'merge_group'", blocks["lint"])
+        self.assertIn("steps: &workflow_lint_steps", blocks["lint"])
+        self.assertIn("steps: *workflow_lint_steps", blocks["queue_lint"])
+        aggregate = blocks["complete"]
+        self.assertIn("github.event_name == 'merge_group' && needs.queue_lint.result || needs.lint.result", aggregate)
+        self.assertIn("github.event_name == 'merge_group' && needs.lint.result || needs.queue_lint.result", aggregate)
+
     def test_all_five_ci_platforms_and_commands_remain(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         names = re.findall(r"^          - name: (.+)$", text, re.M)
@@ -894,7 +914,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
         self.assertIn("needs: reuse", mobile)
         self.assertNotIn("needs: test", mobile)
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", text)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
 
     def test_windows_runs_native_worker_controls_before_the_combination_matrix(self):
@@ -1157,7 +1177,7 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
         # predicate. Exercise all 625 existing shard outcomes with UEFI/analyzer
@@ -1172,8 +1192,8 @@ class WorkflowPolicyTests(unittest.TestCase):
             script = r"""
 set -eu
 checked=0
-UEFI_RESULT=success ANALYZER_RESULT=success REUSE_REQUESTED=false REUSE_REVERIFIED=skipped
-export UEFI_RESULT ANALYZER_RESULT REUSE_REQUESTED REUSE_REVERIFIED
+UEFI_RESULT=success ANALYZER_RESULT=success REUSE_REQUESTED=false REUSE_REVERIFIED=skipped INACTIVE_LINT_RESULT=skipped
+export UEFI_RESULT ANALYZER_RESULT REUSE_REQUESTED REUSE_REVERIFIED INACTIVE_LINT_RESULT
 for LINT_RESULT in success failure cancelled skipped ''; do
   for DESKTOP_RESULT in success failure cancelled skipped ''; do
     for NATIVE_RESULT in success failure cancelled skipped ''; do
@@ -1232,6 +1252,15 @@ for NATIVE_RESULT in success failure cancelled ''; do
   [[ "$actual" -ne 0 ]] || exit 1
   checked=$((checked + 1))
 done
+REUSE_REQUESTED=false NATIVE_RESULT=success MOBILE_RESULT=success UEFI_RESULT=success
+export REUSE_REQUESTED NATIVE_RESULT MOBILE_RESULT UEFI_RESULT
+for INACTIVE_LINT_RESULT in success failure cancelled ''; do
+  export INACTIVE_LINT_RESULT
+  actual=0
+  ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
+  [[ "$actual" -ne 0 ]] || exit 1
+  checked=$((checked + 1))
+done
 printf '%s\n' "$checked"
 """
             # Windows CreateProcess can choose System32/bash.exe (WSL)
@@ -1248,7 +1277,7 @@ printf '%s\n' "$checked"
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
                                     capture_output=True, text=True, timeout=120 if os.name == "nt" else 30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.strip(), "642")
+            self.assertEqual(result.stdout.strip(), "646")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_correctness_environment(self):

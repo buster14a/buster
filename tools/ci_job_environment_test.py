@@ -285,7 +285,7 @@ class JobEnvironmentWorkflowTests(unittest.TestCase):
         self.assertIn("          python3 -B tools/ci_job_environment_test.py -v\n", workflow)
         self.assertIn("            tools/ci_android_sdk_test.py=android-sdk-installer-test.log\n", workflow)
         complete = workflow.split("\n  complete:\n", 1)[1]
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", complete)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", complete)
         self.assertIn("${{ runner.temp }}/desktop-partitions.json", complete)
         self.assertIn("${{ runner.temp }}/main-ci-reuse-finish.json", complete)
 

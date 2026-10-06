@@ -19,6 +19,43 @@ import merge_queue_admission as admission
 ROOT = Path(__file__).resolve().parents[1]
 
 
+
+class InactiveLintTests(unittest.TestCase):
+    def test_only_the_inactive_event_branch_may_be_skipped(self):
+        for event in ("pull_request", "merge_group", "push", "workflow_dispatch"):
+            name = ("Ordinary lint (inactive)" if event == "merge_group"
+                    else "Queue lint preflight (inactive)")
+            inactive = {"name": name, "run_id": 1, "head_sha": "a" * 40,
+                        "run_attempt": 1, "status": "completed", "conclusion": "skipped"}
+            active = {"name": "Workflow lint", "status": "completed", "conclusion": "failure"}
+            jobs, errors = github_ci_time.separate_reuse_job(
+                [active, inactive], 1, 1, "a" * 40, event=event)
+            self.assertEqual(errors, [])
+            self.assertEqual(jobs, [active])
+            self.assertEqual(jobs[0]["conclusion"], "failure")
+            for field, values in (
+                    ("conclusion", ("success", "failure", "cancelled", None)),
+                    ("status", ("in_progress", "queued", None)),
+                    ("name", ("Queue lint preflight (inactive)" if event == "merge_group"
+                              else "Ordinary lint (inactive)",)),
+                    ("run_id", (2,)), ("head_sha", ("b" * 40,)),
+                    ("run_attempt", (0, 2, True))):
+                for value in values:
+                    with self.subTest(event=event, field=field, value=value):
+                        invalid = dict(inactive, **{field: value})
+                        _, errors = github_ci_time.separate_reuse_job(
+                            [active, invalid], 1, 1, "a" * 40, event=event)
+                        self.assertTrue(errors)
+            _, errors = github_ci_time.separate_reuse_job(
+                [active, inactive, inactive], 1, 1, "a" * 40, event=event)
+            self.assertTrue(errors)
+
+    def test_historical_inventory_remains_readable_without_inactive_branch(self):
+        active = {"name": "Workflow lint", "status": "completed", "conclusion": "success"}
+        for event in ("pull_request", "merge_group", "push", "workflow_dispatch"):
+            jobs, errors = github_ci_time.separate_reuse_job([active], 1, 1, "a" * 40, event=event)
+            self.assertEqual((jobs, errors), ([active], []))
+
 class ChecksLayoutCLITests(unittest.TestCase):
     def test_gate_cli_uses_the_split_default_and_keeps_explicit_layouts(self):
         for arguments, expected in (([], "split"), (["--checks-layout", "combined"], "combined"),

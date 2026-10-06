@@ -48,11 +48,11 @@ env:
 
 jobs:
   lint:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Workflow lint
+    if: ${{ github.event_name != 'merge_group' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: ${{ github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
-    steps:
+    steps: &workflow_lint_steps
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         id: checkout
         with:
@@ -168,6 +168,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  queue_lint:
+    # Root job: skipped immediately outside the queue, with no lint dependency.
+    # Share the complete lint workload; exactly one lint job executes per event.
+    if: ${{ github.event_name == 'merge_group' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: ${{ github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps: *workflow_lint_steps
+
   reuse:
     name: Main CI reuse decision
     if: ${{ github.server_url == 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
@@ -214,9 +223,9 @@ jobs:
           retention-days: 7
 
   test:
-    # Desktop shards wait for the main reuse decision and cheap queue lint. Ordinary runs still
-    # execute for diagnostics even when lint fails.
-    needs: [lint, reuse]
+    # Ordinary desktop work has no full-lint ancestor. Queue work waits for
+    # the event-specific lint preflight; main still waits for exact-SHA reuse.
+    needs: [queue_lint, reuse]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -225,7 +234,7 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.lint.result == 'success') }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.queue_lint.result == 'success') }}
     # The first attempt of a draft pull-request run defers scarce macOS
     # runners: the lane reports itself as a named Linux no-op. Merge groups,
     # main, tags, ready pull requests and "Re-run all jobs" run it in full.
@@ -1404,7 +1413,7 @@ jobs:
       contents: read
       actions: read
       checks: read
-    needs: [lint, test, native, mobile, uefi, analyzer, reuse]
+    needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]
     if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1451,7 +1460,8 @@ jobs:
         if: ${{ always() }}
         shell: bash
         env:
-          LINT_RESULT: ${{ needs.lint.result }}
+          LINT_RESULT: ${{ github.event_name == 'merge_group' && needs.queue_lint.result || needs.lint.result }}
+          INACTIVE_LINT_RESULT: ${{ github.event_name == 'merge_group' && needs.lint.result || needs.queue_lint.result }}
           DESKTOP_RESULT: ${{ needs.test.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
           MOBILE_RESULT: ${{ needs.mobile.result }}
@@ -1467,6 +1477,10 @@ jobs:
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$INACTIVE_LINT_RESULT" != skipped ]]; then
+            echo '::error::The inactive event-specific lint job must be skipped.'
+            exit 1
+          fi
           if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$ANALYZER_RESULT" != success ]]; then
             echo '::error::Main-specific lint, desktop and analyzer jobs must succeed.'
             exit 1

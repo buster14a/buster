@@ -119,6 +119,32 @@ does not validate Intel Apple execution or universal release artifacts. The
 [Apple CI policy](apple-ci-policy.md) records the removed lanes and retirement
 census boundary.
 
+## Desktop and lint scheduling
+
+Ordinary pull requests, tags and manual runs schedule desktop shards without
+waiting for full workflow lint. The only desktop prerequisites are the
+main-only reuse decision and the merge-group-only lint job; both are root jobs
+and skip outside their own events. Native remains independent of desktop/lint.
+Main pushes still wait for their exact-SHA reuse decision.
+
+Merge groups retain the full lint preflight before desktop execution. The two
+mutually exclusive lint jobs share one YAML steps anchor, so every event
+executes the same full lint workload once. The executing job retains the
+`Workflow lint` check identity. The inactive branch is explicitly named
+`Ordinary lint (inactive)` or `Queue lint preflight (inactive)` and must be
+skipped. Inventory and timing readers remove only that skipped branch; they
+never rename it to a successful execution. `CI complete` requires successful
+active lint and skipped inactive lint even when every workload already passed.
+Failed, cancelled, missing or disabled lint cannot pass.
+
+Measure scheduling separately from execution: workflow creation to job creation
+includes dependency wait; job creation to start is runner queue delay; start to
+completion is execution time. Total workflow latency ends at the last required
+completion. Earlier desktop eligibility alone proves no whole-CI speedup.
+The existing `github_ci_time` reports retain per-job queue and execution
+durations and workflow elapsed time; use job API creation timestamps for
+dependency wait and overlap evidence.
+
 ## Supplementary bootstrap scheduling and tested revision
 
 `Self-host fixed point` supplies the independent **Linux x86-64 bootstrap
