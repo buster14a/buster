@@ -63,7 +63,7 @@ class MeasurementTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def sample(self, name="sample", arm="baseline", log=None, identity=None):
+    def sample(self, name="sample", arm="baseline", log=None, identity=None, primary_module=None):
         grouped = arm == "candidate"
         text = parallel_log() if grouped else serial_log()
         if log is not None:
@@ -76,6 +76,8 @@ class MeasurementTests(unittest.TestCase):
                         identity=copy.deepcopy(IDENTITY if identity is None else identity), inventory=copy.deepcopy(INVENTORY),
                         log=f"{name}.log", exit_code=0, test_workers=4 if grouped else 2,
                         elapsed_us=1000 if grouped else 1500)
+        if grouped:
+            manifest["primary_module"] = primary_module or "c_frontend_tests"
         path = self.root / f"{name}.json"
         path.write_text(json.dumps(manifest))
         return path
@@ -249,10 +251,27 @@ class MeasurementTests(unittest.TestCase):
         arm_identity = copy.deepcopy(IDENTITY)
         arm_identity.update(architecture="aarch64", runner_image="windows-11-arm")
         arm_path = self.sample("arm-candidate", arm="candidate",
-                               log=parallel_log("compiler_driver_tests"), identity=arm_identity)
+                               log=parallel_log("compiler_driver_tests"), identity=arm_identity, primary_module="compiler_driver_tests")
         arm_result = MEASURE.validate_sample(arm_path)
         self.assertEqual(arm_result["groups"]["primary"]["modules"], ["compiler_driver_tests"])
         self.assertEqual(arm_result["groups"]["rest"]["modules"], ["c_frontend_tests"])
+        wrong_arm = self.sample("wrong-arm-anchor", arm="candidate", identity=arm_identity,
+                                log=parallel_log("c_frontend_tests"), primary_module="c_frontend_tests")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "platform policy"):
+            MEASURE.validate_sample(wrong_arm)
+        linux_identity = copy.deepcopy(IDENTITY)
+        linux_identity.update(platform="linux", runner_image="ubuntu/fixture")
+        linux_path = self.sample("linux-driver", arm="candidate", identity=linux_identity,
+                                 log=parallel_log("compiler_driver_tests"), primary_module="compiler_driver_tests")
+        self.assertEqual(MEASURE.validate_sample(linux_path)["groups"]["primary"]["modules"], ["compiler_driver_tests"])
+        wrong_windows = self.sample("wrong-windows-anchor", arm="candidate",
+                                    log=parallel_log("compiler_driver_tests"), primary_module="compiler_driver_tests")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "platform policy"):
+            MEASURE.validate_sample(wrong_windows)
+        mismatched_inventory = self.sample("inventory-plan-mismatch", arm="candidate",
+                                           log=parallel_log("compiler_driver_tests"), primary_module="c_frontend_tests")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "independent inventory"):
+            MEASURE.validate_sample(mismatched_inventory)
         stale_anchor = parallel_log().replace("primary_module=c_frontend_tests", "primary_module=fixture")
         with self.assertRaisesRegex(MEASURE.EvidenceError, "primary module anchor"):
             MEASURE.validate_sample(self.sample("foreign-anchor", arm="candidate", log=stale_anchor))

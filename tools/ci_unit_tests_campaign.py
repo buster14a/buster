@@ -83,7 +83,7 @@ def inventory_proof(path):
                     "Inventory query contains unexpected native proof records")
     terminals = measure.parse_terminals(lines, {}, len(rows), True)
     measure.require(terminals["External"]["total"] == 0, "Inventory query executed external tests")
-    return rows, profile
+    return rows, profile, primary[0]
 
 
 def inventory(path):
@@ -179,8 +179,9 @@ def assemble(directory, binary, platform, pairs, environment):
     measure.require(directory.is_dir(), "Campaign evidence directory does not exist")
     identities = provenance(directory, binary, platform, environment)
     baseline_jobs = baseline_workers(environment)
-    rows = inventory(directory / "inventory.log")
-    profile = host_profile(directory / "inventory.log")
+    rows, profile, inventory_primary = inventory_proof(directory / "inventory.log")
+    expected_primary = "c_frontend_tests" if platform == "windows" else "compiler_driver_tests"
+    measure.require(inventory_primary == expected_primary, "Inventory primary module differs from platform policy")
     if profile is not None:
         measure.require(profile["architecture"] == identities["architecture"], "Native host profile architecture differs")
         identities["native_host_profile"] = profile
@@ -196,6 +197,8 @@ def assemble(directory, binary, platform, pairs, environment):
                     "mode": "serial" if arm == "baseline" else "groups", "identity": identities,
                     "inventory": rows, "log": identifier + ".log", "exit_code": 0,
                     "elapsed_us": phase["elapsed_us"], "test_workers": test_workers, "native_phase": phase}
+        if arm == "candidate":
+            manifest["primary_module"] = inventory_primary
         path = directory / (identifier + ".json")
         write_json(path, manifest)
         measure.validate_sample(path)
