@@ -8770,7 +8770,7 @@ void c_test_member_slot_counts(u64* visits, u64* builds)
 }
 #define C_PARSE_MEMBER_SLOT_VISIT(count) (c_parse_member_slot_counts[0] += (count))
 #else
-#define C_PARSE_MEMBER_SLOT_VISIT(count) ((void)0)
+#define C_PARSE_MEMBER_SLOT_VISIT(count) ((void)(count))
 #endif
 
 // The built slot table of `type`, or null when the caller must scan: no table
