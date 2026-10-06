@@ -451,6 +451,11 @@ struct CPreprocessDetail
     u64 file_table_compare_count;
     // Name comparisons made by definition-time macro parameter lookups.
     u64 macro_parameter_compare_count;
+    // Peak live bytes of the macro-invocation scratch arenas (collected
+    // arguments, argument records, continuations and argument expansions),
+    // for the scaling fixtures. Tests-disabled builds neither store nor
+    // maintain it.
+    u64 macro_expansion_peak_bytes;
 #endif
     u32 lexed_file_count;
 };

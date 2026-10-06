@@ -91,6 +91,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(U
 }
 #endif
 
+// `count` copies of `text` followed by `middle` and `count` copies of `tail`,
+// the shape of a macro invocation nested `count` deep.
+BUSTER_GLOBAL_LOCAL String8 c_macro_storage_nest(Arena* arena, String8 head, String8 middle, String8 tail, u64 count)
+{
+    u64 length = (head.length + tail.length) * count + middle.length;
+    char8* bytes = arena_allocate(arena, char8, length + 1);
+    u64 output = 0;
+    for (u64 index = 0; index < count; index += 1)
+    {
+        memcpy(bytes + output, head.pointer, head.length);
+        output += head.length;
+    }
+    memcpy(bytes + output, middle.pointer, middle.length);
+    output += middle.length;
+    for (u64 index = 0; index < count; index += 1)
+    {
+        memcpy(bytes + output, tail.pointer, tail.length);
+        output += tail.length;
+    }
+    bytes[output] = 0;
+    return (String8){.pointer = bytes, .length = length};
+}
+
+// Nested invocations hold their argument collection and pre-expansion storage
+// only while they are live: bytes allocated per unit (the phase arena plus the
+// invocation scratch arenas' peak) grow with the nesting depth, not with the
+// square of it. Every invocation used to copy its whole argument, nested
+// invocations included, into the unit arena for good (#2678). The shapes cover
+// nesting in the only argument, in the last of two and in the first of two;
+// the output is checked at both depths so release cannot change an expansion.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_storage_scaling_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 definition;
+        String8 invocation_head;
+        String8 invocation_middle;
+        String8 invocation_tail;
+        String8 expected_head;
+        String8 expected_middle;
+        String8 expected_tail;
+    } shapes[] = {
+        {S8("#define F(x) (x+1)\n"), S8("F("), S8("0"), S8(")"), S8("("), S8("0"), S8("+1)")},
+        {S8("#define G(a,b) (a+b)\n"), S8("G(1,"), S8("0"), S8(")"), S8("(1+"), S8("0"), S8(")")},
+        {S8("#define G(a,b) (a+b)\n"), S8("G("), S8("0"), S8(",1)"), S8("("), S8("0"), S8("+1)")},
+    };
+    u64 depths[] = {500, 2000};
+    for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(shapes); shape_index += 1)
+    {
+        u64 bytes[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        u64 scratch_peak[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 depth = depths[depth_index];
+            String8 invocation = c_macro_storage_nest(temporary.arena, shapes[shape_index].invocation_head, shapes[shape_index].invocation_middle,
+                                                      shapes[shape_index].invocation_tail, depth);
+            String8 source = string_format(temporary.arena, S8("{S8}int x = {S8};\n"), shapes[shape_index].definition, invocation);
+            String8 nested = c_macro_storage_nest(temporary.arena, shapes[shape_index].expected_head, shapes[shape_index].expected_middle,
+                                                  shapes[shape_index].expected_tail, depth);
+            String8 expected = string_format(temporary.arena, S8("int x = {S8};"), nested);
+            CPreprocessResult actual = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("storage-scaling.c")});
+            BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+            BUSTER_TEST(arguments, actual.detail->preprocessed.expansions == depth);
+            UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, temporary.arena, actual, expected);
+            result.test_count += compared.test_count;
+            result.succeeded_test_count += compared.succeeded_test_count;
+            scratch_peak[depth_index] = actual.detail->macro_expansion_peak_bytes;
+            bytes[depth_index] = actual.detail->boundary.released_bytes + scratch_peak[depth_index];
+            scratch_end(temporary);
+        }
+        // Linear growth multiplies four-fold from 500 to 2000, quadratic
+        // sixteen-fold; fixed costs only lower the linear ratio.
+        String8 diagnostic = string_format(arguments->arena, S8("storage scaling shape={u32} bytes {u64} -> {u64}, scratch peak {u64} -> {u64}"),
+                                           shape_index, bytes[0], bytes[1], scratch_peak[0], scratch_peak[1]);
+        BUSTER_TEST_RAW(arguments, bytes[1] < bytes[0] * 6, diagnostic);
+        BUSTER_TEST_RAW(arguments, scratch_peak[1] < scratch_peak[0] * 6, diagnostic);
+    }
+    return result;
+}
+
 // Definition-owned argument demand is reused, never a previous expansion's
 // tokens or stamps. Count checks pin both omitted work and once-only prescan.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArguments* arguments)
@@ -985,6 +1067,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_punctuator_separator_tests);
     BUSTER_TEST_FIXTURE(arguments, c_trigraph_preprocess_tests);
     BUSTER_TEST_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
+    BUSTER_TEST_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
     UnitTestResult demand = c_macro_argument_demand_tests(arguments);
     result.test_count += demand.test_count;
     result.succeeded_test_count += demand.succeeded_test_count;
