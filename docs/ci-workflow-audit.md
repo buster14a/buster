@@ -65,6 +65,24 @@ and it writes immediately after verification, before repository tests run.
 Other branches and manual runs are read-only cache consumers. A corrupt
 archive fails setup rather than executing unverified bytes.
 
+`tools/ci_zig.py` permits one retry after a nonzero extraction or `zig version`
+subprocess exit. It discards the entire staging tree before rechecking the
+same archive's SHA-256 and extracting into a new temporary directory. It
+retains both failed command streams and records the phase/attempt plus each
+successful hash verification. A hash mismatch, successful wrong-version
+response, launch failure or publication failure does not enter this retry;
+verified bytes are never downloaded again to recover a decoder failure.
+
+On Windows only, publication makes at most seven attempts after Access Denied
+(`winerror=5`), with delays of 0.25, 0.5, 1, 2, 4 and 4 seconds (11.75 seconds total).
+Each retry records its attempt and delay. Destination existence is checked
+before every attempt and immediately after a denied rename; Windows uses
+`rename` so a newly appeared destination is never replaced. Other errors
+fail immediately, exhaustion remains fatal, and PATH is written only after
+successful publication. These recovery bounds do not change the manifest,
+cache key, trusted bytes or normal setup path. The network-free controls run
+with `python3 tools/ci_zig_test.py -v` in the existing workflow-tools suite.
+
 Mutable Android SDK packages, AVD state, and Homebrew prefixes are deliberately not cached. Their present installation commands
 do not provide immutable per-package revisions/checksums suitable for portable
 cache keys. Caching those directories by a coarse OS key would create stale or

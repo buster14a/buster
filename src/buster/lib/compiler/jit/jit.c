@@ -8,6 +8,7 @@
 // compiler: no frontend or IR types appear here, only the object model.
 
 #include <buster/lib/compiler/jit/jit.h>
+#include <buster/lib/compiler/jit/jit_internal.h>
 
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
@@ -310,29 +311,154 @@ BUSTER_GLOBAL_LOCAL u64 jit_relocation_size(ObjectRelocationKind kind)
     return object_relocation_kind_width(kind);
 }
 
-BUSTER_GLOBAL_LOCAL JitHostBinding const* jit_binding_find(JitOptions options, ObjectSymbol const* symbol, JitError* error)
+#if BUSTER_INCLUDE_TESTS
+#if defined(BUSTER_THREAD_LOCAL_DECL)
+#define JIT_TEST_THREAD_LOCAL BUSTER_THREAD_LOCAL_DECL
+#else
+#define JIT_TEST_THREAD_LOCAL
+#endif
+BUSTER_GLOBAL_LOCAL JIT_TEST_THREAD_LOCAL u64 jit_binding_visit_counter;
+#define JIT_COUNT_BINDING_VISIT() (jit_binding_visit_counter += 1)
+
+void jit_test_binding_visits_reset(void)
 {
-    bool name_found = false;
-    for (u32 index = 0; index < options.binding_count; index += 1)
+    jit_binding_visit_counter = 0;
+}
+
+u64 jit_test_binding_visits(void)
+{
+    return jit_binding_visit_counter;
+}
+#else
+#define JIT_COUNT_BINDING_VISIT() ((void)0)
+#endif
+
+// Above this many bindings a link builds a name index once instead of scanning
+// the array for each distinct imported symbol.
+#define JIT_BINDING_INDEX_THRESHOLD 16
+
+// Resolves imported symbols to binding indices with first-match name/kind
+// semantics: for duplicate name+kind pairs the first binding in array order
+// wins. The index (if any) holds binding index + 1 per slot, 0 when empty,
+// linear probing, and only the first binding of each name+kind pair.
+typedef struct JitBindingResolver JitBindingResolver;
+struct JitBindingResolver
+{
+    JitOptions options;
+    u32* slots;
+    u32 slot_mask;
+};
+
+BUSTER_GLOBAL_LOCAL u32 jit_binding_name_slot(String8 name)
+{
+    u32 value = 2166136261u;
+    for (u64 index = 0; index < name.length; index += 1)
     {
-        JitHostBinding const* binding = options.bindings + index;
-        if (string_equal(binding->name, symbol->name))
+        value = (value ^ name.pointer[index]) * 16777619u;
+    }
+    return value ^ (value >> 15);
+}
+
+BUSTER_GLOBAL_LOCAL void jit_binding_resolver_begin(JitBindingResolver* resolver, Arena* arena, JitOptions options)
+{
+    resolver->options = options;
+    resolver->slots = 0;
+    resolver->slot_mask = 0;
+    if (options.binding_count > JIT_BINDING_INDEX_THRESHOLD)
+    {
+        u64 slot_count = 1;
+        while (slot_count < (u64)options.binding_count * 2)
         {
-            name_found = true;
-            if (binding->kind == symbol->kind)
+            slot_count <<= 1;
+        }
+        u64 remaining = arena->reserved_size - arena->position;
+        // Without room for the index the linear scan below stays correct.
+        if (slot_count <= remaining / sizeof(u32) / 2 && slot_count <= UINT32_MAX)
+        {
+            u32* slots = arena_allocate(arena, u32, slot_count);
+            memset(slots, 0, slot_count * sizeof(u32));
+            u32 mask = (u32)(slot_count - 1);
+            for (u32 index = 0; index < options.binding_count; index += 1)
             {
-                if (!binding->address)
+                JitHostBinding const* binding = options.bindings + index;
+                u32 slot = jit_binding_name_slot(binding->name) & mask;
+                bool duplicate = false;
+                while (slots[slot] && !duplicate)
                 {
-                    *error = JIT_ERROR_INVALID_BINDING;
-                    return 0;
+                    JitHostBinding const* other = options.bindings + (slots[slot] - 1);
+                    JIT_COUNT_BINDING_VISIT();
+                    duplicate = other->kind == binding->kind && string_equal(other->name, binding->name);
+                    slot = (slot + 1) & mask;
                 }
-                *error = JIT_ERROR_NONE;
-                return binding;
+                if (!duplicate)
+                {
+                    slots[slot] = index + 1;
+                }
+            }
+            resolver->slots = slots;
+            resolver->slot_mask = mask;
+        }
+    }
+}
+
+// Returns the binding index, or UINT32_MAX with *error set.
+BUSTER_GLOBAL_LOCAL u32 jit_binding_resolve(JitBindingResolver const* resolver, ObjectSymbol const* symbol, JitError* error)
+{
+    JitOptions options = resolver->options;
+    u32 found = UINT32_MAX;
+    bool name_found = false;
+    if (resolver->slots)
+    {
+        u32 mask = resolver->slot_mask;
+        u32 slot = jit_binding_name_slot(symbol->name) & mask;
+        while (resolver->slots[slot] && found == UINT32_MAX)
+        {
+            u32 index = resolver->slots[slot] - 1;
+            JitHostBinding const* binding = options.bindings + index;
+            JIT_COUNT_BINDING_VISIT();
+            if (string_equal(binding->name, symbol->name))
+            {
+                name_found = true;
+                if (binding->kind == symbol->kind)
+                {
+                    found = index;
+                }
+            }
+            slot = (slot + 1) & mask;
+        }
+        // Same-name bindings of other kinds may sit beyond the match in the
+        // probe chain; only the match or the name's presence matters here.
+    }
+    else
+    {
+        for (u32 index = 0; index < options.binding_count && found == UINT32_MAX; index += 1)
+        {
+            JitHostBinding const* binding = options.bindings + index;
+            JIT_COUNT_BINDING_VISIT();
+            if (string_equal(binding->name, symbol->name))
+            {
+                name_found = true;
+                if (binding->kind == symbol->kind)
+                {
+                    found = index;
+                }
             }
         }
     }
-    *error = name_found ? JIT_ERROR_BINDING_KIND : JIT_ERROR_UNRESOLVED_IMPORT;
-    return 0;
+    if (found != UINT32_MAX && !options.bindings[found].address)
+    {
+        *error = JIT_ERROR_INVALID_BINDING;
+        found = UINT32_MAX;
+    }
+    else if (found != UINT32_MAX)
+    {
+        *error = JIT_ERROR_NONE;
+    }
+    else
+    {
+        *error = name_found ? JIT_ERROR_BINDING_KIND : JIT_ERROR_UNRESOLVED_IMPORT;
+    }
+    return found;
 }
 
 BUSTER_GLOBAL_LOCAL u64 jit_thunk_size(CpuArch arch)
@@ -362,7 +488,7 @@ BUSTER_GLOBAL_LOCAL bool jit_symbol_address(JitProgram const* program, ObjectSym
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_emit_thunks(JitProgram* program, JitOptions options, void* code_base, u64 thunk_offset,
-                                         u32 const* thunk_indices)
+                                         u32 const* thunk_indices, u32 const* binding_indices)
 {
     ObjectFile const* object = program->object;
     u64 thunk_size = jit_thunk_size(object->target.cpu_arch);
@@ -373,14 +499,14 @@ BUSTER_GLOBAL_LOCAL bool jit_emit_thunks(JitProgram* program, JitOptions options
         {
             continue;
         }
-        JitError binding_error = JIT_ERROR_NONE;
-        JitHostBinding const* binding = jit_binding_find(options, symbol, &binding_error);
-        if (!binding)
+        // Preflight resolved every thunk-bearing import exactly once.
+        if (binding_indices[symbol_index] >= options.binding_count)
         {
-            program->error = binding_error;
+            program->error = JIT_ERROR_INVALID_INPUT;
             program->failing_symbol = symbol->name;
             return false;
         }
+        JitHostBinding const* binding = options.bindings + binding_indices[symbol_index];
         u64 thunk_index = thunk_indices[symbol_index];
         u8* thunk = (u8*)code_base + thunk_offset + thunk_index * thunk_size;
         u64 target = (u64)(uintptr_t)binding->address;
@@ -430,7 +556,7 @@ BUSTER_GLOBAL_LOCAL bool jit_emit_thunks(JitProgram* program, JitOptions options
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions options, void* code_base, u64 thunk_offset,
-                                               u32 const* thunk_indices)
+                                               u32 const* thunk_indices, u32 const* binding_indices)
 {
     ObjectFile const* object = program->object;
     u64 thunk_size = jit_thunk_size(object->target.cpu_arch);
@@ -496,15 +622,14 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
                 program->failing_symbol = symbol->name;
                 return false;
             }
-            JitError binding_error = JIT_ERROR_NONE;
-            JitHostBinding const* binding = jit_binding_find(options, symbol, &binding_error);
-            if (!binding)
+            // Preflight resolved every imported symbol a relocation uses.
+            if (binding_indices[relocation->symbol] >= options.binding_count)
             {
-                program->error = binding_error;
+                program->error = JIT_ERROR_INVALID_INPUT;
                 program->failing_symbol = symbol->name;
                 return false;
             }
-            target = (u64)(uintptr_t)binding->address;
+            target = (u64)(uintptr_t)options.bindings[binding_indices[relocation->symbol]].address;
             if (jit_relocation_uses_function_thunk(relocation->kind, source->kind) && symbol->kind == OBJECT_SYMBOL_FUNCTION)
             {
                 u64 thunk_index = thunk_indices[relocation->symbol];
@@ -739,6 +864,26 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             return result;
         }
     }
+    TemporalArena scratch = scratch_begin(0, 0);
+    u64 scratch_remaining = scratch.arena->reserved_size - scratch.arena->position;
+    if ((u64)object->symbol_count > scratch_remaining / (2 * sizeof(u32)))
+    {
+        result.error = JIT_ERROR_CAPACITY;
+        scratch_end(scratch);
+        return result;
+    }
+    // Link-local scratch, released before every return: the binding index per
+    // used imported symbol (resolved once, reused by thunks and relocation
+    // application) and the thunk slot per imported function.
+    u32* binding_indices = arena_allocate(scratch.arena, u32, object->symbol_count);
+    u32* thunk_indices = arena_allocate(scratch.arena, u32, object->symbol_count);
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        binding_indices[symbol_index] = UINT32_MAX;
+        thunk_indices[symbol_index] = UINT32_MAX;
+    }
+    JitBindingResolver resolver = {0};
+    bool resolver_ready = false;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation const* relocation = object->relocations + index;
@@ -747,6 +892,7 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             // Nonempty arrays were refused above. A relocation in an empty
             // array is malformed, not an inert metadata relocation to ignore.
             result.error = JIT_ERROR_INVALID_INPUT;
+            scratch_end(scratch);
             return result;
         }
         if (jit_section_protection_class(object->sections[relocation->section].kind) == JIT_PROTECTION_CLASS_NONE)
@@ -756,6 +902,7 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         if (relocation->symbol >= object->symbol_count || (u32)relocation->kind >= (u32)OBJECT_RELOCATION_COUNT)
         {
             result.error = JIT_ERROR_INVALID_INPUT;
+            scratch_end(scratch);
             return result;
         }
         ObjectSymbol const* symbol = object->symbols + relocation->symbol;
@@ -763,12 +910,14 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         {
             result.error = JIT_ERROR_TLS_UNSUPPORTED;
             result.failing_symbol = symbol->name;
+            scratch_end(scratch);
             return result;
         }
         if (!jit_relocation_is_supported(relocation->kind, object->target.cpu_arch))
         {
             result.error = JIT_ERROR_UNSUPPORTED_RELOCATION;
             result.failing_symbol = symbol->name;
+            scratch_end(scratch);
             return result;
         }
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
@@ -776,6 +925,7 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         {
             result.error = JIT_ERROR_INVALID_INPUT;
             result.failing_symbol = symbol->name;
+            scratch_end(scratch);
             return result;
         }
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
@@ -785,37 +935,37 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             {
                 result.error = JIT_ERROR_EXTERNAL_DATA;
                 result.failing_symbol = symbol->name;
+                scratch_end(scratch);
                 return result;
             }
             if (symbol->kind == OBJECT_SYMBOL_DATA && !jit_external_data_relocation_is_supported(relocation->kind, object->target.cpu_arch))
             {
                 result.error = JIT_ERROR_EXTERNAL_DATA;
                 result.failing_symbol = symbol->name;
+                scratch_end(scratch);
                 return result;
             }
-            JitError binding_error = JIT_ERROR_NONE;
-            if (!jit_binding_find(options, symbol, &binding_error))
+            if (binding_indices[relocation->symbol] == UINT32_MAX)
             {
-                result.error = binding_error;
-                result.failing_symbol = symbol->name;
-                return result;
+                if (!resolver_ready)
+                {
+                    jit_binding_resolver_begin(&resolver, scratch.arena, options);
+                    resolver_ready = true;
+                }
+                JitError binding_error = JIT_ERROR_NONE;
+                u32 binding_index = jit_binding_resolve(&resolver, symbol, &binding_error);
+                if (binding_index == UINT32_MAX)
+                {
+                    result.error = binding_error;
+                    result.failing_symbol = symbol->name;
+                    scratch_end(scratch);
+                    return result;
+                }
+                binding_indices[relocation->symbol] = binding_index;
             }
         }
     }
 
-    TemporalArena scratch = scratch_begin(0, 0);
-    u64 scratch_remaining = scratch.arena->reserved_size - scratch.arena->position;
-    if ((u64)object->symbol_count > scratch_remaining / sizeof(u32))
-    {
-        result.error = JIT_ERROR_CAPACITY;
-        scratch_end(scratch);
-        return result;
-    }
-    u32* thunk_indices = arena_allocate(scratch.arena, u32, object->symbol_count);
-    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-    {
-        thunk_indices[symbol_index] = UINT32_MAX;
-    }
     for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
     {
         ObjectRelocation const* relocation = object->relocations + relocation_index;
@@ -990,8 +1140,9 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             memcpy(result.section_addresses[section_index], section->data.pointer, section->data.length);
         }
     }
-    if (!jit_emit_thunks(&result, options, class_bases[JIT_PROTECTION_CLASS_CODE], thunk_offset, thunk_indices) ||
-        !jit_apply_relocations(&result, options, class_bases[JIT_PROTECTION_CLASS_CODE], thunk_offset, thunk_indices))
+    if (!jit_emit_thunks(&result, options, class_bases[JIT_PROTECTION_CLASS_CODE], thunk_offset, thunk_indices, binding_indices) ||
+        !jit_apply_relocations(&result, options, class_bases[JIT_PROTECTION_CLASS_CODE], thunk_offset, thunk_indices,
+                               binding_indices))
     {
         goto link_failed;
     }
