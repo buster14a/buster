@@ -85,8 +85,9 @@
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
 //                                                 and derived-type interning
 //   c_ir_function_signature                       signatures and ABI limits
-//   c_ir_field_symbols, c_ir_field_named          member names compared by
-//                                                 interned symbol
+//   c_ir_field_symbols, c_ir_field_named,         member names compared by
+//   c_ir_field_index                              interned symbol; wide
+//                                                 records by a name index
 //   CIntegerIrBuilder                             per-module lowering state
 //   c_ir_label_metadata_*                         label provenance needed by
 //                                                 computed goto
@@ -9525,13 +9526,47 @@ BUSTER_C_INTERNAL bool c_ir_type_queued(const IrTypeId* queued, u32 count, IrTyp
 // stage-1 self-host compile, 18% of lowering's (#1594).
 #define C_IR_FIELD_SYMBOL_NONE UINT32_MAX
 
+// A wide aggregate also gets a name index on its first member lookup once its
+// layout has resolved (the fields are then settled): a hash table from field
+// symbol to the fields carrying it, chained in field order, plus the list of
+// unnamed fields, the only ones a promoted-member search descends into. A
+// lookup then visits the fields that carry the queried name and the unnamed
+// ones instead of every field, so N member accesses on an N-member record cost
+// O(N) rather than O(N^2) (#1313). Records under C_IR_FIELD_INDEX_MIN_FIELDS
+// keep the plain scan, which is cheaper than building a table for them.
+#define C_IR_FIELD_INDEX_MIN_FIELDS 16u
+
 typedef struct CIrFieldSymbolRow CIrFieldSymbolRow;
 struct CIrFieldSymbolRow
 {
     const IrField* fields;
     u32* symbols;
+    // Bucket heads and per-field chain links, both holding field index + 1
+    // with 0 as the end. A chain lists the fields of one bucket in field
+    // order; a lookup keeps the ones whose symbol equals the query's.
+    u32* index_heads;
+    u32* index_next;
+    // Indices of the fields with an empty name, in field order.
+    u32* index_unnamed;
     u32 field_count;
+    u32 index_shift;
+    u32 index_unnamed_count;
+    bool indexed;
 };
+
+#if BUSTER_INCLUDE_TESTS
+// Fields a member lookup visited, and name indexes built, on this thread.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_member_lookup_counts[2];
+
+void c_test_ir_member_lookup_counts(u64* visits, u64* builds)
+{
+    *visits = c_ir_member_lookup_counts[0];
+    *builds = c_ir_member_lookup_counts[1];
+}
+#define C_IR_MEMBER_LOOKUP_VISIT() (c_ir_member_lookup_counts[0] += 1)
+#else
+#define C_IR_MEMBER_LOOKUP_VISIT() ((void)0)
+#endif
 
 // Indexed by IrTypeId and sized, as CIrInitializerSlotCache is, to the
 // program's type capacity, which ir_program_add_type never grows.
@@ -9546,9 +9581,9 @@ struct CIrFieldSymbolCache
 // The symbol row of `type`, or null when the search must compare spellings:
 // a builder without a cache (the test hooks), a type that is not a row of the
 // program's table, or one without fields.
-BUSTER_C_INTERNAL u32* c_ir_field_symbols(CIntegerIrBuilder* builder, const IrType* type)
+BUSTER_C_INTERNAL CIrFieldSymbolRow* c_ir_field_symbol_row(CIntegerIrBuilder* builder, const IrType* type)
 {
-    u32* result = 0;
+    CIrFieldSymbolRow* result = 0;
     CIrFieldSymbolCache* cache = builder->field_symbols;
     if (cache && cache->symbols && type->field_count)
     {
@@ -9570,12 +9605,157 @@ BUSTER_C_INTERNAL u32* c_ir_field_symbols(CIntegerIrBuilder* builder, const IrTy
                 row->field_count = type->field_count;
                 row->symbols = arena_allocate(cache->arena, u32, type->field_count);
                 memset(row->symbols, 0, sizeof(*row->symbols) * type->field_count);
+                row->index_heads = 0;
+                row->index_next = 0;
+                row->index_unnamed = 0;
+                row->index_shift = 0;
+                row->index_unnamed_count = 0;
+                row->indexed = false;
                 cache->rows[index] = row;
             }
-            result = row->symbols;
+            result = row;
         }
     }
     return result;
+}
+
+BUSTER_C_INTERNAL u32* c_ir_field_symbols(CIntegerIrBuilder* builder, const IrType* type)
+{
+    CIrFieldSymbolRow* row = c_ir_field_symbol_row(builder, type);
+    return row ? row->symbols : 0;
+}
+
+// The symbol of field `field_index` of `row`, probing the table on first use
+// (see CIrFieldSymbolRow's comment above for the encoding).
+BUSTER_C_INTERNAL u32 c_ir_field_row_symbol(CIntegerIrBuilder* builder, CIrFieldSymbolRow* row, u32 field_index)
+{
+    u32 field_symbol = row->symbols[field_index];
+    const IrField* field = row->fields + field_index;
+    if (!field_symbol && field->name.length)
+    {
+        field_symbol = c_symbol_find(builder->field_symbols->symbols, field->name);
+        field_symbol = field_symbol ? field_symbol : C_IR_FIELD_SYMBOL_NONE;
+        row->symbols[field_index] = field_symbol;
+    }
+    return field_symbol;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_field_index_bucket(const CIrFieldSymbolRow* row, u32 symbol)
+{
+    return (symbol * 0x9E3779B1u) >> row->index_shift;
+}
+
+// The name-indexed row of `type`, built on first use, or null when the caller
+// must scan: a type below the size threshold, one whose layout is not resolved
+// (its field rows may still be written), or one without a symbol row.
+BUSTER_C_INTERNAL CIrFieldSymbolRow* c_ir_field_index(CIntegerIrBuilder* builder, const IrType* type)
+{
+    CIrFieldSymbolRow* result = 0;
+    if (type->field_count >= C_IR_FIELD_INDEX_MIN_FIELDS && type->layout.resolved)
+    {
+        CIrFieldSymbolRow* row = c_ir_field_symbol_row(builder, type);
+        if (row)
+        {
+            if (!row->indexed)
+            {
+                Arena* arena = builder->field_symbols->arena;
+                u32 bits = 1;
+                while (bits < 31 && ((u32)1 << bits) < row->field_count * 2u)
+                {
+                    bits += 1;
+                }
+                row->index_shift = 32 - bits;
+                row->index_heads = arena_allocate(arena, u32, (u64)1 << bits);
+                memset(row->index_heads, 0, sizeof(*row->index_heads) * ((u64)1 << bits));
+                row->index_next = arena_allocate(arena, u32, row->field_count);
+                row->index_unnamed = arena_allocate(arena, u32, row->field_count);
+                row->index_unnamed_count = 0;
+                for (u32 field_index = 0; field_index < row->field_count; field_index += 1)
+                {
+                    row->index_next[field_index] = 0;
+                    c_ir_field_row_symbol(builder, row, field_index);
+                }
+                for (u32 position = row->field_count; position > 0; position -= 1)
+                {
+                    u32 field_index = position - 1;
+                    if (!row->fields[field_index].name.length)
+                    {
+                        row->index_unnamed[row->index_unnamed_count++] = field_index;
+                    }
+                    else if (row->symbols[field_index] != C_IR_FIELD_SYMBOL_NONE)
+                    {
+                        u32 bucket = c_ir_field_index_bucket(row, row->symbols[field_index]);
+                        row->index_next[field_index] = row->index_heads[bucket];
+                        row->index_heads[bucket] = field_index + 1;
+                    }
+                }
+                // Built back to front so the chains run in field order; the
+                // unnamed list was filled the same way and is reversed here.
+                for (u32 low = 0, high = row->index_unnamed_count; low + 1 < high; low += 1, high -= 1)
+                {
+                    u32 swap = row->index_unnamed[low];
+                    row->index_unnamed[low] = row->index_unnamed[high - 1];
+                    row->index_unnamed[high - 1] = swap;
+                }
+                row->indexed = true;
+#if BUSTER_INCLUDE_TESTS
+                c_ir_member_lookup_counts[1] += 1;
+#endif
+            }
+            result = row;
+        }
+    }
+    return result;
+}
+
+// The first chain entry at or after `chain` (field index + 1, 0 for none)
+// whose field carries `symbol`.
+BUSTER_C_INTERNAL u32 c_ir_field_index_match(const CIrFieldSymbolRow* row, u32 chain, u32 symbol)
+{
+    while (chain && row->symbols[chain - 1] != symbol)
+    {
+        chain = row->index_next[chain - 1];
+    }
+    return chain;
+}
+
+// The fields of an indexed row a lookup of `symbol` visits, in order: first
+// those carrying the symbol, then the unnamed ones. Returns false when done.
+typedef struct CIrFieldIndexCursor CIrFieldIndexCursor;
+struct CIrFieldIndexCursor
+{
+    const CIrFieldSymbolRow* row;
+    u32 symbol;
+    u32 chain;
+    u32 unnamed;
+};
+
+BUSTER_C_INTERNAL CIrFieldIndexCursor c_ir_field_index_cursor(const CIrFieldSymbolRow* row, u32 symbol)
+{
+    CIrFieldIndexCursor cursor = {.row = row, .symbol = symbol};
+    cursor.chain = c_ir_field_index_match(row, row->index_heads[c_ir_field_index_bucket(row, symbol)], symbol);
+    return cursor;
+}
+
+BUSTER_C_INTERNAL bool c_ir_field_index_next(CIrFieldIndexCursor* cursor, u32* field_index, bool* named)
+{
+    bool more = true;
+    if (cursor->chain)
+    {
+        *field_index = cursor->chain - 1;
+        *named = true;
+        cursor->chain = c_ir_field_index_match(cursor->row, cursor->row->index_next[*field_index], cursor->symbol);
+    }
+    else if (cursor->unnamed < cursor->row->index_unnamed_count)
+    {
+        *field_index = cursor->row->index_unnamed[cursor->unnamed++];
+        *named = false;
+    }
+    else
+    {
+        more = false;
+    }
+    return more;
 }
 
 // Whether `field` is the member a token names. An interned token compares its
@@ -9735,10 +9915,35 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
             break;
         }
         u32* candidate_symbols = member.symbol ? c_ir_field_symbols(builder, candidate) : 0;
-        for (u32 index = 0; index < candidate->field_count; index += 1)
+        // A wide, resolved candidate visits only the fields named like the
+        // token and its unnamed ones (c_ir_field_index); the rest cannot
+        // match or descend, so skipping them leaves the outcome unchanged.
+        CIrFieldSymbolRow* candidate_row = member.symbol ? c_ir_field_index(builder, candidate) : 0;
+        CIrFieldIndexCursor candidate_cursor = {0};
+        if (candidate_row)
         {
+            candidate_cursor = c_ir_field_index_cursor(candidate_row, member.symbol);
+        }
+        u32 scan_index = 0;
+        for (;;)
+        {
+            u32 index = scan_index;
+            bool indexed_named = false;
+            if (candidate_row)
+            {
+                if (!c_ir_field_index_next(&candidate_cursor, &index, &indexed_named))
+                {
+                    break;
+                }
+            }
+            else if (scan_index >= candidate->field_count)
+            {
+                break;
+            }
+            scan_index += 1;
+            C_IR_MEMBER_LOOKUP_VISIT();
             IrField* candidate_field = &candidate->fields[index];
-            if (c_ir_field_named(builder, candidate_symbols, candidate_field, index, member.symbol, member_spelling))
+            if (candidate_row ? indexed_named : c_ir_field_named(builder, candidate_symbols, candidate_field, index, member.symbol, member_spelling))
             {
                 if (found_node == UINT32_MAX)
                 {
@@ -29015,104 +29220,160 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_queued(const CIrPromotedMemberWork* 
     return found;
 }
 
+// The search queue starts on the C stack and grows into scratch only for a
+// record whose anonymous aggregates outnumber it. It used to be sized by the
+// whole type table on every call, which a lookup on a wide record paid once
+// per designator (#1313).
+#define C_IR_PROMOTED_MEMBER_LOCAL_CAPACITY 8u
+
 BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrTypeId root, String8 member, CIrPromotedMemberPath* result)
 {
     u32 capacity = builder->program->types.count;
-    if (!capacity || root.value >= capacity)
+    bool status = false;
+    if (capacity && root.value < capacity)
     {
-        return false;
-    }
-    result->ambiguous = false;
-    TemporalArena promoted_member_scratch = scratch_begin(&builder->temporary_arena, 1);
-    Arena* arena = promoted_member_scratch.arena;
-    CIrPromotedMemberWork* work = arena_allocate(arena, CIrPromotedMemberWork, capacity);
-    u32 work_index = 0;
-    u32 work_count = 1;
-    bool found = false;
-    bool ambiguous = false;
-    u32 found_depth = UINT32_MAX;
-    IrType* root_type = ir_type_from_id(&builder->program->types, root);
-    work[0] = (CIrPromotedMemberWork){
-        .type = root,
-        .root_field = UINT32_MAX,
-        .depth = 0,
-        .has_union = root_type && root_type->kind == IR_TYPE_UNION,
-        .union_size = root_type && root_type->kind == IR_TYPE_UNION ? root_type->layout.size : 0,
-    };
-    if (work[0].has_union && !root_type->layout.resolved)
-    {
-        work[0].has_union = false;
-    }
-    while (work_index < work_count && !ambiguous)
-    {
-        CIrPromotedMemberWork current = work[work_index++];
-        IrType* type = ir_type_from_id(&builder->program->types, current.type);
-        if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
+        result->ambiguous = false;
+        CIrPromotedMemberWork local_work[C_IR_PROMOTED_MEMBER_LOCAL_CAPACITY];
+        CIrPromotedMemberWork* work = local_work;
+        u32 work_capacity = BUSTER_MIN(capacity, C_IR_PROMOTED_MEMBER_LOCAL_CAPACITY);
+        TemporalArena promoted_member_scratch = {0};
+        bool scratch_open = false;
+        // The member's interned symbol, when the table has one; a name the
+        // table never interned is compared by spelling.
+        u32 member_symbol = builder->field_symbols && builder->field_symbols->symbols && member.length
+                                ? c_symbol_find(builder->field_symbols->symbols, member)
+                                : 0;
+        u32 work_index = 0;
+        u32 work_count = 1;
+        bool found = false;
+        bool ambiguous = false;
+        bool overflow = false;
+        u32 found_depth = UINT32_MAX;
+        IrType* root_type = ir_type_from_id(&builder->program->types, root);
+        work[0] = (CIrPromotedMemberWork){
+            .type = root,
+            .root_field = UINT32_MAX,
+            .depth = 0,
+            .has_union = root_type && root_type->kind == IR_TYPE_UNION,
+            .union_size = root_type && root_type->kind == IR_TYPE_UNION ? root_type->layout.size : 0,
+        };
+        if (work[0].has_union && !root_type->layout.resolved)
         {
-            continue;
+            work[0].has_union = false;
         }
-        if (found && current.depth > found_depth)
+        while (work_index < work_count && !ambiguous && !overflow)
         {
-            break;
-        }
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-        {
-            IrField* field = type->fields + field_index;
-            if (string_equal(field->name, member))
+            CIrPromotedMemberWork current = work[work_index++];
+            IrType* type = ir_type_from_id(&builder->program->types, current.type);
+            if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
             {
-                if (current.offset > UINT64_MAX - field->offset)
+                continue;
+            }
+            if (found && current.depth > found_depth)
+            {
+                break;
+            }
+            // As in c_ir_emit_field_place_from_value, a wide resolved record
+            // visits only the fields named like the member and its unnamed
+            // fields.
+            CIrFieldSymbolRow* row = member_symbol ? c_ir_field_index(builder, type) : 0;
+            CIrFieldIndexCursor cursor = {0};
+            if (row)
+            {
+                cursor = c_ir_field_index_cursor(row, member_symbol);
+            }
+            u32 scan_index = 0;
+            while (!overflow)
+            {
+                u32 field_index = scan_index;
+                bool indexed_named = false;
+                if (row)
                 {
-                    scratch_end(promoted_member_scratch);
-                    return false;
+                    if (!c_ir_field_index_next(&cursor, &field_index, &indexed_named))
+                    {
+                        break;
+                    }
                 }
-                if (!found)
+                else if (scan_index >= type->field_count)
                 {
-                    *result = (CIrPromotedMemberPath){
-                        .type = field->type,
-                        .field = field,
+                    break;
+                }
+                scan_index += 1;
+                C_IR_MEMBER_LOOKUP_VISIT();
+                IrField* field = type->fields + field_index;
+                if (row ? indexed_named : string_equal(field->name, member))
+                {
+                    if (current.offset > UINT64_MAX - field->offset)
+                    {
+                        overflow = true;
+                        continue;
+                    }
+                    if (!found)
+                    {
+                        *result = (CIrPromotedMemberPath){
+                            .type = field->type,
+                            .field = field,
+                            .offset = current.offset + field->offset,
+                            .union_offset = current.union_offset,
+                            .union_size = current.union_size,
+                            .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
+                            .has_union = current.has_union,
+                        };
+                        found = true;
+                        found_depth = current.depth;
+                    }
+                    else if (current.depth == found_depth)
+                    {
+                        ambiguous = true;
+                    }
+                    continue;
+                }
+                if (found && current.depth >= found_depth)
+                {
+                    continue;
+                }
+                IrType* child = ir_type_from_id(&builder->program->types, field->type);
+                if (!field->name.length && child && (child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && field->type.value < capacity &&
+                    work_count < capacity && current.offset <= UINT64_MAX - field->offset && !c_ir_promoted_member_queued(work, work_count, field->type))
+                {
+                    if (work_count == work_capacity)
+                    {
+                        u32 grown = (u32)BUSTER_MIN((u64)capacity, (u64)work_capacity * 2);
+                        if (!scratch_open)
+                        {
+                            promoted_member_scratch = scratch_begin(&builder->temporary_arena, 1);
+                            scratch_open = true;
+                        }
+                        CIrPromotedMemberWork* grown_work = arena_allocate(promoted_member_scratch.arena, CIrPromotedMemberWork, grown);
+                        memcpy(grown_work, work, sizeof(*work) * work_count);
+                        work = grown_work;
+                        work_capacity = grown;
+                    }
+                    IrTypeId child_id = field->type;
+                    bool child_is_union = child->kind == IR_TYPE_UNION && child->layout.resolved;
+                    work[work_count++] = (CIrPromotedMemberWork){
+                        .type = child_id,
                         .offset = current.offset + field->offset,
-                        .union_offset = current.union_offset,
-                        .union_size = current.union_size,
+                        .union_offset = child_is_union ? current.offset + field->offset : current.union_offset,
+                        .union_size = child_is_union ? child->layout.size : current.union_size,
                         .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
-                        .has_union = current.has_union,
+                        .depth = current.depth + 1,
+                        .has_union = child_is_union || current.has_union,
                     };
-                    found = true;
-                    found_depth = current.depth;
                 }
-                else if (current.depth == found_depth)
-                {
-                    ambiguous = true;
-                }
-                continue;
-            }
-            if (found && current.depth >= found_depth)
-            {
-                continue;
-            }
-            IrType* child = ir_type_from_id(&builder->program->types, field->type);
-            if (!field->name.length && child && (child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && field->type.value < capacity &&
-                work_count < capacity && current.offset <= UINT64_MAX - field->offset && !c_ir_promoted_member_queued(work, work_count, field->type))
-            {
-                IrTypeId child_id = field->type;
-                bool child_is_union = child->kind == IR_TYPE_UNION && child->layout.resolved;
-                work[work_count++] = (CIrPromotedMemberWork){
-                    .type = child_id,
-                    .offset = current.offset + field->offset,
-                    .union_offset = child_is_union ? current.offset + field->offset : current.union_offset,
-                    .union_size = child_is_union ? child->layout.size : current.union_size,
-                    .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
-                    .depth = current.depth + 1,
-                    .has_union = child_is_union || current.has_union,
-                };
             }
         }
+        if (ambiguous && !overflow)
+        {
+            result->ambiguous = true;
+        }
+        if (scratch_open)
+        {
+            scratch_end(promoted_member_scratch);
+        }
+        status = found && !ambiguous && !overflow;
     }
-    if (ambiguous)
-    {
-        result->ambiguous = true;
-    }
-    scratch_end(promoted_member_scratch);
-    return found && !ambiguous;
+    return status;
 }
 
 BUSTER_C_INTERNAL bool c_ir_promoted_member_type(CIntegerIrBuilder* builder, IrTypeId root, String8 member, IrTypeId* result)
