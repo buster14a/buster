@@ -15796,8 +15796,11 @@ struct CIrNestedInitializerTask
     u32 index;
     u32 next_index;
     u32 cursor_count;
+    u32 range_first;
+    u32 range_last;
     bool resume;
     bool zero_subobject;
+    bool range_copy;
 };
 
 typedef struct CIrNestedCompoundLiteralState CIrNestedCompoundLiteralState;
@@ -15821,6 +15824,7 @@ struct CIrNestedCompoundLiteralState
     u32 index;
     u32 next_index;
     u32 selected_index;
+    u32 range_last;
     bool task_active;
     bool cursor_item;
     bool promoted_designator;
@@ -28103,6 +28107,29 @@ BUSTER_C_INTERNAL bool c_ir_nested_initializer_field_cursors(CIntegerIrBuilder* 
     return result;
 }
 
+BUSTER_C_INTERNAL bool c_ir_initializer_inference_index_range(CIntegerIrBuilder* builder, u32 start, u32 end, u64* first_out, u64* last_out,
+                                                                bool* range_out, String8* message_out, u32* token_out);
+
+// A GNU range designator (`[first ... last] = value`) evaluates its value once
+// and gives it to every element of the range (GCC manual, "Designated
+// Initializers"). The item has already initialized element `first`; copy it
+// over the rest of the range before a later item can override part of one.
+BUSTER_C_INTERNAL bool c_ir_nested_initializer_copy_range(CIntegerIrBuilder* builder, IrValueId array_place, IrTypeId element_type, u32 first,
+                                                           u32 last, CToken token)
+{
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrValueId first_place = c_ir_emit_index_place(builder, array_place, c_ir_emit_integer_value(builder, first, false, token), source);
+    IrValueId value = first_place.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID
+                                                                     : c_ir_emit_load_place(builder, first_place, element_type, source);
+    bool result = value.value != IR_ID_UNDERLYING_INVALID;
+    for (u64 element = (u64)first + 1; result && element <= last; element += 1)
+    {
+        IrValueId place = c_ir_emit_index_place(builder, array_place, c_ir_emit_integer_value(builder, element, false, token), source);
+        result = place.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, place, element_type, value, source);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -28112,6 +28139,14 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                       c_ir_emit_store_place(builder, frame->as.nested_compound_literal.state->child_place,
                                             frame->as.nested_compound_literal.state->child_type, machine->child_result.value,
                                             frame->as.nested_compound_literal.state->source);
+        u32 range_first = frame->as.nested_compound_literal.state->selected_index;
+        u32 range_last = frame->as.nested_compound_literal.state->range_last;
+        if (stored && range_last > range_first)
+        {
+            stored = c_ir_nested_initializer_copy_range(builder, frame->as.nested_compound_literal.state->task.place,
+                                                        frame->as.nested_compound_literal.state->child_type, range_first, range_last,
+                                                        builder->preprocess.tokens[frame->as.nested_compound_literal.state->item_start]);
+        }
         if (!stored)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -28120,7 +28155,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         if (!frame->as.nested_compound_literal.state->cursor_item &&
             !frame->as.nested_compound_literal.state->promoted_designator)
         {
-            frame->as.nested_compound_literal.state->next_index = frame->as.nested_compound_literal.state->selected_index + 1;
+            frame->as.nested_compound_literal.state->next_index = range_last + 1;
         }
         frame->as.nested_compound_literal.state->item_start = frame->as.nested_compound_literal.state->index + 1;
         frame->as.nested_compound_literal.state->index += 1;
@@ -28184,6 +28219,15 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             frame->as.nested_compound_literal.state->task =
                 frame->as.nested_compound_literal.state->tasks[--frame->as.nested_compound_literal.state->task_count];
             CIrNestedInitializerTask* active = &frame->as.nested_compound_literal.state->task;
+            if (active->range_copy)
+            {
+                if (!c_ir_nested_initializer_copy_range(builder, active->place, active->type, active->range_first, active->range_last,
+                                                        builder->preprocess.tokens[active->open]))
+                {
+                    goto c_ir_nested_compound_failed;
+                }
+                continue;
+            }
             if (active->resume)
             {
                 frame->as.nested_compound_literal.state->next_index = active->next_index;
@@ -28314,6 +28358,8 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 goto c_ir_nested_compound_failed;
             }
             u32 selected_index = next_index;
+            u32 range_last = 0;
+            bool ranged = false;
             u32 value_start = item_start;
             u32 nested_designator_start = UINT32_MAX;
             u32 designator_equals = UINT32_MAX;
@@ -28330,23 +28376,34 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, item_start, index, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
                 u64 designated = UINT64_MAX;
-                if (close >= index || close + 1 >= index || close != item_start + 2)
+                ranged = close < index && close + 1 < index && c_ir_array_designator_has_range(builder, item_start, close);
+                if (ranged)
                 {
-                    if (close < index && c_ir_array_designator_has_range(builder, item_start, close))
+                    u64 designated_last = UINT64_MAX;
+                    String8 range_message = {0};
+                    u32 range_token = 0;
+                    if (!c_ir_initializer_inference_index_range(builder, item_start + 1, close, &designated, &designated_last, &ranged, &range_message,
+                                                                &range_token) ||
+                        designated_last >= type->element_count || designated_last > UINT32_MAX)
                     {
-                        builder->failure_message = S8("range designators are only supported for static aggregate initializers");
+                        builder->failure_message = range_message.length ? range_message : S8("array designator range exceeds the array bound");
+                        goto c_ir_nested_compound_failed;
                     }
+                    range_last = (u32)designated_last;
+                }
+                else if (close >= index || close + 1 >= index || close != item_start + 2)
+                {
                     goto c_ir_nested_compound_failed;
                 }
                 CToken designator = builder->preprocess.tokens[item_start + 1];
-                if (designator.kind == C_TOKEN_PREPROCESSING_NUMBER)
+                if (!ranged && designator.kind == C_TOKEN_PREPROCESSING_NUMBER)
                 {
                     if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, designator), &designated))
                     {
                         goto c_ir_nested_compound_failed;
                     }
                 }
-                else if (designator.kind == C_TOKEN_IDENTIFIER)
+                else if (!ranged && designator.kind == C_TOKEN_IDENTIFIER)
                 {
                     CEntityId entity = c_ir_identifier_entity(builder, item_start + 1);
                     if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].kind != C_ENTITY_ENUMERATOR ||
@@ -28365,6 +28422,13 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
                 if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
                 {
+                    goto c_ir_nested_compound_failed;
+                }
+                // Copying the first element over the range is only exact when
+                // the item initializes that whole element.
+                if (ranged && designator_equals != nested_designator_start)
+                {
+                    builder->failure_message = S8("a range designator followed by further designators is only supported for static aggregate initializers");
                     goto c_ir_nested_compound_failed;
                 }
                 value_start = designator_equals + 1;
@@ -28434,6 +28498,10 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     goto c_ir_nested_compound_failed;
                 }
             }
+            if (!ranged)
+            {
+                range_last = selected_index;
+            }
             u64 child_count = (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR) ? owner_type->element_count : owner_type->field_count;
             if ((!promoted_designator && selected_index >= child_count) || value_start >= index)
             {
@@ -28482,7 +28550,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                         goto c_ir_nested_compound_failed;
                     }
                     frame->as.nested_compound_literal.state->cursors[frame->as.nested_compound_literal.state->cursor_count++] =
-                        (CIrNestedInitializerCursor){.place = task.place, .type = task.type, .next_index = selected_index + 1};
+                        (CIrNestedInitializerCursor){.place = task.place, .type = task.type, .next_index = range_last + 1};
                 }
                 else if (!c_ir_nested_initializer_field_cursors(builder, frame->as.nested_compound_literal.state, task.place, child_place))
                 {
@@ -28496,7 +28564,12 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     u32 subscript_close =
                         c_ir_matching_delimiter_cached(builder, designator, designator_equals, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
                     u64 subscript_value = UINT64_MAX;
-                    if (subscript_close >= designator_equals || c_ir_array_designator_has_range(builder, designator, subscript_close) ||
+                    if (subscript_close < designator_equals && c_ir_array_designator_has_range(builder, designator, subscript_close))
+                    {
+                        builder->failure_message = S8("a range designator after another designator is only supported for static aggregate initializers");
+                        goto c_ir_nested_compound_failed;
+                    }
+                    if (subscript_close >= designator_equals ||
                         !c_ir_integer_constant_evaluate(builder->arena, builder, designator + 1, subscript_close, &subscript_value) ||
                         subscript_value > UINT32_MAX)
                     {
@@ -28561,6 +28634,15 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 value_is_aggregate = type_close + 1 < index &&
                                      c_token_is_punctuator(&builder->preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE);
             }
+            bool elided = child && c_ir_initializer_type_is_aggregate(child) && !child->is_complex && !value_is_aggregate && !string_initializer &&
+                          !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE);
+            // A brace-elided range item initializes only part of each element,
+            // so the whole-element copy below cannot express it.
+            if (ranged && elided)
+            {
+                builder->failure_message = S8("a range designator whose value elides the braces of an aggregate element is only supported for static aggregate initializers");
+                goto c_ir_nested_compound_failed;
+            }
             while (child && c_ir_initializer_type_is_aggregate(child) && !child->is_complex && !value_is_aggregate && !string_initializer &&
                    !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
             {
@@ -28620,14 +28702,16 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 IrValueId string_value = c_ir_emit_string_range_typed(builder, value_start, index, child_type);
                 if (string_value.value == IR_ID_UNDERLYING_INVALID ||
-                    !c_ir_emit_store_place(builder, child_place, child_type, string_value, source))
+                    !c_ir_emit_store_place(builder, child_place, child_type, string_value, source) ||
+                    (ranged && !c_ir_nested_initializer_copy_range(builder, task.place, child_type, selected_index, range_last,
+                                                                   builder->preprocess.tokens[value_start])))
                 {
                     goto c_ir_nested_compound_failed;
                 }
             }
             else if (nested)
             {
-                if (frame->as.nested_compound_literal.state->task_count > frame->as.nested_compound_literal.state->capacity - 2)
+                if (frame->as.nested_compound_literal.state->task_count + 2 + (u32)ranged > frame->as.nested_compound_literal.state->capacity)
                 {
                     goto c_ir_nested_compound_failed;
                 }
@@ -28637,12 +28721,26 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 parent.resume = true;
                 parent.item_start = index + 1;
                 parent.index = index + 1;
-                parent.next_index = (!cursor_item && !promoted_designator) ? selected_index + 1 : next_index;
+                parent.next_index = (!cursor_item && !promoted_designator) ? range_last + 1 : next_index;
                 parent.cursor_count = frame->as.nested_compound_literal.state->cursor_count;
                 parent.cursors = arena_allocate(builder->temporary_arena, CIrNestedInitializerCursor, parent.cursor_count);
                 memcpy(parent.cursors, frame->as.nested_compound_literal.state->cursors,
                        parent.cursor_count * sizeof(*parent.cursors));
                 frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = parent;
+                if (ranged)
+                {
+                    // Runs after the child's brace list and before the parent's
+                    // next item.
+                    frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = (CIrNestedInitializerTask){
+                        .place = task.place,
+                        .type = child_type,
+                        .open = value_start,
+                        .close = index - 1,
+                        .range_first = selected_index,
+                        .range_last = range_last,
+                        .range_copy = true,
+                    };
+                }
                 frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = (CIrNestedInitializerTask){
                     .place = child_place,
                     .type = child_type,
@@ -28671,6 +28769,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 frame->as.nested_compound_literal.state->index = index;
                 frame->as.nested_compound_literal.state->next_index = next_index;
                 frame->as.nested_compound_literal.state->selected_index = selected_index;
+                frame->as.nested_compound_literal.state->range_last = range_last;
                 frame->as.nested_compound_literal.state->cursor_item = cursor_item;
                 frame->as.nested_compound_literal.state->promoted_designator = promoted_designator;
                 frame->stage = C_IR_LOWER_STAGE_CHILD;
@@ -28689,7 +28788,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             }
             if (!cursor_item && !promoted_designator)
             {
-                next_index = selected_index + 1;
+                next_index = range_last + 1;
             }
             item_start = index + 1;
             index += 1;
@@ -28910,9 +29009,13 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             {
                 u32 subscript_close =
                     c_ir_matching_delimiter_cached(builder, token_index, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+                // The flat machine also holds one operand per slot, so a GNU
+                // range designator (`[0 ... 2] = v`) goes to the nested walker,
+                // which copies the first element over the rest of the range.
                 if (subscript_close + 1 < close &&
                     (c_token_is_punctuator(&builder->preprocess.tokens[subscript_close + 1], C_PUNCTUATOR_LEFT_BRACKET) ||
-                     c_token_is_punctuator(&builder->preprocess.tokens[subscript_close + 1], C_PUNCTUATOR_DOT)))
+                     c_token_is_punctuator(&builder->preprocess.tokens[subscript_close + 1], C_PUNCTUATOR_DOT) ||
+                     c_ir_array_designator_has_range(builder, token_index, subscript_close)))
                 {
                     nested = true;
                     break;

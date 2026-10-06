@@ -6255,16 +6255,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
     }
-    c_test_case_range_lower_diagnostic(
-        arguments, &result,
-        S8("int runtime_range_scalar(void) { return ((int[4]){ [1 ... 2] = 3 })[1]; }\n"),
-        S8("in function 'runtime_range_scalar': range designators are only supported for static aggregate initializers"));
+    // Automatic range items copy their first element over the range, which
+    // is exact only when the item initializes each whole element (#2839).
     c_test_case_range_lower_diagnostic(
         arguments, &result,
         S8("struct RuntimeRangePair { int first; int second; };"
-           " int runtime_range_aggregate(void) {"
-           " return ((struct RuntimeRangePair[2]){ [0 ... 1] = { 3, 4 } })[1].second; }\n"),
-        S8("in function 'runtime_range_aggregate': range designators are only supported for static aggregate initializers"));
+           " int runtime_range_chain(void) {"
+           " struct RuntimeRangePair values[3] = { [0 ... 2].second = 4 }; return values[1].second; }\n"),
+        S8("in function 'runtime_range_chain': a range designator followed by further designators is only supported for static aggregate initializers"));
+    c_test_case_range_lower_diagnostic(
+        arguments, &result,
+        S8("struct RuntimeRangePair { int first; int second; };"
+           " int runtime_range_elided(void) {"
+           " struct RuntimeRangePair values[3] = { [0 ... 2] = 4 }; return values[1].first; }\n"),
+        S8("in function 'runtime_range_elided': a range designator whose value elides the braces of an aggregate element is only supported for static aggregate initializers"));
+    c_test_case_range_lower_diagnostic(
+        arguments, &result,
+        S8("int runtime_range_inner(void) { int values[2][3] = { [0][0 ... 1] = 1 }; return values[0][1]; }\n"),
+        S8("in function 'runtime_range_inner': a range designator after another designator is only supported for static aggregate initializers"));
     c_test_auto_type_diagnostic(
         arguments, &result,
         S8("int strict_initializer_range_c11(void) { static int values[2] = { [0 ... 1] = 1 }; return values[0]; }\n"),
@@ -39408,6 +39416,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_initializer_elision_runtime(Un
     return result;
 }
 
+// GNU range designators in automatic initializers and compound literals
+// (#2839): the value is evaluated once, later items override part of the
+// range, and positional items continue after its last element.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_automatic_range_designator_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 fixture = S8(
+        "struct pair { int a; int b; };\n"
+        "enum { LO = 1, HI = 3 };\n"
+        "static int counter;\n"
+        "static int bump(void) { return ++counter; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failed = 0;\n"
+        "    int x = 4;\n"
+        "    int a[6] = { [0 ... 2] = 1, [4 ... 5] = 2 };\n"
+        "    int b[8] = { [LO ... HI] = 5, 9, [1] = 4 };\n"
+        "    int c[5] = { [0 ... 4] = bump() };\n"
+        "    struct pair d[4] = { [0 ... 2] = { 3, 4 }, [1].b = 8 };\n"
+        "    char e[3][4] = { [0 ... 1] = \"ab\", [2] = \"z\" };\n"
+        "    long f[] = { [2 ... 4] = 7, 1 };\n"
+        "    int g[2][3] = { [0 ... 1] = { [1 ... 2] = 6 } };\n"
+        "    struct pair h = ((struct pair[3]){ [0 ... 2] = { 1, 2 } })[2];\n"
+        "    int k = ((int[4]){ [1 ... 2] = 3 })[1];\n"
+        "    int m[4] = { [0 ... 3] = x * 2 };\n"
+        "    unsigned i;\n"
+        "    failed |= a[0] != 1 || a[1] != 1 || a[2] != 1 || a[3] != 0 || a[4] != 2 || a[5] != 2;\n"
+        "    failed |= b[0] != 0 || b[1] != 4 || b[2] != 5 || b[3] != 5 || b[4] != 9 || b[5] != 0;\n"
+        "    for (i = 0; i < 5; i += 1) failed |= c[i] != 1;\n"
+        "    failed |= counter != 1;\n"
+        "    failed |= d[0].a != 3 || d[0].b != 4 || d[1].a != 3 || d[1].b != 8 || d[2].a != 3 || d[2].b != 4 || d[3].a != 0 || d[3].b != 0;\n"
+        "    failed |= e[0][0] != 'a' || e[0][1] != 'b' || e[0][2] != 0 || e[1][0] != 'a' || e[1][1] != 'b' || e[2][0] != 'z' || e[2][1] != 0;\n"
+        "    failed |= sizeof(f) / sizeof(f[0]) != 6 || f[0] != 0 || f[1] != 0 || f[2] != 7 || f[3] != 7 || f[4] != 7 || f[5] != 1;\n"
+        "    for (i = 0; i < 2; i += 1) failed |= g[i][0] != 0 || g[i][1] != 6 || g[i][2] != 6;\n"
+        "    failed |= h.a != 1 || h.b != 2 || k != 3;\n"
+        "    for (i = 0; i < 4; i += 1) failed |= m[i] != 8;\n"
+        "    return failed;\n"
+        "}\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("automatic-range-designator"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(fixture))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("automatic-range-designator-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -46527,6 +46612,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_comma_value_operands);
     C_TEST_FIXTURE(arguments, c_test_complex_bool_conversion);
     C_TEST_FIXTURE(arguments, c_test_complex_initializer_elision_runtime);
+    C_TEST_FIXTURE(arguments, c_test_automatic_range_designator_runtime);
     C_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
     C_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     C_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
