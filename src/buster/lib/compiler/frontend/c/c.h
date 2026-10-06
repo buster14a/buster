@@ -449,6 +449,8 @@ struct CPreprocessDetail
     u64 include_file_probe_count;
     // Path comparisons made while assigning canonical file-table indices.
     u64 file_table_compare_count;
+    // Name comparisons made by definition-time macro parameter lookups.
+    u64 macro_parameter_compare_count;
 #endif
     u32 lexed_file_count;
 };

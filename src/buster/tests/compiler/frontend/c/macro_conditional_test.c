@@ -922,10 +922,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_file_table_scaling_tests(UnitTestArguments*
     return result;
 }
 
+// One function-like macro with `count` parameters: a duplicate check per
+// parameter, a `#` operand check naming the last one, and every parameter
+// used once in the replacement list. `duplicate` repeats the first name at the
+// end of the list, which the definition must reject with one diagnostic.
+BUSTER_GLOBAL_LOCAL u64 c_macro_parameter_scaling_work(UnitTestArguments* arguments, u32 count, bool duplicate, u64* errors)
+{
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 capacity = (u64)count * 32 + 128;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_identity_scaling_append(bytes, capacity, &length, S8("#define M("));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_identity_scaling_append(bytes, capacity, &length, string_format(temporary.arena, S8("{S8}parameter_{u32}"), index ? S8(", ") : S8(""), index));
+    }
+    if (duplicate)
+    {
+        c_identity_scaling_append(bytes, capacity, &length, S8(", parameter_0"));
+    }
+    c_identity_scaling_append(bytes, capacity, &length, string_format(temporary.arena, S8(") #parameter_{u32}"), count - 1));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_identity_scaling_append(bytes, capacity, &length, string_format(temporary.arena, S8(" parameter_{u32}"), index));
+    }
+    c_identity_scaling_append(bytes, capacity, &length, S8("\n"));
+    String8 source = {.pointer = bytes, .length = length};
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-parameter-scaling.c")});
+    *errors = preprocess.error_count;
+    u64 work = c_preprocess_detail(preprocess)->macro_parameter_compare_count;
+    scratch_end(temporary);
+    return work;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_parameter_scaling_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 1000, DEEP = 4000 };
+    u64 shallow_errors = 0;
+    u64 deep_errors = 0;
+    u64 duplicate_errors = 0;
+    u64 shallow = c_macro_parameter_scaling_work(arguments, SHALLOW, false, &shallow_errors);
+    u64 deep = c_macro_parameter_scaling_work(arguments, DEEP, false, &deep_errors);
+    BUSTER_TEST(arguments, shallow_errors == 0 && deep_errors == 0);
+    // Three lookups per parameter (duplicate check, replacement, and `#`
+    // for one) each cost a hash and a short probe chain.
+    BUSTER_TEST_RAW(arguments, shallow != 0 && deep <= (u64)DEEP * 16 && deep <= shallow * 6,
+                    string_format(arguments->arena, S8("macro parameter compares shallow={u64} deep={u64}"), shallow, deep));
+    // The duplicate is still found and the definition refused.
+    c_macro_parameter_scaling_work(arguments, SHALLOW, true, &duplicate_errors);
+    BUSTER_TEST(arguments, duplicate_errors == 1);
+    return result;
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, c_file_table_scaling_tests);
+    BUSTER_TEST_FIXTURE(arguments, c_macro_parameter_scaling_tests);
     BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
     BUSTER_TEST_FIXTURE(arguments, c_skipped_group_text_tests);
     BUSTER_TEST_FIXTURE(arguments, c_punctuator_separator_tests);

@@ -5187,16 +5187,90 @@ BUSTER_C_INTERNAL u32 c_name_hash(String8 name)
     return (u32)(hash >> 32);
 }
 
-// The spelling ladder behind the definition-time parameter index: which
-// parameter, if any, `name` spells.
-BUSTER_C_INTERNAL s32 c_macro_parameter_index(CMacro* macro, String8 name)
+// Definition-time parameter index: which parameter, if any, a name spells.
+// Up to C_MACRO_PARAMETER_LINEAR_LIMIT parameters are scanned directly; more
+// get an open-addressing table (index + 1, zero marking empty) over the
+// parameter names, sized for the parameter capacity up front, so a
+// definition's lookups cost one hash and a short probe chain instead of a
+// scan of every parameter. Duplicates are probed in insertion order, so the
+// first parameter that spells a name still wins.
+enum
+{
+    C_MACRO_PARAMETER_LINEAR_LIMIT = 8,
+};
+
+typedef struct CMacroParameterMap CMacroParameterMap;
+struct CMacroParameterMap
+{
+    u32* slots;
+    u32 mask;
+#if BUSTER_INCLUDE_TESTS
+    // Name comparisons performed, for scaling fixtures.
+    u64 compare_count;
+#endif
+};
+
+BUSTER_C_INTERNAL CMacroParameterMap c_macro_parameter_map_create(Arena* arena, u64 capacity)
+{
+    CMacroParameterMap map = {0};
+    if (capacity > C_MACRO_PARAMETER_LINEAR_LIMIT)
+    {
+        u64 slot_count = 32;
+        while (slot_count < capacity * 2)
+        {
+            slot_count *= 2;
+        }
+        map.slots = arena_allocate(arena, u32, slot_count);
+        memset(map.slots, 0, slot_count * sizeof(*map.slots));
+        map.mask = (u32)(slot_count - 1);
+    }
+    return map;
+}
+
+// Records parameters[index] after the caller has finished looking it up.
+BUSTER_C_INTERNAL void c_macro_parameter_map_insert(CMacroParameterMap* map, String8* parameters, u32 index)
+{
+    if (map->slots)
+    {
+        u32 slot = c_name_hash(parameters[index]) & map->mask;
+        while (map->slots[slot])
+        {
+            slot = (slot + 1) & map->mask;
+        }
+        map->slots[slot] = index + 1;
+    }
+}
+
+BUSTER_C_INTERNAL s32 c_macro_parameter_map_find(CMacroParameterMap* map, String8* parameters, u32 parameter_count, String8 name)
 {
     s32 result = -1;
-    for (u32 parameter_index = 0; parameter_index < macro->definition.parameter_count && result < 0; parameter_index += 1)
+    if (map->slots)
     {
-        if (string_equal(macro->definition.parameters[parameter_index], name))
+        u32 slot = c_name_hash(name) & map->mask;
+        while (map->slots[slot] && result < 0)
         {
-            result = (s32)parameter_index;
+#if BUSTER_INCLUDE_TESTS
+            map->compare_count += 1;
+#endif
+            u32 candidate = map->slots[slot] - 1;
+            if (string_equal(parameters[candidate], name))
+            {
+                result = (s32)candidate;
+            }
+            slot = (slot + 1) & map->mask;
+        }
+    }
+    else
+    {
+        for (u32 parameter_index = 0; parameter_index < parameter_count && result < 0; parameter_index += 1)
+        {
+#if BUSTER_INCLUDE_TESTS
+            map->compare_count += 1;
+#endif
+            if (string_equal(parameters[parameter_index], name))
+            {
+                result = (s32)parameter_index;
+            }
         }
     }
     return result;
@@ -5204,10 +5278,22 @@ BUSTER_C_INTERNAL s32 c_macro_parameter_index(CMacro* macro, String8 name)
 
 // `spelling_base` resolves the replacement tokens' spellings for the
 // parameter index and may be null when the replacement list is empty.
-BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_base, CSymbolTable* symbols, CMacro** first, CMacro** last, String8 name,
-                                           CToken* replacement, u32 replacement_count, String8* parameters, u32 parameter_count, bool function_like,
-                                           bool variadic)
+// `parameter_map` is the directive's index over `parameters` when the caller
+// already built one; null builds it here.
+BUSTER_C_INTERNAL CMacro* c_macro_define_indexed(Arena* arena, char8 const* spelling_base, CSymbolTable* symbols, CMacro** first, CMacro** last,
+                                                   String8 name, CToken* replacement, u32 replacement_count, String8* parameters, u32 parameter_count,
+                                                   bool function_like, bool variadic, CMacroParameterMap* parameter_map)
 {
+    CMacroParameterMap local_map = {0};
+    if (!parameter_map && function_like)
+    {
+        local_map = c_macro_parameter_map_create(arena, parameter_count);
+        for (u32 index = 0; index < parameter_count; index += 1)
+        {
+            c_macro_parameter_map_insert(&local_map, parameters, index);
+        }
+        parameter_map = &local_map;
+    }
     u32 symbol = c_symbol_intern(symbols, name);
     CMacro* macro = c_macro_find(*first, symbol);
     if (!macro)
@@ -5275,7 +5361,7 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
             {
                 content_close = c_macro_va_opt_close(replacement, replacement_count, index + 1);
             }
-            s32 found = token.kind == C_TOKEN_IDENTIFIER && function_like ? c_macro_parameter_index(macro, token.symbol ? symbols->names[token.symbol] : c_symbol_ucn_name(symbols, c_token_spelling(spelling_base, token))) : -1;
+            s32 found = token.kind == C_TOKEN_IDENTIFIER && function_like ? c_macro_parameter_map_find(parameter_map, parameters, parameter_count, token.symbol ? symbols->names[token.symbol] : c_symbol_ucn_name(symbols, c_token_spelling(spelling_base, token))) : -1;
             parameter_index[index] = found >= 0 ? (u32)found : C_MACRO_PARAMETER_NONE;
             if (found >= 0)
             {
@@ -5320,6 +5406,14 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
         }
     }
     return macro;
+}
+
+BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_base, CSymbolTable* symbols, CMacro** first, CMacro** last, String8 name,
+                                           CToken* replacement, u32 replacement_count, String8* parameters, u32 parameter_count, bool function_like,
+                                           bool variadic)
+{
+    return c_macro_define_indexed(arena, spelling_base, symbols, first, last, name, replacement, replacement_count, parameters, parameter_count,
+                                  function_like, variadic, 0);
 }
 
 BUSTER_C_INTERNAL void c_macro_define_object_text(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro** first, CMacro** last, String8 name,
@@ -9981,6 +10075,7 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
     bool function_like = *token_index < lex.token_count && c_token_is_punctuator(&lex.tokens[*token_index], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                          lex.tokens[*token_index].offset == name.offset + name.length;
     String8* parameters = 0;
+    CMacroParameterMap parameter_map = {0};
     u32 parameter_count = 0;
     bool variadic = false;
     bool valid = !defined_name;
@@ -10003,6 +10098,7 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
             }
         }
         parameters = arena_allocate(arena, String8, parameter_capacity);
+        parameter_map = c_macro_parameter_map_create(arena, parameter_capacity);
         bool expect_parameter = true;
         while (*token_index < lex.token_count)
         {
@@ -10036,11 +10132,10 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS))
             {
                 String8 parameter = S8("__VA_ARGS__");
-                for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
-                {
-                    valid = valid && !string_equal(parameters[parameter_index], parameter);
-                }
-                parameters[parameter_count++] = parameter;
+                valid = valid && c_macro_parameter_map_find(&parameter_map, parameters, parameter_count, parameter) < 0;
+                parameters[parameter_count] = parameter;
+                c_macro_parameter_map_insert(&parameter_map, parameters, parameter_count);
+                parameter_count += 1;
                 variadic = true;
                 expect_parameter = false;
                 *token_index += 1;
@@ -10052,11 +10147,10 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
                 break;
             }
             String8 parameter = token.symbol ? symbols->names[token.symbol] : c_symbol_ucn_name(symbols, c_token_spelling(lex.spelling_base, token));
-            for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
-            {
-                valid = valid && !string_equal(parameters[parameter_index], parameter);
-            }
-            parameters[parameter_count++] = parameter;
+            valid = valid && c_macro_parameter_map_find(&parameter_map, parameters, parameter_count, parameter) < 0;
+            parameters[parameter_count] = parameter;
+            c_macro_parameter_map_insert(&parameter_map, parameters, parameter_count);
+            parameter_count += 1;
             *token_index += 1;
             if (*token_index < lex.token_count && c_token_is_punctuator(&lex.tokens[*token_index], C_PUNCTUATOR_ELLIPSIS))
             {
@@ -10114,10 +10208,7 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
                     followed_by_parameter = variadic && c_macro_is_va_opt(parameter_token);
                     String8 parameter = parameter_token.symbol ? symbols->names[parameter_token.symbol]
                                                                : c_symbol_ucn_name(symbols, c_token_spelling(lex.spelling_base, parameter_token));
-                    for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
-                    {
-                        followed_by_parameter |= string_equal(parameters[parameter_index], parameter);
-                    }
+                    followed_by_parameter |= c_macro_parameter_map_find(&parameter_map, parameters, parameter_count, parameter) >= 0;
                 }
                 if (!followed_by_parameter)
                 {
@@ -10141,8 +10232,12 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
     }
     else
     {
-        CMacro* macro = c_macro_define(arena, lex.spelling_base, symbols, first_macro, last_macro, c_token_spelling(lex.spelling_base, name), replacement,
-                                       (u32)replacement_count, parameters, parameter_count, function_like, variadic);
+        CMacro* macro = c_macro_define_indexed(arena, lex.spelling_base, symbols, first_macro, last_macro, c_token_spelling(lex.spelling_base, name),
+                                               replacement, (u32)replacement_count, parameters, parameter_count, function_like, variadic,
+                                               function_like ? &parameter_map : 0);
+#if BUSTER_INCLUDE_TESTS
+        result->detail->macro_parameter_compare_count += parameter_map.compare_count;
+#endif
         macro->definition.replacement_space = c_macro_replacement_spaces(arena, lex.spelling_base, replacement, (u32)replacement_count);
     }
 }
@@ -10342,7 +10437,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
 // fields still follow the explicit rehoming rules below.
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 608 + 16 * BUSTER_INCLUDE_TESTS);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 608 + 24 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
 BUSTER_CT_CHECK(sizeof(CPackAlignment) == 8);
 
