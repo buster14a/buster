@@ -250,36 +250,6 @@ bool jit_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
-{
-    bool result;
-    switch (kind)
-    {
-        case OBJECT_RELOCATION_X86_64_TPOFF32:
-        case OBJECT_RELOCATION_X86_64_GOTTPOFF:
-        case OBJECT_RELOCATION_X86_64_TLSGD:
-        case OBJECT_RELOCATION_X86_64_TLSLD:
-        case OBJECT_RELOCATION_X86_64_DTPOFF32:
-        case OBJECT_RELOCATION_X86_64_DTPOFF64:
-        case OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
-        case OBJECT_RELOCATION_PE_TLS_OFFSET32:
-        case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
-        case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
-        case OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12:
-        case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
-        case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
-        case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
-        case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
-        case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
-            result = true;
-            break;
-        default:
-            result = false;
-            break;
-    }
-
-    return result;
-}
 
 BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind kind, ObjectSectionKind source_kind)
 {
@@ -579,7 +549,7 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             return false;
         }
         ObjectSymbol const* symbol = object->symbols + relocation->symbol;
-        if (jit_relocation_is_tls(relocation->kind))
+        if (object_relocation_kind_is_tls(relocation->kind))
         {
             program->error = JIT_ERROR_TLS_UNSUPPORTED;
             program->failing_symbol = symbol->name;
@@ -906,7 +876,7 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             return result;
         }
         ObjectSymbol const* symbol = object->symbols + relocation->symbol;
-        if (jit_relocation_is_tls(relocation->kind))
+        if (object_relocation_kind_is_tls(relocation->kind))
         {
             result.error = JIT_ERROR_TLS_UNSUPPORTED;
             result.failing_symbol = symbol->name;
