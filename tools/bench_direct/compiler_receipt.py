@@ -429,6 +429,13 @@ def scaling_digest(bundles: object) -> dict:
     return digest
 
 
+# Report rows: summary key, label and the unit uarch_lab.COMPARE_METRICS declares for it.
+REPORT_METRICS = (("wall", "wall time (harness span)", "s"), ("task_clock", "task-clock", "s"),
+                  ("instructions", "instructions", "count"), ("cycles", "cycles", "count"),
+                  ("branch_misses", "branch misses", "count"), ("page_faults", "page faults", "count"),
+                  ("peak_rss", "peak RSS", "bytes"))
+
+
 def number(value: object, form: str) -> str:
     return form % value if isinstance(value, (int, float)) and not isinstance(value, bool) else "NA"
 
@@ -460,11 +467,17 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
               f"Observed host: `{host.get('cpu_model', 'NA') if isinstance(host, dict) else 'NA'}`.", ""]
     metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
     if metrics:
-        lines += ["| Metric | A median | B median | B/A | 95% CI | Outcome |", "| --- | --- | --- | --- | --- | --- |"]
-        for key in ("wall", "task_clock", "instructions", "cycles", "branch_misses", "page_faults", "peak_rss"):
+        lines += ["A = baseline, B = candidate. B/A is the candidate-to-baseline ratio (below 1 means the candidate is lower; "
+                  "lower is better for every metric below). The 95% interval is a confidence interval of the dimensionless "
+                  "B/A ratio, not of the medians. Medians are in the unit column (exact base units); NA means not measured.", "",
+                  "| Metric | Unit | A (baseline) median | B (candidate) median | B/A ratio | 95% CI of B/A | Outcome |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        for key, label, unit in REPORT_METRICS:
             row = metrics.get(key) if isinstance(metrics.get(key), dict) else {}
-            lines.append("| %s | %s | %s | %s | [%s, %s] | %s |" % (
-                key, number(row.get("a_median"), "%.6g"), number(row.get("b_median"), "%.6g"),
+            if isinstance(row.get("unit"), str) and row["unit"] != unit:
+                row = {"outcome": f"rejected: unit {row['unit']!r}, expected {unit!r}"}
+            lines.append("| %s | %s | %s | %s | %s | [%s, %s] | %s |" % (
+                label, unit, number(row.get("a_median"), "%.6g"), number(row.get("b_median"), "%.6g"),
                 number(row.get("ratio"), "%.4f"), number(row.get("ci_low"), "%.4f"),
                 number(row.get("ci_high"), "%.4f"), row.get("outcome", "NA")))
         lines.append("")

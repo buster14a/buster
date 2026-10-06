@@ -351,6 +351,29 @@ class DecideTest(unittest.TestCase):
                       "excluded)", report)
         self.assertIn("| equal (28) | 2 | core | 2 | 0.5000 | 1.600 | [1.400, 1.800] | 0.800 | 1.200 | 1.300 |", report)
 
+    def test_metric_table_states_units_and_ratio_direction(self) -> None:
+        data = summary()
+        data["metrics"] = {
+            "wall": {"unit": "s", "a_median": 0.0123, "b_median": 0.0119, "ratio": 0.9675, "ci_low": 0.95, "ci_high": 0.98,
+                     "outcome": "faster"},
+            "instructions": {"unit": "count", "a_median": 16934571004, "b_median": 16934571005, "ratio": 1.0, "ci_low": 1.0,
+                             "ci_high": 1.0, "outcome": "slower"},
+            "cycles": {"unit": "count", "a_median": None, "b_median": None, "ratio": None, "ci_low": None, "ci_high": None,
+                       "outcome": "no data"},
+            "peak_rss": {"unit": "bytes", "a_median": 877584384, "b_median": 877584385, "ratio": 1.0, "ci_low": 1.0, "ci_high": 1.0,
+                         "outcome": "slower"},
+            "task_clock": {"unit": "ms", "a_median": 1.0, "b_median": 1.0, "ratio": 1.0, "ci_low": 1.0, "ci_high": 1.0,
+                           "outcome": "faster"},
+        }
+        report = compiler_receipt.render(receipt(), data, "success", [])
+        self.assertIn("A = baseline, B = candidate", report)
+        self.assertIn("confidence interval of the dimensionless B/A ratio", report)
+        self.assertIn("| Metric | Unit | A (baseline) median | B (candidate) median | B/A ratio | 95% CI of B/A | Outcome |", report)
+        self.assertIn("| wall time (harness span) | s | 0.0123 | 0.0119 | 0.9675 | [0.9500, 0.9800] | faster |", report)
+        self.assertIn("| peak RSS | bytes | 8.77584e+08 | 8.77584e+08 |", report)
+        self.assertIn("| cycles | count | NA | NA | NA | [NA, NA] | no data |", report)
+        self.assertIn("| task-clock | s | NA | NA | NA | [NA, NA] | rejected: unit 'ms', expected 's' |", report)
+
     def test_only_recovery_of_a_legacy_receipt_skips_the_corpus(self) -> None:
         legacy = receipt()
         del legacy["throughput_profile"]
