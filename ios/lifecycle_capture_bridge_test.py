@@ -698,6 +698,8 @@ fi
         status_log = self.root / "native-probe.status"
         output_log = self.root / "native-probe.output"
         run_log = self.root / "native-probe.run"
+        native_commands = self.root / "native-probe.commands"
+        command = "simctl spawn 01234567-89AB-CDEF-0123-456789ABCDEF ps -A\n"
         prefix = "BUSTER_IOS_PHASE phase=diagnostic-process-table label=probe-control "
         suffix = ("elapsed_seconds=42 deadline_seconds=10 output_limit_bytes=65536 "
                   "command_elapsed_seconds=unavailable capture_elapsed_seconds=42 ")
@@ -706,8 +708,14 @@ fi
                    + "BUSTER_IOS_CALLER_GATE monitor_status=137 admission=0 invocation_status=unavailable "
                    "generation=Direct01 reason=starting\n"
                    + "BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt\n")
+        expired += "command: xcrun " + command
         warning = "warning: iOS diagnostic unavailable name=process-table outcome=evidence-failure status=1;\n"
         complete = prefix + "outcome=success status=0 native_status=0 capture_status=0 " + suffix + "capture_receipt=complete\n"
+        complete += "command: xcrun " + command
+        declined = (complete.replace("outcome=success status=0 native_status=0",
+                                     "outcome=timeout status=124 native_status=unavailable")
+                    + "BUSTER_IOS_SUPERVISOR_GATE helper_status=124 supervisor_valid=1 deadline_reached=1 cleanup_status=0\n"
+                    + "BUSTER_IOS_SUPERVISOR version=1 native_launch=0\n")
         cases = [
             ("success", complete, "", b"", 0),
             ("command-failure", complete.replace("outcome=success status=0 native_status=0",
@@ -717,11 +725,18 @@ fi
             ("timeout", complete.replace("outcome=success status=0 native_status=0",
                                          "outcome=timeout status=124 native_status=143"), warning, b"stderr", 0),
             ("capture-expired", expired, warning, None, 0),
+            ("declined-before-admission", declined, warning, b"", 0),
+            ("success-without-native-attempt", complete, "", b"", 1),
+            ("declined-without-proof", declined.replace("supervisor_valid=1", "supervisor_valid=0"), warning, b"", 1),
+            ("declined-with-native-admission", declined.replace("native_launch=0", "native_launch=1"), warning, b"", 1),
             ("capture-expired-124", expired.replace("monitor_status=137", "monitor_status=124"), warning, None, 0),
             ("limit", complete, "", b"x" * 65536, 0),
             ("oversized", complete, "", b"x" * 65537, 1),
             ("missing-output", complete, "", None, 1),
             ("missing-status", "", warning, None, 1),
+            ("missing-command", expired.split("command:")[0], warning, None, 1),
+            ("wrong-command", expired.replace("simctl spawn 01234567-89AB-CDEF-0123-456789ABCDEF ps",
+                                              "simctl spawn 01234567-89AB-CDEF-0123-456789ABCDEF log"), warning, None, 1),
             ("missing-warning", expired, "", None, 1),
             ("wrong-probe-warning", expired, warning.replace("process-table", "unified-log"), None, 1),
             ("traceback", expired, warning + "Traceback (most recent call last):\n", None, 1),
@@ -735,11 +750,13 @@ fi
             with self.subTest(label=label):
                 status_log.write_text(receipt)
                 run_log.write_text(run)
+                native_commands.write_text("" if label.startswith("declined-") or label.startswith("capture-expired")
+                                           or label == "success-without-native-attempt" else command)
                 output_log.unlink(missing_ok=True)
                 if output is not None:
                     output_log.write_bytes(output)
                 result = subprocess.run(["/bin/bash", str(script), "--check-probe-receipt",
-                                         str(status_log), str(output_log), str(run_log), "process-table", "10"],
+                                         str(status_log), str(output_log), str(run_log), "process-table", "10", str(native_commands)],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
                 self.assertEqual(result.returncode, expected, result.stderr.decode())
 

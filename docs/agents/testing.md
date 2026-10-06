@@ -329,7 +329,10 @@
   #2742 had no promoted snapshot; increasing those evidence budgets would delay
   failure reporting without making the launch verdict stronger. The native
   control therefore accepts an explicitly unavailable probe with an actual
-  caller-clock expiry receipt and warning, while missing/malformed protocol
+  command- or caller-clock expiry receipt and warning, including expiry before
+  native admission when the requested command and declined-admission proof are
+  retained. Missing proof of a native attempt cannot establish probe success.
+  Missing/malformed protocol
   evidence, tracebacks and oversized output still fail. A closed final
   completion pipe becomes a private helper-failure receipt without retry;
   native exit, deadline and cancellation facts remain separate. The bridge
