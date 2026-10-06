@@ -108,8 +108,14 @@ LLVM consumer `-O0` and `-O2`, including guarded zero for count-leading/trailing
 and unguarded zero for population count.
 
 Canonical operations that do not yet have an LLVM record mapping, including
-instruction-cache clearing, slice/reverse helpers, inline assembly, SIMD,
-label addresses, and indirect branches, are deliberate diagnostics.
+slice/reverse helpers, inline assembly, SIMD, label addresses, and indirect
+branches, are deliberate diagnostics.
+
+Instruction-cache clearing (`__builtin___clear_cache`) lowers to a call of a
+synthetic `void @llvm.clear_cache(ptr, ptr)` declaration, added once per module
+when used; both operands are the canonical pointer values. The regression fills
+a buffer, clears its range and reads it back, with a separately compiled caller
+at LLVM consumer `-O0` and `-O2` for both frontend modes.
 
 A canonical debug trap (`__builtin_debugtrap`) lowers to a call of a
 synthetic `void @llvm.debugtrap()` declaration, added once per module when any
@@ -304,8 +310,7 @@ restore without publishing bytes. The C fixture runs nested and repeated VLAs,
 continue, break, outward goto, early return, and a live outer allocation;
 the independently compiled observer reads only live elements. The 1024-iteration
 16 KiB case exposes an omitted loop restore by exhausting a typical stack.
-The test module also checks (using the still-unsupported instruction-cache
-clear) that a later unsupported operation cannot replace
+The test module also checks (using the still-unsupported inline assembly) that a later unsupported operation cannot replace
 an existing output. When Clang is available, the fixture is consumed and run
 at both `-O0` and `-O2` for both frontend modes.
 

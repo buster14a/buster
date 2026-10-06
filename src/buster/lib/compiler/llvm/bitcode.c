@@ -420,6 +420,7 @@ struct LlvmBcContext
     u32 stack_save_function_index;
     u32 stack_restore_function_index;
     u32 debug_trap_function_index;
+    u32 clear_cache_function_index;
     LlvmBcString* strings;
     u32 string_count;
     u32 string_capacity;
@@ -1913,6 +1914,32 @@ static bool llvm_bc_add_debug_trap_intrinsic(LlvmBcContext* context)
     return result;
 }
 
+static bool llvm_bc_add_clear_cache_intrinsic(LlvmBcContext* context)
+{
+    bool result;
+    String8 name = llvm_bc_s8("llvm.clear_cache");
+    if (!llvm_bc_name_available(context, name, 0))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM clear_cache intrinsic collides with a module symbol"),
+                     0, 0, 0, IR_SYMBOL_ID_INVALID);
+        result = false;
+    }
+    else
+    {
+        u64 signature[4] = {0, context->void_type_id, context->pointer_type_id, context->pointer_type_id};
+        u32 type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, signature, 4);
+        llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
+                            sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
+        u32 index = context->function_count++;
+        context->functions[index] = (LlvmBcFunction){.name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
+                                                     .type_id = type_id, .declaration = true, .synthetic = true};
+        llvm_bc_register_name(context, name, index | LLVM_BC_NAME_FUNCTION);
+        context->clear_cache_function_index = index;
+        result = true;
+    }
+    return result;
+}
+
 static bool llvm_bc_is_integer_count(IrUnaryOperation operation)
 {
     return operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
@@ -2206,6 +2233,7 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
     bool needs_stack_save = false;
     bool needs_stack_restore = false;
     bool needs_debug_trap = false;
+    bool needs_clear_cache = false;
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         IrFunction* function = context->functions[index].function;
@@ -2219,11 +2247,13 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             needs_stack_save |= opcode == IR_OPCODE_STACK_SAVE;
             needs_stack_restore |= opcode == IR_OPCODE_STACK_RESTORE;
             needs_debug_trap |= opcode == IR_OPCODE_DEBUG_TRAP;
+            needs_clear_cache |= opcode == IR_OPCODE_CLEAR_INSTRUCTION_CACHE;
         }
     }
     if ((needs_stack_save && !llvm_bc_add_stack_intrinsic(context, true)) ||
         (needs_stack_restore && !llvm_bc_add_stack_intrinsic(context, false)) ||
-        (needs_debug_trap && !llvm_bc_add_debug_trap_intrinsic(context)))
+        (needs_debug_trap && !llvm_bc_add_debug_trap_intrinsic(context)) ||
+        (needs_clear_cache && !llvm_bc_add_clear_cache_intrinsic(context)))
     {
         return false;
     }
@@ -3351,6 +3381,7 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     case IR_OPCODE_STORE:
     case IR_OPCODE_STACK_RESTORE:
     case IR_OPCODE_DEBUG_TRAP:
+    case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
     case IR_OPCODE_ATOMIC_STORE:
     case IR_OPCODE_ATOMIC_FENCE:
     case IR_OPCODE_BRANCH:
@@ -3358,10 +3389,6 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     case IR_OPCODE_SWITCH:
     case IR_OPCODE_UNREACHABLE:
         return 0;
-    case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode clear_instruction_cache is not implemented"),
-                     function, block, instruction, instruction->symbol);
-        return LLVM_BC_INVALID_ID;
     case IR_OPCODE_SLICE:
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode slice construction is not implemented"), function,
                      block, instruction, instruction->symbol);
@@ -4758,6 +4785,27 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
         break;
     }
+    case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
+    {
+        if (context->clear_cache_function_index == LLVM_BC_INVALID_ID)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("missing LLVM clear_cache intrinsic declaration"), function, block,
+                         instruction, instruction->symbol);
+            return false;
+        }
+        LlvmBcFunction* intrinsic = context->functions + context->clear_cache_function_index;
+        operands[count++] = 0; // no parameter attributes
+        operands[count++] = LLVM_BC_CALL_EXPLICIT_TYPE;
+        operands[count++] = intrinsic->type_id;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, intrinsic->value_id, context->pointer_type_id);
+        for (u32 operand = 0; operand < 2; operand += 1)
+        {
+            u32 pointer = llvm_bc_function_value_id(context, record, instruction->operands[operand]);
+            llvm_bc_push_relative(operands, &count, *current_value_id, pointer);
+        }
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
+        break;
+    }
     case IR_OPCODE_LOAD:
     case IR_OPCODE_ATOMIC_LOAD:
     {
@@ -5093,7 +5141,6 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
     case IR_OPCODE_UNREACHABLE:
         llvm_bc_record(&context->stream, LLVM_BC_FUNC_UNREACHABLE, 0, 0);
         break;
-    case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
     case IR_OPCODE_SLICE:
     case IR_OPCODE_REVERSE:
     case IR_OPCODE_INLINE_ASSEMBLY:
@@ -5507,6 +5554,7 @@ LlvmBitcodeArtifact llvm_bitcode_emit_with_options(Arena* arena, IrProgram* prog
         .stack_save_function_index = LLVM_BC_INVALID_ID,
         .stack_restore_function_index = LLVM_BC_INVALID_ID,
         .debug_trap_function_index = LLVM_BC_INVALID_ID,
+        .clear_cache_function_index = LLVM_BC_INVALID_ID,
         .error = {
             .function = IR_FUNCTION_ID_INVALID,
             .block = IR_BLOCK_ID_INVALID,
