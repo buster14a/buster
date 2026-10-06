@@ -385,7 +385,12 @@
 #else
 #define BUSTER_ASSUME(x) BUSTER_UNUSED(x)
 #endif
-#if BUSTER_OPTIMIZE
+// BUSTER_RAW_UNREACHABLE and BUSTER_ASSUME are raw optimizer escape hatches in
+// every configuration, sanitized ones included: reaching them is undefined
+// behavior. BUSTER_UNREACHABLE is the checked form. It becomes the raw hint
+// only in optimized unsanitized builds; Debug and every sanitized build,
+// optimized or not, trap first so a sanitized Release run diagnoses the path.
+#if BUSTER_OPTIMIZE && !BUSTER_SANITIZE
 #define BUSTER_UNREACHABLE() BUSTER_RAW_UNREACHABLE()
 #else
 #define BUSTER_UNREACHABLE()                                                                                                                                   \

@@ -13,10 +13,13 @@ import ci_unit_tests_campaign as campaign
 ROWS = [(0, "c_frontend_tests", False), (1, "compiler_driver_tests", False), (2, "table_tests", True)]
 ENVIRONMENT = {"BUSTER_TEST_SOURCE_REVISION": "a" * 40, "BUSTER_TEST_JOBS": "2", "BUSTER_TEST_TABLE_AUDITS": "0",
                "ImageOS": "ubuntu26", "ImageVersion": "fixture-image", "RUNNER_ARCH": "X64", "RUNNER_OS": "Linux"}
+HOST_RECORD = "CI_UNIT_HOST_V1 architecture=x86_64 feature_source=cpuid-xcr0 feature_word_count=4 word0=1 word1=2 word2=3 word3=4 simd_512_base=0 simd_512=0\n"
+HOST_PROFILE = {"schema": "buster-native-host-profile-v1", "architecture": "x86_64", "feature_source": "cpuid-xcr0",
+                "feature_words": [1, 2, 3, 4], "simd_512_base": False, "simd_512": False}
 
 
-def inventory_log():
-    lines = []
+def inventory_log(host=True):
+    lines = [HOST_RECORD] if host else []
     for index, name, audit in ROWS:
         owner = "driver" if name == "compiler_driver_tests" else "rest"
         lines.append(f"CI_UNIT_MODULE_V1 index={index} module={name} table_audit={int(audit)} enabled={int(not audit)} selected=0 group={owner}\n")
@@ -101,6 +104,50 @@ class CampaignTests(unittest.TestCase):
         self.assertTrue(result["screening_valid"])
         self.assertFalse(result["ci_complete"])
         self.assertFalse(result["performance_accepted"])
+        self.assertEqual(result["identity"]["native_host_profile"], HOST_PROFILE)
+
+    def test_legacy_inventory_remains_diagnostic_but_has_no_measured_profile(self):
+        path = self.directory / "inventory.log"
+        path.write_text(inventory_log(host=False))
+        self.assertEqual(campaign.inventory(path), [{"index": index, "name": name, "table_audit": audit} for index, name, audit in ROWS])
+        self.assertIsNone(campaign.host_profile(path))
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "Missing measured native host"):
+            campaign.host_profile(path, required=True)
+        self.assertNotIn("native_host_profile", self.assemble()["identity"])
+
+    def test_exact_profile_words_flags_and_aarch64_oracle_are_retained(self):
+        path = self.directory / "inventory.log"
+        path.write_text(inventory_log().replace("word3=4", "word3=18446744073709551615"))
+        self.assertEqual(campaign.host_profile(path, required=True)["feature_words"], [1, 2, 3, 2 ** 64 - 1])
+        path.write_text(inventory_log().replace("architecture=x86_64 feature_source=cpuid-xcr0", "architecture=aarch64 feature_source=target-native"))
+        self.assertEqual(campaign.host_profile(path, required=True)["architecture"], "aarch64")
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "architecture differs"):
+            self.assemble()
+
+    def test_duplicate_malformed_and_unknown_native_host_profiles_fail_closed(self):
+        path = self.directory / "inventory.log"
+        mutations = (HOST_RECORD + inventory_log(), inventory_log().replace("word0=1", "word0=-1"),
+                     inventory_log().replace("word0=1", "word0=18446744073709551616"),
+                     inventory_log().replace("feature_word_count=4", "feature_word_count=3"),
+                     inventory_log().replace("feature_source=cpuid-xcr0", "feature_source=model-guess"),
+                     inventory_log().replace("simd_512_base=0 simd_512=0", "simd_512_base=0 simd_512=1"),
+                     inventory_log().replace("word0=1", "word0=1 extra=1"),
+                     inventory_log().replace("word0=1", "word0=1 word0=2"),
+                     inventory_log().replace("CI_UNIT_HOST_V1 ", "CI_UNIT_HOST_V1"),
+                     inventory_log().replace("CI_UNIT_HOST_V1", "CI_UNIT_HOST_V2"))
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                path.write_text(mutation)
+                with self.assertRaises(campaign.measure.EvidenceError):
+                    campaign.inventory(path)
+
+    def test_invalid_host_proof_encoding_is_rejected_without_rewriting_bytes(self):
+        path = self.directory / "inventory.log"
+        raw = inventory_log().encode().replace(b"word0=1", b"word0=\xff1")
+        path.write_bytes(raw)
+        with self.assertRaisesRegex(campaign.measure.EvidenceError, "Invalid UTF-8 in machine proof"):
+            campaign.host_profile(path, required=True)
+        self.assertEqual(path.read_bytes(), raw)
 
     def test_three_pairs_require_all_six_invocations(self):
         self.populate(3)

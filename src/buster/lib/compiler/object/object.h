@@ -193,6 +193,12 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12,
+    // IMAGE_REL_ARM64_SECREL_HIGH12A: shifted ADD of TLS offset bits 12..23.
+    OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12,
+    // R_AARCH64_ADR_PREL_LO21: the signed byte displacement S + A - P in the
+    // immediate of an ADR. It joins the ELF page family because the reader,
+    // linkers and object_aarch64_elf_page_relocate treat it the same way.
+    OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -206,7 +212,7 @@ BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
 BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
 
 // AArch64 ELF page-address kinds object_aarch64_elf_page_relocate accepts:
-// direct ADRP with ADD or scaled LD/ST, and the GOT ADRP/LDR pair.
+// direct ADRP with ADD or scaled LD/ST, the GOT ADRP/LDR pair, and ADR.
 BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
@@ -214,6 +220,7 @@ BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKi
 // PE linker supplies it here after final placement is known.
 BUSTER_F_DECL bool object_aarch64_pe_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched);
 BUSTER_F_DECL bool object_aarch64_pe_tls_index_lo12_relocate(u32 word, u64 target, s64 addend, u32* patched);
+BUSTER_F_DECL bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind kind, u32 word, u64 offset, s64 addend, u32* patched);
 
 #define OBJECT_SECTION_UNDEFINED UINT32_MAX
 
@@ -290,6 +297,11 @@ struct ObjectSymbol
     // UNKNOWN is retained for object formats that do not encode this property
     // on an undefined symbol. This occupies the former reserved byte.
     u8 thread_local_state;
+    // A defined local label an assembler did not type: the ELF writers state
+    // STT_NOTYPE for it, as GNU as does, so a disassembler does not split a
+    // function there. `kind` is unchanged and still what every other
+    // consumer reads; Mach-O and COFF have no such state and ignore this.
+    bool untyped;
 };
 
 typedef struct ObjectRelocation ObjectRelocation;

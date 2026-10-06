@@ -3385,7 +3385,9 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     // The post-rebase coverage audit folds the canonical form dispositions
     // (including the baseline legacy-width and MMX rows) into this digest.
     // Keep the complete census tied to that current metadata snapshot.
-    bool completion_totals_match = completion.digest == UINT64_C(0x6247277b270816d4) &&
+    // The digest also covers the physical register view of port I/O's OeAX()
+    // accumulator atom (AX/EAX, never RAX), which the IN/OUT binding resolves.
+    bool completion_totals_match = completion.digest == UINT64_C(0xf704761a0e2a44f4) &&
                                    completion.form_count == 11013 && completion.normalized_count == 10607 &&
                                    completion.emitted_count == 10607 && completion.blocked_count == 406 && completion.operand_count == 32813 &&
                                    completion.duplicate_form_id_count == 0 && completion.duplicate_stable_hash_count == 0 &&

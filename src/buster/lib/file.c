@@ -345,7 +345,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
         String8Z path_z = {0};
         if (string8z_copy_arena(arena, path, &path_z))
         {
-            int file_descriptor = open(path_z.pointer, O_RDONLY, 0);
+            int file_descriptor = open(path_z.pointer, O_RDONLY | O_CLOEXEC, 0);
             if (file_descriptor >= 0)
             {
                 struct stat file_stats = {0};
