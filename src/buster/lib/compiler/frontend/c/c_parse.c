@@ -71,6 +71,8 @@
 //                                                 non-constant assertion prints
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
+//   c_parse_initializer_slot_table                a walk's per-record slot
+//                                                 numbering, built once
 //   c_parse_add_type, c_parse_tag_lookup,         type interning and
 //   c_parse_primitive_type                        construction, attributes
 //   c_parse_definition_scan_start                 definition-token index
@@ -8593,59 +8595,249 @@ BUSTER_C_INTERNAL bool c_parse_initializer_member_is_slot(CMember* member)
     return member && !(member->is_bit_field && !member->name.length);
 }
 
-BUSTER_C_INTERNAL u32 c_parse_initializer_member_count(CParseResult* result, CType* type)
+#if BUSTER_INCLUDE_TESTS
+// Member rows the initializer slot helpers below have read on this thread:
+// the reference walks and every table build.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_initializer_slot_member_visits;
+
+void c_test_initializer_slot_member_visits(u64* visits)
 {
-    if (!result || !type || (type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION))
-    {
-        return 0;
-    }
+    *visits = c_parse_initializer_slot_member_visits;
+}
+#define C_PARSE_INITIALIZER_SLOT_VISITS(amount) (c_parse_initializer_slot_member_visits += (u64)(amount))
+#else
+#define C_PARSE_INITIALIZER_SLOT_VISITS(amount) ((void)0)
+#endif
+
+// The slot numbering of an aggregate initializer: a struct's members are its
+// slots in declaration order except an unnamed bit-field, which no element
+// can reach (C11 6.7.9p9), and a union is one slot -- its first initializable
+// member -- or none. The three `_walk` functions are the definition, answered
+// by a pass over the record's members. An inference walk asks the count, the
+// slot of a designated member and the member at a positional slot once per
+// element, so it answers them from CParseInitializerSlotTable, the same
+// numbering built once per record the walk reaches; a walk over N designated
+// members of one record then reads its N rows once instead of N times.
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_count_walk(CParseResult* result, CType* type)
+{
     u32 count = 0;
-    for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+    if (result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION))
     {
-        count += c_parse_initializer_member_is_slot(result->members + type->member_start + field_index);
+        C_PARSE_INITIALIZER_SLOT_VISITS(type->member_count);
+        for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+        {
+            count += c_parse_initializer_member_is_slot(result->members + type->member_start + field_index);
+        }
+        count = type->kind == C_TYPE_UNION ? (count != 0) : count;
     }
-    return type->kind == C_TYPE_UNION ? (count != 0) : count;
+    return count;
 }
 
-BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot(CParseResult* result, CType* type, u32 field_index)
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot_walk(CParseResult* result, CType* type, u32 field_index)
 {
-    if (!result || !type || field_index >= type->member_count ||
-        !c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
+    u32 slot = UINT32_MAX;
+    if (result && type && field_index < type->member_count &&
+        c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
     {
-        return UINT32_MAX;
-    }
-    if (type->kind == C_TYPE_UNION)
-    {
-        return 0;
-    }
-    u32 slot = 0;
-    for (u32 index = 0; index < field_index; index += 1)
-    {
-        slot += c_parse_initializer_member_is_slot(result->members + type->member_start + index);
+        slot = 0;
+        if (type->kind != C_TYPE_UNION)
+        {
+            C_PARSE_INITIALIZER_SLOT_VISITS(field_index);
+            for (u32 index = 0; index < field_index; index += 1)
+            {
+                slot += c_parse_initializer_member_is_slot(result->members + type->member_start + index);
+            }
+        }
     }
     return slot;
 }
 
-BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseResult* result, CType* type, u32 slot)
+BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at_walk(CParseResult* result, CType* type, u32 slot)
 {
+    CMember* found = 0;
     if (result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION))
     {
         u32 current = 0;
-        for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+        for (u32 field_index = 0; !found && field_index < type->member_count; field_index += 1)
         {
+            C_PARSE_INITIALIZER_SLOT_VISITS(1);
             CMember* member = result->members + type->member_start + field_index;
-            if (!c_parse_initializer_member_is_slot(member))
+            if (c_parse_initializer_member_is_slot(member))
             {
-                continue;
-            }
-            if (current++ == slot || type->kind == C_TYPE_UNION)
-            {
-                return member;
+                found = current == slot || type->kind == C_TYPE_UNION ? member : 0;
+                current += 1;
             }
         }
     }
+    return found;
+}
 
-    return 0;
+// One record's slot numbering. `member_slots` is indexed by member (the slot,
+// UINT32_MAX for an unnamed bit-field; every initializable member of a union
+// is slot 0) and `slot_members` by slot (the member index). The record's
+// member run is kept so a table is used only for the run it was built from.
+typedef struct CParseInitializerSlotTable CParseInitializerSlotTable;
+struct CParseInitializerSlotTable
+{
+    u32* member_slots;
+    u32* slot_members;
+    u32 type_plus_one;
+    u32 member_start;
+    u32 member_count;
+    u32 slot_count;
+};
+
+// The tables one inference walk has built, open-addressed by type id in its
+// temporary arena. A walk reaches few records, and a table per type-table row
+// would cost every initializer a clear proportional to the whole unit.
+typedef struct CParseInitializerSlotCache CParseInitializerSlotCache;
+struct CParseInitializerSlotCache
+{
+    Arena* arena;
+    CParseInitializerSlotTable* tables;
+    u32 capacity;
+    u32 count;
+};
+
+#define C_PARSE_INITIALIZER_SLOT_CACHE_INITIAL_CAPACITY 16u
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_slot_cache_find(CParseInitializerSlotCache* cache, u32 type_plus_one)
+{
+    u32 mask = cache->capacity - 1;
+    u32 index = (type_plus_one * 0x9E3779B1u) & mask;
+    while (cache->tables[index].type_plus_one && cache->tables[index].type_plus_one != type_plus_one)
+    {
+        index = (index + 1) & mask;
+    }
+    return index;
+}
+
+BUSTER_C_INTERNAL void c_parse_initializer_slot_cache_grow(CParseInitializerSlotCache* cache)
+{
+    CParseInitializerSlotTable* old_tables = cache->tables;
+    u32 old_capacity = cache->capacity;
+    cache->capacity = old_capacity ? old_capacity * 2 : C_PARSE_INITIALIZER_SLOT_CACHE_INITIAL_CAPACITY;
+    cache->tables = arena_allocate(cache->arena, CParseInitializerSlotTable, cache->capacity);
+    memset(cache->tables, 0, sizeof(*cache->tables) * cache->capacity);
+    for (u32 index = 0; index < old_capacity; index += 1)
+    {
+        if (old_tables[index].type_plus_one)
+        {
+            cache->tables[c_parse_initializer_slot_cache_find(cache, old_tables[index].type_plus_one)] = old_tables[index];
+        }
+    }
+}
+
+BUSTER_C_INTERNAL void c_parse_initializer_slot_table_build(CParseInitializerSlotCache* cache, CParseResult* result, CType* type,
+                                                              CParseInitializerSlotTable* table)
+{
+    u32 row_capacity = type->member_count ? type->member_count : 1;
+    table->member_slots = arena_allocate(cache->arena, u32, row_capacity);
+    table->slot_members = arena_allocate(cache->arena, u32, row_capacity);
+    table->member_start = type->member_start;
+    table->member_count = type->member_count;
+    C_PARSE_INITIALIZER_SLOT_VISITS(type->member_count);
+    u32 slot_count = 0;
+    for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+    {
+        u32 slot = UINT32_MAX;
+        if (c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
+        {
+            slot = type->kind == C_TYPE_UNION ? 0 : slot_count;
+            // A union's later members share slot 0 and add no row.
+            if (slot == slot_count)
+            {
+                table->slot_members[slot_count] = field_index;
+                slot_count += 1;
+            }
+        }
+        table->member_slots[field_index] = slot;
+    }
+    table->slot_count = slot_count;
+#if !BUSTER_OPTIMIZE
+    // The count is the one answer checked against its walk here: the walks
+    // for the other two are linear per question, and checking every slot
+    // would make building a wide record's table quadratic again.
+    if (c_parse_initializer_member_count_walk(result, type) != slot_count)
+    {
+        os_fail_message(S8("initializer slot table disagrees with the member walk"));
+    }
+#endif
+}
+
+// The table of a struct or union, built on the walk's first question about
+// it. Null without a cache (the callers outside an inference walk) and for
+// every other kind or a type outside the table; those take the walks.
+BUSTER_C_INTERNAL CParseInitializerSlotTable* c_parse_initializer_slot_table(CParseInitializerSlotCache* cache, CParseResult* result, CType* type)
+{
+    CParseInitializerSlotTable* table = 0;
+    if (cache && result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION) && type >= result->types &&
+        type < result->types + result->type_count)
+    {
+        if ((cache->count + 1) * 2 > cache->capacity)
+        {
+            c_parse_initializer_slot_cache_grow(cache);
+        }
+        u32 type_plus_one = (u32)(type - result->types) + 1;
+        table = cache->tables + c_parse_initializer_slot_cache_find(cache, type_plus_one);
+        if (!table->type_plus_one)
+        {
+            table->type_plus_one = type_plus_one;
+            cache->count += 1;
+            c_parse_initializer_slot_table_build(cache, result, type, table);
+        }
+        else if (table->member_start != type->member_start || table->member_count != type->member_count)
+        {
+            c_parse_initializer_slot_table_build(cache, result, type, table);
+        }
+    }
+    return table;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_count(CParseInitializerSlotCache* cache, CParseResult* result, CType* type)
+{
+    u32 count;
+    CParseInitializerSlotTable* table = c_parse_initializer_slot_table(cache, result, type);
+    if (table)
+    {
+        count = table->slot_count;
+    }
+    else
+    {
+        count = c_parse_initializer_member_count_walk(result, type);
+    }
+    return count;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot(CParseInitializerSlotCache* cache, CParseResult* result, CType* type, u32 field_index)
+{
+    u32 slot;
+    CParseInitializerSlotTable* table = c_parse_initializer_slot_table(cache, result, type);
+    if (table)
+    {
+        slot = field_index < table->member_count ? table->member_slots[field_index] : UINT32_MAX;
+    }
+    else
+    {
+        slot = c_parse_initializer_member_slot_walk(result, type, field_index);
+    }
+    return slot;
+}
+
+BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseInitializerSlotCache* cache, CParseResult* result, CType* type, u32 slot)
+{
+    CMember* member;
+    CParseInitializerSlotTable* table = c_parse_initializer_slot_table(cache, result, type);
+    if (table)
+    {
+        u32 row = type->kind == C_TYPE_UNION ? 0 : slot;
+        member = row < table->slot_count ? result->members + type->member_start + table->slot_members[row] : 0;
+    }
+    else
+    {
+        member = c_parse_initializer_member_at_walk(result, type, slot);
+    }
+    return member;
 }
 
 BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, CParseResult* result, CTypeId root, u32 symbol, String8 name, CTypeId* type_out,
@@ -8754,7 +8946,8 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
                                                                   CScopeId scope, u32 start, u32 end);
 
 BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                         CScopeId scope, CParseInitializerInferenceFrame* frame, u64* slots_out)
+                                                         CScopeId scope, CParseInitializerSlotCache* slot_cache,
+                                                         CParseInitializerInferenceFrame* frame, u64* slots_out)
 {
     if (frame->root)
     {
@@ -8803,7 +8996,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine
         }
         if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
         {
-            *slots_out = c_parse_initializer_member_count(result, type);
+            *slots_out = c_parse_initializer_member_count(slot_cache, result, type);
             return true;
         }
     }
@@ -8908,7 +9101,8 @@ BUSTER_C_INTERNAL bool c_parse_initializer_index_range(CTypeParseMachine* machin
 }
 
 BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                         CScopeId scope, CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
+                                                         CScopeId scope, CParseInitializerSlotCache* slot_cache,
+                                                         CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
                                                          CParseInitializerContinuation* continuation_work, u32 continuation_capacity,
                                                          CParseInitializerInferenceDesignator* designator, CParseInitializerDiagnostic* diagnostic)
 {
@@ -8965,7 +9159,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                     .type = current,
                 };
                 u64 slots = 0;
-                if (!c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, &nested, &slots))
+                if (!c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, slot_cache, &nested, &slots))
                 {
                     return false;
                 }
@@ -9018,7 +9212,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             current = member_type;
             if (first)
             {
-                u32 member_slot = c_parse_initializer_member_slot(result, type, field_index);
+                u32 member_slot = c_parse_initializer_member_slot(slot_cache, result, type, field_index);
                 if (member_slot == UINT32_MAX)
                 {
                     return false;
@@ -9042,7 +9236,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
             }
             else
             {
-                u32 member_slot = c_parse_initializer_member_slot(result, type, field_index);
+                u32 member_slot = c_parse_initializer_member_slot(slot_cache, result, type, field_index);
                 if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1 || designator->continuation_count >= continuation_capacity)
                 {
                     return false;
@@ -9086,7 +9280,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
     else
     {
         u64 slots = frame->slots;
-        if ((!frame->slots_known && !c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, frame, &slots)) || frame->next_index >= slots ||
+        if ((!frame->slots_known && !c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, slot_cache, frame, &slots)) || frame->next_index >= slots ||
             frame->type.value >= result->type_count)
         {
             return false;
@@ -9098,7 +9292,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
         }
         else
         {
-            CMember* member = c_parse_initializer_member_at(result, type, (u32)frame->next_index);
+            CMember* member = c_parse_initializer_member_at(slot_cache, result, type, (u32)frame->next_index);
             if (!member)
             {
                 return false;
@@ -9293,6 +9487,9 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     u32 capacity = (u32)(span + 2);
     CParseInitializerInferenceFrame* frames = arena_allocate(temporary_arena, CParseInitializerInferenceFrame, capacity);
     CParseInitializerContinuation* continuation_work = arena_allocate(temporary_arena, CParseInitializerContinuation, (u32)(span + 1));
+    CParseInitializerSlotCache slot_cache = {
+        .arena = temporary_arena,
+    };
     u32 frame_count = 1;
     frames[0] = (CParseInitializerInferenceFrame){
         .type = aggregate_type,
@@ -9345,7 +9542,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         }
         if (!frame->slots_known)
         {
-            frame->slots_known = c_parse_initializer_type_slots(machine, result_arena, preprocess, result, scope, frame, &frame->slots);
+            frame->slots_known = c_parse_initializer_type_slots(machine, result_arena, preprocess, result, scope, &slot_cache, frame, &frame->slots);
             if (!frame->slots_known)
             {
                 return false;
@@ -9407,8 +9604,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             return c_parse_initializer_fail(diagnostic, S8("initializer has more elements than the aggregate can hold"), frame->cursor, frame->type);
         }
         CParseInitializerInferenceDesignator designator = {0};
-        if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, frame, frame->cursor, frame->limit, continuation_work,
-                                             (u32)(span + 1), &designator, diagnostic) ||
+        if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, &slot_cache, frame, frame->cursor, frame->limit,
+                                             continuation_work, (u32)(span + 1), &designator, diagnostic) ||
             designator.selected_end == UINT64_MAX)
         {
             return false;
@@ -26840,7 +27037,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
                 CParseInitializerInferenceFrame array = {.type = type};
                 u64 count = 0;
                 bool valid_string = c_ir_count_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, string_start, string_end, result->string_literals, &decoded);
-                if (!valid_string || (c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, &array, &count) &&
+                if (!valid_string || (c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, 0, &array, &count) &&
                     decoded.element_count > count))
                 {
                     diagnostic = (CParseInitializerDiagnostic){
@@ -27285,7 +27482,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
                                                           : (CParseConstant){0};
                     CParseInitializerInferenceFrame frame = {.type = current};
                     u64 count = 0;
-                    bool bound = c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, &frame, &count);
+                    bool bound = c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, 0, &frame, &count);
                     if (!bound || !subscript.valid || subscript.is_float || subscript.integer > count)
                         diagnostic.message = S8("a subscript after a compound literal in a static initializer must be a constant index within the literal");
                     current = value.element_type;
