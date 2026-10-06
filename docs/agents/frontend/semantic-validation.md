@@ -221,6 +221,31 @@ conjunction operator shares the spelling; a body with a goto label and
 `&&` is that operator's operand, not a cast. `c_test_label_values_gate` pins
 the gate through the private seam beside the unchanged diagnostics.
 
+## Reservation failure contract
+
+Required preprocessing spelling/token/shape/phase and semantic machine/phase
+reservations produce an error row in the caller's result arena, with the phase
+and requested size in its message. Parsing has no private arena reservation;
+it forwards failed preprocessing and diagnoses absent or oversized token input.
+Semantic analysis stays incomplete on a reservation failure. Lowering refuses
+an incomplete semantic model and never publishes its partially constructed
+program after a required arena reservation fails, including scratch growth.
+The driver preserves these diagnostics for syntax-only and object actions and
+has a nonempty fallback for an incomplete producer result.
+
+`c_test_frontend_reservation_failures` and
+`compiler_driver_test_frontend_reservation_failures` select each mandatory
+phase-local creation through a calling-thread private seam, which arms the
+existing `arena_test_fail_next_reserve` immediately at that creation and
+disables pool reuse for that attempt. Both SSA forms cover all four
+preprocessing, two analysis and one ordinary lowering reservations, failed
+result publication and successful next-call recovery. Driver coverage includes
+syntax-only for phases it actually executes. Oversized query/function growth
+uses the same reservation boundary and reports the requested bytes; the
+existing scratch-limit regressions continue covering checked plan refusal.
+The lexer diagnostic arena remains an optional optimization with a tested
+result-arena fallback; failure there retains the original lexical diagnostics.
+
 ## Regression contract
 
 The registered `c_test_integer_semantics_agreement` matrix pins #1577's

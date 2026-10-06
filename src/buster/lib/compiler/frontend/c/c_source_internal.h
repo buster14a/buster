@@ -4,6 +4,22 @@
 // from tests-disabled builds; file identity remains separate from spelling.
 #include <buster/lib/compiler/frontend/c/c.h>
 
+// Required frontend reservations have one failure contract. The calling-thread
+// test seam selects a phase-local creation, then arms the allocator's existing
+// one-shot reserve failure immediately before it (bypassing pool reuse).
+typedef enum CFrontendReservationPhase
+{
+    C_FRONTEND_RESERVATION_PREPROCESS,
+    C_FRONTEND_RESERVATION_ANALYSIS,
+    C_FRONTEND_RESERVATION_LOWERING,
+} CFrontendReservationPhase;
+
+BUSTER_F_DECL Arena* c_frontend_arena_create(ArenaCreation creation, CFrontendReservationPhase phase);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL void c_test_fail_frontend_reservation(CFrontendReservationPhase phase, u32 ordinal);
+BUSTER_F_DECL bool c_test_frontend_reservation_pending(void);
+#endif
+
 // Translation keeps offsets and checkpoint counts in u32. Reserve one byte
 // for the terminator and two checkpoint slots without narrowing the counts.
 #define C_SOURCE_MAXIMUM_LENGTH ((u64)UINT32_MAX - 2)

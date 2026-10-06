@@ -22491,7 +22491,12 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
 {
     CParserResult result = {0};
     CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
-    if (arena && preprocess.tokens && preprocess.token_count && preprocess.token_count <= (UINT32_MAX - 1) / 2)
+    if (preprocess.error_count && preprocess.diagnostic_count)
+    {
+        result.diagnostics = preprocess.diagnostics;
+        result.diagnostic_count = (u32)BUSTER_MIN(preprocess.diagnostic_count, UINT32_MAX);
+    }
+    else if (arena && preprocess.tokens && preprocess.token_count && preprocess.token_count <= (UINT32_MAX - 1) / 2)
     {
         u32 token_count = (u32)preprocess.token_count;
         result.declaration_capacity = token_count + 1;
@@ -22806,6 +22811,12 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 continuation = true;
             }
         }
+    }
+    else if (arena)
+    {
+        result.diagnostic_capacity = 1;
+        c_parser_diagnostic(arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                            S8("C parsing requires a complete preprocessing result within its token capacity"));
     }
 
     return result;
@@ -29463,6 +29474,18 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     result->expression_scalar_types = 0;
 }
 
+// Early resource failures precede the ordinary token-sized diagnostic table.
+// Keep their row and message in the caller's result arena, never phase scratch.
+BUSTER_C_INTERNAL void c_analysis_failure(CAnalysisResult* result, String8 message)
+{
+    if (result->arena)
+    {
+        result->diagnostics = arena_allocate(result->arena, CDiagnostic, 1);
+        result->diagnostic_capacity = 1;
+        c_parse_diagnostic(result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+    }
+}
+
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPreprocessResult preprocess, CParserResult syntax,
                                                                   bool validate_lowering_constraints)
 {
@@ -29480,10 +29503,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     if (!arena || !preprocess.tokens || !preprocess.token_count)
     {
+        c_analysis_failure(&result, S8("C semantic analysis requires a complete preprocessing result"));
         return result;
     }
     if (preprocess.token_count > (UINT32_MAX - 1) / 2)
     {
+        c_analysis_failure(&result, S8("C semantic analysis token capacity exceeded"));
         return result;
     }
     u32 token_count = (u32)preprocess.token_count;
@@ -29504,6 +29529,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     u32 maximum_delimiter_depth = census.maximum_delimiter_depth;
     if (maximum_delimiter_depth > (UINT32_MAX - 64) / 8 || token_count == UINT32_MAX)
     {
+        c_analysis_failure(&result, S8("C semantic analysis delimiter capacity exceeded"));
         return result;
     }
     u32 type_frame_capacity = maximum_delimiter_depth * 4 + 32;
@@ -29512,6 +29538,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     u64 promoted_member_capacity_u64 = (u64)token_count * 2 + 1;
     if (promoted_member_capacity_u64 > UINT32_MAX)
     {
+        c_analysis_failure(&result, S8("C semantic analysis member capacity exceeded"));
         return result;
     }
     u32 promoted_member_capacity = (u32)promoted_member_capacity_u64;
@@ -29528,29 +29555,35 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         !c_type_parse_buffer_size_add(&machine_buffer_size, incomplete_array_chain_capacity, sizeof(CTypeId), BUSTER_ALIGN_OF(CTypeId)) ||
         machine_buffer_size > UINT64_MAX - (BUSTER_KB(64) - 1))
     {
+        c_analysis_failure(&result, S8("C semantic analysis workspace size overflow"));
         return result;
     }
     machine_buffer_size = (machine_buffer_size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
-    Arena* machine_buffer_arena = arena_create((ArenaCreation){
+    Arena* machine_buffer_arena = c_frontend_arena_create((ArenaCreation){
         .reserved_size = machine_buffer_size,
         .granularity = BUSTER_KB(64),
         .initial_size = BUSTER_MIN(machine_buffer_size, BUSTER_KB(256)),
-    });
-    if (!machine_buffer_arena)
-    {
-        return result;
-    }
-    // Query-local state goes to the unit's phase arena, or to a private one
-    // when the caller has none; without either the queries keep today's
-    // arenas, so a failed reservation costs memory, never the analysis.
+    }, C_FRONTEND_RESERVATION_ANALYSIS);
+    // Query-local state belongs to a supplied phase arena or a private one.
     Arena* phase_arena = preprocess.recovery ? preprocess.recovery->phase_arena : 0;
     bool phase_arena_owned = !phase_arena;
-    if (phase_arena_owned)
+    if (machine_buffer_arena && phase_arena_owned)
     {
-        phase_arena = arena_create((ArenaCreation){
+        phase_arena = c_frontend_arena_create((ArenaCreation){
             .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
             .flags = {.pool_reuse = 1},
-        });
+        }, C_FRONTEND_RESERVATION_ANALYSIS);
+    }
+    if (!machine_buffer_arena || !phase_arena)
+    {
+        u64 requested_size = !machine_buffer_arena ? machine_buffer_size : C_PHASE_ARENA_RESERVED_SIZE;
+        c_analysis_failure(&result, string_format(arena, S8("could not reserve {u64} bytes for C semantic analysis {S8} arena"),
+                                                 requested_size, !machine_buffer_arena ? S8("machine") : S8("phase")));
+        if (machine_buffer_arena)
+        {
+            arena_destroy(machine_buffer_arena, 1);
+        }
+        return result;
     }
     u64 phase_start = phase_arena ? phase_arena->position : 0;
     Arena* machine_conflicts[] = {
