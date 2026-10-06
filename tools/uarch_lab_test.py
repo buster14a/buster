@@ -418,6 +418,11 @@ elif command == "stat":
     sys.exit(status)
 elif command == "record":
     event = option("-e")
+    # REFUSE: events a strict host forbids (perf_event_paranoid, no PMU).
+    refused = [args[index + 1] for index, arg in enumerate(args) if arg == "-e" and args[index + 1] in globals().get("REFUSE", ())]
+    if refused:
+        sys.stderr.write("Access to performance monitoring and observability operations is limited: %s\n" % refused[0])
+        sys.exit(255)
     if event == "dTLB-load-misses:u":
         sys.stderr.write("The dTLB-load-misses event is not supported.\n")
         sys.exit(255)
@@ -485,8 +490,12 @@ class Fakes:
         write_script(os.path.join(root, "sudo"), FAKE_SUDO, {})
         return root, ide, perf
 
-    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3"), compiler=None):
+    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3"), compiler=None, refuse=()):
         root, ide, perf = self.fakes(mode, stat)
+        if refuse:
+            with open(perf) as handle:
+                script = handle.read()
+            write_script(perf, script.replace("#!/usr/bin/env python3\n", "#!/usr/bin/env python3\nREFUSE = %r\n" % (list(refuse),), 1), {})
         write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": mode,
                                         "COMPILE_LOG": os.path.join(root, "compile.jsonl")}, **(compiler or {})))
         output = os.path.join(root, "out")
@@ -502,6 +511,42 @@ class Fakes:
         with open(os.path.join(output, "report.md")) as handle:
             return meta, handle.read(), output
 
+
+
+@unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+class ThreadsTests(Fakes, unittest.TestCase):
+    """The opt-in Superluminal-style capture (step_threads)."""
+
+    SKIP = ("--skip", "topdown", "timeline", "sampling", "micro")
+
+    def test_threads_are_opt_in(self):
+        meta, report, _ = self.run_lab("new", runs=("--runs", "2") + self.SKIP[:1] + self.SKIP[1:])
+        self.assertEqual((meta["steps"]["threads"]["status"], meta["steps"]["threads"]["note"]), ("skipped", "opt-in: --threads"))
+
+    def test_full_capture_with_scheduler_events(self):
+        meta, report, output = self.run_lab("new", runs=("--runs", "2", "--threads") + self.SKIP)
+        self.assertEqual(meta["steps"]["threads"]["status"], "ok", meta["steps"]["threads"])
+        record = json.loads(lab.read_text(os.path.join(output, "threads", "threads.json")))
+        self.assertEqual((record["mode"], record["hz"], record["refused"]), ("full", lab.THREAD_SAMPLE_HZ, []))
+        self.assertEqual(record["events"], ["cycles", "sched:sched_switch", "sched:sched_wakeup"])
+        self.assertTrue(os.path.isfile(os.path.join(output, "threads", "threads.data")))
+        self.assertIn("## 6b. Thread timeline (Hotspot, opt-in)", report)
+        self.assertIn("hotspot " + record["data"], report)
+        log = lab.read_text(os.path.join(output, "threads", "full.record.log"))
+        for flag in ("--switch-events", "--call-graph fp", "-F %d" % lab.THREAD_SAMPLE_HZ):
+            self.assertIn(flag, log)
+
+    def test_strict_hosts_fall_back_and_say_why(self):
+        meta, report, output = self.run_lab("new", runs=("--runs", "2", "--threads") + self.SKIP, refuse=("cycles",))
+        record = json.loads(lab.read_text(os.path.join(output, "threads", "threads.json")))
+        self.assertEqual(record["mode"], "user")
+        self.assertEqual([item["mode"] for item in record["refused"]], ["full"])
+        self.assertIn("Access to performance monitoring", record["refused"][0]["reason"])
+        self.assertIn("`full` refused (exit 255)", report)
+        meta, report, output = self.run_lab("new", runs=("--runs", "2", "--threads") + self.SKIP,
+                                            refuse=("cycles", "cycles:u", "cpu-clock:u"))
+        self.assertEqual(meta["steps"]["threads"]["status"], "failed")
+        self.assertIn("no thread capture could be recorded", meta["steps"]["threads"]["note"])
 
 
 @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
@@ -1076,6 +1121,13 @@ class CompareFlowTests(Fakes, unittest.TestCase):
         with open(os.path.join(output, "pairs.json")) as handle:
             records = json.load(handle)
         self.assertTrue(all(record["counters"] is False and record["cpu_s"] is not None for record in records))
+
+    def test_compare_thread_captures_for_both_variants(self):
+        summary, report, output = self.compare(["--pairs", "6", "--profile-steps", "threads"])
+        captures = summary["profile"]["threads"]["captures"]
+        self.assertEqual((captures["baseline"]["mode"], captures["candidate"]["mode"]), ("full", "full"))
+        for key in ("a", "b"):
+            self.assertTrue(os.path.isfile(os.path.join(output, key, "threads", "threads.data")))
 
     def test_compare_profile_steps_without_perf_stop_before_any_pair(self):
         with self.assertRaises(SystemExit) as stop:

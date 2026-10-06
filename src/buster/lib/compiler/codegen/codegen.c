@@ -6847,7 +6847,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
                             if (options.verify_invariants && !scheduled_placement.valid)
                             {
-                                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+                                // Frame capacity keeps its own diagnostic; any other
+                                // invalid placement is a verification failure.
+                                fallback_reason = scheduled_placement.capacity_exceeded ? CODEGEN_FALLBACK_PLACEMENT : CODEGEN_FALLBACK_VERIFICATION;
+                                placement.capacity_exceeded = scheduled_placement.capacity_exceeded;
                                 placement.valid = false;
                             }
                             u32 placement_saved_registers = 0;
@@ -6871,7 +6874,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 if (!placement.valid)
                 {
                     fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
-                    if (options.verify_invariants)
+                    if (options.verify_invariants && !placement.capacity_exceeded)
                     {
                         fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
                     }

@@ -9,7 +9,8 @@
 // block, spills lazily on eviction, calls, and block boundaries, and forces
 // the fixed-register operand layout for the constrained opcodes whose
 // encoder sequences pin specific registers. The output is the same
-// placement contract the MIR_STACK builder produces, so the encoder is
+// placement contract and checked machine_stack_frame_reserve/finish arithmetic
+// the MIR_STACK builder produces, so the encoder is
 // untouched: per-slot operand registers plus a point-sorted reload/spill
 // edit stream. Liveness is derived from the complete textual use/definition
 // stream rather than MachineVirtualRegister.definition_point, so explicit
@@ -4098,13 +4099,17 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // below — subtracting a save area that is not there sizes the allocation
         // short and buries the deepest slots under the stack pointer.
         u32 pool_base = description->saves_precede_frame_pointer ? 0u : 8 * push_count;
-        u32 running = pool_base + 8 * pool_size;
+        u64 running = pool_base;
+        bool frame_capacity = machine_stack_frame_reserve(&running, (u64)pool_size * 8u, 1u);
         // Sixty-four-byte vector homes on a sixteen-byte offset boundary,
         // mirroring the canonical frame layout's vector clamp; every access is
         // the unaligned vmovdqu8 either way.
-        u32 vector_base = (running + 15u) & ~15u;
-        running = vector_pool_size ? vector_base + 64u * vector_pool_size : running;
-        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+        u64 vector_base = (running + 15u) & ~(u64)15u;
+        if (vector_pool_size)
+        {
+            frame_capacity = frame_capacity && machine_stack_frame_reserve(&running, (u64)vector_pool_size * 64u, 16u);
+        }
+        for (u32 register_index = 0; frame_capacity && register_index < function->virtual_register_count; register_index += 1)
         {
             bool is_vector = function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR;
             placement.virtual_register_offsets[register_index] = 0;
@@ -4114,21 +4119,32 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             }
             if (pool_indices[register_index] != UINT32_MAX)
             {
-                placement.virtual_register_offsets[register_index] = is_vector ? vector_base + 64u * (pool_indices[register_index] + 1u)
-                                                                               : pool_base + 8u * (pool_indices[register_index] + 1u);
+                u64 offset = is_vector ? vector_base + 64u * ((u64)pool_indices[register_index] + 1u)
+                                       : pool_base + 8u * ((u64)pool_indices[register_index] + 1u);
+                frame_capacity = offset <= running;
+                if (frame_capacity)
+                {
+                    placement.virtual_register_offsets[register_index] = (u32)offset;
+                }
                 continue;
             }
             // A home the colorer never saw — no memory edit gave it a range —
             // still gets a slot of its own so the layout stays sound.
-            running = is_vector ? ((running + 15u) & ~15u) + 64u : running + 8u;
-            placement.virtual_register_offsets[register_index] = running;
+            frame_capacity = machine_stack_frame_reserve(&running, is_vector ? 64u : 8u, is_vector ? 16u : 1u);
+            if (frame_capacity)
+            {
+                placement.virtual_register_offsets[register_index] = (u32)running;
+            }
         }
-        for (u32 group = 0; group < group_count; group += 1)
+        for (u32 group = 0; frame_capacity && group < group_count; group += 1)
         {
-            running = (running + group_sizes[group] + group_alignments[group] - 1) & ~(group_alignments[group] - 1);
-            group_offsets[group] = running;
+            frame_capacity = machine_stack_frame_reserve(&running, group_sizes[group], group_alignments[group]);
+            if (frame_capacity)
+            {
+                group_offsets[group] = (u32)running;
+            }
         }
-        for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
+        for (u32 slot_index = 0; frame_capacity && slot_index < function->stack_slot_count; slot_index += 1)
         {
             // The outgoing argument area is placed at the bottom of the frame
             // below, where a call's stack pointer lands on its base.
@@ -4144,19 +4160,18 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 continue;
             }
             u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
-            running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
-            placement.stack_slot_offsets[slot_index] = running;
+            frame_capacity = machine_stack_frame_reserve(&running, function->stack_slot_sizes[slot_index], slot_alignment);
+            if (frame_capacity)
+            {
+                placement.stack_slot_offsets[slot_index] = (u32)running;
+            }
         }
         u64 edge_copy_temporary_size = machine_function_edge_copy_temporary_size(function);
-        if (edge_copy_temporary_size > UINT32_MAX - running)
-        {
-            return placement;
-        }
-        placement.edge_copy_temporary_offset = running;
-        running += (u32)edge_copy_temporary_size;
-        u32 push_parity = (push_count & 1u) ? 8u : 0u;
-        placement.frame_size = ((running - pool_base + push_parity + 15u) & ~15u) - push_parity + function->outgoing_bytes;
-        if (function->outgoing_bytes)
+        placement.edge_copy_temporary_offset = (u32)running;
+        frame_capacity = frame_capacity && machine_stack_frame_reserve(&running, edge_copy_temporary_size, 1u) &&
+                         machine_stack_frame_finish(function, running, pool_base, push_count, &placement.frame_size);
+        placement.capacity_exceeded = !frame_capacity;
+        if (frame_capacity && function->outgoing_bytes)
         {
             placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
         }
@@ -4164,7 +4179,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // save area that really lies below the frame pointer; see the same guard
         // in machine_stack_placement_build. An invalid placement falls back to the
         // canonical emitter, which is always sound.
-        if (running <= placement.frame_size + pool_base)
+        if (frame_capacity)
         {
             // See machine_stack_placement_build: the saves the Win64 prologue pushes
             // before the frame pointer lie between it and the incoming arguments.

@@ -17,11 +17,11 @@ compiler with tests off as described in `docs/agents/benchmarking.md`. Every
 attempt gets a new output directory, retained until its users finish.
 
     python3 tools/uarch_lab.py run --ide "$session_root/src/build/Release/ide" --repo-root "$session_root/src" \\
-        --cpu 2 --output "$session_root/lab-attempt-1" [--target-minutes 15 | --runs N] [--sudo] \\
+        --cpu 2 --output "$session_root/lab-attempt-1" [--target-minutes 15 | --runs N] [--sudo] [--threads] \\
         [--skip STEP ...] [--no-fresh-copy] [--perf PATH] [-- extra compile args]
     python3 tools/uarch_lab.py compare --baseline A_IDE --candidate B_IDE \\
         --repo-root "$session_root/src" --cpu 2 --output "$session_root/ab-attempt-1" [--target-minutes 15 | --pairs N] \\
-        [--profile-steps topdown,sampling] [--sudo] [--seed N] \\
+        [--profile-steps topdown,sampling,threads] [--sudo] [--seed N] \\
         [--min-effect PCT] [--no-fresh-copy] [--require-identical-output] \\
         [--perf PATH] [-- extra compile args]
     python3 tools/uarch_lab.py retirement --baseline A_IDE --candidate B_IDE \\
@@ -61,6 +61,10 @@ Steps (each writes DIR/<step>/ and one report section; any can be skipped):
               compiler renames its main thread `main_thread`, so its exec name
               alone misses nearly every sample); `report DIR` derives these
               filtered reports from the raw *.data when they are missing
+    threads   (--threads / --profile-steps threads, opt-in) one Superluminal-
+              style capture for Hotspot: `perf record -F 10000 --call-graph
+              fp --switch-events`, with kernel stacks and scheduler wake-ups
+              when perf_event_paranoid is -1, else user-only (step_threads)
     micro     `ide bench` if the binary supports it
 
 A step is `ok` only when its section has real data: the report re-assesses
@@ -157,7 +161,7 @@ import tempfile
 import threading
 import time
 
-STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "micro")
+STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "threads", "micro")
 DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
                    "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm"]
 # No duration_time: perf 7.2.4 reads it as 0 whenever it shares the event
@@ -233,7 +237,18 @@ SHF_EXECINSTR = 0x4
 SHT_NOBITS = 8
 # A/B compare (command_compare): variants, ABBA pair planning, statistics.
 VARIANTS = (("a", "baseline"), ("b", "candidate"))
-PROFILE_STEPS = ("topdown", "sampling", "ibs")
+PROFILE_STEPS = ("topdown", "sampling", "ibs", "threads")
+# The opt-in `threads` step (step_threads): one Superluminal-style capture for
+# Hotspot, at THREAD_SAMPLE_HZ with frame-pointer stacks and context switches.
+# Each mode needs less of the host than the one before; the first that
+# records wins (perf_event_paranoid -1, then 2, then no PMU).
+THREAD_SAMPLE_HZ = 10000
+THREAD_MODES = (
+    ("full", ["-e", "cycles", "-e", "sched:sched_switch", "-e", "sched:sched_wakeup"],
+     "kernel and user stacks, context switches and scheduler wake-ups (off-CPU waits)"),
+    ("user", ["-e", "cycles:u"], "user-space stacks and context switches; no kernel frames or wake-ups"),
+    ("cpu-clock", ["-e", "cpu-clock:u"], "software-clock user stacks and context switches; no PMU"),
+)
 PILOT_PAIRS = 2
 MIN_PAIRS = 10
 MAX_PAIRS = 1000
@@ -1273,11 +1288,11 @@ def compile_flags(lab, metrics_path):
     return ["-fmetrics-out=" + metrics_path] if metrics_path and enabled else []
 
 
-def estimate_other_compiles(groups, skip, sudo):
+def estimate_other_compiles(groups, skip, sudo, threads=False):
     """Rough cost of the steps after `timed`, in compile-equivalents (one
     compile's wall time), for choose_run_count."""
     cost = {"topdown": TOPDOWN_COMPILES_PER_GROUP * (len(groups) if groups is not None else 8),
-            "timeline": 3, "sampling": SAMPLING_COMPILES, "ibs": IBS_COMPILES if sudo else 0, "micro": 3}
+            "timeline": 3, "sampling": SAMPLING_COMPILES, "ibs": IBS_COMPILES if sudo else 0, "threads": 1 if threads else 0, "micro": 3}
     return sum(value for step, value in cost.items() if step not in skip)
 
 
@@ -1609,6 +1624,40 @@ def derive_ibs_reports(lab, directory, basename):
         write_text(os.path.join(directory, name + ".filter.json"), json.dumps(selection, indent=1, sort_keys=True))
         notes.append("%s: %s %s" % (name, selection["method"], ",".join(str(tid) for tid in selection["tids"]) or ",".join(selection["comms"])))
     return notes
+
+
+def step_threads(lab):
+    """Opt-in Superluminal-style capture (run --threads, compare --profile-steps
+    threads): `perf record -F THREAD_SAMPLE_HZ --call-graph fp --switch-events`
+    with the richest THREAD_MODES entry the host permits. The binary runs in
+    place, not as a fresh copy, so threads/threads.data stays resolvable:
+    open it with Hotspot (`hotspot threads/threads.data`). Writes
+    threads.json (mode, events, why richer modes failed), a per-thread sample
+    report and, with scheduler events, `perf sched timehist --summary`."""
+    directory = lab.directory("threads")
+    data = os.path.join(directory, "threads.data")
+    out = os.path.join(directory, "out.exe")
+    record = {"hz": THREAD_SAMPLE_HZ, "data": data, "mode": None, "description": None, "events": [], "refused": []}
+    for mode, events, description in THREAD_MODES:
+        if record["mode"] is None:
+            log = os.path.join(directory, mode + ".record.log")
+            status, _, err = lab.run_command(lab.pin() + [lab.perf, "record", "-q", "-F", str(THREAD_SAMPLE_HZ), "--call-graph", "fp",
+                                                          "--switch-events"] + events + ["-o", data, "--"] + lab.workload(out), log=log)
+            print("[threads] %s exit=%d" % (mode, status), flush=True)
+            if status == 0 and os.path.isfile(data):
+                record.update(mode=mode, description=description, events=events[1::2])
+            else:
+                record["refused"].append({"mode": mode, "exit": status, "reason": last_reason(read_text(log) or err)})
+    write_json(os.path.join(directory, "threads.json"), record)
+    if record["mode"] is None:
+        raise RuntimeError("no thread capture could be recorded: " + "; ".join("%s: %s" % (item["mode"], item["reason"])
+                                                                             for item in record["refused"]))
+    lab.run_command([lab.perf, "report", "-i", data, "--stdio", "--no-children", "--sort", "tid", "-g", "none"],
+                    stdout_path=os.path.join(directory, "threads.tid.txt"), log=os.path.join(directory, "threads.tid.log"))
+    if record["mode"] == "full":
+        lab.run_command([lab.perf, "sched", "timehist", "-i", data, "--summary"],
+                        stdout_path=os.path.join(directory, "threads.sched.txt"), log=os.path.join(directory, "threads.sched.log"))
+    return "mode %s (%s); open %s with Hotspot" % (record["mode"], record["description"], data)
 
 
 def step_ibs(lab):
@@ -2382,6 +2431,31 @@ def mem_lines(base, findings, problems):
     return lines
 
 
+def render_threads(directory, findings, problems):
+    record = json.loads(read_text(os.path.join(directory, "threads", "threads.json")) or "{}")
+    lines = []
+    if not record.get("mode"):
+        problems.append("no thread capture recorded")
+        lines.append("NA (no thread capture; %s)." % ("; ".join("%s: %s" % (item.get("mode"), item.get("reason"))
+                                                                for item in record.get("refused", [])) or "not run"))
+    else:
+        lines += ["Mode `%s`: %s, %d Hz, frame-pointer stacks. Open `%s` with Hotspot (`hotspot %s`) for the per-thread "
+                  "timeline, off-CPU time and flame graphs; `perf script -i` exports it for the Firefox Profiler." % (
+                      record["mode"], record["description"], record["hz"], os.path.relpath(record["data"], directory),
+                      record["data"])]
+        for item in record.get("refused", []):
+            lines.append("- `%s` refused (exit %s): %s" % (item.get("mode"), item.get("exit"), item.get("reason")))
+        tid = read_text(os.path.join(directory, "threads", "threads.tid.txt")) or ""
+        rows = [line for line in tid.splitlines() if line.strip() and not line.startswith("#")]
+        if not rows:
+            problems.append("per-thread report has no rows")
+        lines += ["", "Samples per thread:"] + fenced("\n".join(rows[:40]) or "no rows")
+        sched = read_text(os.path.join(directory, "threads", "threads.sched.txt"))
+        if sched:
+            lines += ["", "Scheduler summary (`perf sched timehist --summary`):"] + fenced("\n".join(sched.splitlines()[:60]))
+    return lines
+
+
 def render_micro(directory, findings, problems):
     text = read_text(os.path.join(directory, "micro", "bench.txt"))
     if not text or "BENCH_C_FRONTEND" not in text:
@@ -2395,7 +2469,7 @@ def render_micro(directory, findings, problems):
 RENDERERS = {"env": ("1. Environment", render_env), "timed": ("2. Timed runs", render_timed),
              "topdown": ("3. Top-down metric groups", render_topdown), "timeline": ("4. Timeline (WHEN)", render_timeline),
              "sampling": ("5. Sampling (WHERE)", render_sampling), "ibs": ("6. IBS and perf mem (sudo)", render_ibs),
-             "micro": ("7. Micro-benchmark", render_micro)}
+             "threads": ("6b. Thread timeline (Hotspot, opt-in)", render_threads), "micro": ("7. Micro-benchmark", render_micro)}
 
 
 def render_section(directory, step, findings):
@@ -2878,7 +2952,7 @@ def compare_timed(labs, directory, meta, arguments, started, other_compiles):
 
 def compare_profile_cost(groups, steps):
     per_variant = {"topdown": TOPDOWN_COMPILES_PER_GROUP * (len(groups) if groups is not None else 8),
-                   "sampling": len(SAMPLE_EVENTS) + 1, "ibs": IBS_COMPILES}
+                   "sampling": len(SAMPLE_EVENTS) + 1, "ibs": IBS_COMPILES, "threads": 1}
     return 2 * sum(per_variant[step] for step in steps)
 
 
@@ -2977,6 +3051,8 @@ def command_compare(arguments):
                         note = step_topdown(lab, groups or [])
                     elif step == "sampling":
                         note = step_sampling(lab, detail=False)
+                    elif step == "threads":
+                        note = step_threads(lab)
                     else:
                         note = step_ibs(lab)
                     lab.meta["steps"][step] = {"status": "ok", "note": note or ""}
@@ -3152,6 +3228,12 @@ def compare_profile(directory, meta):
             if a_text is not None and b_text is not None:
                 events[name] = symbol_movers(a_text, b_text)
         profile[step] = {"status": steps[step]["status"], "events": events}
+    if "threads" in steps:
+        captures = {}
+        for key, role in VARIANTS:
+            record = json.loads(read_text(os.path.join(roots[key], "threads", "threads.json")) or "{}")
+            captures[role] = {"mode": record.get("mode"), "data": record.get("data"), "refused": record.get("refused", [])}
+        profile["threads"] = {"status": steps["threads"]["status"], "captures": captures}
     return profile
 
 
@@ -3757,8 +3839,9 @@ def command_run(arguments):
                                         "timed-run count chosen after %d pilot runs to land near %g min" % (PILOT_RUNS, arguments.target_minutes)), flush=True)
     started = time.monotonic()
     for step in STEPS:
-        if step in arguments.skip or (step == "ibs" and not arguments.sudo):
-            lab.meta["steps"][step] = {"status": "skipped", "elapsed_s": 0.0, "note": "--skip" if step in arguments.skip else "needs --sudo"}
+        if step in arguments.skip or (step == "ibs" and not arguments.sudo) or (step == "threads" and not arguments.threads):
+            lab.meta["steps"][step] = {"status": "skipped", "elapsed_s": 0.0, "note": "--skip" if step in arguments.skip else
+                                       "needs --sudo" if step == "ibs" else "opt-in: --threads"}
             lab.save_meta()
             continue
         print("uarch_lab: step %s ..." % step, flush=True)
@@ -3769,7 +3852,7 @@ def command_run(arguments):
             elif step == "timed":
                 facts = json.loads(read_text(os.path.join(lab.output, "env", "env.json")) or "{}")
                 note = step_timed(lab, arguments.runs, arguments.warmups, arguments.target_minutes, started,
-                                  estimate_other_compiles(facts.get("metric_groups"), arguments.skip, arguments.sudo))
+                                  estimate_other_compiles(facts.get("metric_groups"), arguments.skip, arguments.sudo, arguments.threads))
             elif step == "topdown":
                 facts = json.loads(read_text(os.path.join(lab.output, "env", "env.json")) or "{}")
                 groups = facts.get("metric_groups")
@@ -3787,6 +3870,8 @@ def command_run(arguments):
                 note = step_sampling(lab)
             elif step == "ibs":
                 note = step_ibs(lab)
+            elif step == "threads":
+                note = step_threads(lab)
             else:
                 note = step_micro(lab)
             state = {"status": "ok", "note": note or ""}
@@ -3821,6 +3906,8 @@ def main(argv=None):
     run.add_argument("--warmups", type=int, default=1)
     run.add_argument("--perf", default="perf")
     run.add_argument("--sudo", action="store_true", help="enable the IBS / perf mem step")
+    run.add_argument("--threads", action="store_true",
+                     help="add the Superluminal-style thread capture for Hotspot (step_threads; richest with perf_event_paranoid -1)")
     run.add_argument("--skip", nargs="*", default=[], choices=STEPS)
     run.add_argument("--no-fresh-copy", dest="fresh_copy", action="store_false",
                      help="run the binary in place instead of a fresh copy per timed run and capture")
