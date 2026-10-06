@@ -49300,12 +49300,22 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
             IrSymbolId symbol = builder->entity_symbols[entity_id.value];
             IrTypeId type = builder->c_type_ir_map[entity->type.value];
             IrType* type_value = ir_type_from_id(&builder->program->types, type);
-            if (type_value && type_value->layout.resolved)
+            // An incomplete `extern T a[];` has no IR array type, so it cannot
+            // be an lvalue here; as a value it is only the pointer to its
+            // element, which is what `a + 1`, `&a[1]` and `c ? a : "x"` fold
+            // against (relocation to the symbol, addend in element units).
+            IrTypeId decayed = IR_TYPE_ID_INVALID;
+            if (!type_value && type.value == IR_ID_UNDERLYING_INVALID && symbol.value != IR_ID_UNDERLYING_INVALID)
+            {
+                decayed = c_ir_sizeof_unlowered_array_decay(builder, entity->type);
+            }
+            bool lvalue = type_value && type_value->layout.resolved;
+            if (lvalue || decayed.value != IR_ID_UNDERLYING_INVALID)
             {
                 *result = (CIrConstantValue){
-                    .type = type,
+                    .type = lvalue ? type : decayed,
                     .symbol = symbol,
-                    .kind = C_IR_CONSTANT_LVALUE,
+                    .kind = lvalue ? C_IR_CONSTANT_LVALUE : C_IR_CONSTANT_POINTER,
                 };
                 return true;
             }

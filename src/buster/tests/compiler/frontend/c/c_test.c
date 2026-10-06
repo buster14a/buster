@@ -43100,6 +43100,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_to_array_shapes_runtime(UnitTe
     return result;
 }
 
+// An incomplete `extern const char tbl[];` is only its element pointer as a
+// value (#2877): address arithmetic, subscripts, conditionals and casts over it
+// fold in static initializers as a relocation against the symbol with the
+// addend scaled by the element size, and the linked pointers match the
+// definition in the other unit.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_incomplete_array_address_definition_source = S8_INITIALIZER("const char tbl[] = \"abcdef\";\n");
+
+BUSTER_GLOBAL_LOCAL String8 const c_test_incomplete_array_address_use_source = S8_INITIALIZER(
+    "extern const char tbl[];\n"
+    "const char *p0 = tbl;\n"
+    "const char *p1 = tbl + 1;\n"
+    "const char *p2 = &tbl[1];\n"
+    "const char *p3 = tbl - 0;\n"
+    "const char *p4 = (const char *)tbl + 2;\n"
+    "const char *p5 = 1 ? tbl : \"x\";\n"
+    "const char *p6 = 0 ? \"x\" : tbl + 3;\n"
+    "const char *p7 = 2 + tbl;\n"
+    "const char *p8 = &tbl[0] + 4;\n"
+    "const char *list[] = { tbl, tbl + 1 };\n"
+    "int main(void)\n"
+    "{\n"
+    "    if (p0 != tbl) return 1;\n"
+    "    if (p1 != tbl + 1 || *p1 != 'b') return 2;\n"
+    "    if (p2 != tbl + 1) return 3;\n"
+    "    if (p3 != tbl) return 4;\n"
+    "    if (p4 != tbl + 2 || *p4 != 'c') return 5;\n"
+    "    if (p5 != tbl) return 6;\n"
+    "    if (p6 != tbl + 3 || *p6 != 'd') return 7;\n"
+    "    if (p7 != tbl + 2) return 8;\n"
+    "    if (p8 != tbl + 4 || *p8 != 'e') return 9;\n"
+    "    if (list[0] != tbl || list[1] != tbl + 1) return 10;\n"
+    "    return 0;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_incomplete_array_address_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 definition = buster_test_temporary_path(arguments->arena, S8("incomplete-array-address-definition"), S8(".c"));
+    String8 use = buster_test_temporary_path(arguments->arena, S8("incomplete-array-address-use"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(definition, BUSTER_SLICE_TO_BYTE_SLICE(c_test_incomplete_array_address_definition_source))) &&
+        BUSTER_REQUIRE(arguments, file_write(use, BUSTER_SLICE_TO_BYTE_SLICE(c_test_incomplete_array_address_use_source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("incomplete-array-address-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"),
+                S8("-o"), output, use, definition};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(temporary.arena, S8("incomplete array address runtime form={u32}: status={u32} timed_out={u32}"), form,
+                            execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A place is not a scalar value, and an unknown read is not known false.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArguments* arguments)
 {
@@ -44675,6 +44751,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_header_operands);
     C_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
     C_TEST_FIXTURE(arguments, c_test_identifier_list_function_definitions);
+    C_TEST_FIXTURE(arguments, c_test_incomplete_array_address_runtime);
     C_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
