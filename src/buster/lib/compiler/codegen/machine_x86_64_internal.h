@@ -29,4 +29,14 @@ struct MachineX64GprPreparationAudit
     bool valid;
 };
 BUSTER_F_DECL MachineX64GprPreparationAudit machine_x64_test_gpr_preparation(void);
+// Read-only publication audit and mutation seam for the same production
+// condition/form join. A valid neighboring key must still fail its condition.
+typedef struct MachineX64ConditionBindingAudit MachineX64ConditionBindingAudit;
+struct MachineX64ConditionBindingAudit
+{
+    u32 checked_bindings;
+    u32 mismatched_bindings;
+};
+BUSTER_F_DECL MachineX64ConditionBindingAudit machine_x64_test_condition_binding_audit(void);
+BUSTER_F_DECL bool machine_x64_test_condition_form_agrees(u32 family, u32 condition, u32 form_id, u64 stable_hash);
 #endif

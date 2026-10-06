@@ -81,18 +81,18 @@
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.c",
-      "bytes": 184406,
-      "sha256": "01e688d9bb782c42acab1235087f698b0214ac16705b793513927b5dfe5e5a41"
+      "bytes": 190477,
+      "sha256": "1eef8756e6dd80fed90123bade4e8263828233f849f903f1c7dd53586de6b7bb"
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.h",
-      "bytes": 5742,
-      "sha256": "bebe8260e05c05d71659d14741cc4baf13b36e88e6257984f17f3875ff6a6a39"
+      "bytes": 6073,
+      "sha256": "120822b543a1dfb9b08232e508abf8bd9ed7ee9efdd9a656e4d46689c5716266"
     },
     {
       "source": "src/buster/lib/file.c",
-      "bytes": 27651,
-      "sha256": "35bc24eb54b5e83faaebf6137cbfd02bddd6067df5d5d8360eeb31040f975148"
+      "bytes": 27663,
+      "sha256": "bbc1254d3dc71fcaaea7988583d89f69871e39714f6a70e31b7ddd6f52861f55"
     },
     {
       "source": "src/buster/lib/file.h",
@@ -131,8 +131,8 @@
     },
     {
       "source": "src/buster/lib/os.c",
-      "bytes": 276613,
-      "sha256": "e14beb0f5666e2370a6db6f76bdb6c8a0e9e65fa3a1f54a8260f5108fca2e880"
+      "bytes": 277289,
+      "sha256": "aafbc703ae444d50f762fd94a0614dcbc3d92000caed258772dae3cad63f116c"
     },
     {
       "source": "src/buster/lib/os.h",
@@ -151,13 +151,13 @@
     },
     {
       "source": "src/buster/lib/string.c",
-      "bytes": 72668,
-      "sha256": "b7bf4e0b8aae409aa0677b4689ab2c2f81fb8ae870fcc47f543fb1e9ee6a555b"
+      "bytes": 72958,
+      "sha256": "9efcea4cd112f285f810e935ec0c3b7babc6e87fb2bbfd6de7055e5400dc6820"
     },
     {
       "source": "src/buster/lib/string.h",
-      "bytes": 8763,
-      "sha256": "fb275a7e6e68d3b964eba501439589667697984d0c4297dbd4e11c956db76482"
+      "bytes": 8978,
+      "sha256": "13f7ecaccd09e9209e3e86797016ace5f3d92b6d4195a5dbcdd0e529571fb01e"
     },
     {
       "source": "src/buster/lib/system_headers.h",
@@ -186,8 +186,8 @@
     },
     {
       "source": "src/buster/lib/x86_64.h",
-      "bytes": 1866,
-      "sha256": "7663bfc92d44794f96af390c7634c26634dddca9f3c4a7433b054ba196764cd3"
+      "bytes": 2207,
+      "sha256": "747f42c9f4404531ff958a4249e19caff479126444b837475080231a6a7d0942"
     },
     {
       "source": "tools/native-retirement-darwin/Availability.h",
