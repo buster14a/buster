@@ -5,6 +5,7 @@
  * (real-source qualification), tp_measure (commands), tp_run (paired trials),
  * tp_compare (strict raw-sample replay and CI decision), tp_self_test (tests).
  * qualification.h owns optional dedicated-host admission and cooperative locks.
+ * cpuset.h owns CPU sets/topology; scaling.h owns the multi-TU `scale` series.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -88,6 +89,12 @@ typedef struct TpConfig
     unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
     int cpu, pmu, require_pmu, guard, identical;
     int assembly, output_explicit, service_output;
+    /* scale: explicit CPU set, listed worker counts and selected shapes. */
+    char const* cpu_set;
+    char const* topology_root;
+    TpCpuSet scale_workers;
+    unsigned scale_shape_mask, scale_repeats, scale_max_rss_mib;
+    int scale_allow_smt;
 } TpConfig;
 
 typedef struct TpWorkload
@@ -190,6 +197,9 @@ static uint32_t tp_random(uint32_t* state)
     return x;
 }
 
+static int tp_mkdirs(char const* path);
+#include "scaling.h"
+
 static int tp_options(int argc, char** argv, TpConfig* config)
 {
     *config = (TpConfig){0};
@@ -208,7 +218,9 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->cpu = -1;
     config->lease_fd = -1;
     config->guard = 1;
-    int ok = 1, selected_workloads = 0;
+    config->scale_shape_mask = (1u << 4) - 1u;
+    config->scale_repeats = 10;
+    int ok = 1, selected_workloads = 0, selected_shapes = 0;
     for (int i = 2; i < argc && ok; ++i)
     {
         char const* key = argv[i];
@@ -236,6 +248,10 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         else if (!strcmp(key, "--require-identical-output"))
         {
             config->identical = 1;
+        }
+        else if (!strcmp(key, "--allow-smt"))
+        {
+            config->scale_allow_smt = 1;
         }
         else if (i + 1 >= argc)
         {
@@ -281,6 +297,22 @@ static int tp_options(int argc, char** argv, TpConfig* config)
             else if (!strcmp(key, "--timeout")) ok = tp_number(value, &config->timeout);
             else if (!strcmp(key, "--seed")) ok = tp_number(value, &config->seed);
             else if (!strcmp(key, "--scale")) ok = tp_number(value, &config->scale);
+            else if (!strcmp(key, "--cpu-set")) config->cpu_set = value;
+            else if (!strcmp(key, "--topology-root")) config->topology_root = value;
+            else if (!strcmp(key, "--workers")) ok = tp_scale_workers_parse(value, &config->scale_workers);
+            else if (!strcmp(key, "--repeats")) ok = tp_number(value, &config->scale_repeats);
+            else if (!strcmp(key, "--max-rss-mib")) ok = tp_number(value, &config->scale_max_rss_mib);
+            else if (!strcmp(key, "--shape"))
+            {
+                unsigned mask = 0;
+                for (unsigned shape = 0; shape < TP_SCALE_SHAPES; ++shape)
+                    if (!strcmp(value, tp_scale_shape_names[shape])) mask |= 1u << shape;
+                if (!strcmp(value, "all")) mask = (1u << TP_SCALE_SHAPES) - 1u;
+                ok = mask != 0;
+                if (!selected_shapes) config->scale_shape_mask = 0;
+                config->scale_shape_mask |= mask;
+                selected_shapes = 1;
+            }
             else if (!strcmp(key, "--cpu"))
             {
                 unsigned cpu;
@@ -378,6 +410,19 @@ static int tp_options(int argc, char** argv, TpConfig* config)
          !config->environment_manifest || !config->runtime_manifest))
     {
         tp_error("admit-workload requires DESCRIPTOR, source/compiler/oracle evidence, output, qualification id and all closure manifests");
+        ok = 0;
+    }
+    if (!strcmp(config->command, "scale") &&
+        (!config->compiler || !config->output_explicit || !config->cpu_set || !config->scale_workers.count ||
+         !config->scale_repeats || config->scale_repeats > TP_SCALE_MAX_REPEATS || config->flag_count))
+    {
+        tp_error("scale requires --compiler IDE, --output NEW_DIR, --cpu-set LIST|auto, --workers LIST (1-%u) and --repeats 1-%u; --flag is not accepted",
+                 TP_SCALE_MAX_WORKERS, TP_SCALE_MAX_REPEATS);
+        ok = 0;
+    }
+    if (strcmp(config->command, "scale") && (config->cpu_set || config->scale_allow_smt || config->topology_root))
+    {
+        tp_error("--cpu-set, --topology-root and --allow-smt apply only to scale");
         ok = 0;
     }
     if (!strcmp(config->command, "retirement-replay") &&
@@ -1995,7 +2040,9 @@ static void tp_help(void)
           "  throughput admit-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome pass\n"
           "    --output NEW_DIR --qualification-id ID --dependency-manifest FILE --resource-manifest FILE\n"
           "    --sysroot-manifest FILE --sdk-manifest FILE --environment-manifest FILE --runtime-manifest FILE\n"
-          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH [--lease-fd N]\n\n"
+          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH [--lease-fd N]\n"
+          "  throughput scale --compiler IDE --output NEW_DIR --cpu-set LIST|auto --workers LIST [--shape equal|skewed|tiny|count|all]\n"
+          "    [--repeats N] [--warmups N] [--allow-smt] [--max-rss-mib N] [--profile smoke|ci|full] [--timeout SECONDS]\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
           "--workload NAME (repeatable; first replaces defaults; names below, or default|all),\n"
@@ -2013,7 +2060,10 @@ static void tp_help(void)
           "A service may additionally pass its held lease with --lease-fd N; it requires --lock-file and is not inherited by compiler children.\n"
           "The fixed Linux service uses --service-output to expose completed files to its trusted group reader.\n"
           "qualify prints read-only observations to stdout; does not prove isolation or benchmark noise.\n"
-          "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n\n"
+          "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n"
+          "scale times native multi-input compile-and-link with -fcompile-jobs=W on the first W physical cores of the\n"
+          "permitted --cpu-set, checks -fmetrics-out workers, identical artifacts and ordered diagnostics, and reports\n"
+          "speedup with CPU-work and memory inflation. Report only: exit 0 valid, 2 invalid.\n\n"
           "Exit: 0 no confirmed regression (inspect inconclusive warnings), 1 confirmed regression,\n"
           "2 invalid/incomplete run. Never compare unrelated hosts or reuse an old result directory.\n", stdout);
 }
@@ -2098,6 +2148,10 @@ int main(int argc, char** argv)
                 result = 2;
             }
 #endif
+        }
+        else if (!strcmp(config.command, "scale"))
+        {
+            result = tp_scale(&config);
         }
         else if (!strcmp(config.command, "compare"))
         {
