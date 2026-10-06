@@ -18307,6 +18307,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPre
     {
         return left;
     }
+    // GNU C and Clang type a conditional with exactly one void arm as void;
+    // the other arm is evaluated only for its effects.
+    if (left_value.kind == C_TYPE_VOID || right_value.kind == C_TYPE_VOID)
+    {
+        return left_value.kind == C_TYPE_VOID ? left : right;
+    }
     if (left_value.kind == C_TYPE_NULLPTR &&
         c_parse_range_is_null_pointer_constant(arena, preprocess, result, scope, right, right_start, right_end))
     {
@@ -24405,6 +24411,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             if (first.kind == C_TOKEN_IDENTIFIER && c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, first)) ==
                 C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
             {
+                // States 10 and 11 fold the first and second transform
+                // operands; 8 and 9 belong to __builtin_offsetof.
                 CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target,
                     c_token_spelling(preprocess.spelling_base, first));
                 u32 close = begin + 1 < limit && c_token_is_punctuator(&preprocess.tokens[begin + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
@@ -24415,7 +24423,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                      c_parse_constraint_expression_end(result, preprocess, first_end + 1, close) == close);
                 if (valid)
                 {
-                    task->state = 8;
+                    task->state = 10;
                     task->split = first_end + 1;
                     task->colon = close;
                     task->cast_type = c_parse_expression_scalar_type(result, transform.type);
@@ -24511,7 +24519,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             {
                 last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
             }
-            else if (task->state == 8 || task->state == 9)
+            else if (task->state == 10 || task->state == 11)
             {
                 CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target,
                     c_token_spelling(preprocess.spelling_base, preprocess.tokens[task->start]));
@@ -24520,16 +24528,16 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 // cannot be folded as its literal magnitude or real part here.
                 last.valid &= c_parse_expression_real_kind(kind);
                 last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
-                if (task->state == 8 && transform.argument_count == 2)
+                if (task->state == 10 && transform.argument_count == 2)
                 {
                     task->left = last;
-                    task->state = 9;
+                    task->state = 11;
                     tasks[count++] = (CParseConstantTask){.start = task->split, .end = task->colon, .cast_type = C_TYPE_ID_INVALID};
                     continue;
                 }
-                u64 value = task->state == 9 ? task->left.integer : last.integer;
-                u64 shift = task->state == 9 ? last.integer : 0;
-                if (task->state == 9)
+                u64 value = task->state == 11 ? task->left.integer : last.integer;
+                u64 shift = task->state == 11 ? last.integer : 0;
+                if (task->state == 11)
                 {
                     last.valid &= task->left.valid;
                     last.faulted |= task->left.faulted;
