@@ -9002,10 +9002,12 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_assignment_program = S8
     "    }\n"
     "    return 0;\n"
     "}\n");
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_assignment_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -9041,9 +9043,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_assignment_runtime(Uni
             }
         }
     }
+#endif
     return result;
 }
-#endif
 
 // The runtime check below is the only reader of this program; it is compiled
 // only where the check runs, so other targets do not see an unused constant.
