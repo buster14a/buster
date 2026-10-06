@@ -219,8 +219,15 @@ def measure(run):
             elif name in UEFI:
                 required.add("Build compiler and boot both architectures in all allocators")
             elif name in ANALYZER:
-                required.update(("Exercise analyzer failure and coverage controls",
-                                 "Compare reference analysis and aggregate all module shards"))
+                # Preserve historical measurements without relabeling their
+                # optional-reference policy as current candidate-only work.
+                campaign_names = {"Analyze candidate and aggregate all module shards",
+                                  "Compare reference analysis and aggregate all module shards"}
+                campaigns = [step for step in job.get("steps", []) if step["name"] in campaign_names]
+                if len(campaigns) != 1:
+                    reason = "incomplete-coverage"
+                required.add("Exercise analyzer failure and coverage controls")
+                required.add(campaigns[0]["name"] if len(campaigns) == 1 else "missing analyzer campaign")
             passed = {step["name"] for step in job.get("steps", []) if step.get("conclusion") == "success"}
             if job.get("conclusion") != "success" or job.get("run_attempt") != 1 or not required <= passed:
                 reason = "incomplete-coverage"

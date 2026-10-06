@@ -437,12 +437,26 @@ class MainCIReuseTests(unittest.TestCase):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         analyzer = text.split('\n  analyzer:\n', 1)[1].split('\n  complete:\n', 1)[0]
         self.assertIn('needs: reuse', analyzer)
-        # Queue and main bind baseline to their exact SHA; explicit comparisons
-        # remain dispatch-only and never enter main reuse.
-        self.assertEqual(analyzer.count('BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}'), 2)
+        # Fresh queue validation analyzes the exact candidate once; main may
+        # reuse only that complete execution, never a retired reference step.
+        self.assertNotIn("BASELINE_REVISION", analyzer)
+        self.assertNotIn("--baseline-driver", analyzer)
+        # The retired dispatch input remains only as a candidate-bootstrap refusal.
+        self.assertEqual(analyzer.count("inputs.analyzer_comparison"), 1)
+        self.assertNotIn("inputs.analyzer_comparison", analyzer.split(
+            '      - name: ' + reuse.ANALYZER_STEPS[-1] + '\n', 1)[1].split('\n      - name:', 1)[0])
         for name in reuse.ANALYZER_STEPS:
             block = analyzer.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             self.assertIn("if: ${{ needs.reuse.outputs.reuse != 'true' }}", block)
+
+    def test_retired_analyzer_step_names_cannot_authorize_reuse(self):
+        source = next(job for job in self.api.jobs if job["name"] in inventory.ANALYZER)
+        old = {"Bootstrap and identify candidate build driver": "Bootstrap candidate and select reference build driver",
+               "Analyze candidate and aggregate all module shards": "Compare reference analysis and aggregate all module shards"}
+        for step in source["steps"]:
+            step["name"] = old.get(step["name"], step["name"])
+        with self.assertRaises(AdmissionError):
+            self.admit()
 
     def test_api_uncertainty_and_incomplete_pagination_fall_back(self):
         with mock.patch.object(self.api, "pages", side_effect=OSError("API unavailable")):
