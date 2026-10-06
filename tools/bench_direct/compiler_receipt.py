@@ -45,6 +45,7 @@ Map (searchable symbols):
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
@@ -207,6 +208,10 @@ def range_label(commits: object, first_parent: object) -> str:
     return label
 
 
+def is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def classify(summary: object, binaries: object) -> list[str]:
     """Reasons the lab summary is not a valid core measurement; empty when valid."""
     reasons: list[str] = []
@@ -232,11 +237,26 @@ def classify(summary: object, binaries: object) -> list[str]:
     if type(pairs) is not int or pairs < MIN_PAIRS:
         reasons.append(f"{pairs!r} complete pairs; at least {MIN_PAIRS} are required")
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    metrics = summary.get("metrics")
     if verdict.get("metric") != "wall" or verdict.get("outcome") not in MEASURED_OUTCOMES:
         reasons.append(f"wall-time verdict {verdict.get('outcome')!r} is not a complete measurement")
+    wall = metrics.get("wall") if isinstance(metrics, dict) and isinstance(metrics.get("wall"), dict) else {}
+    if not wall:
+        reasons.append("summary has no wall metric record to check the verdict against")
     for key in ("ratio", "ci_low", "ci_high"):
-        if not isinstance(verdict.get(key), (int, float)) or isinstance(verdict.get(key), bool):
+        value = verdict.get(key)
+        if not is_number(value):
             reasons.append(f"wall-time verdict has no numeric {key}")
+        elif not (math.isfinite(value) and value > 0):
+            reasons.append(f"wall-time verdict {key} {value!r} is not a finite positive ratio")
+        elif wall and wall.get(key) != value:
+            reasons.append(f"wall-time verdict {key} {value!r} contradicts the wall metric {wall.get(key)!r}")
+    low, high = verdict.get("ci_low"), verdict.get("ci_high")
+    if is_number(low) and is_number(high) and low > high:
+        reasons.append(f"wall-time verdict confidence interval is reversed: ci_low {low!r} > ci_high {high!r}")
+    if wall and wall.get("outcome") != verdict.get("outcome"):
+        reasons.append(f"wall-time verdict outcome {verdict.get('outcome')!r} contradicts the wall metric "
+                       f"{wall.get('outcome')!r}")
     return reasons
 
 

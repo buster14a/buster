@@ -115,6 +115,37 @@ class ReceiptTest(unittest.TestCase):
             self.assertTrue(compiler_receipt.classify(value, BINARIES))
         self.assertTrue(compiler_receipt.classify(summary(), {}))
 
+    def test_wall_ratio_domain_and_interval_are_validated(self) -> None:
+        def mutate(**verdict) -> dict:
+            data = summary()
+            data["verdict"].update(verdict)
+            data["metrics"]["wall"].update(verdict)
+            return data
+        bad = {"nan ratio": mutate(ratio=float("nan")), "inf ci_high": mutate(ci_high=float("inf")),
+               "negative ratio": mutate(ratio=-1), "zero ci_low": mutate(ci_low=0), "bool ratio": mutate(ratio=True),
+               "reversed": mutate(ci_low=2, ci_high=1)}
+        for name, data in bad.items():
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.classify(data, BINARIES))
+        self.assertTrue(any("reversed" in item for item in compiler_receipt.classify(bad["reversed"], BINARIES)))
+        self.assertTrue(any("ci_high" in item for item in compiler_receipt.classify(bad["inf ci_high"], BINARIES)))
+        missing = summary()
+        del missing["verdict"]["ci_low"]
+        self.assertTrue(compiler_receipt.classify(missing, BINARIES))
+        # The verdict and the wall metric record must agree.
+        data = summary()
+        data["metrics"]["wall"]["ratio"] = 0.5
+        self.assertTrue(any("contradicts" in item for item in compiler_receipt.classify(data, BINARIES)))
+        data = summary()
+        data["metrics"]["wall"]["outcome"] = "faster"
+        self.assertTrue(compiler_receipt.classify(data, BINARIES))
+        data = summary()
+        del data["metrics"]
+        self.assertTrue(compiler_receipt.classify(data, BINARIES))
+        # A genuine faster result stays valid.
+        self.assertEqual(compiler_receipt.classify(mutate(ratio=0.9, ci_low=0.88, ci_high=0.92, outcome="faster"),
+                                                   BINARIES), [])
+
     def test_regression_policy_defaults_to_report_only_and_enforce_fails_closed(self) -> None:
         self.assertEqual(compiler_receipt.regression_policy(""), ("report-only", ""))
         self.assertEqual(compiler_receipt.regression_policy(" report-only "), ("report-only", ""))
@@ -362,7 +393,9 @@ os.makedirs(value("--output"))
 summary = {"schema": "buster-uarch-lab-compare-v2", "baseline": variant(value("--baseline")),
            "candidate": variant(value("--candidate")), "plan": {"complete_pairs": 12},
            "verdict": {"metric": "wall", "outcome": "no detectable difference", "ratio": 1.0, "ci_low": 0.99,
-                       "ci_high": 1.01, "text": "NO DETECTABLE DIFFERENCE"}, "metrics": {}, "warnings": []}
+                       "ci_high": 1.01, "text": "NO DETECTABLE DIFFERENCE"},
+           "metrics": {"wall": {"outcome": "no detectable difference", "ratio": 1.0, "ci_low": 0.99, "ci_high": 1.01}},
+           "warnings": []}
 open(os.path.join(value("--output"), "summary.json"), "w").write(json.dumps(summary))
 open(os.path.join(value("--output"), "reference.exe"), "w").write("excluded")
 """
