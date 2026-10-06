@@ -5668,6 +5668,16 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     u8 sha256_result[32] = {0};
     link_sha256(arguments->arena, (u8 const*)"abc", 3, sha256_result);
     BUSTER_TEST(arguments, memcmp(sha256_result, sha256_abc, sizeof(sha256_abc)) == 0);
+    {
+        // Regression (#2724): link_sha256 must not consume arena bytes per call.
+        u64 position_before = arguments->arena->position;
+        for (u32 iteration = 0; iteration < 64; iteration += 1)
+        {
+            link_sha256(arguments->arena, (u8 const*)"abc", 3, sha256_result);
+        }
+        BUSTER_TEST(arguments, arguments->arena->position == position_before);
+        BUSTER_TEST(arguments, memcmp(sha256_result, sha256_abc, sizeof(sha256_abc)) == 0);
+    }
     UnitTestResult uefi_x64 = link_test_uefi_pe64(arguments, CPU_ARCH_X86_64);
     result.succeeded_test_count += uefi_x64.succeeded_test_count;
     result.test_count += uefi_x64.test_count;
