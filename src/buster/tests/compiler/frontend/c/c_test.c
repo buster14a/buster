@@ -33871,7 +33871,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tentative_alignment_merging(UnitTestAr
     } cases[] = {
         {S8("int x;\n_Alignas(16) int x;\n"), 16, 4, 1, 5, false},
         {S8("_Alignas(16) int x;\nint x;\n"), 16, 4, 1, 18, false},
-        {S8("static int x;\n_Alignas(16) int x;\n"), 16, 4, 1, 12, true},
+        {S8("static int x;\nstatic _Alignas(16) int x;\n"), 16, 4, 1, 12, true},
         {S8("static int x;\nextern _Alignas(16) int x;\n"), 16, 4, 1, 12, true},
         {S8("int x;\nextern _Alignas(32) int x;\nint x;\n"), 32, 4, 1, 5, false},
         {S8("int x[];\n_Alignas(16) int x[3];\n"), 16, 12, 1, 5, false},
