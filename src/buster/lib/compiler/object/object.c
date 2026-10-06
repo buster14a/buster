@@ -10530,6 +10530,8 @@ static ObjectRelocationProperties const object_relocation_properties[] = {
     {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12
     {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12
     {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12
+    {4, true}, // OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21
 };
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(object_relocation_properties) == OBJECT_RELOCATION_COUNT);
 
