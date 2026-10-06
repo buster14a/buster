@@ -36879,6 +36879,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(Uni
 // change the IR: each shape lowers with and without it to the same parameters,
 // values and instructions. Eligible shapes must create fewer provisional
 // parameters; labels, case/default and statement-expression labels disable it.
+// A branching initializer stores in its join block and still qualifies; a
+// conditional first assignment or an initializer that reads the local does not.
 // The dead `r-=y` after a braced `break` sends an unreachable edge into the
 // loop latch, whose undefined merge the general walk already discards.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_declaration_definition(UnitTestArguments* arguments)
@@ -36899,6 +36901,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_declaration_definition(Unit
         {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){r+=(int){x};r+=c?x:y;n-=1;}}return r;}"), true},
         {S8("int test(int c,int n){int r=0;if(c){int y;int x=y;while(n>0){r+=x;n-=1;}}return r;}"), true},
         {S8("int test(int c,int n){int r=0;if(c){int x=n*3;while(n>0){r+=x;if(r>9)x=1;n-=1;}}return r;}"), false},
+        // Initializers that branch store in a later block than the declaration.
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?n*3:n;int y=n&&c;int z=n||c;while(n>0){r+=x+y-z;n-=1;}}return r;}"), true},
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?(n?n*3:n):c;while(n>0){r+=x;n-=1;}}return r;}"), true},
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?x:n;while(n>0){r+=x;n-=1;}}return r;}"), false},
+        {S8("int test(int c,int n){int r=0;if(c){int x;if(n)x=n*3;while(n>0){r+=x;n-=1;}}return r;}"), false},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {

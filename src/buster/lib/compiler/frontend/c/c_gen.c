@@ -2915,6 +2915,10 @@ struct CIntegerIrBuilder
     // declaration's initializer dominates the reads in its scope. Also set by
     // CIRLowerOptions.disable_declaration_shortcut.
     bool ssa_declaration_shortcut_disabled;
+    // Set only while c_ir_emit_initializer_store stores a declaration's
+    // initializer, which can follow its LOCAL event in a later block when the
+    // initializer branches (`?:`, `&&`, `||`).
+    bool ssa_declaration_initializer_store;
     Arena* arena;
     Arena* scratch_arena;
     Arena* temporary_arena;
@@ -5498,8 +5502,9 @@ struct CIrSsaLocal
     bool initialized_entry;
     bool single_entry_definition;
     // The only write so far is the declaration's own initializer: it directly
-    // follows the local's first event, LOCAL, in the same block. Without jumps
-    // into scope it dominates every later read. A later write revokes it.
+    // follows the local's first event, LOCAL, with no read between them, in
+    // the same block or as the store of the declaration's initializer. Without
+    // jumps into scope it dominates every later read. A later write revokes it.
     bool declaration_definition;
 };
 
@@ -5608,7 +5613,8 @@ BUSTER_C_INTERNAL u32 c_ir_ssa_event(CIntegerIrBuilder* builder, u32 local, u32 
             ssa->locals[local].single_entry_definition = initializes_entry;
             ssa->locals[local].declaration_definition = previous != UINT32_MAX && previous == ssa->locals[local].first_event &&
                                                         ssa->events[previous].opcode == IR_OPCODE_LOCAL &&
-                                                        ssa->events[previous].block.value == builder->current_block.value;
+                                                        (ssa->events[previous].block.value == builder->current_block.value ||
+                                                         builder->ssa_declaration_initializer_store);
         }
         ssa->events[index] = (CIrSsaEvent){
             .source = source, .after = builder->last_instruction, .block = builder->current_block,
@@ -9196,6 +9202,17 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
 BUSTER_C_INTERNAL bool c_ir_emit_store(CIntegerIrBuilder* builder, CIntegerIrLocal* local, IrValueId value, IrSourceRange source)
 {
     return c_ir_emit_store_place(builder, local->place, local->type, value, source);
+}
+
+// Store a declaration's own initializer. Direct SSA marks it as the local's
+// declaration definition even when a branching initializer moved the store
+// into a later block than the declaration.
+BUSTER_C_INTERNAL bool c_ir_emit_initializer_store(CIntegerIrBuilder* builder, CIntegerIrLocal* local, IrValueId value, IrSourceRange source)
+{
+    builder->ssa_declaration_initializer_store = true;
+    bool stored = c_ir_emit_store(builder, local, value, source);
+    builder->ssa_declaration_initializer_store = false;
+    return stored;
 }
 
 // Whether a promoted-member search has already queued `type`.
@@ -37882,7 +37899,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     }
     CToken assignment = builder->preprocess.tokens[initializer_index];
     bool stored = value.value != IR_ID_UNDERLYING_INVALID &&
-                  c_ir_emit_store(builder, local, value, c_ir_token_source_range(builder, assignment));
+                  c_ir_emit_initializer_store(builder, local, value, c_ir_token_source_range(builder, assignment));
     if (!stored && !builder->failure_message.length)
     {
         builder->failure_message = string_format(builder->arena, S8("could not initialize automatic local '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
@@ -37899,7 +37916,7 @@ BUSTER_C_INTERNAL bool c_ir_finish_automatic_declaration(CIntegerIrBuilder* buil
 {
     CToken assignment = builder->preprocess.tokens[state->initializer_index];
     bool stored = value.value != IR_ID_UNDERLYING_INVALID &&
-                  c_ir_emit_store(builder, state->local, value, c_ir_token_source_range(builder, assignment));
+                  c_ir_emit_initializer_store(builder, state->local, value, c_ir_token_source_range(builder, assignment));
     if (!stored && !builder->failure_message.length)
     {
         builder->failure_message = string_format(builder->arena, S8("could not initialize automatic local '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, state->name));
@@ -40585,7 +40602,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         else if (continuation == C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER)
         {
             IrValueId value = builder->lower_machine.child_result.value;
-            if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store(builder, state->child_local, value, state->child_source))
+            if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_initializer_store(builder, state->child_local, value, state->child_source))
             {
                 if (!builder->failure_message.length)
                 {
@@ -42223,7 +42240,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     if (value.value == IR_ID_UNDERLYING_INVALID ||
-                        !c_ir_emit_store(builder, local, value, c_ir_token_source_range(builder, assign)))
+                        !c_ir_emit_initializer_store(builder, local, value, c_ir_token_source_range(builder, assign)))
                     {
                         if (!builder->failure_message.length)
                         {
