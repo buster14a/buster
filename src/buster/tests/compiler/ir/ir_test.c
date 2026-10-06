@@ -32,6 +32,9 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrB
 
 #include <buster/tests/compiler/ir/ir_complex_value_test.c>
 #include <buster/tests/compiler/ir/ir_construction_protocol_test.c>
+#include <buster/tests/compiler/ir/ir_label_owner_test.c>
+#include <buster/tests/compiler/ir/ir_label_sets_test.c>
+#include <buster/tests/compiler/ir/ir_label_paths_test.c>
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_wide_float_constant(Arena* arena, u32 bit_width, u64 low, u64 high,
                                                                                      u32 immediate_count, u32 target_count,
@@ -268,6 +271,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_call_validation(UnitTestArg
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unary_categories_case(UnitTestArguments* arguments, IrUnaryOperation operation,
+                                                                         u32 type_index, u32 variant)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    // Complete raw input independent of C lowering and construction helpers.
+    // LOCAL remains a PLACE and LOAD remains the explicit value boundary;
+    // only the UNARY operand selection or operand/result category changes.
+    IrType types[] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_INTEGER, .bit_width = 64, .is_signed = true,
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_FLOAT, .bit_width = 64,
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_BOOLEAN, .bit_width = 1,
+         .layout = {.size = 1, .alignment = 1, .resolved = true}},
+        {.id = {.value = 3}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 0}, .element_count = 2,
+         .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.id = {.value = 4}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 1}, .element_count = 2,
+         .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.id = {.value = 5}, .kind = IR_TYPE_VOID},
+        {.id = {.value = 6}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 5}},
+    };
+    IrValueId operands[] = {{.value = 0}, {.value = variant == 1 || variant == 3 ? 0 : 1}};
+    IrValue values[] = {
+        {.canonical_type = {.value = type_index}, .definition = {.value = 0}, .category = IR_VALUE_PLACE},
+        {.canonical_type = {.value = type_index}, .definition = {.value = 1}, .category = IR_VALUE_VALUE},
+        {.canonical_type = {.value = type_index}, .definition = {.value = 2}, .category = IR_VALUE_VALUE},
+    };
+    if (variant == 2 || variant == 3)
+    {
+        values[2].category = IR_VALUE_PLACE;
+    }
+    else if (variant == 4)
+    {
+        values[1].category = IR_VALUE_COUNT;
+    }
+    else if (variant == 5)
+    {
+        values[2].category = IR_VALUE_COUNT;
+    }
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_LOCAL, .canonical_type = {.value = type_index}, .result = {.value = 0},
+         .canonical_local = {.value = 0}, .next = {.value = 1}},
+        {.opcode = IR_OPCODE_LOAD, .canonical_type = {.value = type_index}, .result = {.value = 1},
+         .operands = operands, .operand_count = 1, .next = {.value = 2}},
+        {.opcode = IR_OPCODE_UNARY, .unary_operation = (u8)operation, .canonical_type = {.value = type_index},
+         .result = {.value = 2}, .operands = operands + 1, .operand_count = 1, .next = {.value = 3}},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 5}, .result = IR_VALUE_ID_INVALID,
+         .next = IR_INSTRUCTION_ID_INVALID},
+    };
+    IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 3},
+                     .sealed = true, .terminated = true};
+    IrFunction function = {.id = {.value = 0}, .canonical_type = {.value = 6}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                           .blocks = &block, .block_count = 1, .instructions = instructions,
+                           .instruction_count = BUSTER_ARRAY_LENGTH(instructions), .values = values,
+                           .value_count = BUSTER_ARRAY_LENGTH(values), .local_count = 1};
+    IrModule module = {.functions = &function, .function_count = 1};
+    IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1,
+                         .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+    IrValidationError expected = variant ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE;
+    BUSTER_TEST(arguments, validation.error == expected);
+    // A missing rejection in the failure-first baseline must not send
+    // deliberately malformed values through promotion or publication.
+    if (validation.error == expected)
+    {
+        if (variant)
+        {
+            BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 2);
+            u8 instruction_snapshot[sizeof(instructions)];
+            u8 value_snapshot[sizeof(values)];
+            u8 block_snapshot[sizeof(block)];
+            memcpy(instruction_snapshot, instructions, sizeof(instructions));
+            memcpy(value_snapshot, values, sizeof(values));
+            memcpy(block_snapshot, &block, sizeof(block));
+            IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_OPERATION);
+            BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+            BUSTER_TEST(arguments, prepared.function.value == 0 && prepared.block.value == 0 && prepared.instruction.value == 2);
+            BUSTER_TEST(arguments, function.published_cfg == 0 && !module.local_promotion_complete && !module.fast_complete);
+            BUSTER_TEST(arguments, function.instruction_count == BUSTER_ARRAY_LENGTH(instructions) &&
+                                   function.value_count == BUSTER_ARRAY_LENGTH(values));
+            BUSTER_TEST(arguments, memcmp(instruction_snapshot, instructions, sizeof(instructions)) == 0);
+            BUSTER_TEST(arguments, memcmp(value_snapshot, values, sizeof(values)) == 0);
+            BUSTER_TEST(arguments, memcmp(block_snapshot, &block, sizeof(block)) == 0);
+        }
+        else
+        {
+            IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+            BUSTER_TEST(arguments, function.published_cfg != 0 && module.local_promotion_complete);
+            if (function.published_cfg)
+            {
+                BUSTER_TEST(arguments, function.published_cfg->edge_count == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(&program, &module).error == IR_VALIDATION_NONE);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unary_categories(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        IrUnaryOperation operation;
+        u32 type_index;
+    } const cases[] = {
+        {IR_UNARY_INTEGER_NEGATE, 0},
+        {IR_UNARY_FLOAT_NEGATE, 1},
+        {IR_UNARY_INTEGER_BITWISE_NOT, 0},
+        {IR_UNARY_INTEGER_COUNT_LEADING_ZEROS, 0},
+        {IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS, 0},
+        {IR_UNARY_INTEGER_POPULATION_COUNT, 0},
+        {IR_UNARY_BOOLEAN_NOT, 2},
+        {IR_UNARY_VECTOR_INTEGER_NEGATE, 3},
+        {IR_UNARY_VECTOR_FLOAT_NEGATE, 4},
+        {IR_UNARY_VECTOR_INTEGER_BITWISE_NOT, 3},
+    };
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(cases) == IR_UNARY_COUNT);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 variant = 0; variant < 6; variant += 1)
+        {
+            UnitTestResult cell = ir_test_canonical_unary_categories_case(arguments, cases[index].operation, cases[index].type_index, variant);
+            result.test_count += cell.test_count;
+            result.succeeded_test_count += cell.succeeded_test_count;
+        }
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_binary_fixture(IrBinaryOperation operation, u32 operand_type, u32 result_type)
 {
@@ -598,6 +736,235 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArgument
     }
     BUSTER_TEST(arguments, ir_construction_counter_name(IR_CONSTRUCTION_COUNT).length == 0);
 #endif
+    return result;
+}
+
+// Independent mutable and dense backing for the same two-edge join. Poison
+// scratch before every validation; only nonempty metadata needs a provenance
+// calculation after the structural incoming checks have succeeded.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_parameter_validation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        IR_TEST_PARAMETER_VALID,
+        IR_TEST_PARAMETER_ID,
+        IR_TEST_PARAMETER_TYPE,
+        IR_TEST_PARAMETER_INCOMING_ID,
+        IR_TEST_PARAMETER_INCOMING_TYPE,
+        IR_TEST_PARAMETER_SHORT,
+        IR_TEST_PARAMETER_LONG,
+        IR_TEST_PARAMETER_MISSING,
+        IR_TEST_PARAMETER_EXTRA,
+        IR_TEST_PARAMETER_ORDER,
+        IR_TEST_PARAMETER_TAIL,
+        IR_TEST_PARAMETER_NULL_TAIL,
+        IR_TEST_PARAMETER_PROVENANCE,
+        IR_TEST_PARAMETER_COUNT,
+    };
+    for (u32 published = 0; published < 2; published += 1)
+    {
+        for (u32 metadata_kind = 0; metadata_kind < 3; metadata_kind += 1)
+        {
+            for (u32 variant = 0; variant < IR_TEST_PARAMETER_COUNT; variant += 1)
+            {
+                if ((variant == IR_TEST_PARAMETER_PROVENANCE && metadata_kind != 2) ||
+                    (published && (variant == IR_TEST_PARAMETER_TAIL || variant == IR_TEST_PARAMETER_NULL_TAIL)))
+                {
+                    continue;
+                }
+                bool labels = metadata_kind == 2;
+                IrType types[] = {
+                    {.id = {.value = 0}, .kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}},
+                    {.id = {.value = 1}, .kind = labels ? IR_TYPE_POINTER : IR_TYPE_INTEGER, .bit_width = 32,
+                     .element_type = {.value = 0}, .layout = {.size = labels ? 8 : 4, .alignment = labels ? 8 : 4, .resolved = true}},
+                    {.id = {.value = 2}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 1}},
+                    {.id = {.value = 3}, .kind = labels ? IR_TYPE_POINTER : IR_TYPE_INTEGER, .bit_width = 64,
+                     .element_type = {.value = 0}, .layout = {.size = 8, .alignment = 8, .resolved = true}},
+                };
+                IrValue values[] = {
+                    {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE},
+                    {.canonical_type = {.value = 1}, .definition = {.value = 2}, .category = IR_VALUE_VALUE},
+                    {.canonical_type = {.value = 1}, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE},
+                };
+                u64 immediates[] = {10, 20};
+                IrBlockId target = {.value = 2};
+                IrBlockId label_blocks[] = {{.value = 0}, {.value = 1}};
+                IrValueId returned = {.value = 2};
+                IrInstruction instructions[] = {
+                    {.opcode = labels ? IR_OPCODE_LABEL_ADDRESS : IR_OPCODE_CONSTANT_INTEGER, .canonical_type = {.value = 1},
+                     .result = {.value = 0}, .next = {.value = 1}, .immediates = labels ? 0 : immediates,
+                     .immediate_count = (u16)!labels, .targets = labels ? label_blocks : 0, .target_count = (u16)labels},
+                    {.opcode = IR_OPCODE_BRANCH, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+                     .next = IR_INSTRUCTION_ID_INVALID, .targets = &target, .target_count = 1},
+                    {.opcode = labels ? IR_OPCODE_LABEL_ADDRESS : IR_OPCODE_CONSTANT_INTEGER, .canonical_type = {.value = 1},
+                     .result = {.value = 1}, .next = {.value = 3}, .immediates = labels ? 0 : immediates + 1,
+                     .immediate_count = (u16)!labels, .targets = labels ? label_blocks + 1 : 0, .target_count = (u16)labels},
+                    {.opcode = IR_OPCODE_BRANCH, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+                     .next = IR_INSTRUCTION_ID_INVALID, .targets = &target, .target_count = 1},
+                    {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+                     .next = IR_INSTRUCTION_ID_INVALID, .operands = &returned, .operand_count = 1},
+                };
+                IrPredecessor predecessors[] = {{.block = {.value = 0}}, {.block = {.value = 1}}};
+                predecessors[0].next = predecessors + 1;
+                IrIncoming incoming[] = {
+                    {.predecessor = {.value = 0}, .value = {.value = 0}},
+                    {.predecessor = {.value = 1}, .value = {.value = 1}},
+                    {.predecessor = {.value = 1}, .value = {.value = 1}},
+                };
+                incoming[0].next = incoming + 1;
+                IrBlockParameter parameter = {.value = {.value = 2}, .canonical_type = {.value = 1},
+                    .incoming_count = 2, .first_incoming = incoming, .last_incoming = incoming + 1};
+                IrBlock blocks[] = {
+                    {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 1}, .terminated = true, .sealed = true},
+                    {.id = {.value = 1}, .first_instruction = {.value = 2}, .last_instruction = {.value = 3}, .terminated = true, .sealed = true},
+                    {.id = {.value = 2}, .first_instruction = {.value = 4}, .last_instruction = {.value = 4}, .terminated = true, .sealed = true,
+                     .parameter_count = 1, .predecessor_count = 2, .first_parameter = &parameter, .last_parameter = &parameter,
+                     .first_predecessor = predecessors, .last_predecessor = predecessors + 1},
+                };
+                IrCfgBlock cfg_blocks[] = {
+                    {.first_instruction = 0, .instruction_count = 2, .successor_count = 1},
+                    {.first_instruction = 2, .instruction_count = 2, .successor_offset = 1, .successor_count = 1},
+                    {.first_instruction = 4, .instruction_count = 1, .successor_offset = 2, .predecessor_count = 2, .parameter_count = 1},
+                };
+                IrCfgEdge edges[] = {
+                    {.source = {.value = 0}, .destination = {.value = 2}, .argument_offset = 0},
+                    {.source = {.value = 1}, .destination = {.value = 2}, .argument_offset = 1},
+                };
+                u32 predecessor_edges[] = {0, 1};
+                IrCfgParameter cfg_parameter = {.value = {.value = 2}, .canonical_type = {.value = 1}};
+                IrValueId cfg_arguments[] = {{.value = 0}, {.value = 1}, {.value = 1}};
+                IrPublishedCfg cfg = {.arena = arguments->arena, .blocks = cfg_blocks, .edges = edges,
+                    .predecessors = predecessor_edges, .parameters = &cfg_parameter, .arguments = cfg_arguments,
+                    .block_count = 3, .instruction_count = 5, .edge_count = 2, .parameter_count = 1, .argument_count = 2};
+                IrValueId metadata_values[] = {{.value = 0}, {.value = 1}, {.value = 2}};
+                IrValueLabelMetadata metadata[] = {
+                    {.is_label_value = true, .label_blocks = label_blocks, .label_block_count = 1},
+                    {.is_label_value = true, .label_blocks = label_blocks + 1, .label_block_count = 1},
+                    {.is_label_value = true, .label_blocks = label_blocks, .label_block_count = 2},
+                };
+                IrFunction function = {.id = {.value = 7}, .canonical_type = {.value = 2}, .state = IR_FUNCTION_LOWERED,
+                    .entry = {.value = 0}, .blocks = blocks, .block_count = 3, .instructions = instructions,
+                    .instruction_count = 5, .values = values, .value_count = 3};
+                if (metadata_kind == 1)
+                {
+                    metadata[2] = (IrValueLabelMetadata){0};
+                    function.label_metadata_values = metadata_values + 2;
+                    function.label_metadata = metadata + 2;
+                    function.label_metadata_count = 1;
+                }
+                else if (labels)
+                {
+                    function.label_metadata_values = metadata_values;
+                    function.label_metadata = metadata;
+                    function.label_metadata_count = 3;
+                }
+                if (published)
+                {
+                    function.published_cfg = &cfg;
+                    blocks[2].first_parameter = 0;
+                    blocks[2].last_parameter = 0;
+                    blocks[2].first_predecessor = 0;
+                    blocks[2].last_predecessor = 0;
+                }
+                switch (variant)
+                {
+                    case IR_TEST_PARAMETER_ID: parameter.value.value = cfg_parameter.value.value = 3; break;
+                    case IR_TEST_PARAMETER_TYPE: parameter.canonical_type.value = cfg_parameter.canonical_type.value = 3; break;
+                    case IR_TEST_PARAMETER_INCOMING_ID: incoming[0].value.value = cfg_arguments[0].value = 3; break;
+                    case IR_TEST_PARAMETER_INCOMING_TYPE: values[0].canonical_type.value = instructions[0].canonical_type.value = 3; break;
+                    case IR_TEST_PARAMETER_SHORT: parameter.incoming_count = cfg.argument_count = 1; break;
+                    case IR_TEST_PARAMETER_LONG: parameter.incoming_count = cfg.argument_count = 3; break;
+                    case IR_TEST_PARAMETER_MISSING: parameter.first_incoming = 0; cfg.arguments = 0; break;
+                    case IR_TEST_PARAMETER_EXTRA: incoming[1].next = incoming + 2; edges[1].argument_offset = 2; break;
+                    case IR_TEST_PARAMETER_ORDER: incoming[0].predecessor.value = 1; predecessor_edges[0] = 1; break;
+                    case IR_TEST_PARAMETER_TAIL: parameter.last_incoming = incoming; break;
+                    case IR_TEST_PARAMETER_NULL_TAIL: parameter.last_incoming = 0; break;
+                    case IR_TEST_PARAMETER_PROVENANCE: metadata[2].label_block_count = 1; break;
+                    default: break;
+                }
+                IrModule module = {.functions = &function, .function_count = 1};
+                IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1,
+                    .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}, .data_layout = {.pointer = {.size = 8}}};
+                for (u32 repetition = 0; repetition < 2; repetition += 1)
+                {
+                    TemporalArena dirty = scratch_begin(0, 0);
+                    u8* bytes = arena_allocate(dirty.arena, u8, 4096);
+                    memset(bytes, 0xa5, 4096);
+                    scratch_end(dirty);
+#if BUSTER_BENCH_ALLOCATIONS
+                    IrConstructionCounters before = ir_construction_counters();
+#endif
+                    IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+                    BUSTER_TEST(arguments, validation.error == (variant == IR_TEST_PARAMETER_VALID ? IR_VALIDATION_NONE : IR_VALIDATION_BLOCK_PARAMETER));
+                    if (variant != IR_TEST_PARAMETER_VALID)
+                    {
+                        bool scope_failure = published && variant >= IR_TEST_PARAMETER_SHORT && variant <= IR_TEST_PARAMETER_NULL_TAIL;
+                        BUSTER_TEST(arguments, validation.function.value == 7);
+                        BUSTER_TEST(arguments, validation.block.value == (scope_failure ? IR_ID_UNDERLYING_INVALID : 2));
+                        BUSTER_TEST(arguments, validation.instruction.value == IR_ID_UNDERLYING_INVALID);
+                    }
+#if BUSTER_BENCH_ALLOCATIONS
+                    if (variant == IR_TEST_PARAMETER_VALID)
+                    {
+                        IrConstructionCounters after = ir_construction_counters();
+                        BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+                        BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_VALIDATION_PARAMETER_PROVENANCE_CHECKS] -
+                                               before.values[IR_CONSTRUCTION_VALIDATION_PARAMETER_PROVENANCE_CHECKS] == (metadata_kind != 0));
+                        BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_VALIDATION_INCOMING_VALUES] -
+                                               before.values[IR_CONSTRUCTION_VALIDATION_INCOMING_VALUES] == 2);
+                    }
+#endif
+                }
+            }
+        }
+    }
+    // An empty incoming list is valid, but its tail must still be null. These
+    // values are defined by the parameter, rather than an instruction row.
+    for (u32 published = 0; published < 2; published += 1)
+    {
+        for (u32 stale = 0; stale < 2; stale += 1)
+        {
+            if (published && stale)
+            {
+                continue;
+            }
+            IrType types[] = {
+                {.id = {.value = 0}, .kind = IR_TYPE_INTEGER, .bit_width = 32, .layout = {.size = 4, .alignment = 4, .resolved = true}},
+                {.id = {.value = 1}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0}},
+            };
+            IrValue value = {.canonical_type = {.value = 0}, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE};
+            IrValueId returned = {.value = 0};
+            IrInstruction instruction = {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+                .next = IR_INSTRUCTION_ID_INVALID, .operands = &returned, .operand_count = 1};
+            IrIncoming unused = {0};
+            IrBlockParameter parameter = {.canonical_type = {.value = 0}, .value = {.value = 0}, .last_incoming = stale ? &unused : 0};
+            IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 0},
+                .parameter_count = 1, .first_parameter = &parameter, .last_parameter = &parameter, .terminated = true, .sealed = true};
+            IrCfgBlock cfg_block = {.instruction_count = 1, .parameter_count = 1};
+            IrCfgParameter cfg_parameter = {.canonical_type = {.value = 0}, .value = {.value = 0}};
+            IrPublishedCfg cfg = {.arena = arguments->arena, .blocks = &cfg_block, .parameters = &cfg_parameter,
+                .block_count = 1, .instruction_count = 1, .parameter_count = 1};
+            IrFunction function = {.canonical_type = {.value = 1}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                .blocks = &block, .block_count = 1, .instructions = &instruction, .instruction_count = 1, .values = &value, .value_count = 1};
+            if (published)
+            {
+                function.published_cfg = &cfg;
+                block.first_parameter = 0;
+                block.last_parameter = 0;
+            }
+            IrModule module = {.functions = &function, .function_count = 1};
+            IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1,
+                .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+            IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+            BUSTER_TEST(arguments, validation.error == (stale ? IR_VALIDATION_BLOCK_PARAMETER : IR_VALIDATION_NONE));
+            if (stale)
+            {
+                BUSTER_TEST(arguments, validation.block.value == (published ? IR_ID_UNDERLYING_INVALID : 0));
+                BUSTER_TEST(arguments, validation.instruction.value == IR_ID_UNDERLYING_INVALID);
+            }
+        }
+    }
     return result;
 }
 
@@ -1002,6 +1369,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_bfloat16_representation(UnitTestArgum
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_label_sets);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_label_paths);
     UnitTestResult fast = ir_fast_tests(arguments);
     result.test_count += fast.test_count;
     result.succeeded_test_count += fast.succeeded_test_count;
@@ -1014,6 +1384,9 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult validation_census = ir_test_validation_census(arguments);
     result.test_count += validation_census.test_count;
     result.succeeded_test_count += validation_census.succeeded_test_count;
+    UnitTestResult parameter_validation = ir_test_canonical_parameter_validation(arguments);
+    result.test_count += parameter_validation.test_count;
+    result.succeeded_test_count += parameter_validation.succeeded_test_count;
     UnitTestResult integer_semantics = ir_integer_tests(arguments);
     result.test_count += integer_semantics.test_count;
     result.succeeded_test_count += integer_semantics.succeeded_test_count;
@@ -1081,6 +1454,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         }
     }
     BUSTER_TEST(arguments, ir_field_access_pieces(IR_FIELD_ACCESS_MAX_SIZE, 0) == 0);
+
+    UnitTestResult unary_categories = ir_test_canonical_unary_categories(arguments);
+    result.succeeded_test_count += unary_categories.succeeded_test_count;
+    result.test_count += unary_categories.test_count;
 
     UnitTestResult binary_families = ir_test_canonical_binary_families(arguments);
     result.succeeded_test_count += binary_families.succeeded_test_count;

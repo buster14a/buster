@@ -5,9 +5,14 @@ real installed-input materialization boundary and a Linux containment
 supervisor. Linux also provides a long-lived local service endpoint: it owns
 the single queue writer, authenticates Unix peer credentials, and dispatches
 bounded public control frames. Installed execution is selected through a
-compiled recipe registry; request bytes never select a program or command.
-The current executable recipe returns only typed build-driver failures until
-its operator-installed dependencies are available.
+compiled recipe registry; request bytes select immutable inputs while host
+commands remain fixed. [Native execution](NATIVE_EXECUTION.md) adds private
+immutable program upload and one contained static-program recipe (#2648).
+Installed recipes require their reviewed operator-installed profiles and
+helpers before execution is available.
+[Native runtime sampling](NATIVE_RUNTIME.md) is a second recipe over the same
+upload. **To use an installed service, start with [USING.md](USING.md);** this
+file is the contract reference.
 This does not change server configuration, measure performance or qualify a
 9700X.
 Do not close #437 or accept compiler performance changes because these tests
@@ -17,9 +22,11 @@ pass.
 
 `worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU` is the Linux
 single-job supervisor. A request may name only an admitted service recipe:
-`validate-buster-v1` or `zen5-calibration-v1` (one revision named twice). It
-cannot supply a
-program, argument, unit name, resource property, cgroup path or timeout. The
+`validate-buster-v1`, `zen5-calibration-v1` (one revision named twice), or
+`native-execute-v1` (one uploaded manifest SHA256 named twice). It cannot supply
+a host command, argument, unit name, resource property, cgroup path or timeout.
+The native recipe runs the fixed service coordinator and candidate helper
+described in [NATIVE_EXECUTION.md](NATIVE_EXECUTION.md). The
 service sends a typed job/attempt request to the root-owned
 `buster-bench-systemd-broker` socket. The broker constructs the fixed
 `/usr/bin/systemd-run --wait --service-type=exec` invocation of
@@ -658,6 +665,93 @@ ineligible. The service self-test binds the kept result tree through the
 worker's finalization, exports it with the server's snapshot and replays it
 with the client unpack. Nothing here has run on the physical 9700X.
 
+## Native stdio MCP client
+
+`./build.sh bench_service mcp /absolute/control.sock` runs a thin native MCP
+adapter over the existing authenticated public socket. Build it first, then
+configure a client to launch the resulting `build/bench-service-tools/service`
+executable directly with `mcp` and the operator-selected socket pathname;
+`build.sh` writes build output and must not be used as the stdio server command.
+The adapter negotiates `2025-11-25` or `2025-06-18`, supports initialization,
+ping, `tools/list` and `tools/call`, and writes only newline-delimited JSON-RPC
+to stdout. Valid initialization requests are idempotent on the same stdio
+transport: a tunnel may run setup probes and several logical clients through
+one authenticated adapter process. A repeated request keeps an already ready
+transport ready; malformed initialization is still rejected without changing
+its state. The first initialization still requires `notifications/initialized`
+before tool calls. Diagnostics stay on stderr. No dependency, listener, privileged
+transition, queue writer, direct queue fallback or worker is added.
+
+The tools describe the operations the public service actually implements:
+
+| Tool | Arguments and result |
+| --- | --- |
+| `bench_capabilities` | No arguments; current service capability text and explicit adapter limits. |
+| `bench_submit` | `idempotency_key`, admitted `recipe`, full lowercase `baseline_sha` and `candidate_sha`; a durable job receipt. |
+| `bench_status` | `job_id`; phase, execution outcome, cancellation request and request digest. |
+| `bench_result` | `job_id`; the same receipt plus this job's manifest, bundle and full-result digests when durably bound. |
+| `bench_cancel` | `job_id`; durably request cancellation and report the service's observed state. |
+| `bench_logs` | `job_id`, optional `cursor` (default `"0"`); at most four lifecycle events and the next per-job ordinal cursor. |
+| `bench_program_begin` / `bench_program_write` / `bench_program_finish` | `program_sha256`, `program_size`, and for a write `offset` and `bytes_hex`; resumable immutable program upload returning the manifest digest to submit. |
+| `bench_artifact_receipt` | `job_id`, `attempt_token`, `full_result_sha256` as `bench_result` returned them; the canonical 1024-byte export receipt as hex, with the archive size and digest. |
+| `bench_artifact_read` | The same identities plus `receipt_sha256` and a byte `offset`; at most 3072 original archive bytes as hex, `next_offset` and `eof`. |
+
+Job IDs, attempt tokens and cursors are decimal strings to preserve uint64
+identities in clients that use floating-point JSON numbers. IDs are positive;
+cursors may be zero; leading zeroes and values above `18446744073709551615`
+are rejected. `bench_logs` does not fetch build stdout. `bench_result` returns
+validated artifact identities, not artifact bytes or the private host result
+pathname. The two artifact tools read the same sealed archive as the
+[authenticated exporter](EXPORT.md), through the same export operation and
+reply validation, and accept no path or member name. A slice is original
+bytes but not sealed evidence on its own: a client concatenates the slices,
+checks their SHA-256 against the receipt's `archive_sha256`, and may write the
+receipt bytes followed by the archive bytes as the input of `unpack-export`. The public socket suppresses global sequence, queue occupancy
+and reconciliation fields; the adapter does not invent freshness timestamps,
+queue positions or recovery claims from their zeroed bytes. Tool results have
+`structuredContent` and a text item containing that same serialized JSON.
+
+The authenticated service principal remains `github-actions`. The adapter must
+run with the already authorized UID/GID, and callers share that principal's
+idempotency namespace. Tool arguments cannot select a principal, socket,
+source directory, program, command, environment, resource setting or blocked
+recipe. The recipe registry remains authoritative: currently
+`validate-buster-v1` and `zen5-calibration-v1` only, with the latter requiring
+one 40-hex source identity on both sides. [Custom native execution and
+benchmarks](CUSTOM_BENCHMARKS.md) require a separate service contract.
+
+Malformed or unknown tool arguments fail before socket traffic. Unknown methods,
+invalid lifecycle and parse errors use JSON-RPC errors; authenticated service,
+transport and validated-reply failures produce `isError=true` tool results.
+A lost reply leaves execution state unknown: retry the same operation/key;
+closing the adapter never releases a reservation. No-ID `tools/call`
+notifications cannot submit or cancel. MCP request-cancellation notifications
+also cannot cancel durable jobs; use `bench_cancel`. A cancellation request is
+separate from confirmed stopped execution.
+
+Messages are limited to 16 KiB before their newline, 512 JSON tokens, 32
+container levels and 16 KiB aggregate decoded strings. The parser uses an
+explicit stack, validates UTF-8/Unicode escapes and rejects duplicate decoded
+keys. String JSON-RPC IDs are limited to 256 decoded bytes; integer IDs must
+fit the exact signed JSON integer range `-(2^53-1)` through `2^53-1`.
+Oversize or an unterminated nonempty final frame returns a parse error and
+ends the adapter; oversize input is not drained indefinitely. EOF on a frame
+boundary shuts down only the adapter.
+
+This software adapter does not establish the full #437 deployment. The current
+service runs its worker synchronously and may defer every public operation
+until cleanup, causing a bounded request timeout. The adapter reports
+`off_host_cache=false`, `synchronous_backend=true`, `fixed_recipe_only=true`,
+`custom_workloads=false` and `compiler_benchmarks=false`;
+`artifact_download` follows the backend's `export=1` token. `native_program_upload`,
+`arbitrary_native_execution` and `custom_runtime_benchmarks` are true only
+when the installed backend serves `native-execute-v1` and `native-runtime-v1`
+respectively. Off-host cached queue/SSH transport, quiet-phase
+client-load evidence, write-capable ChatGPT/Codex installation and raw
+artifact retrieval from a real installed job are still required. Follow the [MCP client installation
+boundary](deploy/MCP_CLIENT.md); local initialization/enumeration alone is not
+web/Codex-to-9700X acceptance.
+
 ## Local authenticated service
 
 `serve` is the operator-owned service loop. It opens the private queue once and
@@ -867,3 +961,5 @@ evidence with injected replay tests; these are not claims about a deployed host
 or a measured result.
 No credentials, server settings, benchmark thresholds, production runner
 ownership or parent-issue closure are authorized by this implementation.
+
+Custom static-program timing is the separate fixed `native-runtime-v1` recipe; see [NATIVE_RUNTIME.md](NATIVE_RUNTIME.md) for its raw samples, launch boundary, containment and diagnostic limits.

@@ -1,0 +1,9 @@
+{
+  "raw_sha256": "edd2603720b057495850683108782181de4af77f4bb806645fca1d4e659f2f57",
+  "raw_bytes": 2204864,
+  "nul_offsets": [
+    24685
+  ],
+  "retained_sha256": "c321a11f799a5e6f6fdcd72027fdf6be355d48c6ac111a69619070d531d81ad9",
+  "transformation": "one literal NUL byte from a negative process control replaced with five printable bytes [NUL]; all other bytes retained"
+}
