@@ -716,6 +716,21 @@ BUSTER_GLOBAL_LOCAL bool image_test_rejected_at_without_allocation(Arena* arena,
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool image_test_pnm_decodes_to(Arena* arena, char const* text, u64 length, u8 const* expected, u64 expected_length)
+{
+    ImageDecodeOptions options = {.format_hint = IMAGE_FORMAT_PNM};
+    ByteSlice encoded = {.pointer = (u8*)text, .length = length};
+    ImageProbeResult probe = image_probe(encoded, options);
+    u64 position = arena->position;
+    ImageDecodeResult decoded = image_decode(arena, encoded, options);
+    bool result = probe.status == IMAGE_DECODE_SUCCESS && decoded.status == IMAGE_DECODE_SUCCESS &&
+                  decoded.image.pixels.length == expected_length && !memcmp(decoded.image.pixels.pointer, expected, expected_length);
+    arena_set_position(arena, position);
+    return result;
+}
+
+#define IMAGE_TEST_TEXT(text) (text), sizeof(text) - 1u
+
 typedef struct ImageTestPngBuilder ImageTestPngBuilder;
 struct ImageTestPngBuilder
 {
@@ -3076,6 +3091,34 @@ UnitTestResult image_tests(UnitTestArguments* arguments)
                            p1_packed_decode.image.pixels.length == sizeof(p1_packed_expected) &&
                            !memcmp(p1_packed_decode.image.pixels.pointer, p1_packed_expected, sizeof(p1_packed_expected)));
     arena_set_position(arguments->arena, p1_packed_position);
+    // A comment ends at CR as well as LF; the CR is then the single raster
+    // separator when the comment follows maxval, so an LF sample survives.
+    u8 const pnm_cr_header_expected[] = {17, 32, 35, 255};
+    u8 const pnm_cr_sample_expected[] = {10, 32, 35, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\r#c\r1 1\r255\r\x11\x20\x23"),
+                                                     pnm_cr_header_expected, sizeof(pnm_cr_header_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1\n255#c\r\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1\n255\r\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1#c\r255\n\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    u8 const pnm_cr_gray_expected[] = {10, 10, 10, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P5\n1 1\n255#c\r\x0a"),
+                                                     pnm_cr_gray_expected, sizeof(pnm_cr_gray_expected)));
+    u8 const pnm_cr_p4_expected[] = {0, 0, 0, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P4\r#c\r1 1#d\r\x80"),
+                                                     pnm_cr_p4_expected, sizeof(pnm_cr_p4_expected)));
+    u8 const pnm_cr_p2_expected[] = {7, 7, 7, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P2\r1 1\r255#c\r7"),
+                                                     pnm_cr_p2_expected, sizeof(pnm_cr_p2_expected)));
+    u8 const pnm_cr_raster_zero[] = {0, 0, 0, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P5\n1 1\n255#c\r\x00"),
+                                                     pnm_cr_raster_zero, sizeof(pnm_cr_raster_zero)));
+    u8 const p6_cr_truncated[] = "P6\n1 1\n255#c\r\x01\x02";
+    BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, (ByteSlice){.pointer = (u8*)p6_cr_truncated, .length = sizeof(p6_cr_truncated) - 1u},
+                                                                   pnm_options, IMAGE_DECODE_TRUNCATED));
+
     u8 p1_bad_digit[] = "P1\n2 1\n02\n";
     ByteSlice p1_bad_digit_bytes = {.pointer = p1_bad_digit, .length = sizeof(p1_bad_digit) - 1u};
     ImageProbeResult p1_bad_digit_probe = image_probe(p1_bad_digit_bytes, pnm_options);

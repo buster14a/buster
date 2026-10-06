@@ -65,10 +65,13 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_advance(ImagePnmScanner* scanner, u64 amount)
 BUSTER_GLOBAL_LOCAL bool image_pnm_skip_comment(ImagePnmScanner* scanner)
 {
     bool result = scanner && scanner->position < scanner->context->encoded.length && scanner->context->encoded.pointer[scanner->position] == '#';
-    while (result && scanner->position < scanner->context->encoded.length && scanner->context->encoded.pointer[scanner->position] != '\n')
+    while (result && scanner->position < scanner->context->encoded.length && scanner->context->encoded.pointer[scanner->position] != '\n' &&
+           scanner->context->encoded.pointer[scanner->position] != '\r')
     {
         result = image_pnm_advance(scanner, 1);
     }
+    // Netpbm ends a comment at CR or LF. Only that one byte is consumed, so a
+    // CR-terminated comment never swallows a following LF-valued sample.
     if (result && scanner->position < scanner->context->encoded.length)
     {
         result = image_pnm_advance(scanner, 1);
