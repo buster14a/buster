@@ -1,0 +1,10 @@
+# Compiler comparison request for the Ryzen 7 9700X (#2769).
+#
+# Add or change any line of this file in an owner pull request (a draft is
+# enough) to compare that pull request's compiler with its merge base on the
+# 9700X: a tests-off Clang Release ide of each, timed by `tools/uarch_lab.py
+# compare` on the same frozen merge-base source. The result is the check
+# "9700X compiler benchmark (pull request)" on the head commit, with the lab's
+# summary.json in the run's evidence artifact. See README.md in this directory.
+#
+# request: issue #2802 frontend reservation diagnostics and failed-result publication

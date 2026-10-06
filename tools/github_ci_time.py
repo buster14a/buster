@@ -13,7 +13,7 @@ require-jobs is CI complete's inventory gate (require_jobs, validate_required_jo
 separate_reconciled_jobs proves and retains admission metadata separately (#2388);
 transient API reads retry inside its metadata budget (_transient_api_failure,
 _gate_get) and an unsuccessful verdict is printed (report_gate_failure).
-combination_jobs selects the complete combined or dispatch-only split layout;
+combination_jobs selects the complete current split or explicit combined layout;
 measure recognizes both as distinct timing cohorts and rejects mixed inventories.
 draft_pull_request_run and deferred_base_name admit the draft-only macOS
 deferral (#1825) and nothing else; latest_run_jobs and _carried_forward_copy
@@ -58,16 +58,45 @@ COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS fo
 LEGACY_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 HISTORICAL_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
-SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
-SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
+# #2657 moved sanitized Debug to build-only portability coverage, so the
+# current split owners are sanitized Release and portability. The #2120 and
+# #2659 layouts with a separate sanitized-debug job remain historical cohorts.
+HISTORICAL_SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
+SPLIT_CHECK_SHARDS = ("sanitized-release", "portability")
+SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS AArch64", "Windows x86-64")
 SPLIT_QUALIFICATION_BRANCH = "codex/ci-checks-split-overlap"
+SPLIT_QUALIFICATION_BRANCHES = (SPLIT_QUALIFICATION_BRANCH, "codex/2120-evidence-v2-split-overlap")
+DEFAULT_CHECKS_LAYOUT = "split"
+COMBINED_QUALIFICATION_BRANCHES = (
+    "codex/ci-checks-combined-overlap",
+    "codex/ci-checks-combined-all-builds",
+    "codex/2120-evidence-v2-combined-overlap",
+    "codex/2120-evidence-v2-combined-all-builds",
+)
 SPLIT_COMBINATION_PLATFORMS = tuple(
     f"{platform} {shard}" for platform in PLATFORMS
     for shard in (("release",) + SPLIT_CHECK_SHARDS
                   if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
 SPLIT_COMBINATION_JOBS = SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
-# Only these four retained Apple jobs may defer on first-attempt draft PRs.
-MACOS_RUNNER_JOBS = tuple(name for name in COMBINATION_PLATFORMS + NATIVE + MOBILE
+# The 27-job split layout before macOS AArch64 left grouped checks (#2659);
+# a separate timing cohort only, never an admissible current inventory.
+HISTORICAL_SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
+HISTORICAL_SPLIT_COMBINATION_JOBS = tuple(
+    f"{platform} {shard}" for platform in PLATFORMS
+    for shard in (("release",) + HISTORICAL_SPLIT_CHECK_SHARDS
+                  if platform in HISTORICAL_SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS)
+) + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+# The 29-job #2659 layout with a full-runtime sanitized-debug job on all four
+# split platforms, before #2657; likewise a separate historical cohort only.
+MACOS_SPLIT_COMBINATION_PLATFORMS = tuple(
+    f"{platform} {shard}" for platform in PLATFORMS
+    for shard in (("release",) + HISTORICAL_SPLIT_CHECK_SHARDS
+                  if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
+MACOS_SPLIT_COMBINATION_JOBS = MACOS_SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + (
+    "Workflow lint", "CI complete")
+# Only these retained Apple jobs may defer on first-attempt draft PRs. Draft
+# pull requests always run the default split layout.
+MACOS_RUNNER_JOBS = tuple(name for name in SPLIT_COMBINATION_PLATFORMS + NATIVE + MOBILE
                           if name.startswith(("macOS ", "iOS ")))
 DEFERRED_SUFFIX = " (deferred for draft PR)"
 DEFERRAL_STEP = "Defer macOS runner lane for draft pull request"
@@ -114,11 +143,22 @@ def timestamp(value):
     return result
 
 
-def combination_jobs(checks_layout="combined"):
+def combination_jobs(checks_layout=DEFAULT_CHECKS_LAYOUT):
     """Exactly one complete desktop layout; the default remains accepted policy."""
     if checks_layout not in ("combined", "split"):
         raise ValueError("Unknown checks layout")
     return SPLIT_COMBINATION_JOBS if checks_layout == "split" else COMBINATION_JOBS
+
+
+def checks_layout_for_run(run, event_ref=None):
+    """Only exact manual qualification refs can override the current layout."""
+    if run.get("event") not in ("pull_request", "push", "merge_group", "workflow_dispatch"):
+        raise ValueError("The API run has an unsupported CI event")
+    combined = run.get("event") == "workflow_dispatch" and \
+        event_ref in tuple("refs/heads/" + branch for branch in COMBINED_QUALIFICATION_BRANCHES)
+    if combined and run.get("head_branch") != event_ref.removeprefix("refs/heads/"):
+        raise ValueError("The API branch does not match the exact manual qualification ref")
+    return "combined" if combined else DEFAULT_CHECKS_LAYOUT
 
 
 def measure(run):
@@ -130,7 +170,8 @@ def measure(run):
     jobs = [job for job in run.get("jobs", []) if job.get("name") != MAIN_REUSE_JOB]
     names = sorted(job.get("name", "") for job in jobs)
     combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS),
-                             sorted(COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS))
+                             sorted(COMBINATION_JOBS), sorted(HISTORICAL_SPLIT_COMBINATION_JOBS),
+                             sorted(MACOS_SPLIT_COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS))
     suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
                        sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS)) or combinations
     sharded = names == sorted(SHARDED_JOBS) or suites
@@ -158,7 +199,8 @@ def measure(run):
         for job in jobs:
             name = job["name"]
             required = set()
-            if name in HISTORICAL_PLATFORMS + HISTORICAL_COMBINATION_PLATFORMS + SPLIT_COMBINATION_PLATFORMS:
+            if name in HISTORICAL_PLATFORMS + HISTORICAL_COMBINATION_PLATFORMS + MACOS_SPLIT_COMBINATION_PLATFORMS + \
+                    SPLIT_COMBINATION_PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
                 if combinations:
@@ -190,8 +232,15 @@ def measure(run):
             elif name in UEFI:
                 required.add("Build compiler and boot both architectures in all allocators")
             elif name in ANALYZER:
-                required.update(("Exercise analyzer failure and coverage controls",
-                                 "Compare reference analysis and aggregate all module shards"))
+                # Preserve historical measurements without relabeling their
+                # optional-reference policy as current candidate-only work.
+                campaign_names = {"Analyze candidate and aggregate all module shards",
+                                  "Compare reference analysis and aggregate all module shards"}
+                campaigns = [step for step in job.get("steps", []) if step["name"] in campaign_names]
+                if len(campaigns) != 1:
+                    reason = "incomplete-coverage"
+                required.add("Exercise analyzer failure and coverage controls")
+                required.add(campaigns[0]["name"] if len(campaigns) == 1 else "missing analyzer campaign")
             passed = {step["name"] for step in job.get("steps", []) if step.get("conclusion") == "success"}
             if job.get("conclusion") != "success" or job.get("run_attempt") != 1 or not required <= passed:
                 reason = "incomplete-coverage"
@@ -726,12 +775,10 @@ def require_jobs(args):
     head_sha = run.get("head_sha")
     if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         raise ValueError("The API run has no exact source identity")
-    checks_layout = getattr(args, "checks_layout", "combined")
+    checks_layout = getattr(args, "checks_layout", DEFAULT_CHECKS_LAYOUT)
     expected_names = combination_jobs(checks_layout)
-    if checks_layout == "split" and run.get("event") != "workflow_dispatch":
-        raise ValueError("The split checks layout requires a workflow_dispatch run")
-    if checks_layout == "split" and run.get("head_branch") != SPLIT_QUALIFICATION_BRANCH:
-        raise ValueError("The split checks layout requires the exact qualification branch")
+    if checks_layout != checks_layout_for_run(run, getattr(args, "event_ref", os.getenv("GITHUB_REF"))):
+        raise ValueError("The checks layout does not match the run event and exact qualification ref")
     draft = draft_pull_request_run(run, head_sha, getattr(args, "event_name", None),
                                    getattr(args, "event_path", None))
     jobs = []
@@ -1219,7 +1266,8 @@ def main():
     gate.add_argument("--run-attempt", type=int, default=os.getenv("GITHUB_RUN_ATTEMPT", "0"))
     gate.add_argument("--event-name", default=os.getenv("GITHUB_EVENT_NAME"))
     gate.add_argument("--event-path", default=os.getenv("GITHUB_EVENT_PATH"))
-    gate.add_argument("--checks-layout", choices=("combined", "split"), default="combined")
+    gate.add_argument("--event-ref", default=os.getenv("GITHUB_REF"))
+    gate.add_argument("--checks-layout", choices=("combined", "split"), default=DEFAULT_CHECKS_LAYOUT)
     gate.add_argument("--output")
     report = sub.add_parser("summarize")
     report.add_argument("input")

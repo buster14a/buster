@@ -61,7 +61,7 @@ class FakeAPI:
     def __init__(self):
         self.current = run(CURRENT_ID, "push", "main", NOW - timedelta(minutes=1))
         self.source = run(SOURCE_ID, "merge_group", BRANCH, NOW - timedelta(minutes=2))
-        self.jobs = [job(name, SOURCE_ID) for name in inventory.COMBINATION_JOBS]
+        self.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs()]
         for index, record in enumerate(self.jobs):
             record["id"] = 1000 + index
         self.checks = []
@@ -153,8 +153,8 @@ class MainCIReuseTests(unittest.TestCase):
                 receipt = reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW,
                                               diagnostics=source_evidence)
                 current = reuse.verify_current_jobs(self.api, SHA, CURRENT_ID, diagnostics=main_evidence)
-                self.assertEqual(len(receipt["source_jobs"]), 19)
-                self.assertEqual(len(current), 13)
+                self.assertEqual(len(receipt["source_jobs"]), 23)
+                self.assertEqual(len(current), 17)
                 self.assertEqual([row["job"] for row in source_evidence["source_reconciled_checks"]],
                                  self.api.jobs[-2:])
                 self.assertEqual([row["job"] for row in main_evidence["current_reconciled_checks"]],
@@ -267,20 +267,21 @@ class MainCIReuseTests(unittest.TestCase):
 
     def test_exact_commit_source_and_main_specific_jobs(self):
         receipt = self.admit()
-        self.assertEqual(len(receipt["source_jobs"]), 19)
-        self.assertEqual(len(receipt["source_artifacts"]), 19)
+        self.assertEqual(len(receipt["source_jobs"]), 23)
+        self.assertEqual(len(receipt["source_artifacts"]), 23)
         self.assertEqual(receipt["source_run_id"], SOURCE_ID)
-        self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 13)
+        self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 17)
         self.assertRegex(reuse.receipt_digest(receipt), r"[0-9a-f]{64}\Z")
 
-    def test_dispatch_split_layout_cannot_change_the_main_reuse_inventory(self):
-        self.assertEqual(inventory.combination_jobs(), inventory.COMBINATION_JOBS)
-        self.assertEqual(len(inventory.combination_jobs()), 21)
-        self.assertEqual(len(inventory.combination_jobs("split")), 27)
-        self.assertEqual(len(reuse.RETAINED_NAMES), 13)
-        self.assertIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
+    def test_current_split_reuse_rejects_the_historical_combined_inventory(self):
+        self.assertEqual(inventory.combination_jobs(), inventory.SPLIT_COMBINATION_JOBS)
+        self.assertEqual(len(inventory.combination_jobs()), 25)
+        self.assertEqual(len(inventory.combination_jobs("split")), 25)
+        self.assertEqual(len(reuse.RETAINED_NAMES), 17)
+        self.assertNotIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
+        self.assertIn("Windows x86-64 sanitized-release", reuse.RETAINED_NAMES)
         self.assertNotIn("Windows x86-64 sanitized-debug", reuse.RETAINED_NAMES)
-        self.api.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs("split")]
+        self.api.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs("combined")]
         with self.assertRaises(AdmissionError):
             self.admit()
 
@@ -370,9 +371,25 @@ class MainCIReuseTests(unittest.TestCase):
     def test_all_desktop_source_coverage_and_artifacts_are_required(self):
         for name, prefix, mandatory in reuse.DESKTOP:
             with self.subTest(name=name):
+                for mutation in ("missing", "duplicate", "failure", "cancelled", "skipped"):
+                    self.api = FakeAPI()
+                    source = next(j for j in self.api.jobs if j['name'] == name)
+                    if mutation == "missing":
+                        self.api.jobs.remove(source)
+                    elif mutation == "duplicate":
+                        self.api.jobs.append(dict(copy.deepcopy(source), id=9999))
+                    else:
+                        source['conclusion'] = mutation
+                    with self.subTest(mutation=mutation), self.assertRaises(AdmissionError):
+                        self.admit()
                 self.api = FakeAPI()
                 source = next(j for j in self.api.jobs if j['name'] == name)
                 source['steps'] = [s for s in source['steps'] if s['name'] != mandatory]
+                with self.assertRaises(AdmissionError):
+                    self.admit()
+                self.api = FakeAPI()
+                artifact = next(a for a in self.api.artifacts if a['name'] == f'{prefix}-{SOURCE_ID}-1')
+                self.api.artifacts.append(dict(copy.deepcopy(artifact), id=9999))
                 with self.assertRaises(AdmissionError):
                     self.admit()
                 self.api = FakeAPI()
@@ -403,7 +420,7 @@ class MainCIReuseTests(unittest.TestCase):
         for name in reuse.CACHE_STEPS:
             block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             self.assertNotIn("needs.reuse.outputs.reuse != 'true'", block)
-        self.assertEqual(reuse.DESKTOP_NAMES, set(inventory.COMBINATION_PLATFORMS))
+        self.assertEqual(reuse.DESKTOP_NAMES, set(inventory.SPLIT_COMBINATION_PLATFORMS))
 
     def test_analyzer_requires_complete_source_controls_and_main_receipt(self):
         for step_name in reuse.ANALYZER_STEPS:
@@ -421,12 +438,26 @@ class MainCIReuseTests(unittest.TestCase):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         analyzer = text.split('\n  analyzer:\n', 1)[1].split('\n  complete:\n', 1)[0]
         self.assertIn('needs: reuse', analyzer)
-        # Queue and main bind baseline to their exact SHA; explicit comparisons
-        # remain dispatch-only and never enter main reuse.
-        self.assertEqual(analyzer.count('BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}'), 2)
+        # Fresh queue validation analyzes the exact candidate once; main may
+        # reuse only that complete execution, never a retired reference step.
+        self.assertNotIn("BASELINE_REVISION", analyzer)
+        self.assertNotIn("--baseline-driver", analyzer)
+        # The retired dispatch input remains only as a candidate-bootstrap refusal.
+        self.assertEqual(analyzer.count("inputs.analyzer_comparison"), 1)
+        self.assertNotIn("inputs.analyzer_comparison", analyzer.split(
+            '      - name: ' + reuse.ANALYZER_STEPS[-1] + '\n', 1)[1].split('\n      - name:', 1)[0])
         for name in reuse.ANALYZER_STEPS:
             block = analyzer.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             self.assertIn("if: ${{ needs.reuse.outputs.reuse != 'true' }}", block)
+
+    def test_retired_analyzer_step_names_cannot_authorize_reuse(self):
+        source = next(job for job in self.api.jobs if job["name"] in inventory.ANALYZER)
+        old = {"Bootstrap and identify candidate build driver": "Bootstrap candidate and select reference build driver",
+               "Analyze candidate and aggregate all module shards": "Compare reference analysis and aggregate all module shards"}
+        for step in source["steps"]:
+            step["name"] = old.get(step["name"], step["name"])
+        with self.assertRaises(AdmissionError):
+            self.admit()
 
     def test_api_uncertainty_and_incomplete_pagination_fall_back(self):
         with mock.patch.object(self.api, "pages", side_effect=OSError("API unavailable")):
@@ -471,7 +502,7 @@ class MainCIReuseTests(unittest.TestCase):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         self.assertEqual(reuse.REUSED_NAMES,
                          set(inventory.NATIVE + inventory.MOBILE + inventory.UEFI))
-        self.assertEqual(len(reuse.RETAINED_NAMES), 13)
+        self.assertEqual(len(reuse.RETAINED_NAMES), 17)
         for key in ("native", "mobile", "uefi"):
             header = re.split(r"\n  [a-z][a-z_]*:\n", text.split(f"\n  {key}:\n", 1)[1], maxsplit=1)[0]
             self.assertIn("needs: reuse", header)
@@ -576,7 +607,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
         code, report, outputs, _ = self.invoke("finish", handoff)
         self.assertEqual(code, 0)
         self.assertEqual(report["status"], "verified")
-        self.assertEqual(len(report["receipt"]["main_jobs"]), 13)
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
         self.assertEqual(outputs, {})
 
     def test_transient_empty_listing_is_recollected_after_direct_lookup(self):
@@ -771,7 +802,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
         self.unexpanded_jobs()
         code, report, _, _ = self.invoke("finish", handoff)
         self.assertEqual(code, 0)
-        self.assertEqual(len(report["receipt"]["main_jobs"]), 13)
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
         skipped = report["diagnostics"]["skipped_jobs"]
         self.assertEqual([row["job_id"] for row in skipped], [4000, 4001, 4002])
         self.assertTrue(all(row["conclusion"] == "skipped" for row in skipped))
@@ -826,8 +857,8 @@ class MainCIReuseFinishTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(outputs["reuse"], "true")
         self.assertEqual(report["status"], "verified")
-        self.assertEqual(len(report["receipt"]["source_jobs"]), 19)
-        self.assertEqual(len(report["receipt"]["source_artifacts"]), 19)
+        self.assertEqual(len(report["receipt"]["source_jobs"]), 23)
+        self.assertEqual(len(report["receipt"]["source_artifacts"]), 23)
         self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
         self.sleeps.assert_called_once_with(1)
 

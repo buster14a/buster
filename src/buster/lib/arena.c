@@ -1,4 +1,5 @@
 #include <buster/lib/arena.h>
+#include <buster/lib/arena_internal.h>
 #include <buster/lib/os.h>
 #include <buster/lib/integer.h>
 
@@ -9,16 +10,127 @@ BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position);
+
+typedef struct ArenaCommitAttempt ArenaCommitAttempt;
+struct ArenaCommitAttempt
+{
+    OsCommitFailureContext failure;
+    bool succeeded;
+    bool forced_for_test;
+};
+
+typedef struct ArenaCommitFailureMessage ArenaCommitFailureMessage;
+struct ArenaCommitFailureMessage
+{
+    char8 bytes[1024];
+    u64 length;
+};
+
+BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_commit_failure_append(ArenaCommitFailureMessage* message, String8 value)
+{
+    for (u64 index = 0; index < value.length && message->length < BUSTER_ARRAY_LENGTH(message->bytes); index += 1)
+    {
+        message->bytes[message->length] = value.pointer[index];
+        message->length += 1;
+    }
+}
+
+BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_commit_failure_append_u64(ArenaCommitFailureMessage* message, u64 value, u32 radix)
+{
+    char8 digits[20];
+    u64 length = 0;
+    do
+    {
+        u64 digit = value % radix;
+        digits[length] = (char8)(digit < 10 ? '0' + digit : 'a' + digit - 10);
+        length += 1;
+        value /= radix;
+    } while (value && length < BUSTER_ARRAY_LENGTH(digits));
+    while (length && message->length < BUSTER_ARRAY_LENGTH(message->bytes))
+    {
+        length -= 1;
+        message->bytes[message->length] = digits[length];
+        message->length += 1;
+    }
+}
+
+BUSTER_NORETURN BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_commit_failure(Arena* arena, u64 requested_end, void* address, u64 size,
+                                                                         ArenaCommitAttempt attempt, u32 line, String8 function, String8 file)
+{
+    ArenaCommitFailureMessage message = {0};
+    arena_commit_failure_append(&message, S8("arena commit failed origin="));
+    arena_commit_failure_append(&message, attempt.forced_for_test ? S8("forced-test") : S8("os"));
+    arena_commit_failure_append(&message, S8(" error="));
+    arena_commit_failure_append_u64(&message, attempt.failure.error.v, 10);
+    arena_commit_failure_append(&message, S8(" address=0x"));
+    arena_commit_failure_append_u64(&message, (u64)address, 16);
+    arena_commit_failure_append(&message, S8(" size="));
+    arena_commit_failure_append_u64(&message, size, 10);
+    arena_commit_failure_append(&message, S8(" requested_end="));
+    arena_commit_failure_append_u64(&message, requested_end, 10);
+    arena_commit_failure_append(&message, S8(" arena=0x"));
+    arena_commit_failure_append_u64(&message, (u64)arena, 16);
+    arena_commit_failure_append(&message, S8(" position="));
+    arena_commit_failure_append_u64(&message, arena->position, 10);
+    arena_commit_failure_append(&message, S8(" os_position="));
+    arena_commit_failure_append_u64(&message, arena->os_position, 10);
+    arena_commit_failure_append(&message, S8(" reserved="));
+    arena_commit_failure_append_u64(&message, arena->reserved_size, 10);
+    arena_commit_failure_append(&message, S8(" page_size="));
+    arena_commit_failure_append_u64(&message, attempt.failure.page_size, 10);
+    if (attempt.failure.system_memory_observed)
+    {
+        arena_commit_failure_append(&message, S8(" system_commit_limit="));
+        arena_commit_failure_append_u64(&message, attempt.failure.system_commit_limit_bytes, 10);
+        arena_commit_failure_append(&message, S8(" system_commit_available="));
+        arena_commit_failure_append_u64(&message, attempt.failure.system_commit_available_bytes, 10);
+        arena_commit_failure_append(&message, S8(" physical_available="));
+        arena_commit_failure_append_u64(&message, attempt.failure.physical_available_bytes, 10);
+    }
+    else
+    {
+        arena_commit_failure_append(&message, S8(" system_memory=unavailable"));
+    }
+    if (attempt.failure.process_memory_observed)
+    {
+        arena_commit_failure_append(&message, S8(" process_commit="));
+        arena_commit_failure_append_u64(&message, attempt.failure.process_commit_bytes, 10);
+    }
+    else
+    {
+        arena_commit_failure_append(&message, S8(" process_commit=unavailable"));
+    }
+    os_fail_raw(line, function, file, (String8){.pointer = message.bytes, .length = message.length});
+}
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_reserve;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_commit;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_decommit;
 
 void arena_test_fail_next_reserve(void)
 {
     arena_fail_next_reserve = true;
 }
 
+bool arena_test_cancel_reserve_failure(void)
+{
+    bool result = arena_fail_next_reserve;
+    arena_fail_next_reserve = false;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool arena_test_release_fill;
+
+// Reservation bytes held by arenas that were created and not yet destroyed on
+// this thread, so concurrently running tests cannot disturb one another's
+// reading. A destroyed arena parked in the reuse pool no longer counts: the
+// pool is bounded per thread, so the counter is the leak signal.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 arena_test_live_bytes;
+
+u64 arena_test_live_reserved_bytes(void)
+{
+    return arena_test_live_bytes;
+}
 
 void arena_test_fill_releases(bool enabled)
 {
@@ -28,6 +140,11 @@ void arena_test_fill_releases(bool enabled)
 void arena_test_fail_next_commit(void)
 {
     arena_fail_next_commit = true;
+}
+
+void arena_test_fail_next_decommit(void)
+{
+    arena_fail_next_decommit = true;
 }
 #endif
 
@@ -47,18 +164,19 @@ BUSTER_GLOBAL_LOCAL void* arena_reserve_attempt(void* base, u64 size, Protection
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool arena_commit_attempt(void* address, u64 size, ProtectionFlags protection, bool prefault)
+BUSTER_GLOBAL_LOCAL ArenaCommitAttempt arena_commit_attempt(void* address, u64 size, ProtectionFlags protection, bool prefault)
 {
-    bool result = false;
+    ArenaCommitAttempt result = {0};
 #if BUSTER_INCLUDE_TESTS
     if (arena_fail_next_commit)
     {
         arena_fail_next_commit = false;
+        result.forced_for_test = true;
     }
     else
 #endif
     {
-        result = os_commit(address, size, protection, prefault);
+        result.succeeded = os_commit_diagnose(address, size, protection, prefault, &result.failure);
     }
     return result;
 }
@@ -107,12 +225,12 @@ void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
     u64 size_to_commit = target_committed_size - os_position;
     u8* commit_pointer = (u8*)arena + os_position;
 
-    bool commit_succeeded = arena_commit_attempt(commit_pointer, size_to_commit,
-                                                    (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute},
-                                                    arena->flags.prefault_pages);
-    if (!commit_succeeded)
+    ArenaCommitAttempt commit = arena_commit_attempt(commit_pointer, size_to_commit,
+                                                       (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute},
+                                                       arena->flags.prefault_pages);
+    if (!commit.succeeded)
     {
-        os_fail_message(S8("arena commit failed"));
+        arena_commit_failure(arena, aligned_size_after, commit_pointer, size_to_commit, commit, (u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__));
     }
     arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
 }
@@ -139,8 +257,11 @@ u64 arena_dirty_position(Arena* arena)
 
 u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment)
 {
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
-    u8* result = arena_get_byte_pointer_at_position(arena, align_forward(position, alignment));
+    BUSTER_VALIDATE(arena && position <= arena->reserved_size);
+    u64 aligned_position;
+    BUSTER_VALIDATE(arena_align_position_checked(arena, position, alignment, &aligned_position));
+    BUSTER_VALIDATE(aligned_position <= arena->reserved_size);
+    u8* result = arena_get_byte_pointer_at_position(arena, aligned_position);
     return result;
 }
 
@@ -157,9 +278,7 @@ void arena_set_position(Arena* arena, u64 position)
 
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position)
 {
-#if BUSTER_INCLUDE_TESTS
-    arena->test_high_water = BUSTER_MAX(arena->test_high_water, arena->position);
-#endif
+    arena->high_water = BUSTER_MAX(arena->high_water, arena->position);
     arena->dirty_position = BUSTER_MAX(arena->dirty_position, BUSTER_MAX(arena->position, position));
     arena->position = position;
 }
@@ -167,9 +286,7 @@ BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position
 bool arena_set_position_and_decommit(Arena* arena, u64 position)
 {
     BUSTER_VALIDATE(arena && arena->position <= arena->reserved_size && position >= arena_minimum_position && position <= arena->position);
-#if BUSTER_INCLUDE_TESTS
-    arena->test_high_water = BUSTER_MAX(arena->test_high_water, arena->position);
-#endif
+    arena->high_water = BUSTER_MAX(arena->high_water, arena->position);
     u64 page_size = os_get_page_size();
     BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
     // Arena granularities may legally be smaller than a native page. Start at
@@ -186,7 +303,17 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
     {
         // Pages handed back to the OS carry no released-range poison with them.
         BUSTER_ARENA_UNPOISON((u8*)arena + decommit_start, decommit_end - decommit_start);
-        result = os_decommit((u8*)arena + decommit_start, decommit_end - decommit_start);
+#if BUSTER_INCLUDE_TESTS
+        if (arena_fail_next_decommit)
+        {
+            arena_fail_next_decommit = false;
+            result = false;
+        }
+        else
+#endif
+        {
+            result = os_decommit((u8*)arena + decommit_start, decommit_end - decommit_start);
+        }
         if (result)
         {
             // A sub-page-granularity arena can have a committed partial page
@@ -202,10 +329,15 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
         // Recommit can expose the old contents, including earlier rewinds.
         arena_set_position_unchecked(arena, position);
 #else
-        // Bytes beyond the native decommit boundary are freshly zeroed if
-        // they are committed again; retain the prefix that can still carry
-        // old contents, including a partial page below that boundary.
-        arena->dirty_position = BUSTER_MIN(BUSTER_MAX(arena->dirty_position, arena->position), decommit_start);
+        // Only the discarded complete pages become fresh on recommit. A
+        // dirty partial page above decommit_end survives and a single prefix
+        // watermark must conservatively cover it as well as the lower prefix.
+        u64 dirty_position = BUSTER_MAX(arena->dirty_position, arena->position);
+        if (dirty_position <= decommit_end)
+        {
+            dirty_position = BUSTER_MIN(dirty_position, decommit_start);
+        }
+        arena->dirty_position = dirty_position;
         arena->position = position;
 #endif
     }
@@ -238,7 +370,7 @@ void arena_retire(Arena* arena, u64 retained_size)
     {
         // Decommit moves the cursor to its boundary, so the cursor visits the
         // retained edge first and returns to the start afterwards; the dirty
-        // mark then covers exactly the retained prefix.
+        // mark still covers any undiscarded partial tail page.
         arena_set_position(arena, retained);
         BUSTER_VALIDATE(arena_set_position_and_decommit(arena, retained));
     }
@@ -345,6 +477,18 @@ bool arena_destroy(Arena* arena, u64 count)
     // A released range stays poisoned until the next allocation reaches it;
     // neither a pooled reuse nor a later mapping at this address may inherit it.
     BUSTER_ARENA_UNPOISON((u8*)arena + arena_minimum_position, BUSTER_MAX(arena_dirty_position(arena), arena->os_position) - arena_minimum_position);
+#if BUSTER_INCLUDE_TESTS
+    arena_test_live_bytes -= reserved_size * count;
+    if (arena_test_release_fill)
+    {
+        // Everything the arena committed is released with it; a reference
+        // that outlives the arena reads the pattern, not stale data.
+        u64 extent = BUSTER_MAX(arena_dirty_position(arena), arena->os_position);
+        memset((u8*)arena + arena_minimum_position, ARENA_TEST_RELEASE_FILL, extent - arena_minimum_position);
+        // A pooled arena promises zeroed bytes above its dirty mark.
+        arena->dirty_position = extent;
+    }
+#endif
     if (arena_pool_eligible(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
     {
         arena->dirty_position = BUSTER_MAX(arena_dirty_position(arena), arena_minimum_position + sizeof(Arena*));
@@ -404,7 +548,7 @@ Arena* arena_create(ArenaCreation original_creation)
             bool committed_enough = committed >= creation.initial_size;
             if (!committed_enough)
             {
-                committed_enough = arena_commit_attempt(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false);
+                committed_enough = arena_commit_attempt(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false).succeeded;
                 committed = arena_os_position_after_commit(creation.initial_size, individual_reserved_size);
             }
             if (committed_enough)
@@ -440,7 +584,7 @@ Arena* arena_create(ArenaCreation original_creation)
 
                 // Only the commit decides whether this arena exists. The
                 // prefault request it carries is advisory and cannot fail it.
-                bool commit_result = arena_commit_attempt(arena, creation.initial_size, protection_flags, creation.flags.prefault_pages);
+                bool commit_result = arena_commit_attempt(arena, creation.initial_size, protection_flags, creation.flags.prefault_pages).succeeded;
                 if (commit_result)
                 {
                     *arena = (Arena){
@@ -463,6 +607,12 @@ Arena* arena_create(ArenaCreation original_creation)
         }
     }
 
+#if BUSTER_INCLUDE_TESTS
+    if (result)
+    {
+        arena_test_live_bytes += total_reserved_size;
+    }
+#endif
     return (Arena*)result;
 }
 

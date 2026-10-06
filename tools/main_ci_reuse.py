@@ -72,12 +72,14 @@ DESKTOP = tuple((f"{name} {shard}", f"desktop-{os_name}-{arch}-{shard}",
                     ("macOS AArch64", "macos", "aarch64"),
                     ("Windows x86-64", "windows", "x86_64"),
                     ("Windows AArch64", "windows", "aarch64"))
-                for shard in github_ci_time.COMBINATION_SHARDS)
+                for shard in (("release",) + github_ci_time.SPLIT_CHECK_SHARDS
+                              if name in github_ci_time.SPLIT_CHECK_PLATFORMS
+                              else github_ci_time.COMBINATION_SHARDS))
 DESKTOP_NAMES = frozenset(row[0] for row in DESKTOP)
-ANALYZER_STEPS = ("Bootstrap candidate and select reference build driver",
+ANALYZER_STEPS = ("Bootstrap and identify candidate build driver",
                   "Exercise analyzer failure and coverage controls",
                   "Configure the authoritative split-source database",
-                  "Compare reference analysis and aggregate all module shards")
+                  "Analyze candidate and aggregate all module shards")
 ANALYZER_RECEIPT_STEPS = ("Report reused analyzer validation",
                          "Retain analyzer inventory, results and measurements")
 SOURCE_COVERAGE = REUSED + DESKTOP + (("Clang analyzer shards", "clang-analyzer", ANALYZER_STEPS[-1]),)
@@ -89,7 +91,7 @@ VALIDATION_STEPS = ("Workflow tool regression tests", "Bootstrap wrapper regress
                     "Install mold", "Install latest stable LLVM", "Application compilers",
                     "Combination matrix (Linux, macOS)", "Combination matrix (Windows)",
                     "Collect CMake configure evidence", "Desktop result and reproduction")
-RETAINED_NAMES = tuple(name for name in github_ci_time.COMBINATION_JOBS
+RETAINED_NAMES = tuple(name for name in github_ci_time.combination_jobs()
                        if name not in REUSED_NAMES)
 
 
@@ -314,6 +316,7 @@ def successful_source_jobs(api, source, sha, *, diagnostics=None):
     jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha)
     require(not extras, "; ".join(extras))
     errors = github_ci_time.validate_required_jobs(jobs, run_id, 1, sha,
+                                                   expected_names=github_ci_time.combination_jobs(),
                                                    complete_active=False)
     require(not errors, "; ".join(errors))
     identifiers = [job.get("id") for job in jobs]

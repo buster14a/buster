@@ -85,7 +85,10 @@ struct UnitTestArguments
     TestWatchSlot* watch_slot;
     bool memory_report;
     bool fixture_timing_report;
-    u8 reserved[6];
+    // Harness self-tests set this only around an expected failed assertion;
+    // diagnostics and assertion accounting still run normally.
+    bool suppress_debugger_break;
+    u8 reserved[5];
 #endif
 };
 
