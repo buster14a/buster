@@ -116,6 +116,23 @@ publication/completion markers. The valid control publishes an edge-free CFG
 and validates again after publication. Certified callers retain their existing
 obligation to supply an actual producer proof; this adds no redundant scan.
 
+## Binary value categories
+
+Every BINARY operand and result is `IR_VALUE_VALUE`. A place denotes object
+storage, even when its canonical type matches the desired arithmetic type;
+an explicit LOAD supplies that stored value. Scalar arithmetic/comparison,
+Boolean, pointer-comparison and vector families use this same category
+contract. Consumers must not infer an implicit load from a matching type.
+
+`ir_test_canonical_binary_categories` supplies raw complete-module LOCAL/LOAD
+rows independently of the frontend and builder. Across 33 scalar operations
+and eight Boolean/pointer/vector controls, it preserves value-only neighbors
+and rejects independent or combined place operands/results and an invalid
+result category at the BINARY row. Its unused result and void return keep
+return validation from masking the fault. Uncertified preparation must reject
+each malformed input before promotion/publication, retain exact row context,
+and leave completion markers unset.
+
 ## Label provenance validation work
 
 Global label-address relocations resolve their function owner through a lazy,
