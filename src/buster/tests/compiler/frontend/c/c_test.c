@@ -9724,6 +9724,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(Unit
     return result;
 }
 
+// The runtime check below is the only reader of this program; it is compiled
+// only where the check runs, so other targets do not see an unused constant.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+// A cast to a variadic function-pointer type in a local initializer (#2840):
+// the `...` closing its parameter list is not a GNU range designator, in a
+// scalar, a compound literal, or beside a real static range designator.
+BUSTER_GLOBAL_LOCAL String8 const c_test_variadic_function_pointer_cast_program = S8_INITIALIZER(
+    "static int first(int a, ...) { return a; }\n"
+    "struct Holder { int (*call)(int, ...); int values[2]; };\n"
+    "static int (*file_scope)(int, ...) = (int (*)(int, ...))first;\n"
+    "int main(void)\n"
+    "{\n"
+    "    void *opaque = 0;\n"
+    "    long zero = (long)(int (*)(int, ...))0;\n"
+    "    int (*null_call)(int, ...) = (int (*)(int, ...))0;\n"
+    "    int (*from_void)(int, ...) = (int (*)(int, ...))opaque;\n"
+    "    struct Holder holder = (struct Holder){ .call = (int (*)(int, ...))first, .values = { 1, 2 } };\n"
+    "    static int ranged[4] = { [0 ... 2] = 5 };\n"
+    "    return zero != 0 || null_call || from_void || file_scope != first || holder.call(7) != 7 || holder.values[1] != 2 ||\n"
+    "           ranged[2] != 5 || ranged[3] != 0;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("variadic-function-pointer-cast"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_variadic_function_pointer_cast_program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("variadic-function-pointer-cast-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("variadic function-pointer cast {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("variadic function-pointer cast runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -45624,6 +45692,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_validation_candidates);
     C_TEST_FIXTURE(arguments, c_test_variable_member_types);
     C_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
+    C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast_runtime);
     C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
     C_TEST_FIXTURE(arguments, c_test_vla_row_places);
     C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);

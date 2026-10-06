@@ -26479,6 +26479,16 @@ BUSTER_C_INTERNAL bool c_parse_type_is_variably_modified(CTypeParseMachine* mach
     return variable;
 }
 
+// Whether the token at index is the ellipsis of a GNU range designator
+// (`[lo ... hi]`) rather than the one ending a variadic parameter list in a
+// cast or compound-literal type name (#2840). The variadic ellipsis is always
+// followed by `)`, which can never close the bracket of a range designator.
+BUSTER_C_INTERNAL bool c_parse_token_is_range_designator_ellipsis(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    return c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_ELLIPSIS) &&
+           !(index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS));
+}
+
 BUSTER_C_INTERNAL bool c_parse_declarator_has_initializer(CPreprocessResult preprocess, u32 start, u32 end)
 {
     u32 depth = 0;
@@ -27250,7 +27260,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
         {
             for (u32 cursor = open + 1; !diagnostic.message.length && cursor < close; cursor += 1)
             {
-                if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_ELLIPSIS))
+                if (c_parse_token_is_range_designator_ellipsis(preprocess, cursor, close))
                     diagnostic.message = S8("range designators are only supported for static aggregate initializers");
             }
         }
@@ -27541,7 +27551,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             {
                 for (u32 token = shape_start; token < shape_end; token += 1)
                 {
-                    if (c_token_is_punctuator(&preprocess.tokens[token], C_PUNCTUATOR_ELLIPSIS))
+                    if (c_parse_token_is_range_designator_ellipsis(preprocess, token, shape_end))
                     {
                         c_parse_lowering_constraint_consider(diagnostic, S8("range designators are only supported for static aggregate initializers"), start, location);
                     }
