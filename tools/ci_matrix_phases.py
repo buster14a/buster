@@ -174,7 +174,9 @@ def validate_plan(plan, coverage, environment):
                                       ("compiler_identity", "identity"), ("compiler_version", "version"), ("target", "target")):
                 require(tree.get(tree_key) == cap.get(cap_key) and bool(tree.get(tree_key)), f"compiler mismatch: {tree_id}/{tree_key}")
             require(tree.get("sanitize") == int(row["sanitize"]), "sanitizer policy mismatch")
-            if row["compiler"] == "clang":
+            # Only runtime rows own test phases; build-only rows, including
+            # sanitized Clang Debug since #2657, must not report a test.
+            if row["execution"] == "runtime":
                 expected_tasks.update((task_id(tree_id, "test", row["configuration"]), task_id(tree_id, "validation", row["configuration"])))
                 if row["unity"]:
                     canonical = tree_id
