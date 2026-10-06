@@ -29141,6 +29141,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             " failed |= !chain_triple(); failed |= !chain_middle_empty(); failed |= !chain_all_empty(); failed |= !chain_argument_triple();\n"
             " return failed;\n"
             "}\n"),
+        // #2844: a _Generic selection or __builtin_choose_expr is a primary
+        // expression, so a postfix call applies to the designator it picks.
+        S8(
+            "static int factory_calls, invoke_calls, arg_calls;\n"
+            "typedef int (*Unary)(int);\n"
+            "static int twice(int value) { invoke_calls += 1; return value * 2; }\n"
+            "static double half(double value) { invoke_calls += 1; return value / 2; }\n"
+            "static int sum(int left, int right) { invoke_calls += 1; return left + right; }\n"
+            "static Unary tget(void) { factory_calls += 1; return twice; }\n"
+            "static int arg(int value) { arg_calls += 1; return value; }\n"
+            "#define RESET() factory_calls = 0; invoke_calls = 0; arg_calls = 0\n"
+            "int generic_call(void) { RESET(); int value = _Generic((3), int: twice, double: half)(3); return value == 6 && invoke_calls == 1; }\n"
+            "int generic_double(void) { RESET(); double value = _Generic(1.0, int: twice, double: half)(9.0); return value == 4.5 && invoke_calls == 1; }\n"
+            "int generic_arguments(void) { RESET(); int value = _Generic(1L, long: sum, default: twice)(arg(1), 2); return value == 3 && invoke_calls == 1 && arg_calls == 1; }\n"
+            "int generic_factory(void) { RESET(); int value = _Generic(1, int: tget(), default: tget)(5); return value == 10 && factory_calls == 1 && invoke_calls == 1; }\n"
+            "int generic_nested(void) { RESET(); int value = twice(_Generic(1, int: twice)(arg(2))); return value == 8 && invoke_calls == 2 && arg_calls == 1; }\n"
+            "int generic_lazy(int enabled) { RESET(); int value = enabled && _Generic(1, int: twice)(4); return value == enabled && invoke_calls == enabled; }\n"
+            "int choose_call(void) { RESET(); int value = __builtin_choose_expr(1, twice, sum)(7); return value == 14 && invoke_calls == 1; }\n"
+            "int main(void) {\n"
+            " int failed = 0;\n"
+            " failed |= !generic_call(); failed |= !generic_double(); failed |= !generic_arguments(); failed |= !generic_factory();\n"
+            " failed |= !generic_nested(); failed |= !generic_lazy(0); failed |= !generic_lazy(1); failed |= !choose_call();\n"
+            " return failed;\n"
+            "}\n"),
     };
     typedef struct CTestCallResultExpected CTestCallResultExpected;
     struct CTestCallResultExpected
@@ -29165,6 +29189,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         {1, S8("chain_middle_empty"), 3},
         {1, S8("chain_all_empty"), 3},
         {1, S8("chain_argument_triple"), 3},
+        {2, S8("generic_call"), 1},
+        {2, S8("generic_double"), 1},
+        {2, S8("generic_arguments"), 2},
+        {2, S8("generic_factory"), 2},
+        {2, S8("generic_nested"), 3},
+        {2, S8("generic_lazy"), 1},
+        {2, S8("choose_call"), 1},
     };
     for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
     {

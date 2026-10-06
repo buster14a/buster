@@ -21550,9 +21550,22 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // _Generic and __builtin_choose_expr own their selected expression.
         // Deferred preparation lets that expression prepare its own calls.
         // __builtin_constant_p also discards side effects in its operand.
+        // A selection or choice can designate a function, so a `(` after
+        // its close calls the result: stop on the close, its open folded
+        // into the scan, so the `)(` chain call is discovered there exactly
+        // as it is for `get()(3)`.
         if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p)
         {
-            index = close;
+            if ((builtin_generic || builtin_choose_expr) && close + 1 < end &&
+                c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index + 1);
+                index = close - 1;
+            }
+            else
+            {
+                index = close;
+            }
         }
     }
     u32 remaining = builder->prepared_call_count - first_new;
