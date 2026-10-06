@@ -43140,6 +43140,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArgum
 }
 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_offsetof_address_static_initializer_runtime_source = S8_INITIALIZER(
+    "typedef unsigned long size_t;\n"
+    "struct N { int a, v; };\n"
+    "struct I { char pad[3]; int arr[5]; };\n"
+    "struct O { long z; struct I inner; };\n"
+    "long g = (long)&((struct N*)0)->v;\n"
+    "unsigned long g2 = (unsigned long)&((struct N*)0)->v;\n"
+    "size_t g3 = (size_t)&((struct O*)0)->inner.arr[2];\n"
+    "long g4 = (long)((char*)&((struct N*)0)->v - (char*)0);\n"
+    "char *g5 = (char*)&((struct N*)0)->v;\n"
+    "long g6 = __builtin_offsetof(struct O, inner.arr[2]);\n"
+    "int main(void)\n"
+    "{\n"
+    "    static long s = (long)&((struct N*)0)->v;\n"
+    "    static size_t s2 = (size_t)&((struct O*)0)->inner.arr[1];\n"
+    "    if (g != 4) return 1;\n"
+    "    if (g2 != 4) return 2;\n"
+    "    if (g3 != 20) return 3;\n"
+    "    if (g4 != 4) return 4;\n"
+    "    if ((long)g5 != 4) return 5;\n"
+    "    if (g6 != 20) return 6;\n"
+    "    if (s != 4) return 7;\n"
+    "    if (s2 != 16) return 8;\n"
+    "    return 0;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_address_static_initializer_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("offsetof-address-static"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_offsetof_address_static_initializer_runtime_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("offsetof-address-static-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("offsetof-address-static runtime mode={u32} form={u32}: status={u32} timed_out={u32}"),
+                                mode, form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 const c_test_typeof_anonymous_aggregate_runtime_source = S8_INITIALIZER(
     "__typeof__(((struct{char c[7];}*)0)->c) file_scope;\n"
     "int main(void)\n"
@@ -44939,6 +45011,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
     C_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
     C_TEST_FIXTURE(arguments, c_test_number_facts);
+    C_TEST_FIXTURE(arguments, c_test_offsetof_address_static_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_offsetof_members);
     C_TEST_FIXTURE(arguments, c_test_offsetof_members_runtime);
     C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices);

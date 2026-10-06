@@ -50128,11 +50128,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                     }
                     else
                     {
+                        // A pointer with no symbol is a bare address: the null
+                        // pointer, or the offsetof idiom `&((T *)0)->m`, whose
+                        // member offset rides in the addend. Its integer value
+                        // is that addend.
                         success = source.kind == C_IR_CONSTANT_INTEGER ||
-                                  (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID && source.addend == 0);
+                                  (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID);
                         if (success)
                         {
-                            u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer : 0;
+                            u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer : (u64)source.addend;
                             IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? source_type : 0;
                             // Replay a negative narrow source's sign before the
                             // target mask. Narrowing still discards the high bits.
@@ -52124,6 +52128,15 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
             if (converted.symbol.value == IR_ID_UNDERLYING_INVALID && converted.addend == 0)
             {
                 global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+            }
+            else if (converted.symbol.value == IR_ID_UNDERLYING_INVALID)
+            {
+                // A bare address with no symbol -- the offsetof idiom
+                // `(char *)&((T *)0)->m` -- is its addend as raw pointer bits.
+                u8* bytes = arena_allocate_zeroed(builder->arena, u8, type->layout.size);
+                c_ir_store_pointer_bits(builder, type, bytes, 0, (u64)converted.addend);
+                global->bytes = (ByteSlice){.pointer = bytes, .length = type->layout.size};
+                global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
             }
             else
             {
