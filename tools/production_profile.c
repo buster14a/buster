@@ -321,23 +321,23 @@ BUSTER_GLOBAL_LOCAL String8 production_profile_seconds_text(Arena* arena, u64 mi
     return string_format(arena, S8("{u64}.{u64}"), microseconds / 1000000, (microseconds % 1000000) / 100000);
 }
 
-BUSTER_GLOBAL_LOCAL String8 production_profile_phase_outcome(ProductionProfilePhase const* phase)
+BUSTER_GLOBAL_LOCAL String8 production_profile_phase_outcome(ProductionProfilePhase* phase)
 {
     return phase->timed_out ? S8("timed_out") : phase->success ? S8("passed") : S8("failed");
 }
 
-BUSTER_GLOBAL_LOCAL u64 production_profile_ledger_elapsed(ProductionProfileLedger const* ledger)
+BUSTER_GLOBAL_LOCAL u64 production_profile_ledger_elapsed(ProductionProfileLedger* ledger)
 {
     u64 result = 0;
     for (u64 index = 0; index < ledger->count; index += 1)
     {
-        ProductionProfilePhase const* phase = ledger->phases + index;
+        ProductionProfilePhase* phase = ledger->phases + index;
         result = BUSTER_MAX(result, phase->start_us + phase->duration_us);
     }
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_tsv(Arena* arena, ProductionProfileLedger const* ledger)
+BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_tsv(Arena* arena, ProductionProfileLedger* ledger)
 {
     String8List lines = {0};
     string8_list_push(arena, &lines, string_format(arena, S8(BUSTER_PRODUCTION_PROFILE_LEDGER_VERSION "\tcomplete={u32}\tphases={u64}\texpected={u64}\n"),
@@ -345,22 +345,34 @@ BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_tsv(Arena* arena, Producti
     string8_list_push(arena, &lines, S8("index\tlabel\tkind\tvariant\tstart_us\tduration_us\toutcome\tuser_cpu_us\tsystem_cpu_us\tpeak_memory_bytes\n"));
     for (u64 index = 0; index < ledger->count; index += 1)
     {
-        ProductionProfilePhase const* phase = ledger->phases + index;
-        bool cpu = phase->resources.cpu_status == PROCESS_RESOURCE_OBSERVED;
-        bool memory = phase->resources.memory_status == PROCESS_RESOURCE_OBSERVED;
+        ProductionProfilePhase* phase = ledger->phases + index;
+        String8 variant = S8("-");
+        String8 user_cpu = S8("-");
+        String8 system_cpu = S8("-");
+        String8 peak_memory = S8("-");
+        if (phase->variant.length)
+        {
+            variant = phase->variant;
+        }
+        if (phase->resources.cpu_status == PROCESS_RESOURCE_OBSERVED)
+        {
+            user_cpu = string_format(arena, S8("{u64}"), phase->resources.user_cpu_us);
+            system_cpu = string_format(arena, S8("{u64}"), phase->resources.system_cpu_us);
+        }
+        if (phase->resources.memory_status == PROCESS_RESOURCE_OBSERVED)
+        {
+            peak_memory = string_format(arena, S8("{u64}"), phase->resources.peak_memory_bytes);
+        }
         string8_list_push(arena, &lines, string_format(arena, S8("{u64}\t{S8}\t{S8}\t{S8}\t{u64}\t{u64}\t{S8}\t{S8}\t{S8}\t{S8}\n"),
-            index + 1, phase->label, phase->kind, phase->variant.length ? phase->variant : S8("-"),
-            phase->start_us, phase->duration_us, production_profile_phase_outcome(phase),
-            cpu ? string_format(arena, S8("{u64}"), phase->resources.user_cpu_us) : S8("-"),
-            cpu ? string_format(arena, S8("{u64}"), phase->resources.system_cpu_us) : S8("-"),
-            memory ? string_format(arena, S8("{u64}"), phase->resources.peak_memory_bytes) : S8("-")));
+            index + 1, phase->label, phase->kind, variant, phase->start_us, phase->duration_us,
+            production_profile_phase_outcome(phase), user_cpu, system_cpu, peak_memory));
     }
     return string_join_arena(arena, string8_list_to_slice(arena, lines), false);
 }
 
 // The Actions step summary: identity, per-kind totals in first-run order, then
 // every phase. Shares are of the elapsed span covered by recorded phases.
-BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_markdown(Arena* arena, ProductionProfileLedger const* ledger)
+BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_markdown(Arena* arena, ProductionProfileLedger* ledger)
 {
     u64 elapsed = production_profile_ledger_elapsed(ledger);
     String8List lines = {0};
@@ -399,7 +411,7 @@ BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_markdown(Arena* arena, Pro
         bool cpu_complete = true;
         for (u64 index = 0; index < ledger->count; index += 1)
         {
-            ProductionProfilePhase const* phase = ledger->phases + index;
+            ProductionProfilePhase* phase = ledger->phases + index;
             if (string_equal(phase->kind, kinds[kind_index]))
             {
                 phases += 1;
@@ -409,9 +421,14 @@ BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_markdown(Arena* arena, Pro
             }
         }
         u64 share_tenths = elapsed ? (wall * 1000 + elapsed / 2) / elapsed : 0;
+        String8 wall_text = production_profile_seconds_text(arena, wall);
+        String8 cpu_text = S8("-");
+        if (cpu_complete)
+        {
+            cpu_text = production_profile_seconds_text(arena, cpu);
+        }
         string8_list_push(arena, &lines, string_format(arena, S8("| {S8} | {u64} | {S8} | {u64}.{u64}% | {S8} |\n"),
-            kinds[kind_index], phases, production_profile_seconds_text(arena, wall), share_tenths / 10, share_tenths % 10,
-            cpu_complete ? production_profile_seconds_text(arena, cpu) : S8("-")));
+            kinds[kind_index], phases, wall_text, share_tenths / 10, share_tenths % 10, cpu_text));
     }
 
     string8_list_push(arena, &lines, S8(
@@ -420,20 +437,32 @@ BUSTER_GLOBAL_LOCAL String8 production_profile_ledger_markdown(Arena* arena, Pro
         "| ---: | --- | --- | --- | ---: | ---: | --- | ---: | ---: |\n"));
     for (u64 index = 0; index < ledger->count; index += 1)
     {
-        ProductionProfilePhase const* phase = ledger->phases + index;
-        bool cpu = phase->resources.cpu_status == PROCESS_RESOURCE_OBSERVED;
-        bool memory = phase->resources.memory_status == PROCESS_RESOURCE_OBSERVED;
+        ProductionProfilePhase* phase = ledger->phases + index;
+        String8 variant = S8("-");
+        String8 cpu_text = S8("-");
+        String8 memory_text = S8("-");
+        if (phase->variant.length)
+        {
+            variant = phase->variant;
+        }
+        if (phase->resources.cpu_status == PROCESS_RESOURCE_OBSERVED)
+        {
+            cpu_text = production_profile_seconds_text(arena, phase->resources.user_cpu_us + phase->resources.system_cpu_us);
+        }
+        if (phase->resources.memory_status == PROCESS_RESOURCE_OBSERVED)
+        {
+            memory_text = string_format(arena, S8("{u64}"), phase->resources.peak_memory_bytes >> 20);
+        }
+        String8 start_text = production_profile_seconds_text(arena, phase->start_us);
+        String8 wall_text = production_profile_seconds_text(arena, phase->duration_us);
         string8_list_push(arena, &lines, string_format(arena, S8("| {u64} | `{S8}` | {S8} | {S8} | {S8} | {S8} | {S8} | {S8} | {S8} |\n"),
-            index + 1, phase->label, phase->kind, phase->variant.length ? phase->variant : S8("-"),
-            production_profile_seconds_text(arena, phase->start_us), production_profile_seconds_text(arena, phase->duration_us),
-            production_profile_phase_outcome(phase),
-            cpu ? production_profile_seconds_text(arena, phase->resources.user_cpu_us + phase->resources.system_cpu_us) : S8("-"),
-            memory ? string_format(arena, S8("{u64}"), phase->resources.peak_memory_bytes >> 20) : S8("-")));
+            index + 1, phase->label, phase->kind, variant, start_text, wall_text,
+            production_profile_phase_outcome(phase), cpu_text, memory_text));
     }
     return string_join_arena(arena, string8_list_to_slice(arena, lines), false);
 }
 
-BUSTER_GLOBAL_LOCAL bool production_profile_ledger_flush(Arena* arena, ProductionProfileLedger const* ledger)
+BUSTER_GLOBAL_LOCAL bool production_profile_ledger_flush(Arena* arena, ProductionProfileLedger* ledger)
 {
     bool result = production_profile_write(ledger->tsv_path, production_profile_ledger_tsv(arena, ledger)) &&
                   production_profile_write(ledger->markdown_path, production_profile_ledger_markdown(arena, ledger));
