@@ -71,6 +71,8 @@
 //                                                 non-constant assertion prints
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
+//   c_parse_initializer_slot_table                a walk's per-record slot
+//                                                 numbering, built once
 //   c_parse_add_type, c_parse_tag_lookup,         type interning and
 //   c_parse_primitive_type                        construction, attributes
 //   c_parse_definition_scan_start                 definition-token index
