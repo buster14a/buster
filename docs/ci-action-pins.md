@@ -7,8 +7,10 @@ lowercase commit SHA. Mutable branches/tags, unlisted paths and unapproved
 revisions fail. Local and container references require a separate policy
 decision before use; approved same-commit references are listed below.
 
-The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
-actionlint. The checker now lives under `tools/` because the Forgejo workflows
+The `Workflow lint` job runs the checker and the maintained
+`tools/ci_workflow_tools_test.py` suite before actionlint. That suite inherits
+the frozen `tests/action_pins_test.py` cases and replaces only the current
+lint entry point and artifact-reference inventory assertions. The checker now lives under `tools/` because the Forgejo workflows
 and their script directory were removed. Its allowlist preserves existing revisions and records staged migrations; an
 older pin remains approved only while at least one reviewed workflow still uses it.
 
@@ -107,13 +109,7 @@ scalar content for structural checks, but cannot select an action reference.
 
 Nonempty flow mappings, nested flow collections, YAML tags, explicit/quoted
 mapping keys, mapping anchors/aliases/merges and multiline action references
-are rejected, with one reviewed exception: `.github/workflows/ci.yml` may
-declare `steps: &workflow_lint_steps` once in `lint` and reference it once
-with `steps: *workflow_lint_steps` in `queue_lint`. The definition remains
-fully scanned. Missing/duplicate definitions or aliases, other owners/paths,
-action-value aliases and merges remain rejected. This shares the complete
-ordinary/queue lint workload without hiding action references.
-Literal/folded script blocks are skipped. It is not a general
+are rejected. Literal/folded script blocks are skipped. It is not a general
 YAML parser; adding syntax requires a reviewed scanner change and regression.
 General GitHub workflow validation continues to use actionlint independently.
 

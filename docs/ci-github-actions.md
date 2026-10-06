@@ -128,8 +128,9 @@ and skip outside their own events. Native remains independent of desktop/lint.
 Main pushes still wait for their exact-SHA reuse decision.
 
 Merge groups retain the full lint preflight before desktop execution. The two
-mutually exclusive lint jobs share one YAML steps anchor, so every event
-executes the same full lint workload once. The executing job retains the
+mutually exclusive lint jobs have equivalent explicit steps, enforced by a
+policy regression, so every event executes the same full lint workload once.
+The pinned actionlint and action-pin scanner do not support steps-list aliases. The executing job retains the
 `Workflow lint` check identity. The inactive branch is explicitly named
 `Ordinary lint (inactive)` or `Queue lint preflight (inactive)` and must be
 skipped. Inventory and timing readers remove only that skipped branch; they
@@ -191,10 +192,14 @@ GitHub's normal approval requirements still apply. The trusted cancellation
 recovery workflow remains scoped to `Buster CI` and eligible same-repository
 PRs; this change does not broaden recovery or the source-free broker.
 
-`python3 tests/ci_tools_test.py -v` checks the shared event/concurrency contract,
+`python3 tools/ci_workflow_tools_test.py -v` preserves the frozen suite's
+unaffected cases and checks the shared event/concurrency contract,
 retained bootstrap command order, and the actual `CI complete` shell predicate
 under all 625 combinations of success, failure, cancellation, skip and missing
-results. These checks validate the checked-in policy; they are not evidence
+results. The current suite also rejects unsuccessful or missing inactive lint results.
+The frozen `tests/ci_tools_test.py` and `tests/action_pins_test.py` bytes remain
+unchanged; only their obsolete topology and inventory assertions are replaced
+in the maintained subclass. These checks validate the checked-in policy; they are not evidence
 that a live fork, merge queue, manual dispatch or cancellation race was run.
 
 ## Bootstrapping and prerequisites

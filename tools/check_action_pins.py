@@ -60,14 +60,6 @@ def without_comment(line):
 def check_text(text, path):
     errors = []
     block_indent = None
-    # One reviewed steps-list alias, confined to ci.yml's lint/queue_lint jobs.
-    # The definition is scanned in full below; no action value may be aliased.
-    blocks = dict(re.findall(r"(?ms)^  ([A-Za-z_][A-Za-z0-9_]*):\n(.*?)(?=^  [A-Za-z_][A-Za-z0-9_]*:|\Z)", text))
-    lint_alias = (str(path).replace("\\", "/").endswith(".github/workflows/ci.yml") and
-                  text.count("    steps: &workflow_lint_steps") == 1 and
-                  text.count("    steps: *workflow_lint_steps") == 1 and
-                  "\n    steps: &workflow_lint_steps\n" in "\n" + blocks.get("lint", "") and
-                  "\n    steps: *workflow_lint_steps\n" in "\n" + blocks.get("queue_lint", ""))
     for number, raw in enumerate(text.splitlines(), 1):
         indent = len(raw) - len(raw.lstrip(" "))
         if block_indent is not None and (not raw.strip() or indent > block_indent):
@@ -89,9 +81,7 @@ def check_text(text, path):
         elif re.search(r"(?:^|\s)![!A-Za-z<]", structural):
             problem = "YAML tags are not supported"
         elif re.search(r"(?:^|\s)[&*][A-Za-z0-9_-]+|(?:^|\s)<<\s*:", structural):
-            if not (lint_alias and line in ("    steps: &workflow_lint_steps",
-                                           "    steps: *workflow_lint_steps")):
-                problem = "mapping anchors, aliases and merges are not supported"
+            problem = "mapping anchors, aliases and merges are not supported"
         else:
             if ("{" in structural or "}" in structural) and not EMPTY_MAPPING.fullmatch(structural):
                 problem = "flow mappings are not supported"
