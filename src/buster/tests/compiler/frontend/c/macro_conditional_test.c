@@ -91,6 +91,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(U
 }
 #endif
 
+// `count` copies of `text` followed by `middle` and `count` copies of `tail`,
+// the shape of a macro invocation nested `count` deep.
+BUSTER_GLOBAL_LOCAL String8 c_macro_storage_nest(Arena* arena, String8 head, String8 middle, String8 tail, u64 count)
+{
+    u64 length = (head.length + tail.length) * count + middle.length;
+    char8* bytes = arena_allocate(arena, char8, length + 1);
+    u64 output = 0;
+    for (u64 index = 0; index < count; index += 1)
+    {
+        memcpy(bytes + output, head.pointer, head.length);
+        output += head.length;
+    }
+    memcpy(bytes + output, middle.pointer, middle.length);
+    output += middle.length;
+    for (u64 index = 0; index < count; index += 1)
+    {
+        memcpy(bytes + output, tail.pointer, tail.length);
+        output += tail.length;
+    }
+    bytes[output] = 0;
+    return (String8){.pointer = bytes, .length = length};
+}
+
+// Nested invocations hold their argument collection and pre-expansion storage
+// only while they are live: bytes allocated per unit (the phase arena plus the
+// invocation scratch arenas' peak) grow with the nesting depth, not with the
+// square of it. Every invocation used to copy its whole argument, nested
+// invocations included, into the unit arena for good (#2678). The shapes cover
+// nesting in the only argument, in the last of two and in the first of two;
+// the output is checked at both depths so release cannot change an expansion.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_storage_scaling_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 definition;
+        String8 invocation_head;
+        String8 invocation_middle;
+        String8 invocation_tail;
+        String8 expected_head;
+        String8 expected_middle;
+        String8 expected_tail;
+    } shapes[] = {
+        {S8("#define F(x) (x+1)\n"), S8("F("), S8("0"), S8(")"), S8("("), S8("0"), S8("+1)")},
+        {S8("#define G(a,b) (a+b)\n"), S8("G(1,"), S8("0"), S8(")"), S8("(1+"), S8("0"), S8(")")},
+        {S8("#define G(a,b) (a+b)\n"), S8("G("), S8("0"), S8(",1)"), S8("("), S8("0"), S8("+1)")},
+    };
+    u64 depths[] = {500, 2000};
+    for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(shapes); shape_index += 1)
+    {
+        u64 bytes[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        u64 scratch_peak[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 depth = depths[depth_index];
+            String8 invocation = c_macro_storage_nest(temporary.arena, shapes[shape_index].invocation_head, shapes[shape_index].invocation_middle,
+                                                      shapes[shape_index].invocation_tail, depth);
+            String8 source = string_format(temporary.arena, S8("{S8}int x = {S8};\n"), shapes[shape_index].definition, invocation);
+            String8 nested = c_macro_storage_nest(temporary.arena, shapes[shape_index].expected_head, shapes[shape_index].expected_middle,
+                                                  shapes[shape_index].expected_tail, depth);
+            String8 expected = string_format(temporary.arena, S8("int x = {S8};"), nested);
+            CPreprocessResult actual = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("storage-scaling.c")});
+            BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+            BUSTER_TEST(arguments, actual.detail->preprocessed.expansions == depth);
+            UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, temporary.arena, actual, expected);
+            result.test_count += compared.test_count;
+            result.succeeded_test_count += compared.succeeded_test_count;
+            scratch_peak[depth_index] = actual.detail->macro_expansion_peak_bytes;
+            bytes[depth_index] = actual.detail->boundary.released_bytes + scratch_peak[depth_index];
+            scratch_end(temporary);
+        }
+        // Linear growth multiplies four-fold from 500 to 2000, quadratic
+        // sixteen-fold; fixed costs only lower the linear ratio.
+        String8 diagnostic = string_format(arguments->arena, S8("storage scaling shape={u32} bytes {u64} -> {u64}, scratch peak {u64} -> {u64}"),
+                                           shape_index, bytes[0], bytes[1], scratch_peak[0], scratch_peak[1]);
+        BUSTER_TEST_RAW(arguments, bytes[1] < bytes[0] * 6, diagnostic);
+        BUSTER_TEST_RAW(arguments, scratch_peak[1] < scratch_peak[0] * 6, diagnostic);
+    }
+    return result;
+}
+
 // Definition-owned argument demand is reused, never a previous expansion's
 // tokens or stamps. Count checks pin both omitted work and once-only prescan.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArguments* arguments)
@@ -871,14 +953,121 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
     return result;
 }
 
+// Deterministic scaling fixtures for the preprocessor's identity tables
+// (issue #1313). Inputs are generated in memory at two sizes and the actual
+// comparison counts, not a clock, must grow about linearly with the size.
+BUSTER_GLOBAL_LOCAL void c_identity_scaling_append(char8* bytes, u64 capacity, u64* length, String8 text)
+{
+    BUSTER_CHECK(*length + text.length <= capacity);
+    memcpy(bytes + *length, text.pointer, text.length);
+    *length += text.length;
+}
+
+// `count` linemarkers each naming a distinct logical file, so the canonical
+// file table sees `count` different paths in one translation unit.
+BUSTER_GLOBAL_LOCAL u64 c_file_table_scaling_work(UnitTestArguments* arguments, u32 count, u64* files)
+{
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 capacity = (u64)count * 64 + 64;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_identity_scaling_append(bytes, capacity, &length,
+                                  string_format(temporary.arena, S8("#line 1 \"scaling_header_{u32}.h\"\nint v{u32};\n"), index, index));
+    }
+    String8 source = {.pointer = bytes, .length = length};
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("file-table-scaling.c")});
+    u64 work = UINT64_MAX;
+    if (preprocess.error_count == 0 && preprocess.diagnostic_count == 0)
+    {
+        work = c_preprocess_detail(preprocess)->file_table_compare_count;
+        *files = preprocess.file_count;
+    }
+    scratch_end(temporary);
+    return work;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_file_table_scaling_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 1000, DEEP = 4000 };
+    u64 shallow_files = 0;
+    u64 deep_files = 0;
+    u64 shallow = c_file_table_scaling_work(arguments, SHALLOW, &shallow_files);
+    u64 deep = c_file_table_scaling_work(arguments, DEEP, &deep_files);
+    BUSTER_TEST(arguments, shallow_files >= SHALLOW && deep_files >= DEEP);
+    // Hashing keeps each lookup to a handful of comparisons: bound the work
+    // by a constant per file and by linear growth between the two sizes.
+    BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && shallow != 0 && deep <= (u64)DEEP * 8 && deep <= shallow * 6,
+                    string_format(arguments->arena, S8("file table compares shallow={u64} deep={u64}"), shallow, deep));
+    return result;
+}
+
+// One function-like macro with `count` parameters: a duplicate check per
+// parameter, a `#` operand check naming the last one, and every parameter
+// used once in the replacement list. `duplicate` repeats the first name at the
+// end of the list, which the definition must reject with one diagnostic.
+BUSTER_GLOBAL_LOCAL u64 c_macro_parameter_scaling_work(UnitTestArguments* arguments, u32 count, bool duplicate, u64* errors)
+{
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 capacity = (u64)count * 32 + 128;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_identity_scaling_append(bytes, capacity, &length, S8("#define M("));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_identity_scaling_append(bytes, capacity, &length, string_format(temporary.arena, S8("{S8}parameter_{u32}"), index ? S8(", ") : S8(""), index));
+    }
+    if (duplicate)
+    {
+        c_identity_scaling_append(bytes, capacity, &length, S8(", parameter_0"));
+    }
+    c_identity_scaling_append(bytes, capacity, &length, string_format(temporary.arena, S8(") #parameter_{u32}"), count - 1));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_identity_scaling_append(bytes, capacity, &length, string_format(temporary.arena, S8(" parameter_{u32}"), index));
+    }
+    c_identity_scaling_append(bytes, capacity, &length, S8("\n"));
+    String8 source = {.pointer = bytes, .length = length};
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-parameter-scaling.c")});
+    *errors = preprocess.error_count;
+    u64 work = c_preprocess_detail(preprocess)->macro_parameter_compare_count;
+    scratch_end(temporary);
+    return work;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_parameter_scaling_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 1000, DEEP = 4000 };
+    u64 shallow_errors = 0;
+    u64 deep_errors = 0;
+    u64 duplicate_errors = 0;
+    u64 shallow = c_macro_parameter_scaling_work(arguments, SHALLOW, false, &shallow_errors);
+    u64 deep = c_macro_parameter_scaling_work(arguments, DEEP, false, &deep_errors);
+    BUSTER_TEST(arguments, shallow_errors == 0 && deep_errors == 0);
+    // Three lookups per parameter (duplicate check, replacement, and `#`
+    // for one) each cost a hash and a short probe chain.
+    BUSTER_TEST_RAW(arguments, shallow != 0 && deep <= (u64)DEEP * 16 && deep <= shallow * 6,
+                    string_format(arguments->arena, S8("macro parameter compares shallow={u64} deep={u64}"), shallow, deep));
+    // The duplicate is still found and the definition refused.
+    c_macro_parameter_scaling_work(arguments, SHALLOW, true, &duplicate_errors);
+    BUSTER_TEST(arguments, duplicate_errors == 1);
+    return result;
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_file_table_scaling_tests);
+    BUSTER_TEST_FIXTURE(arguments, c_macro_parameter_scaling_tests);
     BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
     BUSTER_TEST_FIXTURE(arguments, c_skipped_group_text_tests);
     BUSTER_TEST_FIXTURE(arguments, c_punctuator_separator_tests);
     BUSTER_TEST_FIXTURE(arguments, c_trigraph_preprocess_tests);
     BUSTER_TEST_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
+    BUSTER_TEST_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
     UnitTestResult demand = c_macro_argument_demand_tests(arguments);
     result.test_count += demand.test_count;
     result.succeeded_test_count += demand.succeeded_test_count;
