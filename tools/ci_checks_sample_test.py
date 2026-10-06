@@ -103,10 +103,10 @@ class SampleTests(unittest.TestCase):
         event, observation_path = self.partitioned(item, 4)
         observation = qualification.phases.read(observation_path)
         inventory = qualification.unit_campaign.inventory(observation_path.parent / "inventory.log")
-        lines = [f"CI_UNIT_PLAN_V1 binary_sha256={'e' * 64} source_revision={'a' * 40} workers=4 groups=2 group_workers=2"]
-        for group, index, count in (("driver", 0, 1), ("rest", 1, 2)):
+        lines = [f"CI_UNIT_PLAN_V1 binary_sha256={'e' * 64} source_revision={'a' * 40} workers=4 groups=2 group_workers=2 primary_module=compiler_driver_tests"]
+        for group, index, count in (("primary", 0, 1), ("rest", 1, 2)):
             for row in inventory:
-                owner = "driver" if row["name"] == "compiler_driver_tests" else "rest"
+                owner = "primary" if row["name"] == "compiler_driver_tests" else "rest"
                 lines.append(f"CI_UNIT_MODULE_V1 index={row['index']} module={row['name']} table_audit={int(row['table_audit'])} enabled={int(not row['table_audit'])} selected={int(not row['table_audit'] and owner == group)} group={owner}")
             lines += [f"TEST_MODULE_TIMING index={index} module={inventory[index]['name']} duration_ns=1 passed={count} failed=0 assertions={count} status=pass",
                       f"CI_UNIT_BATCH_V1 group={group} modules=1 modules_passed=1 assertions={count} passed={count} failed=0 external=0 external_passed=0 status=pass",

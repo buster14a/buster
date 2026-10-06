@@ -337,9 +337,15 @@ exchange for no idle CPUs during a long sanitized test tail. Before #2657 this
 applied to the grouped hosted checks shards (sanitized Debug and Release
 tests); since #2657 every hosted desktop shard has at most one test tree, so
 serialization remains only for multi-test-tree local selections. Sanitized
-Clang CI trees run `test_all` through the isolated-process runner
-(`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a four-worker quota into two
-two-worker processes and runs the ordinary invocation below four. Larger hosts retain the weighted
+Clang CI trees and Windows AArch64 Release run `test_all` through the existing
+isolated-process runner (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a
+four-worker quota into two two-worker processes and runs the ordinary invocation
+below four. The `primary` group owns `c_frontend_tests` on Windows x86-64 and
+`compiler_driver_tests` elsewhere; `rest` owns every other enabled module.
+The parent independently checks both complete inventories and their exact
+disjoint union. Windows AArch64 has no artifact-fanout consumer; supported
+canonical producers retain their standard configure arguments.
+See [Windows critical-path attribution](../windows-ci-critical-path.md). Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Clang tests then run concurrently in the same bounded
 pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work

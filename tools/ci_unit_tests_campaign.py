@@ -58,14 +58,17 @@ def inventory_proof(path):
         measure.require(audit in (0, 1), "Inventory query has an invalid table-audit flag")
         measure.require(measure.number(row, "enabled") == 1 - audit and
                         measure.number(row, "selected") == 0, "Inventory query executed modules or changed audit policy")
-        owner = "driver" if row["module"] == "compiler_driver_tests" else "rest"
-        measure.require(row["group"] == owner, "Inventory query has an invalid module owner")
+        owner = row["group"]
+        measure.require(owner in {"primary", "rest"}, "Inventory query has an invalid module owner")
         rows.append({"index": index, "name": row["module"], "table_audit": bool(audit)})
     validated = measure.inventory_rows({"inventory": rows})
-    measure.require("compiler_driver_tests" in validated and
-                    not validated["compiler_driver_tests"]["table_audit"], "Inventory query lacks an enabled driver module")
-    measure.require(any(not row["table_audit"] and row["name"] != "compiler_driver_tests" for row in rows),
-                    "Inventory query lacks enabled rest modules")
+    primary = [row["module"] for row in declared if row["group"] == "primary"]
+    measure.require(len(primary) == 1 and primary[0] in {"c_frontend_tests", "compiler_driver_tests"},
+                    "Inventory query lacks one permitted primary module anchor")
+    measure.require(not validated[primary[0]]["table_audit"], "Primary module anchor is disabled")
+    measure.require(all(row["group"] == ("primary" if row["module"] == primary[0] else "rest") for row in declared),
+                    "Inventory query has foreign or duplicate primary ownership")
+
     batches = measure.native_records(lines, "CI_UNIT_BATCH_V1")
     measure.require(len(batches) == 1, "Inventory query lacks one terminal batch record")
     batch = batches[0]

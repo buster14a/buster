@@ -213,6 +213,9 @@ def validate_groups(lines, inventory, expected, provenance):
     plan, partition = plans[0], partitions[0]
     require(plan.get("binary_sha256") == provenance["binary_sha256"] and
             plan.get("source_revision") == provenance["source_revision"], "Parent binary/source identity mismatch")
+    primary_module = plan.get("primary_module")
+    require(primary_module in {"c_frontend_tests", "compiler_driver_tests"} and primary_module in inventory and
+            primary_module in expected, "Unsupported/missing primary module anchor")
     require(number(plan, "workers") == provenance["cpu_budget"] and number(plan, "groups") == 2, "Parent plan CPU/group mismatch")
     group_workers = number(plan, "group_workers")
     require(group_workers >= 1 and group_workers * 2 <= provenance["cpu_budget"], "Declared child quota exceeds CPU budget")
@@ -228,7 +231,7 @@ def validate_groups(lines, inventory, expected, provenance):
         require(len(batches) == 1, "Missing/duplicate child terminal batch record")
         batch = batches[0]
         group = batch.get("group")
-        require(group in {"driver", "rest"} and group not in groups, "Unknown/duplicate child group")
+        require(group in {"primary", "rest"} and group not in groups, "Unknown/duplicate child group")
         declared = native_records(block, "CI_UNIT_MODULE_V1")
         require(len(declared) == len(inventory), "Incomplete registered child inventory")
         seen = set()
@@ -240,7 +243,7 @@ def validate_groups(lines, inventory, expected, provenance):
             require(number(row, "index") == inventory[name]["index"], "Declared canonical index mismatch")
             require(number(row, "table_audit") == int(inventory[name]["table_audit"]), "Declared table-audit flag mismatch")
             require(number(row, "enabled") == int(name in expected), "Disabled audit inventory mismatch")
-            owner = "driver" if name == "compiler_driver_tests" else "rest"
+            owner = "primary" if name == primary_module else "rest"
             require(row.get("group") == owner, "Declared module owner mismatch")
             require(number(row, "selected") == int(name in expected and owner == group), "Child selected inventory mismatch")
             if number(row, "selected"):
@@ -258,7 +261,7 @@ def validate_groups(lines, inventory, expected, provenance):
         combined.update(modules)
         external_total += terminals["External"]["total"]
         groups[group] = {"modules": sorted(modules), "assertions": assertions}
-    require(set(groups) == {"driver", "rest"}, "Missing required child group")
+    require(set(groups) == {"primary", "rest"}, "Missing required child group")
     exact_modules(combined, expected, inventory)
     process_names = set()
     intervals = []
