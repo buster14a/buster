@@ -1029,9 +1029,20 @@ static bool llvm_bc_build_types(LlvmBcContext* context)
     return true;
 }
 
+// A 128-bit integer is read from a variadic list like a two-eightbyte aggregate.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_is_wide_integer(IrType* type)
+{
+    return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 128;
+}
+
 BUSTER_GLOBAL_LOCAL bool llvm_bc_is_aggregate(IrType* type)
 {
     return type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY);
+}
+
+BUSTER_GLOBAL_LOCAL bool llvm_bc_va_arg_is_composite(IrType* type)
+{
+    return llvm_bc_is_aggregate(type) || llvm_bc_is_wide_integer(type);
 }
 
 BUSTER_GLOBAL_LOCAL void llvm_bc_sysv_aggregate_parts(LlvmBcContext* context, IrTypeId root, IrAbiValue* abi)
@@ -3119,7 +3130,7 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
                 llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64, 0);
                 break;
             case IR_OPCODE_VA_ARG:
-                if (llvm_bc_is_aggregate(llvm_bc_ir_type(context, instruction->canonical_type)))
+                if (llvm_bc_va_arg_is_composite(llvm_bc_ir_type(context, instruction->canonical_type)))
                 {
                     llvm_bc_va_arg_aggregate(context, 0, function, 0, instruction, 0, LLVM_BC_BIT_FIELD_AGGREGATE_CONSTANTS);
                 }
@@ -3289,7 +3300,7 @@ BUSTER_GLOBAL_LOCAL bool llvm_bc_va_shape_supported(LlvmBcContext* context, IrFu
         else if (instruction->opcode == IR_OPCODE_VA_ARG)
         {
             IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
-            supported = type && (llvm_bc_is_aggregate(type) || (type->kind == IR_TYPE_INTEGER && (type->bit_width == 32 || type->bit_width == 64)) ||
+            supported = type && (llvm_bc_va_arg_is_composite(type) || (type->kind == IR_TYPE_INTEGER && (type->bit_width == 32 || type->bit_width == 64)) ||
                                  (type->kind == IR_TYPE_FLOAT && type->bit_width == 64) || type->kind == IR_TYPE_POINTER);
             if (!supported)
             {
@@ -3447,7 +3458,7 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
         if (llvm_bc_va_shape_supported(context, function, block, instruction))
         {
             IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
-            if (llvm_bc_is_aggregate(type))
+            if (llvm_bc_va_arg_is_composite(type))
             {
                 count = llvm_bc_va_arg_aggregate(context, 0, function, block, instruction, 0, LLVM_BC_BIT_FIELD_AGGREGATE_COUNT);
             }
@@ -3640,7 +3651,7 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_plan_instruction_allocas(LlvmBcContext* context,
     case IR_OPCODE_VA_ARG:
     {
         LlvmBcVaArgClass class;
-        if (llvm_bc_is_aggregate(llvm_bc_ir_type(context, instruction->canonical_type)) &&
+        if (llvm_bc_va_arg_is_composite(llvm_bc_ir_type(context, instruction->canonical_type)) &&
             llvm_bc_va_arg_classify(context, instruction->canonical_type, &class) && class.kind == LLVM_BC_VA_ARG_SYSV_REGISTERS)
         {
             llvm_bc_plan_fixed_alloca(context, record, class.storage.storage_type_id, class.storage.alignment);
@@ -4413,17 +4424,32 @@ BUSTER_GLOBAL_LOCAL bool llvm_bc_va_arg_classify(LlvmBcContext* context, IrTypeI
 {
     IrType* type = llvm_bc_ir_type(context, type_id);
     bool valid = type && type->layout.size && type->layout.alignment;
+    bool wide = llvm_bc_is_wide_integer(type);
     *result = (LlvmBcVaArgClass){0};
     if (valid)
     {
         bool windows = context->abi_target.os == OPERATING_SYSTEM_WINDOWS;
-        IrAbiValue abi = ir_type_abi_value(context->program, type_id,
-                                           windows ? IR_ABI_CONVENTION_WIN64_X86_64 : IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+        IrAbiValue abi = {0};
+        if (!wide)
+        {
+            abi = ir_type_abi_value(context->program, type_id,
+                                    windows ? IR_ABI_CONVENTION_WIN64_X86_64 : IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+        }
         result->alignment = type->layout.alignment;
         result->slot_size = (type->layout.size + 7) & ~UINT64_C(7);
         if (windows)
         {
-            result->kind = abi.indirect || abi.memory ? LLVM_BC_VA_ARG_WIN64_REFERENCE : LLVM_BC_VA_ARG_WIN64_INLINE;
+            result->kind = wide || abi.indirect || abi.memory ? LLVM_BC_VA_ARG_WIN64_REFERENCE : LLVM_BC_VA_ARG_WIN64_INLINE;
+        }
+        else if (wide)
+        {
+            // Two INTEGER eightbytes, 16-byte aligned in the overflow area.
+            result->kind = LLVM_BC_VA_ARG_SYSV_REGISTERS;
+            result->part_count = 2;
+            result->integer_count = 2;
+            result->storage = (LlvmBcAbiValue){.storage_type_id = llvm_bc_array_type(context, 16, context->i8_type_id), .alignment = 16,
+                                               .aggregate = true};
+            valid = type->layout.size == 16 && type->layout.alignment == 16;
         }
         else if (abi.indirect || abi.memory || type->layout.size > 16)
         {
@@ -5345,7 +5371,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         llvm_bc_emit_va_instruction(context, record, instruction, current_value_id);
         break;
     case IR_OPCODE_VA_ARG:
-        if (llvm_bc_is_aggregate(llvm_bc_ir_type(context, instruction->canonical_type)))
+        if (llvm_bc_va_arg_is_composite(llvm_bc_ir_type(context, instruction->canonical_type)))
         {
             if (llvm_bc_va_arg_aggregate(context, record, function, block, instruction, current_value_id,
                                          LLVM_BC_BIT_FIELD_AGGREGATE_EMIT) == LLVM_BC_INVALID_ID)
