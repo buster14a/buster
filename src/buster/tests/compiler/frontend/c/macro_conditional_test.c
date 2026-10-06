@@ -488,9 +488,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments
 #endif
                 if (actual.recovery)
                 {
-                    arena_destroy(actual.recovery->spelling_arena, 1);
-                    arena_destroy(actual.recovery->token_arena, 1);
-                    arena_destroy(actual.recovery->token_shape_arena, 1);
+                    c_preprocess_release(&actual);
                 }
                 scratch_end(temporary);
             }
@@ -539,9 +537,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_dynamic_builtin_macro_tests(UnitTestArgumen
             }
             if (actual.recovery)
             {
-                arena_destroy(actual.recovery->spelling_arena, 1);
-                arena_destroy(actual.recovery->token_arena, 1);
-                arena_destroy(actual.recovery->token_shape_arena, 1);
+                c_preprocess_release(&actual);
             }
             scratch_end(temporary);
         }

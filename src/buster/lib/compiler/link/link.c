@@ -3650,107 +3650,12 @@ BUSTER_GLOBAL_LOCAL void link_write_u32_be(u8* bytes, u64 offset, u32 value)
     bytes[offset + 3] = (u8)value;
 }
 
-BUSTER_GLOBAL_LOCAL u32 link_rotate_right_u32(u32 value, u32 amount)
-{
-    return (value >> amount) | (value << (32 - amount));
-}
-
 void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
 {
-    static u32 const constants[64] = {
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be,
-        0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa,
-        0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85,
-        0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
-        0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    };
-    u32* state = arena_allocate(arena, u32, 8);
-    state[0] = 0x6a09e667;
-    state[1] = 0xbb67ae85;
-    state[2] = 0x3c6ef372;
-    state[3] = 0xa54ff53a;
-    state[4] = 0x510e527f;
-    state[5] = 0x9b05688c;
-    state[6] = 0x1f83d9ab;
-    state[7] = 0x5be0cd19;
-    u8* block = arena_allocate(arena, u8, 64);
-    u32* words = arena_allocate(arena, u32, 64);
-    u64 block_count = (length + 9 + 63) / 64;
-    for (u64 block_index = 0; block_index < block_count; block_index += 1)
-    {
-        memset(block, 0, 64);
-        u64 block_offset = block_index * 64;
-        for (u64 byte_index = 0; byte_index < 64; byte_index += 1)
-        {
-            u64 source_offset = block_offset + byte_index;
-            if (source_offset < length)
-            {
-                block[byte_index] = input[source_offset];
-            }
-            else if (source_offset == length)
-            {
-                block[byte_index] = 0x80;
-            }
-        }
-        if (block_index + 1 == block_count)
-        {
-            u64 bit_length = length * 8;
-            for (u32 index = 0; index < 8; index += 1)
-            {
-                block[63 - index] = (u8)(bit_length >> (index * 8));
-            }
-        }
-        memset(words, 0, 64 * sizeof(*words));
-        for (u32 index = 0; index < 16; index += 1)
-        {
-            u32 offset = index * 4;
-            words[index] = ((u32)block[offset] << 24) | ((u32)block[offset + 1] << 16) | ((u32)block[offset + 2] << 8) | block[offset + 3];
-        }
-        for (u32 index = 16; index < 64; index += 1)
-        {
-            u32 first = link_rotate_right_u32(words[index - 15], 7) ^ link_rotate_right_u32(words[index - 15], 18) ^ (words[index - 15] >> 3);
-            u32 second = link_rotate_right_u32(words[index - 2], 17) ^ link_rotate_right_u32(words[index - 2], 19) ^ (words[index - 2] >> 10);
-            words[index] = words[index - 16] + first + words[index - 7] + second;
-        }
-        u32 a = state[0];
-        u32 b = state[1];
-        u32 c = state[2];
-        u32 d = state[3];
-        u32 e = state[4];
-        u32 f = state[5];
-        u32 g = state[6];
-        u32 h = state[7];
-        for (u32 index = 0; index < 64; index += 1)
-        {
-            u32 sigma1 = link_rotate_right_u32(e, 6) ^ link_rotate_right_u32(e, 11) ^ link_rotate_right_u32(e, 25);
-            u32 choice = (e & f) ^ (~e & g);
-            u32 temporary1 = h + sigma1 + choice + constants[index] + words[index];
-            u32 sigma0 = link_rotate_right_u32(a, 2) ^ link_rotate_right_u32(a, 13) ^ link_rotate_right_u32(a, 22);
-            u32 majority = (a & b) ^ (a & c) ^ (b & c);
-            u32 temporary2 = sigma0 + majority;
-            h = g;
-            g = f;
-            f = e;
-            e = d + temporary1;
-            d = c;
-            c = b;
-            b = a;
-            a = temporary1 + temporary2;
-        }
-        state[0] += a;
-        state[1] += b;
-        state[2] += c;
-        state[3] += d;
-        state[4] += e;
-        state[5] += f;
-        state[6] += g;
-        state[7] += h;
-    }
-    for (u32 index = 0; index < 8; index += 1)
-    {
-        link_write_u32_be(output, (u64)index * 4, state[index]);
-    }
+    // The arena parameter is retained for existing callers; the shared hash
+    // keeps its state on the stack and allocates nothing.
+    BUSTER_UNUSED(arena);
+    sha256_bytes(input, length, output);
 }
 
 BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, NativeExecutableLinkResult* result)

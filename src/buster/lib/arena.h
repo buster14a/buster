@@ -156,6 +156,11 @@ BUSTER_F_DECL void arena_test_fail_next_commit(void);
 BUSTER_F_DECL void arena_test_fill_releases(bool enabled);
 #define ARENA_TEST_RELEASE_FILL 0xa5
 BUSTER_F_DECL u64 arena_test_pool_count(u64 reserved_size);
+// Reservation bytes held by arenas created and not yet destroyed on the
+// calling thread (a count of the thread's own creations less its own
+// destructions, wrapping if it destroys more than it created). Destroying an arena into the reuse pool releases its share, so a
+// bounded value after repeated work shows nothing is leaking reservations.
+BUSTER_F_DECL u64 arena_test_live_reserved_bytes(void);
 #endif
 BUSTER_F_DECL u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment);
 

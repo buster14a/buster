@@ -255,6 +255,24 @@ facts; the ownership inventory records their producer, lifetime and invalidation
 This inventory is source-level reconciliation, not a claim that all remaining
 CFG, dominance, width and relocation hypotheses were reproduced or repaired.
 
+## Switch case keys
+
+SWITCH case keys must be distinct after reduction to the selector's integer
+width. Signed raw encodings keep their low-width bit pattern. Wider-than-64-bit
+selectors use the existing zero-extended 64-bit case payload. Repeated
+destinations are permitted; case order and the default-last target contract
+are preserved. This prevents duplicate constants in the LLVM switch consumer.
+It does not assert identical narrow-selector execution across native consumers,
+whose existing comparisons use 32/64-bit widths.
+
+Validation scans strictly ascending/descending normalized keys without scratch
+allocation. Unordered keys use a scratch copy and at most eight radix passes;
+validation never sorts caller-owned immediates or targets. The registered
+`ir_test_canonical_switch_keys` uses raw original ARGUMENT/SWITCH/RETURN rows,
+explicit valid/invalid keys and 4096-case permutations. It checks width aliases,
+signed/full-width endpoints, shared destinations, exact error context and
+uncertified preparation refusal before publication, with unchanged input arrays.
+
 ## Regression and measurement contract
 
 `ir_promotion_tests` now runs the existing structural corpus with both certified

@@ -144,18 +144,38 @@ mutating the arena; a refusal emits no partial event. Conversion-library
 allocations remain native-library owned and outside the event arena. These
 limits do not establish a general bound on all XIM protocol-library activity.
 
+CREATE_IC publication marks a window pending before `xcb_xim_create_ic`,
+because the library processes its request queue synchronously and a send
+failure or immediate reply can run the completion callback before the call
+returns; that callback's transition is never overwritten. Only a direct refusal
+(nothing queued) clears pending and advances the input-style attempt, once, and
+the per-window loop never issues a second request while one is pending or a
+context exists. Provider disconnect is handled by the `disconnected` callback:
+xcb-imdkit frees queued requests without completion callbacks, so Buster clears
+every window's IC, pending CREATE_IC, style attempt, negotiated styles,
+style-query state, open state and provider event masks while retaining windows,
+focus and arena ownership. Automatic reconnect then rebuilds contexts.
+
 `test_rendering_raster_native` exercises actual X-server XDND negotiation,
 direct/INCR transfer, decoded-path ownership, cancellation and shutdown, plus
 synthetic XIM reducer boundaries and actual poll scope teardown. Its ordinary
 native invocation also requires a real XIM provider on a second XCB connection,
-using the server API in the already linked `libxcb-imdkit`. Two independently
+using the server API in the already linked `libxcb-imdkit`. Independently
 negotiated provider cycles exercise UTF-8 and Compound Text commits through
 normal bounded polling with nonzero input contexts. Independent Unicode golden
 bytes, producer-payload mutation/release, scratch clobbering and text reads after
 complete client/provider shutdown check caller-arena ownership. UTF-8 controls
 also admit 4096 raw bytes, refuse 4097 bytes and malformed input, and recover with
 a subsequent valid commit. Asynchronous commits followed by ordered XIM SYNC
-replies distinguish consumed refusals from missing provider traffic.
+replies distinguish consumed refusals from missing provider traffic. A third
+UTF-8 cycle closes the provider after a commit, requires the client to
+invalidate its session and contexts, keeps polling with the provider missing
+without a fabricated context, then restarts a provider under the same
+advertisement name and requires a rebuilt nonzero context, a correct commit and
+teardown of both provider sessions. Synthetic controls drive the CREATE_IC
+publication helpers for immediate failure, accepted asynchronous, immediate
+success and refused requests, and the registered disconnect callback against a
+window with a pending CREATE_IC.
 
 Provider handshake, commit and teardown phases each have a 5-second deadline,
 a 2048-pass cap, and bounded work per pass (64 provider events, 32 client events).
