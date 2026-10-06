@@ -9043,6 +9043,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_assignment_runtime(Uni
             }
         }
     }
+#else
+    BUSTER_UNUSED(arguments);
 #endif
     return result;
 }
