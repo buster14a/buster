@@ -836,6 +836,25 @@ without facts for identical bitcode and diagnostics.
   values own a fresh context. `c_test_initializer_relocation_index` replays
   random append/clear scripts through both paths and requires identical
   arrays and failure points.
+- Positional scalar stores replace earlier relocation records through the same
+  context clear as designated stores. Explicit braces, strings and compatible
+  compound literals replace the complete selected aggregate; a bare scalar
+  entering it through brace elision preserves its other subobjects. Bit-fields
+  still merge their storage unit. Ordinary scalar tables without relocation
+  records need no additional clear. Member designators update both ends of the
+  selected slot interval in semantic validation and array-bound inference, so
+  the following positional item resumes after the named member.
+  `c_test_positional_initializer_relocations` pins survivor symbols/offsets,
+  zeroed overwritten slots, complete-aggregate replacement and sibling
+  retention across target layouts and both frontend forms, plus native runs
+  through FAST and QUALITY.
+- Promoted initializer members retain the selected canonical union type and
+  union-member index separately from the outer aggregate's projection slot.
+  Clearing compares that identity and the union's object offset, so switching
+  promoted anonymous-union members resets the complete union while consecutive
+  writes into the same member preserve its other subobjects.
+  `c_test_promoted_union_initializer_overrides` covers numeric/pointer switches,
+  same-member preservation, nested anonymous promotion and named-union controls.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.
@@ -1508,7 +1527,7 @@ the same signed-int dispatch as a narrow integer. Case constants and GNU
 ranges still convert to that promoted type before overlap validation.
 `c_test_switch_integer_controls` checks canonical signed-32-bit controls and
 single call preparation on six native targets in both frontend forms, plus
-desktop execution through all four allocators. Narrow signed/unsigned and
+desktop execution through FAST and QUALITY. Narrow signed/unsigned and
 64-bit cases remain independent controls.
 
 The current canonical SWITCH label representation contains one u64 per case.

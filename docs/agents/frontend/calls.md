@@ -605,7 +605,7 @@ marked callers in GNU17/GNU23, six native data models and both frontend forms.
 It checks exact CALL counts, RETURN/UNREACHABLE presence and canonical validity.
 Independent runtime oracles cover direct, parenthesized, macro, pointer and
 shadowed calls, storage live after a call, conditional continuation, used integer
-results and an explicit assembler name. Supported desktop execution covers all
-four allocator modes and both forms with strict codegen verification. Standard,
+results and an explicit assembler name. Supported desktop execution covers FAST
+and QUALITY and both forms with strict codegen verification. Standard,
 GNU and later-declaration non-returning helpers each exit through the explicitly
 marked `_Exit`; a continuation that executes instead fails the runtime oracle.

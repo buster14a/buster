@@ -4065,10 +4065,12 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             machine_fast_close_slot_ranges(arena, function, prepass, slot_fixed, slot_starts, slot_ends, &frame_addresses,
                                            block_color_slots ? &slot_blocks : 0);
         }
+        // Closure preserves the final eligibility count. An empty population
+        // leaves the caller's slot-group sentinels intact and needs no row histogram.
         u32 group_count = slot_blocks.count
                               ? machine_fast_color_block_objects(arena, function, &slot_blocks, false, false, slot_groups, group_sizes,
                                                                  group_alignments)
-                              : UINT32_MAX;
+                              : shareable_slots ? UINT32_MAX : 0;
         if (group_count == UINT32_MAX)
         {
             memset(slot_groups, 0xff, (u64)slot_axis * sizeof(*slot_groups));

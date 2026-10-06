@@ -126,6 +126,24 @@ failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
 
+## Linux process-group census reads
+
+A procfs task can disappear after its stat/status descriptor opens. Both the
+ordinary read and the capacity probe classify native ESRCH as disappearance;
+the caller retries its unchanged bounded, complete two-snapshot census.
+Open-time ENOENT/ESRCH retain the same meaning. Empty files, oversized content,
+malformed records, other read errors and close failures remain failures, and a
+failed read never publishes a length. This does not relax leader reservation,
+namespace identity, member-state or final ownership checks.
+
+Registered `os_tests` retain an unread stat descriptor for an exited child,
+reap that exact child, then exercise the production descriptor reader. Both
+normal and capacity-probe reads must observe ESRCH without publishing a length.
+Live, empty, oversized and invalid-descriptor controls distinguish disappearance
+from other outcomes. The existing synthetic census-churn fixture remains a
+separate check. This regression proves the read-after-open defect; the original
+#2380 CI failure had no stage detail and is not attributed conclusively to it.
+
 Linux process-group cleanup reads `self/status` from its retained procfs
 descriptor. `NSpid` lists the procfs mount's namespace followed by successively
 nested namespaces; the final coordinate is the caller's active namespace and
