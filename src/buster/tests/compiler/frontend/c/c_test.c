@@ -39384,6 +39384,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     return result;
 }
 
+// Scalar fabs must lower without any math-library import on every native
+// layout; the driver fixture separately observes executed float images.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fabs_builtin_lowering(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("float absolute32(float x) { return __builtin_fabsf(x); }"
+                       " double absolute64(double x) { return __builtin_fabs(x); }"
+                       " float integer32(int x) { return __builtin_fabsf(x); }"
+                       " double integer64(int x) { return __builtin_fabs(x); }");
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_C17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            bool valid = !tokens.diagnostic_count && !syntax.diagnostic_count && !analysis.diagnostic_count && analysis.analysis_complete;
+            BUSTER_TEST(arguments, valid);
+            if (BUSTER_REQUIRE(arguments, valid))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("fabs-builtin-lowering.c"), tokens, analysis, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified &&
+                                             lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, module->function_count == 4);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    u32 checked_results = 0;
+                    for (u32 symbol_index = 0; symbol_index < lowered.program->symbols.count; symbol_index += 1)
+                    {
+                        IrSymbol* symbol = lowered.program->symbols.symbols + symbol_index;
+                        bool math_import = symbol->kind == IR_SYMBOL_FUNCTION &&
+                            (string_equal(symbol->link_name, S8("fabs")) || string_equal(symbol->link_name, S8("fabsf")));
+                        BUSTER_TEST(arguments, !math_import);
+                        bool single = string_equal(symbol->name, S8("absolute32")) || string_equal(symbol->name, S8("integer32"));
+                        bool dual = string_equal(symbol->name, S8("absolute64")) || string_equal(symbol->name, S8("integer64"));
+                        if (single || dual)
+                        {
+                            IrType* function = ir_type_from_id(&lowered.program->types, symbol->type);
+                            IrType* returned = function && function->kind == IR_TYPE_FUNCTION
+                                                   ? ir_type_from_id(&lowered.program->types, function->return_type) : 0;
+                            BUSTER_TEST(arguments, returned && returned->kind == IR_TYPE_FLOAT && returned->bit_width == (single ? 32u : 64u));
+                            checked_results += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, checked_results == 4);
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // GNU's marker suppresses extension diagnostics and preserves operand values.
 // I spells the glibc imaginary-unit macro without requiring a host header.
 BUSTER_GLOBAL_LOCAL String8 const c_test_extension_constant_source = S8_INITIALIZER(
@@ -48597,6 +48657,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
     C_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
+    C_TEST_FIXTURE(arguments, c_test_fabs_builtin_lowering);
     C_TEST_FIXTURE(arguments, c_test_float16_type);
     C_TEST_FIXTURE(arguments, c_test_float_classifier_widths);
     C_TEST_FIXTURE(arguments, c_test_float_integer_constants);

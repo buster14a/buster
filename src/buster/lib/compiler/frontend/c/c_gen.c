@@ -19094,6 +19094,44 @@ BUSTER_C_INTERNAL CIrFloatBits c_ir_emit_float_bits(CIntegerIrBuilder* builder, 
     return result;
 }
 
+// fabs clears only the sign bit after the builtin's ordinary parameter
+// conversion. Canonical memory operations preserve NaN payload and quiet bits.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_fabs_value(CIntegerIrBuilder* builder, CToken token, IrValueId value, IrTypeId value_type)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId original_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrType* original = ir_type_from_id(&builder->program->types, original_type);
+    IrType* type = ir_type_from_id(&builder->program->types, value_type);
+    if (original && (original->kind == IR_TYPE_INTEGER || original->kind == IR_TYPE_BOOLEAN || original->kind == IR_TYPE_FLOAT || original->is_complex) &&
+        type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        u32 width = type->bit_width;
+        value = c_ir_emit_cast(builder, value, value_type, source);
+        IrTypeId bits_type = c_ir_builder_scalar_type(builder, width == 32 ? C_TYPE_UNSIGNED_INT : C_TYPE_UNSIGNED_LONG_LONG);
+        IrValueId slot = c_ir_emit_temporary(builder, value_type, source);
+        if (value.value != IR_ID_UNDERLYING_INVALID && bits_type.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID &&
+            c_ir_emit_store_place(builder, slot, value_type, value, source))
+        {
+            IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+            IrValueId address = c_ir_emit_address_of_place(builder, slot, value_type, source);
+            IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+                                         ? c_ir_emit_cast(builder, address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId bits_place = bits_address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, bits_address, source) : IR_VALUE_ID_INVALID;
+            IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId magnitude_mask = c_ir_emit_integer_value_typed(builder,
+                width == 32 ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff), false, token, bits_type);
+            IrValueId magnitude = bits.value != IR_ID_UNDERLYING_INVALID && magnitude_mask.value != IR_ID_UNDERLYING_INVALID
+                                      ? c_ir_emit_binary_value(builder, bits, magnitude_mask, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source) : IR_VALUE_ID_INVALID;
+            if (magnitude.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, bits_place, bits_type, magnitude, source))
+            {
+                result = c_ir_emit_load_place(builder, slot, value_type, source);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_signbit_value(CIntegerIrBuilder* builder, CToken token, IrValueId value)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
@@ -19634,6 +19672,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         return c_ir_emit_builtin_float_bits(builder, value_type, type->bit_width == 32 ? UINT64_C(0x7fc00000)
                                                                                        : UINT64_C(0x7ff8000000000000),
                                             source, S8("NAN"));
+    }
+    if (string_equal(link_name, S8("fabsf")) || string_equal(link_name, S8("fabs")))
+    {
+        IrTypeId value_type = string_equal(link_name, S8("fabsf")) ? builder->f32_type : builder->f64_type;
+        return argument_count == 1 ? c_ir_emit_fabs_value(builder, token, arguments[0], value_type) : IR_VALUE_ID_INVALID;
     }
     if (string_equal(link_name, S8("fabsl")))
     {
