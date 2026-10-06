@@ -39,13 +39,16 @@ BUSTER_GLOBAL_LOCAL CompilerDriverError compiler_driver_object_path_test_compile
     Arena* arena = arena_create((ArenaCreation){0});
     if (!arena)
     {
+        // Reservation failure, not a compile failure: say so, because it
+        // otherwise surfaces as a silent INVALID_INPUT (GitHub #2789).
+        arguments->show(arguments, S8("default object path compiler error: arena_create failed\n"));
         return COMPILER_DRIVER_ERROR_INVALID_INPUT;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, command_line);
     CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
-    if (compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length)
+    if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        arguments->show(arguments, S8("default object path compiler error: {S8}\n"), compiled.diagnostic);
+        arguments->show(arguments, S8("default object path compiler error {u32}: {S8}\n"), (u32)compiled.error, compiled.diagnostic);
     }
     CompilerDriverError result = compiled.error;
     BUSTER_CHECK(arena_destroy(arena, 1));

@@ -23395,7 +23395,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     };
     CompilerDriverResult wasm64_integer = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasm64_integer_command)));
-    BUSTER_TEST(arguments, wasm64_integer.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST_RAW(arguments, wasm64_integer.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(arguments->arena, S8("wasm64 integer compile error {u32}: {S8}"), (u32)wasm64_integer.error,
+                                  wasm64_integer.diagnostic));
     BUSTER_TEST(arguments, wasm64_integer.has_wasm64 && wasm64_integer.wasm64.stats.memory64);
     if (wasm64_integer.error == COMPILER_DRIVER_ERROR_NONE)
     {
