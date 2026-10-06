@@ -60,12 +60,6 @@ bootstrap #2069 admitted it before this policy transition updated the test, its
 row and the benchmark-service support pin. Earlier digests remain accepted for
 historical evidence.
 
-Since the benchmark service's removal (#2708) that support pin lives in
-`docs/native-retirement-performance-v1.blocked`, the non-executable
-declaration for `native-retirement-performance-v1`. A support-declaration
-transition updates its `support-declaration-sha256` in the same change;
-`tools/native_retirement_performance_declaration_test.py` fails otherwise.
-
 The September 17, 2026 integration retains every subject admitted by the
 current support ledger. The integrated profile has 559 inputs,
 411 subjects, 19,728 groups and 78,912 rows: 405 supported-object

@@ -6,6 +6,10 @@
 contract, support declaration, validator, schema and statistics it would use.
 The benchmark service's suite checked these pins until the service was
 removed (#2708); this keeps them from going stale.
+
+A support-declaration transition (a changed row in
+`docs/native-retirement-support-v1.tsv`) must update
+`support-declaration-sha256` in the declaration in the same change.
 """
 
 from __future__ import annotations
