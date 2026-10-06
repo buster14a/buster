@@ -11493,6 +11493,10 @@ struct CIrExt80Value
     // Unsigned integer domain after promotion, retained through grouping.
     // Zero denotes a signed integer or any real floating value.
     u8 unsigned_width;
+    // Bit width of the promoted integer type (32 or 64 on every supported
+    // target) for an integer value; zero for a real value.  Integer
+    // arithmetic needs it to pick the common type and to wrap or refuse.
+    u8 integer_width;
 };
 
 // The real floating types in conversion-rank order: an operation rounds in
@@ -11678,6 +11682,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_convert(CIrExt80Value* value, u8 rank)
     {
         converted.rank = rank;
         converted.unsigned_width = 0;
+        converted.integer_width = 0;
         *value = converted;
     }
     return result;
@@ -11881,16 +11886,168 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
     return c_ir_ext80_value_round(&left_numerator, &denominator, (s32)exponent, negative, rank, result_out);
 }
 
+// Integer constants live in CIrExt80Value as their exact encoding.  These two
+// helpers open one into sign and magnitude and close it again, so integer
+// arithmetic and casts never leave the 64-bit domain a promoted integer has.
+BUSTER_C_INTERNAL void c_ir_ext80_integer_open(CIrExt80Value value, bool* negative_out, u64* magnitude_out)
+{
+    u64 magnitude = 0;
+    if (value.significand)
+    {
+        u32 exponent = value.exponent_sign & C_IR_EXT80_SPECIAL_EXPONENT;
+        u32 shift = 63 - (exponent - 16383);
+        magnitude = value.significand >> shift;
+    }
+    *magnitude_out = magnitude;
+    *negative_out = magnitude && (value.exponent_sign & C_IR_EXT80_SIGN);
+}
+
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_integer_close(bool negative, u64 magnitude, u32 width, bool is_unsigned)
+{
+    u32 shift = magnitude ? leading_zeroes_u64(magnitude) : 0;
+    CIrExt80Value value = {
+        .significand = magnitude << shift,
+        .exponent_sign = magnitude ? (u16)(16383 + 63 - shift) : (u16)0,
+        .rank = C_IR_EXT80_RANK_INTEGER,
+        .unsigned_width = is_unsigned ? (u8)width : (u8)0,
+        .integer_width = (u8)width,
+    };
+    if (negative && magnitude)
+    {
+        value.exponent_sign |= C_IR_EXT80_SIGN;
+    }
+    return value;
+}
+
+BUSTER_C_INTERNAL u64 c_ir_ext80_width_mask(u32 width)
+{
+    return width >= 64 ? UINT64_MAX : (((u64)1 << width) - 1);
+}
+
+// Re-express a sign/magnitude integer in a width/signedness pair.  The modular
+// answer is what an unsigned target defines and what every supported compiler
+// gives a signed one; `exact` reports whether the value survived unchanged, so
+// arithmetic can refuse overflow while a cast just takes the wrapped value.
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_integer_wrap(bool negative, u64 magnitude, u32 width, bool is_unsigned, bool* exact_out)
+{
+    u64 mask = c_ir_ext80_width_mask(width);
+    u64 bits = (negative ? (0 - magnitude) : magnitude) & mask;
+    u64 sign_bit = (u64)1 << (width - 1);
+    bool result_negative = false;
+    u64 result_magnitude = bits;
+    if (!is_unsigned && (bits & sign_bit))
+    {
+        result_negative = true;
+        result_magnitude = (0 - bits) & mask;
+    }
+    *exact_out = result_magnitude == magnitude && (result_negative == negative || !magnitude);
+    return c_ir_ext80_integer_close(result_negative, result_magnitude, width, is_unsigned);
+}
+
+// Integer arithmetic on two promoted integers, in the usual-arithmetic-
+// conversion common type.  Signed overflow and division by zero are not
+// constant expressions, so they refuse instead of wrapping.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_integer(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
+{
+    u32 left_width = left.integer_width ? left.integer_width : 32;
+    u32 right_width = right.integer_width ? right.integer_width : 32;
+    u32 width = left_width > right_width ? left_width : right_width;
+    bool left_unsigned = left.unsigned_width != 0;
+    bool right_unsigned = right.unsigned_width != 0;
+    bool is_unsigned = left_width == right_width ? (left_unsigned || right_unsigned) : left_width > right_width ? left_unsigned : right_unsigned;
+    bool left_negative = false;
+    bool right_negative = false;
+    u64 left_magnitude = 0;
+    u64 right_magnitude = 0;
+    c_ir_ext80_integer_open(left, &left_negative, &left_magnitude);
+    c_ir_ext80_integer_open(right, &right_negative, &right_magnitude);
+    bool exact = true;
+    bool result = true;
+    // Bring both operands into the common type first: a negative signed value
+    // converted to an unsigned type wraps, which is the usual conversion.
+    CIrExt80Value left_common = c_ir_ext80_integer_wrap(left_negative, left_magnitude, width, is_unsigned, &exact);
+    CIrExt80Value right_common = c_ir_ext80_integer_wrap(right_negative, right_magnitude, width, is_unsigned, &exact);
+    c_ir_ext80_integer_open(left_common, &left_negative, &left_magnitude);
+    c_ir_ext80_integer_open(right_common, &right_negative, &right_magnitude);
+    bool negative = false;
+    u64 magnitude = 0;
+    if (op == C_PUNCTUATOR_PLUS || op == C_PUNCTUATOR_MINUS)
+    {
+        if (op == C_PUNCTUATOR_MINUS)
+        {
+            right_negative = !right_negative;
+        }
+        if (left_negative == right_negative)
+        {
+            magnitude = left_magnitude + right_magnitude;
+            negative = left_negative;
+            result = is_unsigned || magnitude >= left_magnitude;
+        }
+        else if (left_magnitude >= right_magnitude)
+        {
+            magnitude = left_magnitude - right_magnitude;
+            negative = left_negative;
+        }
+        else
+        {
+            magnitude = right_magnitude - left_magnitude;
+            negative = right_negative;
+        }
+    }
+    else if (op == C_PUNCTUATOR_STAR)
+    {
+        result = is_unsigned || !right_magnitude || left_magnitude <= UINT64_MAX / right_magnitude;
+        magnitude = result ? left_magnitude * right_magnitude : 0;
+        negative = left_negative != right_negative;
+    }
+    else if (op == C_PUNCTUATOR_SLASH)
+    {
+        result = right_magnitude != 0;
+        magnitude = result ? left_magnitude / right_magnitude : 0;
+        negative = left_negative != right_negative;
+    }
+    else
+    {
+        result = false;
+    }
+    if (result && is_unsigned)
+    {
+        // Unsigned arithmetic is modular; the operands are already in range,
+        // so only the wrap of the result remains.
+        if (op == C_PUNCTUATOR_PLUS || op == C_PUNCTUATOR_MINUS || op == C_PUNCTUATOR_STAR)
+        {
+            *result_out = c_ir_ext80_integer_wrap(negative, magnitude, width, true, &exact);
+        }
+        else
+        {
+            *result_out = c_ir_ext80_integer_close(false, magnitude, width, true);
+        }
+    }
+    else if (result)
+    {
+        u64 limit = (u64)1 << (width - 1);
+        result = negative ? magnitude <= limit : magnitude < limit;
+        if (result)
+        {
+            *result_out = c_ir_ext80_integer_close(negative && magnitude, magnitude, width, false);
+        }
+    }
+    return result;
+}
+
 // The usual arithmetic conversions decide where an operation rounds: both
 // operands convert to the common real type first and the result rounds there.
-// Integer arithmetic is still refused, because it does not round at all --
-// `1/3` would need its own truncating semantics, and a fold that answered 0.5
-// for it would be silently wrong rather than merely absent.
+// Two integer operands never reach the rounding core: they take the exact,
+// truncating integer path, so `1/3` is 0 rather than 0.5.
 BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
 {
     u8 rank = left.rank > right.rank ? left.rank : right.rank;
     bool result;
-    if (rank == C_IR_EXT80_RANK_INTEGER || !c_ir_ext80_value_convert(&left, rank) || !c_ir_ext80_value_convert(&right, rank))
+    if (rank == C_IR_EXT80_RANK_INTEGER)
+    {
+        result = c_ir_ext80_fold_integer(op, left, right, result_out);
+    }
+    else if (!c_ir_ext80_value_convert(&left, rank) || !c_ir_ext80_value_convert(&right, rank))
     {
         result = false;
     }
@@ -11968,6 +12125,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 
     u64 significand = 0;
     bool negative = false;
     u8 unsigned_width = 0;
+    u8 integer_width = 0;
     u16 exponent_sign = 0;
     bool floating = c_number_is_float(spelling);
     char8 suffix = 0;
@@ -12036,6 +12194,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 
             // Narrow unsigned literals promote to signed int before a unary
             // operation; wider unsigned literals retain their modulo width.
             unsigned_width = !integer_type.is_signed && integer_type.bit_width >= 32 ? (u8)integer_type.bit_width : 0;
+            integer_width = (u8)(integer_type.bit_width < 32 ? 32 : integer_type.bit_width);
             CIrExt80Big numerator;
             CIrExt80Big denominator;
             c_ir_ext80_big_set_u64(&numerator, integer);
@@ -12053,6 +12212,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 
             .exponent_sign = exponent_sign,
             .rank = rank,
             .unsigned_width = unsigned_width,
+            .integer_width = integer_width,
         };
     }
     else if (status == C_IR_ROUND_OVERFLOW)
@@ -12068,6 +12228,173 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 
         result = false;
     }
 
+    return result;
+}
+
+// A parenthesized type name made only of arithmetic keywords: the casts the
+// token folder can evaluate.  A typedef name or anything else is not a type
+// here, because this folder has no scope to resolve it in.
+typedef struct CIrExt80Cast CIrExt80Cast;
+struct CIrExt80Cast
+{
+    bool integer;
+    bool is_unsigned;
+    u8 rank;
+    u32 width;
+};
+
+BUSTER_C_INTERNAL bool c_ir_ext80_cast_parse(CPreprocessResult preprocess, u32 open, u32 close, CIrExt80Cast* cast_out)
+{
+    u32 long_count = 0;
+    u32 double_count = 0;
+    u32 float_count = 0;
+    u32 int_count = 0;
+    u32 short_count = 0;
+    u32 char_count = 0;
+    u32 signed_count = 0;
+    u32 unsigned_count = 0;
+    bool valid = close > open + 1;
+    for (u32 index = open + 1; valid && index < close; index += 1)
+    {
+        CToken const* token = &preprocess.tokens[index];
+        String8 word = token->kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, *token) : (String8){0};
+        if (string_equal(word, S8("long")))
+        {
+            long_count += 1;
+        }
+        else if (string_equal(word, S8("double")))
+        {
+            double_count += 1;
+        }
+        else if (string_equal(word, S8("float")))
+        {
+            float_count += 1;
+        }
+        else if (string_equal(word, S8("int")))
+        {
+            int_count += 1;
+        }
+        else if (string_equal(word, S8("short")))
+        {
+            short_count += 1;
+        }
+        else if (string_equal(word, S8("char")))
+        {
+            char_count += 1;
+        }
+        else if (string_equal(word, S8("signed")))
+        {
+            signed_count += 1;
+        }
+        else if (string_equal(word, S8("unsigned")))
+        {
+            unsigned_count += 1;
+        }
+        else if (!string_equal(word, S8("const")) && !string_equal(word, S8("volatile")))
+        {
+            valid = false;
+        }
+    }
+    CTypeKind kind = C_TYPE_VOID;
+    if (valid && (double_count || float_count))
+    {
+        bool integer_words = int_count || short_count || char_count || signed_count || unsigned_count;
+        valid = !integer_words && double_count + float_count == 1 && long_count <= (double_count ? 1u : 0u);
+        cast_out->integer = false;
+        cast_out->rank = float_count ? C_IR_EXT80_RANK_FLOAT : long_count ? C_IR_EXT80_RANK_LONG_DOUBLE : C_IR_EXT80_RANK_DOUBLE;
+    }
+    else if (valid)
+    {
+        bool is_unsigned = unsigned_count != 0;
+        valid = signed_count + unsigned_count <= 1 && int_count <= 1 && short_count <= 1 && char_count <= 1 && long_count <= 2 &&
+                char_count + short_count + (long_count ? 1u : 0u) <= 1 && !(char_count && int_count);
+        if (char_count)
+        {
+            kind = unsigned_count ? C_TYPE_UNSIGNED_CHAR : signed_count ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
+        }
+        else if (short_count)
+        {
+            kind = is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
+        }
+        else if (long_count == 2)
+        {
+            kind = is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
+        }
+        else if (long_count == 1)
+        {
+            kind = is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
+        }
+        else
+        {
+            kind = is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+        }
+        IrTypeKind ir_kind = IR_TYPE_VOID;
+        u32 width = 0;
+        bool is_signed = false;
+        u32 alignment = 0;
+        valid = valid && c_ir_scalar_type_properties(preprocess.target, kind, &ir_kind, &width, &is_signed, &alignment) &&
+                ir_kind == IR_TYPE_INTEGER && width >= 8 && width <= 64;
+        cast_out->integer = true;
+        cast_out->is_unsigned = !is_signed;
+        cast_out->width = width;
+    }
+    return valid;
+}
+
+// Apply a parsed cast.  Real targets round through the same conversion an
+// operand takes; an integer source wraps modularly into an integer target; a
+// real source truncates toward zero and refuses a value the target cannot hold
+// (infinity, NaN or out of range), which C leaves undefined.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_cast(CIrExt80Cast cast, CIrExt80Value* value)
+{
+    bool result = true;
+    if (!cast.integer)
+    {
+        result = c_ir_ext80_value_convert(value, cast.rank);
+    }
+    else
+    {
+        bool negative = false;
+        u64 magnitude = 0;
+        if (value->rank == C_IR_EXT80_RANK_INTEGER)
+        {
+            c_ir_ext80_integer_open(*value, &negative, &magnitude);
+        }
+        else if (c_ir_ext80_value_is_special(*value))
+        {
+            result = false;
+        }
+        else if (value->significand)
+        {
+            s32 unbiased = (s32)(value->exponent_sign & C_IR_EXT80_SPECIAL_EXPONENT) - 16383;
+            negative = (value->exponent_sign & C_IR_EXT80_SIGN) != 0;
+            if (unbiased > 63)
+            {
+                result = false;
+            }
+            else if (unbiased >= 0)
+            {
+                magnitude = value->significand >> (63 - unbiased);
+            }
+        }
+        if (result)
+        {
+            bool exact = true;
+            CIrExt80Value wrapped = c_ir_ext80_integer_wrap(negative, magnitude, cast.width, cast.is_unsigned, &exact);
+            // A real source must fit; an integer source simply wraps.
+            result = exact || value->rank == C_IR_EXT80_RANK_INTEGER;
+            if (result)
+            {
+                // Types narrower than int promote to int.
+                if (cast.width < 32)
+                {
+                    wrapped.unsigned_width = 0;
+                    wrapped.integer_width = 32;
+                }
+                *value = wrapped;
+            }
+        }
+    }
     return result;
 }
 
@@ -12149,6 +12476,21 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
         {
             fold->blame = fold->cursor;
             return false;
+        }
+        CIrExt80Cast cast = {0};
+        if (c_ir_ext80_cast_parse(fold->preprocess, fold->cursor, close, &cast))
+        {
+            // A cast binds to the unary expression after it, one level deeper.
+            fold->cursor = close + 1;
+            fold->depth += 1;
+            bool operand = c_ir_ext80_fold_primary(fold, value_out);
+            fold->depth -= 1;
+            if (operand && !c_ir_ext80_fold_cast(cast, value_out))
+            {
+                fold->blame = close;
+                operand = false;
+            }
+            return operand;
         }
         CIrExt80Fold inner = *fold;
         inner.cursor = fold->cursor + 1;

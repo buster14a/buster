@@ -32211,6 +32211,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_integer_global_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Integer-only subexpressions and arithmetic casts fold exactly into the
+    // ten-byte x87 image (#1420).  Each row is the image a host x87 compiler
+    // gives the same spelling; "long" is 64 bits on the LP64 targets below.
+    struct
+    {
+        String8 name;
+        String8 initializer;
+        u8 expected[16];
+    } rows[] = {
+        {S8("long_min_minus_half"), S8("(-9223372036854775807L - 1) - 0.5"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3e, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("long_max_plus_half"), S8("9223372036854775807L + 0.5"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("cast_five"), S8("(long double)5"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("cast_ullong_max"), S8("(long double)-1ULL"), {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("long_min"), S8("(long double)(-9223372036854775807L - 1)"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3e, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("int_sum"), S8("1 + 2"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("int_div"), S8("7 / 2 + 0.0L"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("uint_wrap"), S8("(long double)(0u - 1)"), {0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x1e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("int_trunc"), S8("(long double)(int)-2.5L"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("float_round"), S8("(long double)(float)0.1L"), {0x00, 0x00, 0x00, 0x00, 0x00, 0xcd, 0xcc, 0xcc, 0xfb, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("double_round"), S8("(long double)(double)0.1L"), {0x00, 0xd0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xfb, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("mul_u64"), S8("(long double)(4294967296UL * 4294967295UL)"), {0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x3e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("cast_char"), S8("(long double)(signed char)200"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x04, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+        {S8("sixteen"), S8("16777217 * 1.0f"), {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x17, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+    };
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-apple-macos"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        for (u32 row_index = 0; row_index < BUSTER_ARRAY_LENGTH(rows); row_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = string_format(temporary.arena, S8("static long double {S8} = {S8};"), rows[row_index].name, rows[row_index].initializer);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.program != 0);
+            if (lowered.program && c_test_target_uses_x86_f80_abi(parsed_target.target))
+            {
+                IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, rows[row_index].name);
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, rows[row_index].expected, 16));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -32225,9 +32284,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         String8 source;
         bool invalid_integer;
     } sources[] = {
-        {S8("long double cast_value = (long double)1; int main(void) { return 0; }"), false},
         {S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"), false},
-        {S8("long double integer_arithmetic = 1 + 2; int main(void) { return 0; }"), false},
+        {S8("long double integer_divide_zero = 1 / 0; int main(void) { return 0; }"), false},
+        {S8("long double integer_overflow = 2147483647 + 1; int main(void) { return 0; }"), false},
+        {S8("long double cast_out_of_range = (long double)(int)3e9; int main(void) { return 0; }"), false},
         {S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"), false},
         {S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
         {S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
@@ -42385,6 +42445,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_x87_integer_unary_initializers);
     BUSTER_TEST_FIXTURE(arguments, c_test_x87_integer_unary_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_initializers);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_integer_global_initializers);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
