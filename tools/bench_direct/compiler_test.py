@@ -936,6 +936,59 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual((code, result["state"]), (0, "superseded"))
         self.assertEqual(result["timings"]["build_seconds"], {})
 
+    def test_filesystem_faults_keep_an_attributable_incomplete_receipt(self) -> None:
+        # #2927: an error after a completed phase must not erase timings, identity or the failing stage.
+        for target, phase in (("shutil.copyfile", "build-baseline"), ("compiler_compare.collect_evidence", "lab-evidence"),
+                              ("compiler_compare.sha256", "build-baseline")):
+            subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+            with self.subTest(target=target), mock.patch(target, side_effect=OSError("injected")):
+                code, result, _ = self.run_harness(self.head)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertIn(f"attempt aborted in phase {phase}", " ".join(result["reasons"]))
+                self.assertIn("injected", " ".join(result["reasons"]))
+                self.assertEqual(result["identity"]["head"], self.head)
+                self.assertIn("baseline", result["timings"]["build_seconds"])
+
+    def test_missing_cmake_cache_is_a_build_failure_not_a_crash(self) -> None:
+        (self.repo / "build.sh").write_text("#!/usr/bin/env bash\nmkdir -p build/Release\ncp compiler.txt build/Release/ide\n")
+        subprocess.run(["git", "-C", str(self.repo), "update-index", "--assume-unchanged", "build.sh"], check=True)
+        code, result, _ = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertIn("not tests-off", " ".join(result["reasons"]))
+
+    def test_interruption_between_lab_and_corpus_leaves_the_lab_outcome(self) -> None:
+        with mock.patch.object(compiler_compare, "measure_throughput", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_harness(self.head)
+        result = json.loads((self.root / "evidence" / "receipt.json").read_text())
+        self.assertEqual((result["state"], result["lab"]["exit"]), ("failed", 0))
+        self.assertIn("attempt aborted in phase throughput", " ".join(result["reasons"]))
+        self.assertTrue((self.root / "evidence" / "lab" / "summary.json").is_file())
+
+    def test_kill_leaves_the_last_checkpoint_and_no_checkpoint_is_measured(self) -> None:
+        states = []
+        real = compiler_compare.checkpoint
+
+        def spy(receipt: dict, evidence: Path, phase: str) -> str:
+            problem = real(receipt, evidence, phase)
+            shown = json.loads((evidence / "receipt.json").read_text())
+            states.append((phase, shown["state"], shown["phase"]))
+            return problem
+
+        with mock.patch.object(compiler_compare, "checkpoint", spy):
+            code, result, _ = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (0, "measured"))
+        self.assertEqual([phase for phase, _, _ in states][:3], ["build-baseline", "build-candidate", "build-closure"])
+        self.assertTrue({"lab", "throughput", "validate"} <= {phase for phase, _, _ in states})
+        self.assertEqual({state for _, state, _ in states}, {"failed"})
+        self.assertNotIn("phase", result)
+
+    def test_unpersistable_final_receipt_is_never_measured(self) -> None:
+        with mock.patch.object(compiler_compare, "write_receipt", return_value="final receipt not persisted: disk full"):
+            code, result, _ = self.run_harness(self.head)
+        self.assertEqual(code, 1)
+        self.assertEqual(result["state"], "failed")  # the last checkpoint, not a measured receipt
+
     def test_identity_mismatch_and_failed_build_are_failures(self) -> None:
         code, result, _ = self.run_harness(self.head, base="8" * 40)
         self.assertEqual((code, result["state"]), (1, "failed"))

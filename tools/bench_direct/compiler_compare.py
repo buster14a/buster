@@ -197,7 +197,8 @@ def build(candidate: Path, commit: str, log: Path) -> tuple[str, float]:
     cache = candidate / "build" / "CMakeCache.txt"
     if status != 0:
         problem = f"build of {commit} failed with exit {status} (see {log.name})"
-    elif "BUSTER_INCLUDE_TESTS:BOOL=OFF" not in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+    elif "BUSTER_INCLUDE_TESTS:BOOL=OFF" not in (cache.read_text(encoding="utf-8", errors="replace").splitlines()
+                                                 if cache.is_file() else []):
         problem = f"build of {commit} is not tests-off"
     elif not (candidate / "build" / "Release" / "ide").is_file():
         problem = f"build of {commit} produced no build/Release/ide"
@@ -364,6 +365,111 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def checkpoint(receipt: dict, evidence: Path, phase: str) -> str:
+    """Atomically persist the attempt so far as an incomplete (failed) receipt; returns '' or the write error.
+
+    A kill cannot be handled, so this runs before each expensive phase. A checkpoint is never
+    `measured`: only the final write after validation can carry that state.
+    """
+    shown = dict(receipt, state="failed" if receipt["state"] == "measured" else receipt["state"], phase=phase,
+                 reasons=[*receipt["reasons"], f"attempt did not finish; last phase started: {phase}"])
+    temporary = evidence / "receipt.json.tmp"
+    problem = ""
+    try:
+        temporary.write_text(dumps(shown) + "\n", encoding="utf-8")
+        os.replace(temporary, evidence / "receipt.json")
+    except OSError as error:
+        problem = f"receipt checkpoint at {phase} not persisted: {error}"
+    return problem
+
+
+def write_receipt(receipt: dict, evidence: Path) -> str:
+    """Atomically write the final receipt; returns '' or the reason it could not be persisted."""
+    temporary = evidence / "receipt.json.tmp"
+    problem = ""
+    try:
+        temporary.write_text(dumps(receipt) + "\n", encoding="utf-8")
+        os.replace(temporary, evidence / "receipt.json")
+    except OSError as error:
+        problem = f"final receipt not persisted: {error}"
+    return problem
+
+
+def mark(receipt: dict, evidence: Path, phase: str) -> None:
+    """Record the phase about to start and checkpoint it."""
+    receipt["phase"] = phase
+    problem = checkpoint(receipt, evidence, phase)
+    if problem:
+        receipt.setdefault("notes", []).append(problem)
+
+
+def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
+            receipt: dict, summaries: list) -> None:
+    """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
+    reasons = receipt["reasons"]
+    summary = None
+    if not reasons:
+        for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
+            mark(receipt, evidence, f"build-{role}")
+            problem, seconds = build(candidate, commit, log)
+            receipt["timings"]["build_seconds"][role] = round(seconds, 3)
+            if problem:
+                reasons.append(problem)
+                break
+            if role != "closure":
+                binary = bins / ("ide-base" if role == "baseline" else "ide-cand")
+                shutil.copyfile(candidate / "build" / "Release" / "ide", binary)
+                binary.chmod(0o755)
+                shutil.copyfile(candidate / "build" / "CMakeCache.txt", evidence / f"{role}.CMakeCache.txt")
+                receipt["binaries"][role] = {"sha256": sha256(binary), "size_bytes": binary.stat().st_size,
+                                             "revision": commit}
+
+    if not reasons:
+        lab = work / "lab"
+        mark(receipt, evidence, "lab")
+        measured = time.monotonic()
+        status = run([sys.executable, "-B", str(arguments.lab.resolve()), "compare",
+                      "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
+                      "--repo-root", str(candidate), "--cpu", str(PROFILE["cpu"]), "--output", str(lab),
+                      "--target-minutes", str(PROFILE["target_minutes"]), "--warmups", str(PROFILE["warmups"])],
+                     candidate, evidence / "lab.log", LAB_TIMEOUT_SECONDS)
+        receipt["timings"]["measurement_seconds"] = round(time.monotonic() - measured, 3)
+        receipt["lab"]["exit"] = status
+        mark(receipt, evidence, "lab-evidence")
+        collect_evidence(lab, evidence)
+        try:
+            summary = json.loads((lab / "summary.json").read_text(encoding="utf-8"))
+            summaries[:] = [summary]
+        except (OSError, ValueError) as error:
+            reasons.append(f"lab summary unreadable: {error}")
+        if status != 0:
+            reasons.append(f"uarch_lab compare exited {status}")
+        mark(receipt, evidence, "throughput")
+        measured = time.monotonic()
+        corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
+                                                           arguments.head, receipt["binaries"])
+        receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
+        reasons.extend(corpus)
+        if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
+            mark(receipt, evidence, "scaling")
+            measured = time.monotonic()
+            receipt["scaling_profile"] = SCALING_PROFILE
+            scaled, receipt["scaling"] = measure_scaling(candidate, bins, work, evidence, receipt["binaries"])
+            receipt["timings"]["scaling_seconds"] = round(time.monotonic() - measured, 3)
+            reasons.extend(scaled)
+        mark(receipt, evidence, "validate")
+        for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
+            if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
+                reasons.append(f"{role} binary changed during measurement")
+        reasons.extend(classify(summary, receipt["binaries"]))
+        if isinstance(summary, dict):
+            receipt["lab"].update(schema=summary.get("schema"), verdict=summary.get("verdict"),
+                                  complete_pairs=(summary.get("plan") or {}).get("complete_pairs"))
+        if not reasons:
+            receipt["state"] = "measured"
+
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = parse(argv)
     started = time.monotonic()
@@ -426,65 +532,34 @@ def main(argv: list[str] | None = None) -> int:
     elif live is None and not reasons and arguments.mode == "pull":
         receipt["notes"] = [f"{arguments.ref} could not be read before measurement; measured anyway"]
 
-    if not reasons:
-        for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
-            problem, seconds = build(candidate, commit, log)
-            receipt["timings"]["build_seconds"][role] = round(seconds, 3)
-            if problem:
-                reasons.append(problem)
-                break
-            if role != "closure":
-                binary = bins / ("ide-base" if role == "baseline" else "ide-cand")
-                shutil.copyfile(candidate / "build" / "Release" / "ide", binary)
-                binary.chmod(0o755)
-                shutil.copyfile(candidate / "build" / "CMakeCache.txt", evidence / f"{role}.CMakeCache.txt")
-                receipt["binaries"][role] = {"sha256": sha256(binary), "size_bytes": binary.stat().st_size,
-                                             "revision": commit}
-
-    if not reasons:
-        lab = work / "lab"
-        measured = time.monotonic()
-        status = run([sys.executable, "-B", str(arguments.lab.resolve()), "compare",
-                      "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
-                      "--repo-root", str(candidate), "--cpu", str(PROFILE["cpu"]), "--output", str(lab),
-                      "--target-minutes", str(PROFILE["target_minutes"]), "--warmups", str(PROFILE["warmups"])],
-                     candidate, evidence / "lab.log", LAB_TIMEOUT_SECONDS)
-        receipt["timings"]["measurement_seconds"] = round(time.monotonic() - measured, 3)
-        receipt["lab"]["exit"] = status
-        collect_evidence(lab, evidence)
-        try:
-            summary = json.loads((lab / "summary.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
-            reasons.append(f"lab summary unreadable: {error}")
-        if status != 0:
-            reasons.append(f"uarch_lab compare exited {status}")
-        measured = time.monotonic()
-        corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
-                                                           arguments.head, receipt["binaries"])
-        receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
-        reasons.extend(corpus)
-        if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
-            measured = time.monotonic()
-            receipt["scaling_profile"] = SCALING_PROFILE
-            scaled, receipt["scaling"] = measure_scaling(candidate, bins, work, evidence, receipt["binaries"])
-            receipt["timings"]["scaling_seconds"] = round(time.monotonic() - measured, 3)
-            reasons.extend(scaled)
-        for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
-            if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
-                reasons.append(f"{role} binary changed during measurement")
-        reasons.extend(classify(summary, receipt["binaries"]))
-        if isinstance(summary, dict):
-            receipt["lab"].update(schema=summary.get("schema"), verdict=summary.get("verdict"),
-                                  complete_pairs=(summary.get("plan") or {}).get("complete_pairs"))
-        if not reasons:
-            receipt["state"] = "measured"
-
+    summaries: list = []
+    aborted = None
+    try:
+        measure(arguments, candidate, work, evidence, bins, log, receipt, summaries)
+    except BaseException as error:  # noqa: BLE001 - recorded, then re-raised after the receipt is written
+        reasons.append(f"attempt aborted in phase {receipt.get('phase', 'start')}: {error.__class__.__name__}: {error}")
+        receipt["state"] = "failed"
+        if not isinstance(error, Exception):
+            aborted = error
+    summary = summaries[-1] if summaries else None
     receipt["timings"]["total_seconds"] = round(time.monotonic() - started, 3)
     receipt["timings"]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    (evidence / "receipt.json").write_text(dumps(receipt) + "\n", encoding="utf-8")
-    with arguments.summary.open("a", encoding="utf-8") as stream:
-        stream.write(render(receipt, summary, receipt["state"], []) + "\n")
+    receipt.pop("phase", None)
+    persisted = write_receipt(receipt, evidence)
+    if persisted:
+        reasons.append(persisted)
+        receipt["state"] = "failed"
+        print(f"compiler_compare: {persisted}", file=sys.stderr)
+    try:
+        with arguments.summary.open("a", encoding="utf-8") as stream:
+            stream.write(render(receipt, summary, receipt["state"], []) + "\n")
+    except OSError as error:
+        reasons.append(f"step summary not written: {error}")
+        print(f"compiler_compare: step summary not written: {error}", file=sys.stderr)
+        receipt["state"] = "failed"
     print(f"BENCH_COMPILER_{receipt['state'].upper()} " + "; ".join(reasons))
+    if aborted is not None:
+        raise aborted
     return 0 if receipt["state"] in ("measured", "superseded") else 1
 
 
