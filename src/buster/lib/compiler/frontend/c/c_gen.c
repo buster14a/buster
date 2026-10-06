@@ -12746,132 +12746,158 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_cast(CIrExt80Cast cast, CIrExt80Value* va
     return result;
 }
 
-// The initializer expression itself, as a recursive descent over the token
-// range with the two ordinary precedence levels.  Values are ten bytes, so the
-// recursion carries no bignum; the bounded ones live inside a single operation.
+// The initializer expression itself: an operator-precedence machine over the
+// token range with the two ordinary binary precedence levels, the prefix
+// operators (unary sign and cast) and parenthesized groups.  Values are ten
+// bytes, so nothing here carries a bignum; the bounded ones live inside a
+// single operation.  There is no input-dependent recursion: pending prefix
+// operators, binary operators and open groups wait on one frame stack, their
+// operands on one value stack, and both are sized from the token count of the
+// range, because every frame and every value consumes at least one token.
+enum CIrExt80FrameKind
+{
+    C_IR_EXT80_FRAME_GROUP,
+    C_IR_EXT80_FRAME_ADD,
+    C_IR_EXT80_FRAME_SUBTRACT,
+    C_IR_EXT80_FRAME_MULTIPLY,
+    C_IR_EXT80_FRAME_DIVIDE,
+    C_IR_EXT80_FRAME_PLUS,
+    C_IR_EXT80_FRAME_NEGATE,
+    C_IR_EXT80_FRAME_CAST,
+};
+typedef enum CIrExt80FrameKind CIrExt80FrameKind;
+
+typedef struct CIrExt80Frame CIrExt80Frame;
+struct CIrExt80Frame
+{
+    CIrExt80FrameKind kind;
+    // The operator token a refusal names; for a group and a cast, the closing
+    // parenthesis.
+    u32 token;
+    // A group restores the limit of the range it was opened in.
+    u32 saved_limit;
+    CIrExt80Cast cast;
+};
+
 typedef struct CIrExt80Fold CIrExt80Fold;
 struct CIrExt80Fold
 {
     CPreprocessResult preprocess;
+    Arena* arena;
     u32 cursor;
+    // The end of the innermost open group, or of the whole range.
     u32 limit;
-    u32 depth;
     // The token the refusal names, kept separate from the cursor because the
     // failing operator is behind it by the time an operation reports.
     u32 blame;
+    CIrExt80Frame* frames;
+    CIrExt80Value* values;
+    u32 frame_count;
+    u32 value_count;
+    u32 capacity;
+    // Set when the frame or value stack would overflow its token-count size,
+    // so the caller can say so instead of naming a token.
+    bool capacity_exceeded;
 };
 
-#define C_IR_EXT80_FOLD_DEPTH_LIMIT 64
+// Entries each stack keeps on the host stack before it asks the arena.
+#define C_IR_EXT80_FOLD_INLINE_CAPACITY 16
 
-BUSTER_C_INTERNAL bool c_ir_ext80_fold_sum(CIrExt80Fold* fold, CIrExt80Value* value_out);
-
-BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value* value_out)
+// Binding strength of a pending frame; prefix operators bind tightest and a
+// group binds nothing, so a reduction never crosses one.
+BUSTER_C_INTERNAL u32 c_ir_ext80_frame_precedence(CIrExt80FrameKind kind)
 {
-    while (fold->cursor < fold->limit &&
-           c_token_in_well_known_set(fold->preprocess.spelling_base, fold->preprocess.tokens[fold->cursor],
-                                    C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+    u32 precedence = 3;
+    if (kind == C_IR_EXT80_FRAME_GROUP)
     {
-        fold->cursor += 1;
+        precedence = 0;
     }
-    if (fold->cursor >= fold->limit || fold->depth >= C_IR_EXT80_FOLD_DEPTH_LIMIT)
+    else if (kind == C_IR_EXT80_FRAME_ADD || kind == C_IR_EXT80_FRAME_SUBTRACT)
     {
-        fold->blame = fold->cursor < fold->limit ? fold->cursor : (fold->limit ? fold->limit - 1 : 0);
-        return false;
+        precedence = 1;
     }
+    else if (kind == C_IR_EXT80_FRAME_MULTIPLY || kind == C_IR_EXT80_FRAME_DIVIDE)
+    {
+        precedence = 2;
+    }
+    return precedence;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_push_frame(CIrExt80Fold* fold, CIrExt80Frame frame)
+{
+    bool fits = fold->frame_count < fold->capacity;
+    if (fits)
+    {
+        fold->frames[fold->frame_count] = frame;
+        fold->frame_count += 1;
+    }
+    else
+    {
+        fold->capacity_exceeded = true;
+    }
+    return fits;
+}
+
+// The next value slot, or 0 at capacity.
+BUSTER_C_INTERNAL CIrExt80Value* c_ir_ext80_fold_value_slot(CIrExt80Fold* fold)
+{
+    CIrExt80Value* slot = 0;
+    if (fold->value_count < fold->capacity)
+    {
+        slot = &fold->values[fold->value_count];
+    }
+    else
+    {
+        fold->capacity_exceeded = true;
+    }
+    return slot;
+}
+
+// Pop the top frame and apply it to the value stack.  A failure names the
+// operator that failed, exactly as the operation did when it ran inline.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_reduce(CIrExt80Fold* fold)
+{
+    CIrExt80Frame frame = fold->frames[fold->frame_count - 1];
+    fold->frame_count -= 1;
+    bool applied = true;
+    if (frame.kind == C_IR_EXT80_FRAME_PLUS || frame.kind == C_IR_EXT80_FRAME_NEGATE)
+    {
+        applied = c_ir_ext80_fold_unary(frame.kind == C_IR_EXT80_FRAME_NEGATE, &fold->values[fold->value_count - 1]);
+    }
+    else if (frame.kind == C_IR_EXT80_FRAME_CAST)
+    {
+        applied = c_ir_ext80_fold_cast(frame.cast, &fold->values[fold->value_count - 1]);
+    }
+    else
+    {
+        CPunctuator op = frame.kind == C_IR_EXT80_FRAME_ADD        ? C_PUNCTUATOR_PLUS
+                         : frame.kind == C_IR_EXT80_FRAME_SUBTRACT ? C_PUNCTUATOR_MINUS
+                         : frame.kind == C_IR_EXT80_FRAME_MULTIPLY ? C_PUNCTUATOR_STAR
+                                                                   : C_PUNCTUATOR_SLASH;
+        CIrExt80Value right = fold->values[fold->value_count - 1];
+        fold->value_count -= 1;
+        applied = c_ir_ext80_fold_apply(op, fold->values[fold->value_count - 1], right, &fold->values[fold->value_count - 1]);
+    }
+    if (!applied)
+    {
+        fold->blame = frame.token;
+    }
+    return applied;
+}
+
+// The two constant-valued math intrinsics, folded here for the same
+// reason c_ir_constant_evaluate folds them: a hosted <math.h> spells
+// INFINITY and NAN as `__builtin_inff()` and `__builtin_nanf("")`
+// whenever the compiler advertises the GNU builtins, and every `long
+// double` table libc-test writes opens with one of them.  The
+// pointer-arithmetic spellings musl falls back to (`1e5000f`,
+// `(0.0f/0.0f)`) already fold through the number and operator paths;
+// these are the same values written the other way.  A refusal, including
+// "not one of these", names the token at the cursor.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_builtin(CIrExt80Fold* fold, CIrExt80Value* value_out)
+{
     CToken const* token = &fold->preprocess.tokens[fold->cursor];
-    if (c_token_is_punctuator(token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
-    {
-        bool negative = c_token_is_punctuator(token, C_PUNCTUATOR_MINUS);
-        u32 operator_index = fold->cursor;
-        fold->cursor += 1;
-        while (fold->cursor < fold->limit &&
-               c_token_in_well_known_set(fold->preprocess.spelling_base, fold->preprocess.tokens[fold->cursor],
-                                        C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
-        {
-            fold->cursor += 1;
-        }
-        if (fold->cursor < fold->limit && fold->preprocess.tokens[fold->cursor].kind == C_TOKEN_PREPROCESSING_NUMBER)
-        {
-            // Direct and grouped operands use the same promoted-domain sign.
-            u32 number = fold->cursor;
-            fold->cursor += 1;
-            if (!c_ir_ext80_fold_number(fold->preprocess, number, value_out) || !c_ir_ext80_fold_unary(negative, value_out))
-            {
-                fold->blame = number;
-                return false;
-            }
-            return true;
-        }
-        fold->depth += 1;
-        bool folded = c_ir_ext80_fold_primary(fold, value_out);
-        fold->depth -= 1;
-        if (!folded)
-        {
-            return false;
-        }
-        bool applied = c_ir_ext80_fold_unary(negative, value_out);
-        if (!applied)
-        {
-            fold->blame = operator_index;
-        }
-        return applied;
-    }
-    if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        u32 close = c_ir_matching_delimiter(fold->preprocess, fold->cursor, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                            C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close == UINT32_MAX)
-        {
-            fold->blame = fold->cursor;
-            return false;
-        }
-        CIrExt80Cast cast = {0};
-        if (c_ir_ext80_cast_parse(fold->preprocess, fold->cursor, close, &cast))
-        {
-            // A cast binds to the unary expression after it, one level deeper.
-            fold->cursor = close + 1;
-            fold->depth += 1;
-            bool operand = c_ir_ext80_fold_primary(fold, value_out);
-            fold->depth -= 1;
-            if (operand && !c_ir_ext80_fold_cast(cast, value_out))
-            {
-                fold->blame = close;
-                operand = false;
-            }
-            return operand;
-        }
-        CIrExt80Fold inner = *fold;
-        inner.cursor = fold->cursor + 1;
-        inner.limit = close;
-        inner.depth = fold->depth + 1;
-        bool folded = c_ir_ext80_fold_sum(&inner, value_out);
-        if (!folded || inner.cursor != close)
-        {
-            fold->blame = folded ? inner.cursor : inner.blame;
-            return false;
-        }
-        fold->cursor = close + 1;
-        return true;
-    }
-    if (token->kind == C_TOKEN_PREPROCESSING_NUMBER)
-    {
-        u32 number = fold->cursor;
-        fold->cursor += 1;
-        if (!c_ir_ext80_fold_number(fold->preprocess, number, value_out))
-        {
-            fold->blame = number;
-            return false;
-        }
-        return true;
-    }
-    // The two constant-valued math intrinsics, folded here for the same
-    // reason c_ir_constant_evaluate folds them: a hosted <math.h> spells
-    // INFINITY and NAN as `__builtin_inff()` and `__builtin_nanf("")`
-    // whenever the compiler advertises the GNU builtins, and every `long
-    // double` table libc-test writes opens with one of them.  The
-    // pointer-arithmetic spellings musl falls back to (`1e5000f`,
-    // `(0.0f/0.0f)`) already fold through the number and operator paths
-    // above; these are the same values written the other way.
+    bool folded = false;
     if (token->kind == C_TOKEN_IDENTIFIER && fold->cursor + 1 < fold->limit &&
         c_token_is_punctuator(&fold->preprocess.tokens[fold->cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
@@ -12882,95 +12908,236 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
         {
             u32 open = fold->cursor + 1;
             u32 close = c_ir_matching_delimiter(fold->preprocess, open, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close != UINT32_MAX)
+            {
+                // Only the default payload folds: `__builtin_nan("")` is the
+                // quiet NaN every hosted header spells, and a non-empty payload
+                // string names a different value.
+                String8 payload = close == open + 2 && fold->preprocess.tokens[open + 1].kind == C_TOKEN_STRING_LITERAL
+                                      ? c_token_spelling(fold->preprocess.spelling_base, fold->preprocess.tokens[open + 1])
+                                      : (String8){0};
+                bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
+                if (quiet_nan ? empty_payload : close == open + 1)
+                {
+                    u8 rank = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("inff")) ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
+                    *value_out = infinity ? c_ir_ext80_value_infinity(false, rank) : c_ir_ext80_value_default_nan(rank);
+                    fold->cursor = close + 1;
+                    folded = true;
+                }
+            }
+        }
+    }
+    if (!folded)
+    {
+        fold->blame = fold->cursor;
+    }
+    return folded;
+}
+
+// Step over `__extension__` markers; true while a token remains in the range.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_skip_extensions(CIrExt80Fold* fold)
+{
+    while (fold->cursor < fold->limit &&
+           c_token_in_well_known_set(fold->preprocess.spelling_base, fold->preprocess.tokens[fold->cursor],
+                                    C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+    {
+        fold->cursor += 1;
+    }
+    return fold->cursor < fold->limit;
+}
+
+// One step in operand position: a prefix operator or an opening group pushes a
+// frame and stays in operand position; a number or intrinsic pushes a value and
+// moves to operator position.  Returns false on a refusal.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_operand(CIrExt80Fold* fold, bool* expect_operand)
+{
+    bool ok = true;
+    if (!c_ir_ext80_fold_skip_extensions(fold))
+    {
+        fold->blame = fold->limit ? fold->limit - 1 : 0;
+        ok = false;
+    }
+    else
+    {
+        CToken const* token = &fold->preprocess.tokens[fold->cursor];
+        if (c_token_is_punctuator(token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
+        {
+            bool negative = c_token_is_punctuator(token, C_PUNCTUATOR_MINUS);
+            u32 operator_index = fold->cursor;
+            fold->cursor += 1;
+            bool more = c_ir_ext80_fold_skip_extensions(fold);
+            if (more && fold->preprocess.tokens[fold->cursor].kind == C_TOKEN_PREPROCESSING_NUMBER)
+            {
+                // Direct and grouped operands use the same promoted-domain sign.
+                u32 number = fold->cursor;
+                fold->cursor += 1;
+                CIrExt80Value* slot = c_ir_ext80_fold_value_slot(fold);
+                if (!slot)
+                {
+                    ok = false;
+                }
+                else if (!c_ir_ext80_fold_number(fold->preprocess, number, slot) || !c_ir_ext80_fold_unary(negative, slot))
+                {
+                    fold->blame = number;
+                    ok = false;
+                }
+                else
+                {
+                    fold->value_count += 1;
+                    *expect_operand = false;
+                }
+            }
+            else
+            {
+                ok = c_ir_ext80_fold_push_frame(fold, (CIrExt80Frame){.kind = negative ? C_IR_EXT80_FRAME_NEGATE : C_IR_EXT80_FRAME_PLUS,
+                                                                       .token = operator_index});
+            }
+        }
+        else if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter(fold->preprocess, fold->cursor, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            CIrExt80Cast cast = {0};
             if (close == UINT32_MAX)
             {
                 fold->blame = fold->cursor;
-                return false;
+                ok = false;
             }
-            // Only the default payload folds: `__builtin_nan("")` is the
-            // quiet NaN every hosted header spells, and a non-empty payload
-            // string names a different value.
-            String8 payload = close == open + 2 && fold->preprocess.tokens[open + 1].kind == C_TOKEN_STRING_LITERAL
-                                  ? c_token_spelling(fold->preprocess.spelling_base, fold->preprocess.tokens[open + 1])
-                                  : (String8){0};
-            bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
-            if (quiet_nan ? !empty_payload : close != open + 1)
+            else if (c_ir_ext80_cast_parse(fold->preprocess, fold->cursor, close, &cast))
             {
-                fold->blame = fold->cursor;
-                return false;
+                // A cast binds to the unary expression after it.
+                ok = c_ir_ext80_fold_push_frame(fold, (CIrExt80Frame){.kind = C_IR_EXT80_FRAME_CAST, .token = close, .cast = cast});
+                fold->cursor = close + 1;
             }
-            u8 rank = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("inff")) ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
-            *value_out = infinity ? c_ir_ext80_value_infinity(false, rank) : c_ir_ext80_value_default_nan(rank);
-            fold->cursor = close + 1;
-            return true;
+            else
+            {
+                ok = c_ir_ext80_fold_push_frame(fold, (CIrExt80Frame){.kind = C_IR_EXT80_FRAME_GROUP, .token = close,
+                                                                       .saved_limit = fold->limit});
+                fold->limit = close;
+                fold->cursor += 1;
+            }
+        }
+        else
+        {
+            CIrExt80Value* slot = c_ir_ext80_fold_value_slot(fold);
+            if (!slot)
+            {
+                ok = false;
+            }
+            else if (token->kind == C_TOKEN_PREPROCESSING_NUMBER)
+            {
+                u32 number = fold->cursor;
+                fold->cursor += 1;
+                if (!c_ir_ext80_fold_number(fold->preprocess, number, slot))
+                {
+                    fold->blame = number;
+                    ok = false;
+                }
+            }
+            else
+            {
+                ok = c_ir_ext80_fold_builtin(fold, slot);
+            }
+            if (ok)
+            {
+                fold->value_count += 1;
+                *expect_operand = false;
+            }
         }
     }
-    fold->blame = fold->cursor;
-    return false;
+    return ok;
 }
 
-BUSTER_C_INTERNAL bool c_ir_ext80_fold_term(CIrExt80Fold* fold, CIrExt80Value* value_out)
+// One step in operator position, after a value: a binary operator reduces what
+// binds at least as tightly and waits for its right operand; anything else ends
+// the innermost expression, which closes its group or finishes the range.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_operator(CIrExt80Fold* fold, bool* expect_operand, bool* running)
 {
-    CIrExt80Value left = {0};
-    if (!c_ir_ext80_fold_primary(fold, &left))
-    {
-        return false;
-    }
-    while (fold->cursor < fold->limit)
+    bool ok = true;
+    // A group kind here means "not a binary operator".
+    CIrExt80FrameKind kind = C_IR_EXT80_FRAME_GROUP;
+    if (fold->cursor < fold->limit)
     {
         CToken const* token = &fold->preprocess.tokens[fold->cursor];
-        bool multiply = c_token_is_punctuator(token, C_PUNCTUATOR_STAR);
-        if (!multiply && !c_token_is_punctuator(token, C_PUNCTUATOR_SLASH))
-        {
-            break;
-        }
-        u32 operator_index = fold->cursor;
+        kind = c_token_is_punctuator(token, C_PUNCTUATOR_PLUS)    ? C_IR_EXT80_FRAME_ADD
+               : c_token_is_punctuator(token, C_PUNCTUATOR_MINUS) ? C_IR_EXT80_FRAME_SUBTRACT
+               : c_token_is_punctuator(token, C_PUNCTUATOR_STAR)  ? C_IR_EXT80_FRAME_MULTIPLY
+               : c_token_is_punctuator(token, C_PUNCTUATOR_SLASH) ? C_IR_EXT80_FRAME_DIVIDE
+                                                                  : C_IR_EXT80_FRAME_GROUP;
+    }
+    u32 precedence = c_ir_ext80_frame_precedence(kind);
+    while (ok && fold->frame_count && fold->frames[fold->frame_count - 1].kind != C_IR_EXT80_FRAME_GROUP &&
+           c_ir_ext80_frame_precedence(fold->frames[fold->frame_count - 1].kind) >= precedence)
+    {
+        ok = c_ir_ext80_fold_reduce(fold);
+    }
+    if (ok && kind != C_IR_EXT80_FRAME_GROUP)
+    {
+        ok = c_ir_ext80_fold_push_frame(fold, (CIrExt80Frame){.kind = kind, .token = fold->cursor});
         fold->cursor += 1;
-        CIrExt80Value right = {0};
-        if (!c_ir_ext80_fold_primary(fold, &right))
+        *expect_operand = true;
+    }
+    else if (ok && fold->frame_count)
+    {
+        CIrExt80Frame group = fold->frames[fold->frame_count - 1];
+        if (fold->cursor != group.token)
         {
-            return false;
+            fold->blame = fold->cursor;
+            ok = false;
         }
-        if (!c_ir_ext80_fold_apply(multiply ? C_PUNCTUATOR_STAR : C_PUNCTUATOR_SLASH, left, right, &left))
+        else
         {
-            fold->blame = operator_index;
-            return false;
+            fold->frame_count -= 1;
+            fold->limit = group.saved_limit;
+            fold->cursor = group.token + 1;
         }
     }
-    *value_out = left;
-    return true;
+    else if (ok)
+    {
+        *running = false;
+    }
+    return ok;
 }
 
-BUSTER_C_INTERNAL bool c_ir_ext80_fold_sum(CIrExt80Fold* fold, CIrExt80Value* value_out)
+// Evaluate the range [fold->cursor, fold->limit).  On success the cursor is
+// where the expression stopped; the caller decides whether that is the end.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_expression(CIrExt80Fold* fold, CIrExt80Value* value_out)
 {
-    CIrExt80Value left = {0};
-    if (!c_ir_ext80_fold_term(fold, &left))
+    CIrExt80Frame inline_frames[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    CIrExt80Value inline_values[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    // Every frame and value consumes a token, so the range length bounds both.
+    u32 capacity = fold->limit - fold->cursor + 1;
+    bool ok = true;
+    if (capacity <= C_IR_EXT80_FOLD_INLINE_CAPACITY)
     {
-        return false;
+        fold->frames = inline_frames;
+        fold->values = inline_values;
     }
-    while (fold->cursor < fold->limit)
+    else
     {
-        CToken const* token = &fold->preprocess.tokens[fold->cursor];
-        bool add = c_token_is_punctuator(token, C_PUNCTUATOR_PLUS);
-        if (!add && !c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
+        fold->frames = arena_allocate(fold->arena, CIrExt80Frame, capacity);
+        fold->values = arena_allocate(fold->arena, CIrExt80Value, capacity);
+        if (!fold->frames || !fold->values)
         {
-            break;
-        }
-        u32 operator_index = fold->cursor;
-        fold->cursor += 1;
-        CIrExt80Value right = {0};
-        if (!c_ir_ext80_fold_term(fold, &right))
-        {
-            return false;
-        }
-        if (!c_ir_ext80_fold_apply(add ? C_PUNCTUATOR_PLUS : C_PUNCTUATOR_MINUS, left, right, &left))
-        {
-            fold->blame = operator_index;
-            return false;
+            fold->capacity_exceeded = true;
+            ok = false;
         }
     }
-    *value_out = left;
-    return true;
+    fold->capacity = capacity;
+    fold->frame_count = 0;
+    fold->value_count = 0;
+    bool expect_operand = true;
+    bool running = ok;
+    while (running)
+    {
+        ok = expect_operand ? c_ir_ext80_fold_operand(fold, &expect_operand) : c_ir_ext80_fold_operator(fold, &expect_operand, &running);
+        running = running && ok;
+    }
+    if (ok)
+    {
+        *value_out = fold->values[0];
+    }
+    return ok;
 }
 
 // The entry point both static x87 writers use: the scalar global and one
@@ -12979,15 +13146,16 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_sum(CIrExt80Fold* fold, CIrExt80Value* va
 BUSTER_C_SHARED bool c_semantic_ext80_fold_initializer(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end,
                                                          u64* significand_out, u16* exponent_sign_out, String8* message, u32* location)
 {
-    CIrExt80Fold fold = {.preprocess = preprocess, .cursor = start, .limit = end, .blame = start};
+    CIrExt80Fold fold = {.preprocess = preprocess, .arena = arena, .cursor = start, .limit = end, .blame = start};
     CIrExt80Value value = {0};
-    bool folded = start < end && c_ir_ext80_fold_sum(&fold, &value);
+    bool folded = start < end && c_ir_ext80_fold_expression(&fold, &value);
     bool valid = folded && fold.cursor == end;
     if (!valid)
     {
         u32 blame = folded ? fold.cursor : fold.blame;
         String8 spelling = blame < preprocess.token_count ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[blame]) : (String8){0};
-        *message = spelling.length ? string_format(arena, S8("cannot fold '{S8}' in an x86 long double static initializer"), spelling)
+        *message = fold.capacity_exceeded ? S8("x86 long double static initializer exceeds the constant folder's stack capacity")
+                   : spelling.length ? string_format(arena, S8("cannot fold '{S8}' in an x86 long double static initializer"), spelling)
                                    : S8("unsupported x86 long double static initializer");
         *location = blame;
     }

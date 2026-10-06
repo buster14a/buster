@@ -33158,6 +33158,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_integer_global_initializers
     return result;
 }
 
+// The x87 initializer folder keeps its pending operators on an explicit stack
+// sized from the token count, so nesting depth is not a limit (#2779).  Each
+// row nests one operator form `depth` times around 1.0L and pins the exact
+// ten-byte image at the depths either side of the old 64-level cap and far
+// beyond it.  Shape 0 is parentheses, 1 a unary-minus chain, 2 a chain of long
+// double casts, 3 nested `(2.0L*` groups whose value is 2^depth, and 4 a group
+// holding a negation of a cast at every level.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_deep_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {63, 64, 8192};
+    String8 prefixes[] = {S8("("), S8("- "), S8("(long double)"), S8("(2.0L*"), S8("(-(long double)")};
+    String8 suffixes[] = {S8(")"), S8(""), S8(""), S8(")"), S8(")")};
+    String8 triples[] = {S8("x86_64-unknown-linux-gnu"), S8("x86_64-apple-macos")};
+    for (u32 triple_index = 0; triple_index < BUSTER_ARRAY_LENGTH(triples); triple_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(triples[triple_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(prefixes); shape += 1)
+        {
+            for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+            {
+                u32 depth = depths[depth_index];
+                TemporalArena temporary = scratch_begin(0, 0);
+                String8 head = S8("static long double deep = ");
+                String8 core = S8("1.0L");
+                String8 tail = S8("; int main(void) { return 0; }");
+                u64 length = head.length + (u64)depth * (prefixes[shape].length + suffixes[shape].length) + core.length + tail.length;
+                char8* bytes = arena_allocate(temporary.arena, char8, length);
+                u64 cursor = 0;
+                memcpy(bytes + cursor, head.pointer, head.length);
+                cursor += head.length;
+                for (u32 level = 0; level < depth; level += 1)
+                {
+                    memcpy(bytes + cursor, prefixes[shape].pointer, prefixes[shape].length);
+                    cursor += prefixes[shape].length;
+                }
+                memcpy(bytes + cursor, core.pointer, core.length);
+                cursor += core.length;
+                for (u32 level = 0; level < depth; level += 1)
+                {
+                    memcpy(bytes + cursor, suffixes[shape].pointer, suffixes[shape].length);
+                    cursor += suffixes[shape].length;
+                }
+                memcpy(bytes + cursor, tail.pointer, tail.length);
+                String8 source = {.pointer = bytes, .length = length};
+                // 1.0L is 0x3fff with the integer bit set.  The multiply shape
+                // is 2^depth, and the negating shapes flip the sign once per
+                // level, so an odd depth is negative.
+                u32 exponent = 0x3fff + (shape == 3 ? depth : 0);
+                bool negative = (shape == 1 || shape == 4) && (depth & 1);
+                u8 expected[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+                                   (u8)(exponent & 0xff), (u8)((exponent >> 8) | (negative ? 0x80 : 0)), 0, 0, 0, 0, 0, 0};
+                CPreprocessResult preprocess = {0};
+                CParseResult parse = {0};
+                CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, triples[triple_index], parsed_target.target, &preprocess, &parse);
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.program != 0);
+                if (lowered.program && c_test_target_uses_x86_f80_abi(parsed_target.target))
+                {
+                    IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, S8("deep"));
+                    BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected, 16));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -43914,6 +43990,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wasm_long_double_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_android_boundaries);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_deep_initializers);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
