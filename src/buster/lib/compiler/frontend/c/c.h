@@ -1667,6 +1667,10 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
+    // Resolve every pending SSA parameter of a local initialized only at its
+    // declaration through the general predecessor walk. The output must not
+    // change; tests use it as the differential reference for the shortcut.
+    bool disable_declaration_shortcut;
     bool sysv_unnamed_bitfields_integer;
     // No consumer will read debug information (-g0): lowered functions carry
     // no IrDebugLocal records. Their only readers are the debug-value, debug

@@ -8,6 +8,8 @@
  * wait4 page-fault and context-switch counts after the wall interval ends.
  * Their availability bits distinguish an observed zero from an unsupported
  * platform or failed wait. They are diagnostics, never PMU events or gates.
+ * tp_process_cpus pins the child to a whole TpCpuSet; tp_process keeps the
+ * single --cpu form. Unsupported placement fails the launch, never runs unpinned.
  */
 #ifndef BUSTER_THROUGHPUT_PLATFORM_H
 #define BUSTER_THROUGHPUT_PLATFORM_H
@@ -24,6 +26,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#include "cpuset.h"
 
 #define TP_PATH_CAP 4096
 #define TP_COUNTERS 6
@@ -124,13 +127,23 @@ static int tp_first_allowed_cpu(void)
     return cpu;
 }
 
-static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
-                            unsigned timeout_seconds, int cpu, int counters)
+static TpProcess tp_process_cpus(char* const* args, char const* directory, char const* log_path,
+                                 unsigned timeout_seconds, TpCpuSet const* cpus, int counters)
 {
     TpProcess result = {0};
     result.exit_code = -1;
     result.peak_rss_bytes = NAN;
     (void)counters;
+    DWORD_PTR affinity = 0;
+    int affinity_ok = cpus && cpus->count;
+    for (unsigned cpu = 0; cpus && cpu < TP_MAX_CPUS && affinity_ok; ++cpu)
+    {
+        if (tp_cpu_set_has(cpus, cpu))
+        {
+            affinity_ok = cpu < sizeof(DWORD_PTR) * 8;
+            if (affinity_ok) affinity |= (DWORD_PTR)1 << cpu;
+        }
+    }
     for (unsigned i = 0; i < TP_COUNTERS; ++i)
     {
         result.counters[i] = NAN;
@@ -164,9 +177,10 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     if (ok)
     {
         ok = AssignProcessToJobObject(job, process.hProcess) != 0;
-        if (ok && cpu >= 0)
+        if (ok && cpus)
         {
-            ok = (unsigned)cpu < sizeof(DWORD_PTR) * 8 && SetProcessAffinityMask(process.hProcess, (DWORD_PTR)1 << cpu) != 0;
+            ok = affinity_ok && SetProcessAffinityMask(process.hProcess, affinity) != 0;
+            if (!affinity_ok) SetLastError(ERROR_INVALID_PARAMETER);
         }
         if (ok)
         {
@@ -236,6 +250,14 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     }
     scratch_end(temp);
     return result;
+}
+
+static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
+                            unsigned timeout_seconds, int cpu, int counters)
+{
+    TpCpuSet single = {0};
+    if (cpu >= 0 && cpu < TP_MAX_CPUS) tp_cpu_set_add(&single, (unsigned)cpu);
+    return tp_process_cpus(args, directory, log_path, timeout_seconds, cpu >= 0 ? &single : NULL, counters);
 }
 #else
 #include <fcntl.h>
@@ -321,7 +343,7 @@ typedef struct TpDescriptorLaunch
 } TpDescriptorLaunch;
 
 static TpProcess tp_process_internal(char* const* args, char const* directory, char const* log_path,
-                            unsigned timeout_seconds, int cpu, int counters, TpDescriptorLaunch const* descriptor)
+                            unsigned timeout_seconds, TpCpuSet const* cpus, int counters, TpDescriptorLaunch const* descriptor)
 {
     TpProcess result = {0};
     result.exit_code = -1;
@@ -334,6 +356,23 @@ static TpProcess tp_process_internal(char* const* args, char const* directory, c
         result.running_fraction[i] = NAN;
         result.counter_errors[i] = counters ? ENOSYS : 0;
     }
+    /* The child must not allocate after fork: translate the set beforehand. An
+     * empty set or one beyond cpu_set_t is reported from the child's CPU stage. */
+    int pin_error = cpus && !cpus->count ? EINVAL : 0;
+#ifdef __linux__
+    cpu_set_t pinned;
+    CPU_ZERO(&pinned);
+    for (unsigned cpu = 0; cpus && cpu < TP_MAX_CPUS && !pin_error; ++cpu)
+    {
+        if (tp_cpu_set_has(cpus, cpu))
+        {
+            if (cpu >= CPU_SETSIZE) pin_error = EINVAL;
+            else CPU_SET(cpu, &pinned);
+        }
+    }
+#else
+    if (cpus && !pin_error) pin_error = ENOSYS;
+#endif
     int ready[2] = {-1, -1}, launch[2] = {-1, -1};
     int log = descriptor ? fcntl(descriptor->log, F_DUPFD_CLOEXEC, 3) :
               open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -395,23 +434,12 @@ static TpProcess tp_process_internal(char* const* args, char const* directory, c
             failure.stage = TP_LAUNCH_DIRECTORY;
             failure.error = errno;
         }
-        if (!failure.error && cpu >= 0)
+        if (!failure.error && cpus)
         {
             failure.stage = TP_LAUNCH_CPU;
+            failure.error = pin_error;
 #ifdef __linux__
-            cpu_set_t set;
-            CPU_ZERO(&set);
-            if (cpu >= CPU_SETSIZE)
-            {
-                failure.error = EINVAL;
-            }
-            else
-            {
-                CPU_SET(cpu, &set);
-                if (sched_setaffinity(0, sizeof(set), &set) != 0) failure.error = errno;
-            }
-#else
-            failure.error = ENOSYS;
+            if (!failure.error && sched_setaffinity(0, sizeof(pinned), &pinned) != 0) failure.error = errno;
 #endif
         }
         char byte;
@@ -678,10 +706,18 @@ static TpProcess tp_process_internal(char* const* args, char const* directory, c
     return result;
 }
 #ifndef TP_PROCESS_DESCRIPTOR_ONLY
+static TpProcess tp_process_cpus(char* const* args, char const* directory, char const* log_path,
+                                 unsigned timeout_seconds, TpCpuSet const* cpus, int counters)
+{
+    return tp_process_internal(args, directory, log_path, timeout_seconds, cpus, counters, NULL);
+}
+
 static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
                             unsigned timeout_seconds, int cpu, int counters)
 {
-    TpProcess result = tp_process_internal(args, directory, log_path, timeout_seconds, cpu, counters, NULL);
+    TpCpuSet single = {0};
+    if (cpu >= 0 && cpu < TP_MAX_CPUS) tp_cpu_set_add(&single, (unsigned)cpu);
+    TpProcess result = tp_process_internal(args, directory, log_path, timeout_seconds, cpu >= 0 ? &single : NULL, counters, NULL);
     return result;
 }
 #endif
