@@ -11,12 +11,12 @@
       "id": "build:bench_throughput",
       "kind": "build-command",
       "validation": "performance",
-      "measures": "native compiler throughput corpus, paired baseline/candidate",
+      "measures": "native compiler throughput corpus, paired baseline/candidate; its scale subcommand measures multi-TU -fcompile-jobs scaling on topology-checked CPU sets (#424)",
       "zen5": {
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "No 9700X route yet. A throughput claim needs a pull-compare or a new reviewed profile that runs this corpus on the 9700X."
+        "resolution": "No 9700X route yet. A throughput claim needs a pull-compare or a new reviewed profile that runs this corpus on the 9700X. A scaling claim needs a scale result bundle produced on the 9700X itself."
       }
     },
     {

@@ -43,6 +43,10 @@ captures (#2741).
   `--workload macros --workload aggregate-abi`; custom sets require `--no-guard`
   and preserve the default CI corpus. Their counts/hashes and full job-capacity
   cross product are covered by the native harness tests.
+  `scale` measures native multi-TU compile-and-link with `-fcompile-jobs=W` on
+  the first W physical cores of an explicit, permitted `--cpu-set`, and reports
+  speedup beside CPU-work and memory inflation without a gate; see its
+  [README section](../../tools/throughput/README.md#multi-tu-scaling-scale).
   `check-workload` provides a separate, non-timing preflight for the pinned
   cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors: it hashes the complete
   staged tree plus compiler and oracle evidence, but always reports
