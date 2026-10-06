@@ -244,7 +244,7 @@ Focused controls, without compiling the full compiler matrix:
 ```sh
 python3 tools/matrix_shard_test.py -v
 python3 tools/coverage_manifest_test.py -v
-python3 tests/ci_tools_test.py -v
+python3 tools/ci_workflow_policy_test.py -v
 python3 tools/check_action_pins.py
 ```
 
