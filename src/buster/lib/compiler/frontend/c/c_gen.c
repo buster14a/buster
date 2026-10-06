@@ -1219,11 +1219,9 @@ struct CIrSignature
     bool valid;
     bool body_supported;
     bool returns_void;
-    // Reaching the closing brace of this function's body produces a zero
-    // rather than being undefined. C 5.1.2.2.3 says that of `main` alone, so
-    // this is set for a file-scope `main` whose return type is `int` and for
-    // nothing else; every other non-void function terminates the fall-off
-    // with unreachable, which is what Clang and GCC emit.
+    // C 5.1.2.2.3 gives file-scope int main a defined implicit zero.
+    // Other non-void falloffs retain a return edge for discarded calls,
+    // without giving a defined value to a caller that uses the result.
     bool returns_zero_at_end;
     bool is_variadic;
     // The callee's declaration carried _Noreturn, __attribute__((noreturn)),
@@ -41819,16 +41817,16 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         }
         else
         {
-            // Only the root body task has no continuation, so this is the end
-            // of a non-void function's body. Reaching the closing brace is
-            // undefined only if the caller uses the value (C 6.9.1p12), so
-            // this is not a refusal: terminate with unreachable, which is what
-            // Clang and GCC emit. sbase's dc ends `regname` with a call to its
-            // own non-noreturn error(), and the bc its tests drive is
-            // yacc-generated with the same shape.
-            IrSourceRange unreachable_source = declaration_source;
-            IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
-            c_ir_append_instruction(builder, unreachable, unreachable_source);
+            // A discarded result keeps this return edge and the scope effects
+            // emitted above. C 6.9.1p12 gives no defined result when it is used;
+            // an arbitrary typed value completes canonical RETURN, without
+            // claiming that control cannot reach the closing brace.
+            CToken token = builder->preprocess.tokens[builder->parse.declarations[builder->declaration_index].token_start];
+            IrValueId value = c_ir_emit_zero_value(builder, builder->return_type, token);
+            if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_terminate(builder, IR_OPCODE_RETURN, &value, 1, 0, 0, declaration_source))
+            {
+                return false;
+            }
         }
     }
     return true;
