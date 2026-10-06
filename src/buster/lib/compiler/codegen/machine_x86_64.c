@@ -2619,7 +2619,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128(MachineX64Selector* select
     IrFunction* function = selector->function;
 
     bool selected = false;
-    if (source_type && cast_target_type && source_type->kind == IR_TYPE_INTEGER && cast_target_type->kind == IR_TYPE_INTEGER)
+    if (source_type && cast_target_type && (source_type->kind == IR_TYPE_INTEGER ||
+         (source_type->kind == IR_TYPE_BOOLEAN && instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND)) &&
+        cast_target_type->kind == IR_TYPE_INTEGER)
     {
         bool source_integer128 = source_type->bit_width == 128;
         bool target_integer128 = cast_target_type->bit_width == 128;
@@ -2630,7 +2632,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128(MachineX64Selector* select
                                  instruction->conversion_operation == IR_CONVERSION_IDENTITY);
         bool truncate_i128 = source_integer128 && !target_integer128 && cast_target_type->bit_width <= 64 &&
                              instruction->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE;
-        bool extend_i128 = target_integer128 && !source_integer128 && source_type->bit_width >= 8 && source_type->bit_width <= 64 &&
+        bool extend_i128 = target_integer128 && !source_integer128 && source_bits >= 8 && source_bits <= 64 &&
                            (instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
                             instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND);
         if (reinterpret_i128)

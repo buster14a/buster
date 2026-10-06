@@ -133,7 +133,9 @@ the validated merge revision against its first parent.
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
 `0fb54300b56512754221d80adda85ddb9815bceb` (0.9.28rc) bootstraps this tree
-without changing those initializers. Keep the chosen TCC source/binary identity
+without changing those initializers, so 0.9.28rc is the minimum supported
+TinyCC. `build.c` checks `__TINYC__` and stops an older TCC with an `#error`
+naming that minimum, before the first shared source it would reject. Keep the chosen TCC source/binary identity
 with local validation evidence; the older compiler's failure is not a reason
 to report a Clang-built driver as the canonical TCC bootstrap.
 
@@ -368,8 +370,9 @@ from a shared pool in declaration order and a fresh CI checkout has no
 `BUSTER_MATRIX_DIRECT=1` only to diagnose the retained legacy scheduler,
 `BUSTER_MATRIX_NO_TREE_ORDER=1` to restore the previous declaration order, and
 `BUSTER_MATRIX_THREADS=<n>` to state a CPU budget instead of the detected one
-(`get_nprocs()` ignores CPU affinity, so `taskset` alone cannot reproduce a
-small runner's admission behavior). The last two exist so the ordering can be
+(the detected count honours CPU affinity on Linux and Windows, so `taskset`
+narrows it too, but the variable states the budget without confining the
+processes). The last two exist so the ordering can be
 A/B measured on one host. When artifact fan-out is enabled on the supported
 desktop CI platforms, the canonical trusted Clang Release tree also gets a
 self-host worker in this same pool. The build-driver boundary is mandatory:
