@@ -7,4 +7,4 @@
 # "9700X compiler benchmark (pull request)" on the head commit, with the lab's
 # summary.json in the run's evidence artifact. See README.md in this directory.
 #
-# request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
+# request: issue #1321 PR #2771 SSA finish declaration-definition shortcut
