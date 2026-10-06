@@ -72,6 +72,19 @@ physical device/inode hashes vary between simulator app containers, so probe
 counts from two independently created file sets are not a stable ratio. The
 direct table workload retains its cross-size ratio check on fixed path keys.
 
+Each translation unit also keeps a probe cache (`CIncludeProbeTable`) keyed by
+(search directory, header name). It records misses and hits, and a hit keeps
+its resolved spelling plus the identity captured by the probe that opened it.
+`#include`, `#include_next`, `#import` and `__has_include` consult it before
+the file system, so each missing path is opened at most once per TU.
+A cached hit is decided by `c_include_suppressed` on that identity's record
+before anything is opened, so a suppressed re-include makes no system call.
+An inclusion that lexes maps the path again. If the new descriptor's identity
+differs, because the file was replaced, that identity governs. The cache
+assumes search directories do not gain or lose headers during one TU.
+`file_map_read` likewise does not reopen a path through its read fallback
+after POSIX `open()` reports `ENOENT` or `ENOTDIR`.
+
 ## Builtin stddef inclusion requests
 
 The embedded `<stddef.h>` supports independent `__need_ptrdiff_t`,

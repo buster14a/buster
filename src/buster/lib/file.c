@@ -295,6 +295,9 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
 #else
     // Padding and alignment requests cannot be served by a raw mapping.
     bool mapping_unavailable = false;
+    // A path that does not exist cannot be read either; reopening it through
+    // the read fallback would only repeat the failed open().
+    bool path_missing = false;
 #if BUSTER_INCLUDE_TESTS
     mapping_unavailable = os_file_test_map_unavailable(path);
 #endif
@@ -369,11 +372,15 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
                 }
                 close(file_descriptor);
             }
+            else
+            {
+                path_missing = errno == ENOENT || errno == ENOTDIR;
+            }
         }
     }
 #endif
 
-        if (!result.bytes.pointer && !options.map_required)
+        if (!result.bytes.pointer && !path_missing && !options.map_required)
         {
             file_map_read_fallback(arena, path, options, &result);
         }
