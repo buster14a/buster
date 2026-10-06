@@ -5456,12 +5456,13 @@ BUSTER_C_INTERNAL bool c_parse_expression_real_kind(CTypeKind kind)
 BUSTER_C_INTERNAL bool c_parse_range_is_null_pointer_constant(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                 CTypeId type_id, u32 start, u32 end);
 
-BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, CParseResult* result, CTypeId type_id, bool decay);
+BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId type_id,
+                                                                   bool decay);
 
 BUSTER_C_INTERNAL String8 c_parse_invalid_unary_operand_message(CParseResult* result, CPreprocessResult preprocess, u32 operator_index, CTypeId operand)
 {
     String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[operator_index]);
-    String8 type = c_parse_assignment_conversion_type_name(result->arena, result, operand, false);
+    String8 type = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, operand, false);
     String8 message = string_format(result->arena, S8("invalid operand to unary '{S8}' (have '{S8}')"), spelling, type);
     return message;
 }
@@ -6212,7 +6213,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     pointer->kind != C_TYPE_FUNCTION && !machine->expression_constraint.length)
                 {
                     machine->expression_constraint = string_format(result->arena, S8("indirection requires a pointer operand (have '{S8}')"),
-                        c_parse_assignment_conversion_type_name(result->arena, result, last, false));
+                        c_parse_assignment_conversion_type_name(result->arena, result, preprocess, last, false));
                     machine->expression_constraint_token = task->end;
                 }
                 last = pointer->kind == C_TYPE_POINTER || pointer->kind == C_TYPE_ARRAY ? pointer->element_type
@@ -6230,7 +6231,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 if (kind == C_TYPE_STRUCT || kind == C_TYPE_UNION || kind == C_TYPE_VOID)
                 {
                     machine->expression_constraint = string_format(result->arena, S8("conditional operator requires a scalar condition (have '{S8}')"),
-                        c_parse_assignment_conversion_type_name(result->arena, result, last, false));
+                        c_parse_assignment_conversion_type_name(result->arena, result, preprocess, last, false));
                     machine->expression_constraint_token = task->split;
                 }
             }
@@ -6333,8 +6334,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     : invalid
                     ? string_format(result->arena, S8("invalid operands to binary '{S8}' (have '{S8}' and '{S8}')"),
                                     c_token_spelling(preprocess.spelling_base, token),
-                                    c_parse_assignment_conversion_type_name(result->arena, result, left, false),
-                                    c_parse_assignment_conversion_type_name(result->arena, result, right, false))
+                                    c_parse_assignment_conversion_type_name(result->arena, result, preprocess, left, false),
+                                    c_parse_assignment_conversion_type_name(result->arena, result, preprocess, right, false))
                     : S8("this operator has no complex form");
                 machine->expression_constraint_token = task->end;
             }
@@ -25393,12 +25394,12 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                         : string_format(result->arena,
                             arrow ? S8("member reference '->{S8}' requires a pointer to a structure or union (have '{S8}')")
                                   : S8("member reference '.{S8}' requires a structure or union operand (have '{S8}')"),
-                            name, c_parse_assignment_conversion_type_name(result->arena, result, written_type, false));
+                            name, c_parse_assignment_conversion_type_name(result->arena, result, preprocess, written_type, false));
                     c_parse_lowering_constraint_consider(diagnostic, message, index, index + 1);
                 }
                 else if (call && value.kind != C_TYPE_FUNCTION)
                 {
-                    String8 type_name = c_parse_assignment_conversion_type_name(result->arena, result, written_type, false);
+                    String8 type_name = c_parse_assignment_conversion_type_name(result->arena, result, preprocess, written_type, false);
                     String8 message = operand_start + 1 == index && preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER
                         ? string_format(result->arena, S8("called object '{S8}' is not a function or function pointer (have '{S8}')"),
                                         c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start]), type_name)
@@ -29842,8 +29843,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             };
             c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
                                string_format(arena, S8("conflicting declaration of '{S8}' (previous type '{S8}', new type '{S8}')"), declaration->name,
-                                             c_parse_assignment_conversion_type_name(arena, &result, conflicting->type, false),
-                                             c_parse_assignment_conversion_type_name(arena, &result, declaration->type, false)));
+                                             c_parse_assignment_conversion_type_name(arena, &result, preprocess, conflicting->type, false),
+                                             c_parse_assignment_conversion_type_name(arena, &result, preprocess, declaration->type, false)));
             continue;
         }
         CEntityId entity = {
