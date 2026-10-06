@@ -761,9 +761,12 @@ class FakeReader:
 
     def __init__(self, main, heads):
         self.main, self.heads, self.checks, self.reads = main, dict(heads), {}, []
+        self.runs = {}
 
     def get(self, path, **query):
         self.reads.append(path)
+        if path.startswith("actions/runs/"):
+            return self.runs[path]
         if path == "git/ref/heads/main":
             sha = self.main
         else:
@@ -773,7 +776,7 @@ class FakeReader:
     def pages(self, path, field, **query):
         self.reads.append(path)
         assert field == "check_runs" and query.get("check_name") in (
-            gate.CONTEXT, gate.RETIREMENT_CONTEXT)
+            gate.CONTEXT, gate.RETIREMENT_CONTEXT, gate.COMPILER_BENCHMARK_CONTEXT)
         assert query["filter"] == "all" and query["app_id"] == gate.GITHUB_ACTIONS_APP_ID
         return [dict(row) for row in self.checks.get(path.split("/")[1], [])
                 if row["name"] == query["check_name"]]
@@ -847,9 +850,10 @@ class ReconcileTests(unittest.TestCase):
         gate.git(self.trusted, "fetch", "-q", "origin", "main")
         gate.git(self.trusted, "checkout", "-q", "--detach", sha)
 
-    def reconcile(self):
+    def reconcile(self, compiler_benchmark="off"):
         arguments = SimpleNamespace(repo_root=self.trusted, repository="buster14a/buster",
-                                    details_url="https://example.invalid/run")
+                                    details_url="https://example.invalid/run",
+                                    compiler_benchmark=compiler_benchmark)
         collected = iter(self.collected)
         with patch.object(gate, "GitHub", return_value=self.reader), \
                 patch.object(gate, "CheckWriter", return_value=self.writer), \
@@ -892,6 +896,72 @@ class ReconcileTests(unittest.TestCase):
         groups, _ = self.reconcile()
         self.assertEqual(groups[self.g1]["state"], "published")
         self.assertEqual(len(self.writer.sent), 2)
+
+    def benchmark(self, head, conclusion="success", status="completed", marker=True, path=None, run=77, check=500):
+        """Publish one 9700X compiler check run on head, as the bench workflow would."""
+        self.reader.runs[f"actions/runs/{run}"] = {
+            "path": path or gate.COMPILER_BENCHMARK_WORKFLOW, "event": "workflow_run",
+            "repository": {"full_name": "buster14a/buster"}}
+        row = {"id": check, "name": gate.COMPILER_BENCHMARK_CONTEXT, "head_sha": head,
+               "app": {"id": gate.GITHUB_ACTIONS_APP_ID}, "status": status, "conclusion": conclusion,
+               "external_id": gate.COMPILER_BENCHMARK_MARKER + ":" + head if marker else "other",
+               "details_url": f"https://github.com/buster14a/buster/actions/runs/{run}/attempts/1",
+               "output": {"title": "Measured (report-only): wall B/A 1.0100, slower"}}
+        self.reader.checks.setdefault(head, []).append(row)
+
+    def test_compiler_benchmark_off_never_reads_or_waits_for_the_check(self):
+        self.collected = [(self.evidence, []), (self.evidence, [])]
+        groups, report = self.reconcile()
+        self.assertEqual(groups[self.g1]["state"], "admitted")
+        self.assertEqual(groups[self.g1]["detail"]["compiler_benchmark"], {"policy": "off"})
+        self.assertEqual(report["compiler_benchmark"], "off")
+        self.assertFalse(any(row["name"] == gate.COMPILER_BENCHMARK_CONTEXT
+                             for rows in self.reader.checks.values() for row in rows))
+
+    def test_required_compiler_benchmark_waits_then_admits_a_slow_valid_result(self):
+        self.collected = [(self.evidence, [])]
+        groups, _ = self.reconcile("require")
+        self.assertEqual(groups[self.g1]["state"], "pending")
+        self.assertEqual(groups[self.g1]["detail"], [gate.COMPILER_BENCHMARK_CONTEXT + ": not reported"])
+        # G2 waits for its predecessor and is never measured against main early.
+        self.assertEqual(groups[self.g2]["detail"], ["queued predecessor has not landed"])
+        self.benchmark(self.g1, status="in_progress", conclusion=None)
+        self.collected = [(self.evidence, [])]
+        groups, _ = self.reconcile("require")
+        self.assertEqual(groups[self.g1]["detail"], [gate.COMPILER_BENCHMARK_CONTEXT + ": still running"])
+        # A later attempt replaces the earlier one; a slower verdict still admits.
+        self.benchmark(self.g1, check=501)
+        self.collected = [(self.evidence, []), (self.evidence, [])]
+        groups, _ = self.reconcile("require")
+        self.assertEqual(groups[self.g1]["state"], "admitted")
+        benchmark = groups[self.g1]["detail"]["compiler_benchmark"]
+        self.assertEqual((benchmark["policy"], benchmark["evidence"]["check_run_id"],
+                          benchmark["evidence"]["run_id"]), ("require", 501, 77))
+
+    def test_failed_or_foreign_compiler_benchmark_never_admits(self):
+        cases = {"failure": {"conclusion": "failure"}, "neutral": {"conclusion": "neutral"},
+                 "other workflow": {"path": ".github/workflows/ci.yml"}}
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.reader.checks = {}
+                self.writer.sent = []
+                self.benchmark(self.g1, **change)
+                self.collected = [(self.evidence, [])]
+                groups, _ = self.reconcile("require")
+                self.assertEqual(groups[self.g1]["state"], "rejected")
+                self.assertEqual(self.writer.sent[-1][1]["conclusion"], "failure")
+        # A same-name check without the exact-head marker is not evidence.
+        self.reader.checks = {}
+        self.writer.sent = []
+        self.benchmark(self.g1, marker=False)
+        self.collected = [(self.evidence, [])]
+        groups, _ = self.reconcile("require")
+        self.assertEqual(groups[self.g1]["detail"], [gate.COMPILER_BENCHMARK_CONTEXT + ": not reported"])
+
+    def test_compiler_benchmark_policy_is_closed(self):
+        with self.assertRaises(SystemExit):
+            gate.main(["reconcile", "--repo-root", ".", "--repository", "buster14a/buster",
+                       "--details-url", "u", "--output", "o", "--compiler-benchmark", "enforce"])
 
     def native_group(self, native_job):
         gate.git(self.work, "checkout", "-q", "-b", "native-policy", self.main)
@@ -1186,6 +1256,8 @@ class ReconcileTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 10\n", text)
         self.assertIn("cancel-in-progress: false", text)
         self.assertIn("github.event.workflow_run.event == 'merge_group'", text)
+        self.assertIn("COMPILER_BENCHMARK: ${{ vars.BENCH_COMPILER_ADMISSION || 'off' }}", text)
+        self.assertIn('--compiler-benchmark "$COMPILER_BENCHMARK"', text)
         self.assertNotIn("sleep", text)
         for filename in {**gate.CHECKS, **gate.RECONSTRUCTION_CHECK}:
             name = (ROOT / ".github/workflows" / filename).read_text().split("\n", 1)[0]

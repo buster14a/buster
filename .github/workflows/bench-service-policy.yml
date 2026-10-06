@@ -55,6 +55,8 @@ jobs:
           python3 -B tools/bench_direct/workflow_policy_test.py
           python3 -B tools/bench_direct/run_workloads_test.py
           python3 -B tools/bench_direct/authorize_test.py
+          python3 -B tools/bench_direct/authorize_compiler_test.py
+          python3 -B tools/bench_direct/compiler_test.py
       - name: Replay Zen 5 qualification formats
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |

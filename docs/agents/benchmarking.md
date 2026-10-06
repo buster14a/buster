@@ -435,15 +435,20 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   The queued benchmark service, its dispatch workflow and the earlier
   `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
   admitted to the restricted runner group is
-  `.github/workflows/9700x-direct-bench.yml`: it compiles and times the
+  `.github/workflows/9700x-direct-bench.yml`. It compiles and times the
   owner's own pull-request workloads from `benchmarks/9700x/` and reports
   diagnostic, unsealed process latency; see
   [`benchmarks/9700x/README.md`](../../benchmarks/9700x/README.md) and its
-  [admission guide](../../benchmarks/9700x/ADMISSION.md). There is currently
-  no sanctioned compiler A/A or A/B path on that host:
-  `native-retirement-performance-v1` remains blocked and the
-  `zen5-calibration-v1` producer no longer exists. Use the local trusted
-  capture methods above for ad-hoc profiling. Historical audit notes retain
+  [admission guide](../../benchmarks/9700x/ADMISSION.md). Once enabled, it
+  also runs the routine `uarch_lab.py compare` of each owner-authored main
+  merge-queue candidate against its first parent (#2752; frozen
+  `queue-compare-v1` profile, report-only). Each comparison is published as
+  the `9700X compiler benchmark` check on the candidate commit; see
+  [merge-queue admission](../merge-queue-admission.md#9700x-compiler-comparison-2752).
+  That is the only sanctioned compiler A/B path on that host; it runs no
+  profile steps and no A/A. `native-retirement-performance-v1` remains blocked
+  and the `zen5-calibration-v1` producer no longer exists. Use the local
+  trusted capture methods above for ad-hoc profiling. Historical audit notes retain
   the removed workflows and service job numbers only as provenance.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
   the CI critical path, so it is the configuration most worth profiling. Record
