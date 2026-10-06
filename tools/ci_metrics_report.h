@@ -5,7 +5,7 @@
 #ifndef BUSTER_CI_METRICS_REPORT_H
 #define BUSTER_CI_METRICS_REPORT_H
 #include "ci_metrics_collect.h"
-#define CM_SERIES 128u
+#define CM_SERIES 96u
 #define CM_FILES 256u
 typedef struct CmOutputs CmOutputs;
 struct CmOutputs { CmFile files[CM_FILES]; unsigned count; };
@@ -81,7 +81,8 @@ BUSTER_GLOBAL_LOCAL void cm_point(FILE *f, const CmRow *r)
 }
 BUSTER_GLOBAL_LOCAL void cm_stats_text(FILE *f, const CmStats *s)
 {
-    fprintf(f, "n=%u; median %.1f s; MAD %.1f s; %u UTC date buckets", s->n, s->median, s->mad, s->days);
+    if (s->n) fprintf(f, "n=%u; median %.1f s; MAD %.1f s; %u UTC date buckets", s->n, s->median, s->mad, s->days);
+    else fputs("n=0; median/dispersion unavailable", f);
     if (s->p95_available) fprintf(f, "; p95 %.1f s", s->p95);
     else fputs("; p95 unavailable (requires 20)", f);
 }
@@ -89,8 +90,9 @@ BUSTER_GLOBAL_LOCAL void cm_comparison_text(FILE *f, const char *label, const Cm
 {
     fprintf(f, "### %s\n\n**%s**. Baseline: ", label, c->state); cm_stats_text(f, &c->baseline);
     fputs(". Candidate: ", f); cm_stats_text(f, &c->candidate);
-    fprintf(f, ". Change: %+.1f s", c->seconds);
-    if (c->percent_available) fprintf(f, " (%+.1f%%)", c->percent);
+    if (c->baseline.n && c->candidate.n) fprintf(f, ". Change: %+.1f s", c->seconds);
+    else fputs(". Change unavailable", f);
+    if (c->percent_available && c->candidate.n) fprintf(f, " (%+.1f%%)", c->percent);
     else fputs(" (percent unavailable below two-second baseline)", f);
     fprintf(f, ". Observed practical floor %.1f s; candidate variability allowance %.1f s.\n\n",
         c->practical_seconds, c->uncertainty_seconds);
@@ -201,7 +203,7 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
         unsigned recent_count = 0, anchor_count = 0;
         CmStore anchor_store; int anchor_initialized = cm_store_init(&anchor_store);
         valid = anchor_initialized;
-        int available = 0; char *retained = valid ? cm_data_read(t, anchor_path, &available) : NULL;
+        int available = 0; char *retained = valid && series[k].samples ? cm_data_read(t, anchor_path, &available) : NULL;
         if (available < 0) { valid = 0; ++store->gaps; }
         if (retained && valid) valid = cm_import(&anchor_store, retained, strlen(retained));
         for (unsigned i = 0; valid && i < anchor_store.count; ++i)
@@ -298,7 +300,7 @@ BUSTER_GLOBAL_LOCAL int cm_reports(CmTransport *t, CmStore *store, CmOutputs *ou
             {
                 for (unsigned a = 0; a < anchor_count; ++a) cm_emit_row(anchor_output, anchor[a]);
                 char *text = cm_memory(anchor_output); fclose(anchor_output);
-                if (text && (!retained || !cm_equal(text, retained)))
+                if (text && text[0] && (!retained || !cm_equal(text, retained)))
                 {
                     FILE *saved = tmpfile();
                     if (saved) { fputs(text, saved); valid = cm_output(out, anchor_path, saved); }

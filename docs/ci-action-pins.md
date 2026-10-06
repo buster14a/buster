@@ -91,7 +91,7 @@ still fail CI.
    including runtime requirements, authentication handling and post-job cleanup.
 2. Update workflow literals and `APPROVED` in the checker together. Record
    the action path, full commit, tag/date and compatibility changes here.
-3. Run `python3 tools/check_action_pins.py`, `python3 tests/action_pins_test.py`
+3. Run `python3 tools/check_action_pins.py`, `python3 tools/ci_workflow_policy_test.py`
    and `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.
    Mutable references and unapproved SHAs must still fail.
 4. Validate the submitted revision on the affected GitHub jobs before claiming
@@ -150,3 +150,12 @@ attestation of the bundled JavaScript dependency graph. These MIT licenses cover
 the named upstream action projects, not all transitive packages or Buster's
 first-party code. No upstream source, theme, or license text is copied into the
 published site. See [Pages setup and acceptance](github-pages.md).
+
+## Hosted timing reporter dependency
+
+The timing-history consumer uses the same first-party machine-specifications action
+reviewed in #2758 / #2766 at `a36422384d0334a53d4be73bc306b97ccdba4768`.
+It runs before checkout in each executing consumer job. The action and its native
+helper are read from that immutable revision; the consumer adds no hardware probes.
+Universal repository wiring remains owned by #2766, which precedes this feature's
+activation. Buster's first-party license remains unselected under #621.

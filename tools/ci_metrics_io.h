@@ -95,7 +95,7 @@ BUSTER_GLOBAL_LOCAL int cm_process(char *const *args, char **output, size_t limi
 BUSTER_GLOBAL_LOCAL int cm_api(CmTransport *t, const char *path, const char *method,
     const char *body, int raw, char **output, int *missing)
 {
-    int result = 0;
+    int result = 0, last_absent = 0;
     char endpoint[4096], temporary[] = "/tmp/buster-ci-metrics-input-XXXXXX";
     int fd = body ? mkstemp(temporary) : -1, input_ok = !body;
     if (body && fd >= 0)
@@ -123,6 +123,7 @@ BUSTER_GLOBAL_LOCAL int cm_api(CmTransport *t, const char *path, const char *met
             if (body) { args[11] = "--input"; args[12] = temporary; }
             int absent = 0; ++t->requests;
             result = cm_process(args, output, CM_BYTES, &absent);
+            last_absent = absent;
             if (missing) *missing = absent;
             if (absent) allowed = 0;
             if (!result && allowed && attempt + 1 < attempts)
@@ -133,7 +134,7 @@ BUSTER_GLOBAL_LOCAL int cm_api(CmTransport *t, const char *path, const char *met
         }
     }
     if (body && fd >= 0) unlink(temporary);
-    if (!result) ++t->failures;
+    if (!result && !last_absent) ++t->failures;
     return result;
 }
 BUSTER_GLOBAL_LOCAL CmJson cm_api_json(CmTransport *t, const char *path, const char *method, const char *body, int *missing)

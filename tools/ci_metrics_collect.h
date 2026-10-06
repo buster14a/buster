@@ -17,6 +17,7 @@ struct CmCollection
     const char *observed;
     uint64_t selected_job;
     unsigned executions, machine_verified, source_verified, skipped, failed;
+    int source_action_verified;
 };
 BUSTER_GLOBAL_LOCAL const char *cm_machine_value(const CmJson *j, const char *key)
 {
@@ -190,6 +191,34 @@ BUSTER_GLOBAL_LOCAL int cm_workflow_path(char *out, size_t size, const char *ref
     }
     return valid;
 }
+BUSTER_GLOBAL_LOCAL int cm_workflow_source(const char *workflow, const char *key)
+{
+    char declaration[160]; snprintf(declaration, sizeof(declaration), "  %s:", key);
+    char *copy = workflow ? strdup(workflow) : NULL;
+    int in_job = 0, in_source = 0, pinned = 0, mode = 0, bad = 0, count = 0;
+    for (char *line = copy; line && *line; )
+    {
+        char *next = strchr(line, '\n'); if (next) *next++ = 0;
+        size_t indent = strspn(line, " "); const char *text = line + indent;
+        if (cm_equal(line, declaration)) in_job = 1;
+        else if (in_job && indent <= 2 && text[0] && text[0] != '#') in_job = 0;
+        if (in_job && indent == 6 && strncmp(text, "- ", 2) == 0)
+        {
+            in_source = cm_equal(text, "- name: Record actual checkout identity");
+            if (in_source) ++count;
+        }
+        else if (in_source)
+        {
+            if (indent == 8 && cm_equal(text, "uses: buster14a/buster/.github/actions/machine-specifications@" CM_REPORTER)) pinned = 1;
+            else if (indent == 8 && (strncmp(text, "run:", 4) == 0 || strncmp(text, "env:", 4) == 0)) bad = 1;
+            else if (indent == 10 && cm_equal(text, "mode: source")) mode = 1;
+        }
+        line = next;
+    }
+    int result = copy && count == 1 && pinned && mode && !bad;
+    free(copy);
+    return result;
+}
 BUSTER_GLOBAL_LOCAL int cm_workflow_proof(CmCollection *c, const CmJson *machine, CmRow *row, char fields[CM_FIELD_COUNT][CM_FIELD + 1])
 {
     char path[512], endpoint[1024];
@@ -208,6 +237,7 @@ BUSTER_GLOBAL_LOCAL int cm_workflow_proof(CmCollection *c, const CmJson *machine
         valid = valid && cm_workflow_startup(workflow, key, &static_matrix);
         if (valid)
         {
+            c->source_action_verified = cm_workflow_source(workflow, key);
             cm_copy(fields[CM_WORKFLOW], CM_FIELD + 1, path);
             cm_copy(fields[CM_JOB_KEY], CM_FIELD + 1, key);
             cm_copy(fields[CM_WORKFLOW_SHA], CM_FIELD + 1, revision);
@@ -231,6 +261,7 @@ BUSTER_GLOBAL_LOCAL int cm_workflow_proof(CmCollection *c, const CmJson *machine
 BUSTER_GLOBAL_LOCAL int cm_machine(CmCollection *c, const CmJson *jobs, unsigned job, CmRow *row,
     char fields[CM_FIELD_COUNT][CM_FIELD + 1])
 {
+    c->source_action_verified = 0;
     unsigned steps = cm_member(jobs, job, "steps"), startup = 0, source_step = 0, startup_count = 0;
     unsigned step_index = 0;
     for (unsigned step = steps ? jobs->tokens[steps].child : 0; step; step = jobs->tokens[step].next)
@@ -280,7 +311,7 @@ BUSTER_GLOBAL_LOCAL int cm_machine(CmCollection *c, const CmJson *jobs, unsigned
                 row->s[CM_MACHINE_JSON] = cm_keep(c->store, record);
                 valid = row->s[CM_MACHINE_JSON] != NULL;
                 ++c->machine_verified;
-                if (original_log && source_step)
+                if (original_log && source_step && c->source_action_verified)
                 {
                     unsigned source_count = 0;
                     char *source = cm_log_record(original_log, "MACHINE_SOURCE_IDENTITY_JSON ",
@@ -418,7 +449,12 @@ BUSTER_GLOBAL_LOCAL int cm_collect_job(CmCollection *c, const CmJson *j, unsigne
                     ++c->executions;
                 }
             }
-            if (valid) valid = cm_add(c->store, &row) != 0;
+            if (valid)
+            {
+                int added = cm_add(c->store, &row);
+                valid = added != 0;
+                if (added == 1) cm_emit_row(stdout, &row);
+            }
         }
         free(steps);
     }
