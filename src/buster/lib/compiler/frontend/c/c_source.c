@@ -4263,6 +4263,10 @@ CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, Str
         {S8_INITIALIZER("__builtin_rotateright32"), 32, C_INTEGER_TRANSFORM_ROTATE_RIGHT},
         {S8_INITIALIZER("__builtin_rotateright64"), 64, C_INTEGER_TRANSFORM_ROTATE_RIGHT},
     };
+    // Darwin and Wasm spell int64_t as long long even when long is 64 bits.
+    bool apple_target = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool wasm_target = target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64;
+    bool int64_uses_long = target_data_layout(target).unsigned_long_integer.bit_width == 64 && !apple_target && !wasm_target;
     CIntegerTransformBuiltin result = {0};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(entries) && !result.operation; index += 1)
     {
@@ -4272,8 +4276,7 @@ CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, Str
             result.operation = entries[index].operation;
             result.argument_count = result.operation == C_INTEGER_TRANSFORM_BYTE_SWAP ? 1 : 2;
             result.type = result.width == 8 ? C_TYPE_UNSIGNED_CHAR : result.width == 16 ? C_TYPE_UNSIGNED_SHORT :
-                          result.width == 32 ? C_TYPE_UNSIGNED_INT : target_data_layout(target).unsigned_long_integer.bit_width == 64
-                              ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+                          result.width == 32 ? C_TYPE_UNSIGNED_INT : int64_uses_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
         }
     }
     return result;
