@@ -10,6 +10,7 @@ jobs, while a proof that changes after jobs were skipped fails the aggregate.
 source_run binds finalization to the decision receipt and checks discovery for
 competing runs. Only inconclusive discovery reads retry; changed evidence never
 does. cli retains a diagnostic result even when verification fails (#2134).
+Admission metadata is independently proved and retained, never reused as work (#2388).
 """
 
 import argparse
@@ -27,6 +28,7 @@ import urllib.error
 
 import github_ci_time
 from merge_queue_admission import AdmissionError, GitHub, require
+from native_retirement_integration import APIReadError
 
 REPOSITORY = "buster14a/buster"
 REPOSITORY_ID = 1071732997
@@ -70,12 +72,14 @@ DESKTOP = tuple((f"{name} {shard}", f"desktop-{os_name}-{arch}-{shard}",
                     ("macOS AArch64", "macos", "aarch64"),
                     ("Windows x86-64", "windows", "x86_64"),
                     ("Windows AArch64", "windows", "aarch64"))
-                for shard in github_ci_time.COMBINATION_SHARDS)
+                for shard in (("release",) + github_ci_time.SPLIT_CHECK_SHARDS
+                              if name in github_ci_time.SPLIT_CHECK_PLATFORMS
+                              else github_ci_time.COMBINATION_SHARDS))
 DESKTOP_NAMES = frozenset(row[0] for row in DESKTOP)
-ANALYZER_STEPS = ("Bootstrap candidate and select reference build driver",
+ANALYZER_STEPS = ("Bootstrap and identify candidate build driver",
                   "Exercise analyzer failure and coverage controls",
                   "Configure the authoritative split-source database",
-                  "Compare reference analysis and aggregate all module shards")
+                  "Analyze candidate and aggregate all module shards")
 ANALYZER_RECEIPT_STEPS = ("Report reused analyzer validation",
                          "Retain analyzer inventory, results and measurements")
 SOURCE_COVERAGE = REUSED + DESKTOP + (("Clang analyzer shards", "clang-analyzer", ANALYZER_STEPS[-1]),)
@@ -87,7 +91,7 @@ VALIDATION_STEPS = ("Workflow tool regression tests", "Bootstrap wrapper regress
                     "Install mold", "Install latest stable LLVM", "Application compilers",
                     "Combination matrix (Linux, macOS)", "Combination matrix (Windows)",
                     "Collect CMake configure evidence", "Desktop result and reproduction")
-RETAINED_NAMES = tuple(name for name in github_ci_time.COMBINATION_JOBS
+RETAINED_NAMES = tuple(name for name in github_ci_time.combination_jobs()
                        if name not in REUSED_NAMES)
 
 
@@ -135,7 +139,8 @@ def failure_record(error):
     code = "invalid-evidence" if isinstance(error, AdmissionError) else "internal-error"
     if isinstance(error, ReuseError):
         code = error.code
-    elif isinstance(error, urllib.error.HTTPError):
+    elif isinstance(error, urllib.error.HTTPError) or (isinstance(error, APIReadError) and
+                                                      type(error.status) is int):
         code = "http-error"
     elif isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
         code = "transport-or-io-error"
@@ -150,6 +155,8 @@ def failure_record(error):
     result = {"code": code, "type": type(error).__name__, "message": message}
     if isinstance(error, urllib.error.HTTPError):
         result["http_status"] = error.code
+    elif isinstance(error, APIReadError) and type(error.status) is int:
+        result["http_status"] = error.status
     return result
 
 
@@ -191,6 +198,11 @@ def discovery_retryable(error):
     # attempts, permission errors, malformed pages, or exhausted page bounds.
     if isinstance(error, ReuseError):
         retry = error.code in ("missing-source", "moving-list")
+    elif isinstance(error, APIReadError):
+        # GitHub.get wraps exhausted GET errors from the shared reader. Only
+        # transport, throttling and server failures are inconclusive evidence.
+        retry = error.status is None or (type(error.status) is int and
+                                         (error.status == 429 or 500 <= error.status < 600))
     elif isinstance(error, urllib.error.HTTPError):
         retry = error.code == 429 or 500 <= error.code < 600
     else:
@@ -207,7 +219,10 @@ def source_run(api, sha, *, expected=None, diagnostics=None):
         source = read_source(api, expected["source_run_id"], diagnostics)
         check_source(source, sha, expected["source_run_id"], expected["source_branch"],
                      expected["source_completed_at"])
-    delays = DISCOVERY_DELAYS if expected is not None else ()
+    # Recollect at most three complete discovery snapshots in either phase.
+    # Per-GET retries have their own budget; these delays are not a wall-time
+    # bound. No pages, jobs or artifacts are borrowed from failed snapshots.
+    delays = DISCOVERY_DELAYS
     for attempt in range(len(delays) + 1):
         diagnostics["stage"] = "source-discovery"
         snapshot = {"read": attempt + 1, "path": DISCOVERY_PATH,
@@ -244,10 +259,11 @@ def source_run(api, sha, *, expected=None, diagnostics=None):
             time.sleep(delays[attempt])
             # A source rerun/failure during backoff must stop immediately, even
             # when discovery is still inconsistent on the following read.
-            diagnostics["stage"] = "bound-source"
-            source = read_source(api, expected["source_run_id"], diagnostics)
-            check_source(source, sha, expected["source_run_id"], expected["source_branch"],
-                         expected["source_completed_at"])
+            if expected is not None:
+                diagnostics["stage"] = "bound-source"
+                source = read_source(api, expected["source_run_id"], diagnostics)
+                check_source(source, sha, expected["source_run_id"], expected["source_branch"],
+                             expected["source_completed_at"])
         else:
             break
     diagnostics["stage"] = "source-run"
@@ -262,12 +278,45 @@ def source_run(api, sha, *, expected=None, diagnostics=None):
     return source
 
 
-def successful_source_jobs(api, source, sha):
+def reconciled_check_inventory(api, sha):
+    """Checks-only complete snapshot; verify stable bounded totals on every page."""
+    rows = []
+    total = None
+    page = 1
+    while total is None or len(rows) < total:
+        require(page <= 10, "reconciler check pagination limit reached")
+        batch = api.get(f"commits/{sha}/check-runs", filter="all", per_page=100, page=page)
+        require(isinstance(batch, dict), "malformed reconciler check page")
+        count = batch.get("total_count")
+        require(type(count) is int and 0 <= count <= 1000 and
+                (total is None or count == total),
+                "missing, changing or excessive reconciler check inventory")
+        total = count
+        chunk = batch.get("check_runs")
+        require(isinstance(chunk, list) and len(chunk) <= 100 and
+                len(rows) + len(chunk) <= total and (bool(chunk) or len(rows) == total),
+                "incomplete reconciler check pagination")
+        rows.extend(chunk)
+        require(len(chunk) == 100 or len(rows) == total, "partial reconciler check page")
+        page += 1
+    return rows
+
+
+def successful_source_jobs(api, source, sha, *, diagnostics=None):
+    diagnostics = {} if diagnostics is None else diagnostics
     run_id = source["id"]
     jobs = api.pages(f"actions/runs/{run_id}/attempts/1/jobs", "jobs")
+    try:
+        checks = (reconciled_check_inventory(api, sha)
+                  if github_ci_time.reconciled_job_candidates(jobs) else [])
+        jobs, diagnostics["source_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
+            jobs, run_id, 1, sha, checks)
+    except ValueError as error:
+        raise AdmissionError(str(error)) from error
     jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha)
     require(not extras, "; ".join(extras))
     errors = github_ci_time.validate_required_jobs(jobs, run_id, 1, sha,
+                                                   expected_names=github_ci_time.combination_jobs(),
                                                    complete_active=False)
     require(not errors, "; ".join(errors))
     identifiers = [job.get("id") for job in jobs]
@@ -339,7 +388,7 @@ def verify_source(api, sha, current_run_id, workflow_blob, now, *, expected=None
     require(blob.get("type") == "file" and blob.get("sha") == workflow_blob,
             "workflow revision differs from exact checkout")
     diagnostics["stage"] = "source-jobs"
-    jobs = successful_source_jobs(api, source, sha)
+    jobs = successful_source_jobs(api, source, sha, diagnostics=diagnostics)
     diagnostics["stage"] = "source-artifacts"
     artifacts = retained_artifacts(api, source, now)
     diagnostics["stage"] = "source-recheck"
@@ -399,6 +448,13 @@ def verify_current_jobs(api, sha, run_id, *, diagnostics=None):
     current = api.get("actions/runs/" + str(run_id))
     exact_run(current, run_id=run_id, sha=sha, event="push", branch="main")
     rows = api.pages(f"actions/runs/{run_id}/jobs", "jobs", filter="all")
+    try:
+        checks = (reconciled_check_inventory(api, sha)
+                  if github_ci_time.reconciled_job_candidates(rows) else [])
+        rows, diagnostics["current_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
+            rows, run_id, 1, sha, checks)
+    except ValueError as error:
+        raise AdmissionError(str(error)) from error
     rows = separate_skipped_jobs(rows, sha, run_id, diagnostics)
     jobs = github_ci_time.latest_run_jobs(rows, run_id, 1, sha)
     jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, required=True)

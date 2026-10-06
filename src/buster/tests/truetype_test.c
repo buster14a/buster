@@ -7,6 +7,8 @@
 #if BUSTER_INCLUDE_TESTS
 // truetype_test_kerning covers subtable composition using synthetic cmap/kern bytes.
 #include <buster/lib/truetype_internal.h>
+#include <buster/lib/file.h>
+#include <buster/lib/os.h>
 
 BUSTER_GLOBAL_LOCAL void truetype_test_u16(u8* bytes, u32 offset, s32 value)
 {
@@ -481,9 +483,262 @@ BUSTER_GLOBAL_LOCAL UnitTestResult truetype_test_compound_attachments(UnitTestAr
     return result;
 }
 
+// Builds a complete minimal TrueType font in bytes: one 700 by 700 unit square
+// glyph that every codepoint from ' ' to '~' maps to. The hhea ascent and
+// descent set truetype_scale_for_pixel_height, so shrinking them makes the
+// rasterized glyphs arbitrarily larger than the atlas. Returns the byte length.
+BUSTER_GLOBAL_LOCAL u32 truetype_test_atlas_font(u8* bytes, u32 capacity, s32 ascent, s32 descent)
+{
+    enum
+    {
+        atlas_table_count = 7,
+        atlas_character_count = '~' - ' ' + 1,
+        atlas_cmap_length = 12 + 16 + atlas_character_count * 12,
+        atlas_head_length = 54,
+        atlas_hhea_length = 36,
+        atlas_hmtx_length = 8,
+        atlas_maxp_length = 32,
+        atlas_loca_length = 12,
+    };
+    typedef struct TruetypeAtlasTable TruetypeAtlasTable;
+    struct TruetypeAtlasTable
+    {
+        char8 tag[4];
+        u32 offset;
+        u32 length;
+    };
+    u32 cmap = 12u + atlas_table_count * 16u;
+    u32 head = cmap + atlas_cmap_length;
+    u32 hhea = head + atlas_head_length;
+    u32 hmtx = hhea + atlas_hhea_length;
+    u32 maxp = hmtx + atlas_hmtx_length;
+    u32 loca = maxp + atlas_maxp_length;
+    u32 glyf = loca + atlas_loca_length;
+    memset(bytes, 0, capacity);
+
+    TruetypeSourceTestPoint square[] = {{0, 0, 1, {0}}, {700, 0, 1, {0}}, {700, 700, 1, {0}}, {0, 700, 1, {0}}};
+    u32 end = truetype_test_simple_outline(bytes, glyf, square, BUSTER_ARRAY_LENGTH(square), 0);
+
+    TruetypeAtlasTable tables[atlas_table_count] = {
+        {{'c', 'm', 'a', 'p'}, cmap, atlas_cmap_length}, {{'h', 'e', 'a', 'd'}, head, atlas_head_length},
+        {{'h', 'h', 'e', 'a'}, hhea, atlas_hhea_length}, {{'h', 'm', 't', 'x'}, hmtx, atlas_hmtx_length},
+        {{'m', 'a', 'x', 'p'}, maxp, atlas_maxp_length}, {{'l', 'o', 'c', 'a'}, loca, atlas_loca_length},
+        {{'g', 'l', 'y', 'f'}, glyf, end - glyf},
+    };
+    truetype_test_u32(bytes, 0, 0x00010000u);
+    truetype_test_u16(bytes, 4, atlas_table_count);
+    for (u32 index = 0; index < atlas_table_count; index += 1)
+    {
+        u32 record = 12u + index * 16u;
+        memcpy(bytes + record, tables[index].tag, 4);
+        truetype_test_u32(bytes, record + 8u, tables[index].offset);
+        truetype_test_u32(bytes, record + 12u, tables[index].length);
+    }
+
+    // One Unicode (platform 3, encoding 10) format-12 subtable with a
+    // single-codepoint group per character, all mapped to glyph 1.
+    truetype_test_u16(bytes, cmap + 2u, 1);
+    truetype_test_u16(bytes, cmap + 4u, 3);
+    truetype_test_u16(bytes, cmap + 6u, 10);
+    truetype_test_u32(bytes, cmap + 8u, 12);
+    truetype_test_u16(bytes, cmap + 12u, 12);
+    truetype_test_u32(bytes, cmap + 16u, 16u + atlas_character_count * 12u);
+    truetype_test_u32(bytes, cmap + 24u, atlas_character_count);
+    for (u32 index = 0; index < atlas_character_count; index += 1)
+    {
+        u32 group = cmap + 28u + index * 12u;
+        truetype_test_u32(bytes, group, ' ' + index);
+        truetype_test_u32(bytes, group + 4u, ' ' + index);
+        truetype_test_u32(bytes, group + 8u, 1);
+    }
+
+    truetype_test_u16(bytes, head + 18u, 1000); // units per em
+    truetype_test_u16(bytes, head + 50u, 1); // long loca
+    truetype_test_u16(bytes, hhea + 4u, ascent);
+    truetype_test_u16(bytes, hhea + 6u, descent);
+    truetype_test_u16(bytes, hhea + 34u, 2); // horizontal metrics
+    truetype_test_u16(bytes, hmtx, 500);
+    truetype_test_u16(bytes, hmtx + 4u, 800);
+    truetype_test_u16(bytes, maxp + 4u, 2); // glyphs
+    truetype_test_u16(bytes, maxp + 6u, 4); // max points
+    truetype_test_u16(bytes, maxp + 8u, 1); // max contours
+    truetype_test_u32(bytes, loca + 8u, end - glyf); // glyph 0 is empty, glyph 1 is the square
+    return end;
+}
+
+// font_texture_atlas_create copies glyph bitmaps whose sizes come from the font
+// file into a fixed atlas. A font with a tiny hhea ascent - descent scales its
+// glyphs far beyond the atlas; that must fail with a status in every build
+// (the old BUSTER_CHECK bounds became optimizer assumptions in Release and the
+// copy ran megabytes past the atlas). Text heights whose atlas size overflows
+// u32 must be rejected too.
+BUSTER_GLOBAL_LOCAL UnitTestResult truetype_test_font_atlas(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    u8 bytes[1536];
+    enum
+    {
+        text_height = 16,
+        atlas_edge = text_height * 16,
+    };
+
+    // Control: ascent - descent = 700 scales the square to 16 pixels.
+    u32 length = truetype_test_atlas_font(bytes, sizeof(bytes), 700, 0);
+    TTF_AtlasBuild build = truetype_font_atlas_build(arena, (ByteSlice){.pointer = bytes, .length = length}, text_height);
+    BUSTER_TEST(arguments, build.status == TTF_ATLAS_SUCCESS && build.description.pointer && build.description.width == atlas_edge &&
+                               build.description.height == atlas_edge);
+    if (build.status == TTF_ATLAS_SUCCESS && build.description.pointer && build.description.characters)
+    {
+        const FontCharacter* letter = &build.description.characters['A'];
+        BUSTER_TEST(arguments, letter->width >= 15 && letter->width <= 17 && letter->height == letter->width);
+        BUSTER_TEST(arguments, build.description.pointer[letter->y * build.description.width + letter->x + 1] == 0xffffffffu);
+        BUSTER_TEST(arguments, build.description.characters['~'].y + build.description.characters['~'].height <= atlas_edge);
+    }
+    arena_set_position(arena, position);
+
+    // Glyphs of about 415 pixels cannot fit a 256 pixel atlas row.
+    length = truetype_test_atlas_font(bytes, sizeof(bytes), 20, -7);
+    build = truetype_font_atlas_build(arena, (ByteSlice){.pointer = bytes, .length = length}, text_height);
+    BUSTER_TEST(arguments, build.status == TTF_ATLAS_GLYPH_DOES_NOT_FIT && !build.description.pointer && !build.description.characters &&
+                               !build.description.width && !build.description.height);
+    arena_set_position(arena, position);
+
+    // Glyphs of about 238 pixels fit horizontally but the second row does not fit vertically.
+    length = truetype_test_atlas_font(bytes, sizeof(bytes), 47, 0);
+    build = truetype_font_atlas_build(arena, (ByteSlice){.pointer = bytes, .length = length}, text_height);
+    BUSTER_TEST(arguments, build.status == TTF_ATLAS_GLYPH_DOES_NOT_FIT && !build.description.pointer);
+    arena_set_position(arena, position);
+
+    // The text height product overflowed u32 from 4096 on, producing a tiny atlas.
+    u32 rejected_heights[] = {0, BUSTER_TTF_ATLAS_MAX_TEXT_HEIGHT + 1u, 4096, 65536, 0x80000000u, UINT32_MAX};
+    length = truetype_test_atlas_font(bytes, sizeof(bytes), 700, 0);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected_heights); index += 1)
+    {
+        build = truetype_font_atlas_build(arena, (ByteSlice){.pointer = bytes, .length = length}, rejected_heights[index]);
+        BUSTER_TEST(arguments, build.status == TTF_ATLAS_INVALID_TEXT_HEIGHT && !build.description.pointer && arena->position == position);
+    }
+
+    // Truncated and empty input is an unusable font, not a partial atlas.
+    build = truetype_font_atlas_build(arena, (ByteSlice){.pointer = bytes, .length = 40}, text_height);
+    BUSTER_TEST(arguments, build.status == TTF_ATLAS_INVALID_FONT && !build.description.pointer);
+    build = truetype_font_atlas_build(arena, (ByteSlice){0}, text_height);
+    BUSTER_TEST(arguments, build.status == TTF_ATLAS_INVALID_FONT && !build.description.pointer);
+    arena_set_position(arena, position);
+    return result;
+}
+
+// System font discovery must only select a file this parser can use, and must
+// say why every other candidate was passed over (font_provider.c reports it).
+// Candidate files are synthesized: an 'OTTO' (CFF) sfnt, a TrueType collection
+// whose first face is unreadable, a truncated font, an empty and a missing
+// file, then a valid font.
+BUSTER_GLOBAL_LOCAL UnitTestResult truetype_test_candidate_selection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    u8 valid_bytes[1536];
+    u32 valid_length = truetype_test_atlas_font(valid_bytes, sizeof(valid_bytes), 700, 0);
+    u8 cff_bytes[1536];
+    memcpy(cff_bytes, valid_bytes, valid_length);
+    memcpy(cff_bytes, "OTTO", 4);
+    u8 collection_bytes[64] = {'t', 't', 'c', 'f', 0, 1, 0, 0, 0, 0, 0, 2};
+    truetype_test_u32(collection_bytes, 12, 4000); // first face lies outside the file
+    u8 truncated_bytes[16];
+    memcpy(truncated_bytes, valid_bytes, sizeof(truncated_bytes));
+
+    typedef struct CandidateFile CandidateFile;
+    struct CandidateFile
+    {
+        String8 name;
+        ByteSlice content;
+        bool write;
+        TTF_FontCandidateStatus expected;
+    };
+    CandidateFile files[] = {
+        {S8("font-candidate-missing"), {0}, false, TTF_FONT_CANDIDATE_UNREADABLE},
+        {S8("font-candidate-empty"), {0}, true, TTF_FONT_CANDIDATE_UNREADABLE},
+        {S8("font-candidate-otto"), {cff_bytes, valid_length}, true, TTF_FONT_CANDIDATE_UNSUPPORTED},
+        {S8("font-candidate-collection"), {collection_bytes, sizeof(collection_bytes)}, true, TTF_FONT_CANDIDATE_MALFORMED},
+        {S8("font-candidate-truncated"), {truncated_bytes, sizeof(truncated_bytes)}, true, TTF_FONT_CANDIDATE_MALFORMED},
+        {S8("font-candidate-valid"), {valid_bytes, valid_length}, true, TTF_FONT_CANDIDATE_USABLE},
+        {S8("font-candidate-valid-later"), {valid_bytes, valid_length}, true, TTF_FONT_CANDIDATE_USABLE},
+    };
+    enum
+    {
+        file_count = 7,
+        valid_index = 5,
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(files) == file_count);
+    String8 paths[file_count];
+    for (u32 index = 0; index < file_count; index += 1)
+    {
+        paths[index] = buster_test_temporary_path(arena, files[index].name, S8(".ttf"));
+        os_file_delete(paths[index]);
+        if (files[index].write)
+        {
+            BUSTER_TEST(arguments, file_write(paths[index], files[index].content));
+        }
+    }
+
+    // Unsupported candidates fall through to the first valid one, and the
+    // search stops there: later candidates are not even read.
+    TTF_FontCandidateStatus statuses[file_count] = {0};
+    u64 selected = truetype_font_select_first_usable(paths, file_count, statuses);
+    BUSTER_TEST(arguments, selected == valid_index);
+    for (u32 index = 0; index < file_count; index += 1)
+    {
+        TTF_FontCandidateStatus expected = index > valid_index ? TTF_FONT_CANDIDATE_NOT_TRIED : files[index].expected;
+        BUSTER_TEST(arguments, statuses[index] == expected);
+    }
+
+    // The first usable candidate wins even when it is first, and a null status array is allowed.
+    BUSTER_TEST(arguments, truetype_font_select_first_usable(paths + valid_index, 2, 0) == 0);
+
+    // When nothing is usable every path carries its own reason.
+    memset(statuses, 0, sizeof(statuses));
+    selected = truetype_font_select_first_usable(paths, valid_index, statuses);
+    BUSTER_TEST(arguments, selected == valid_index);
+    for (u32 index = 0; index < valid_index; index += 1)
+    {
+        BUSTER_TEST(arguments, statuses[index] == files[index].expected && statuses[index] != TTF_FONT_CANDIDATE_USABLE);
+        BUSTER_TEST(arguments, truetype_font_candidate_status_description(statuses[index]).length != 0);
+    }
+    BUSTER_TEST(arguments, truetype_font_select_first_usable(paths, 0, statuses) == 0);
+    String8 empty_path = {0};
+    TTF_FontCandidateStatus empty_status = TTF_FONT_CANDIDATE_USABLE;
+    BUSTER_TEST(arguments, truetype_font_select_first_usable(&empty_path, 1, &empty_status) == 1 && empty_status == TTF_FONT_CANDIDATE_UNREADABLE);
+
+    // A font the atlas builder cannot use must be rejected by selection too: both ask truetype_font_initialize.
+    for (u32 index = 0; index < valid_index; index += 1)
+    {
+        if (files[index].write && files[index].content.length)
+        {
+            TTF_AtlasBuild build = truetype_font_atlas_build(arena, files[index].content, 16);
+            BUSTER_TEST(arguments, build.status == TTF_ATLAS_INVALID_FONT);
+            arena_set_position(arena, position);
+        }
+    }
+
+    for (u32 index = 0; index < file_count; index += 1)
+    {
+        os_file_delete(paths[index]);
+    }
+    arena_set_position(arena, position);
+    return result;
+}
+
 UnitTestResult truetype_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = truetype_test_compound_attachments(arguments);
+    UnitTestResult atlas_result = truetype_test_font_atlas(arguments);
+    result.test_count += atlas_result.test_count;
+    result.succeeded_test_count += atlas_result.succeeded_test_count;
+    UnitTestResult selection_result = truetype_test_candidate_selection(arguments);
+    result.test_count += selection_result.test_count;
+    result.succeeded_test_count += selection_result.succeeded_test_count;
     // Long loca entries [0,34], then a rectangle with bounds (-2,-3)-(6,5).
     // Four on-curve points use signed 16-bit x/y deltas without instructions.
     u8 bytes[] = {

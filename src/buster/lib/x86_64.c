@@ -4,7 +4,6 @@
 // issue CPUID directly.
 
 #include <buster/lib/x86_64.h>
-#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/string.h>
 
 BUSTER_GLOBAL_LOCAL CpuId cpuid(u32 leaf, u32 subleaf)
@@ -54,55 +53,6 @@ String8 x86_64_cpu_brand_string(char8* buffer, u64 capacity)
         length = 48;
     }
     return (String8){ .pointer = buffer, .length = length };
-}
-
-X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperation operation, u32 target_register, u32 source_register)
-{
-    X86_64EncodedInstruction result = {0};
-    if (operation < X86_64_REGISTER_OPERATION_COUNT && target_register < 32 && source_register < 32)
-    {
-        String8 const mnemonics[] = {
-            S8("MOV"),
-            S8("ADD"),
-            S8("SUB"),
-            S8("AND"),
-            S8("OR"),
-            S8("XOR"),
-        };
-        BusterX86MetadataPhysicalOperand operands[2] = {
-            {
-                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
-                .width = 64,
-                .reg = {.index = (u16)target_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-            },
-            {
-                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
-                .width = 64,
-                .reg = {.index = (u16)source_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-            },
-        };
-        String8 apx_features[1] = {S8("APX_F")};
-        BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
-            .physical = {
-                .mnemonic = mnemonics[operation],
-                .operands = operands,
-                .operand_count = BUSTER_ARRAY_LENGTH(operands),
-                .features = {.names = (target_register >= 16 || source_register >= 16) ? apx_features : 0,
-                             .count = (target_register >= 16 || source_register >= 16) ? 1u : 0u},
-                .address_size = 64,
-                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
-                .source_semantics = false,
-            },
-            .output = result.bytes,
-            .output_capacity = sizeof(result.bytes),
-        });
-        if (encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.byte_count <= sizeof(result.bytes))
-        {
-            result.length = (u8)encoded.byte_count;
-        }
-    }
-
-    return result;
 }
 
 TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
@@ -695,18 +645,9 @@ TargetCpuFeatures cpu_detect_features_x86_64(void)
     return x86_64_cpu_features_from_cpuid(input);
 }
 
-CpuModel cpu_detect_model_x86_64(void)
+CpuModel cpu_model_x86_64_from_identity(String8 vendor_string, CpuId family_model_cpuid, bool has_avx512vnni, bool has_avx512bf16)
 {
-    CpuId vendor_cpuid = cpuid(0, 0);
-    char8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
-    String8 vendor_string = (String8)BUSTER_ARRAY_TO_SLICE(vendor_buffer);
-    *(u32*)(vendor_buffer + 0 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.ebx;
-    *(u32*)(vendor_buffer + 1 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.edx;
-    *(u32*)(vendor_buffer + 2 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.ecx;
-
     CpuModel result = CPU_MODEL_ERROR;
-
-    CpuId family_model_cpuid = cpuid(1, 0);
 
     // let stepping = (u8)((amd_cpuid.eax >> 0) & 0xf);
     u8 model = (u8)((family_model_cpuid.eax >> 4) & 0xf);
@@ -719,22 +660,6 @@ CpuModel cpu_detect_model_x86_64(void)
 
     bool has_sse = ((family_model_cpuid.edx >> 25) & 1) != 0;
     bool has_sse3 = ((family_model_cpuid.ecx >> 0) & 1) != 0;
-    bool has_avx512bf16 = false;
-    bool has_avx512vnni = false;
-
-    // vendor_cpuid.eax is the maximum supported standard leaf; leaf 7's own
-    // eax is the maximum supported subleaf.
-    if (vendor_cpuid.eax >= 7)
-    {
-        CpuId extended_features = cpuid(7, 0);
-        has_avx512vnni = ((extended_features.ecx >> 11) & 1) != 0;
-
-        if (extended_features.eax >= 1)
-        {
-            CpuId extended_features_1 = cpuid(7, 1);
-            has_avx512bf16 = ((extended_features_1.eax >> 5) & 1) != 0;
-        }
-    }
 
     if (string_equal(vendor_string, S8("AuthenticAMD")))
     {
@@ -1039,10 +964,39 @@ CpuModel cpu_detect_model_x86_64(void)
         }
         }
     }
-    else
-    {
-        string_print(S8("Vendor string: {S8}\n"), vendor_string);
-    }
+    // Any other vendor (Hygon, Zhaoxin, VIA, hypervisor identities) is a normal
+    // outcome: CPU_MODEL_ERROR resolves to the native identity in
+    // cpu_model_resolve_detected. Library code must not write to stdout here.
 
     return result;
+}
+
+CpuModel cpu_detect_model_x86_64(void)
+{
+    CpuId vendor_cpuid = cpuid(0, 0);
+    char8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
+    String8 vendor_string = (String8)BUSTER_ARRAY_TO_SLICE(vendor_buffer);
+    memcpy(vendor_buffer + 0 * sizeof(vendor_cpuid.eax), &vendor_cpuid.ebx, sizeof(vendor_cpuid.ebx));
+    memcpy(vendor_buffer + 1 * sizeof(vendor_cpuid.eax), &vendor_cpuid.edx, sizeof(vendor_cpuid.edx));
+    memcpy(vendor_buffer + 2 * sizeof(vendor_cpuid.eax), &vendor_cpuid.ecx, sizeof(vendor_cpuid.ecx));
+
+    CpuId family_model_cpuid = cpuid(1, 0);
+    bool has_avx512bf16 = false;
+    bool has_avx512vnni = false;
+
+    // vendor_cpuid.eax is the maximum supported standard leaf; leaf 7's own
+    // eax is the maximum supported subleaf.
+    if (vendor_cpuid.eax >= 7)
+    {
+        CpuId extended_features = cpuid(7, 0);
+        has_avx512vnni = ((extended_features.ecx >> 11) & 1) != 0;
+
+        if (extended_features.eax >= 1)
+        {
+            CpuId extended_features_1 = cpuid(7, 1);
+            has_avx512bf16 = ((extended_features_1.eax >> 5) & 1) != 0;
+        }
+    }
+
+    return cpu_model_x86_64_from_identity(vendor_string, family_model_cpuid, has_avx512vnni, has_avx512bf16);
 }

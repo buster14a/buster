@@ -106,6 +106,23 @@ UnitTestResult x86_64_tests(UnitTestArguments* arguments)
     });
     BUSTER_TEST(arguments, invalid.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT);
     BUSTER_TEST(arguments, invalid.form_id == UINT32_MAX);
+
+    // Model detection runs at the start of every program, before the program
+    // flags exist. A vendor outside AMD/Intel (Hygon, Zhaoxin, VIA, hypervisor
+    // identities) is a normal outcome: the lookup is a pure function that
+    // reports CPU_MODEL_ERROR (cpu_model_resolve_detected turns that into the
+    // native identity, see target_test.c), and it never writes to stdout (#2668).
+    CpuId family_model_hygon_dhyana = {.eax = UINT32_C(0x00900f01), .edx = UINT32_C(1) << 25};
+    CpuId family_model_zen4_raphael = {.eax = UINT32_C(0x00a60f10), .edx = UINT32_C(1) << 25};
+    String8 unknown_vendors[] = {S8("HygonGenuine"), S8("  Shanghai  "), S8("CentaurHauls"), S8("TCGTCGTCGTCG"), S8("")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unknown_vendors); index += 1)
+    {
+        CpuModel hygon = cpu_model_x86_64_from_identity(unknown_vendors[index], family_model_hygon_dhyana, false, false);
+        BUSTER_TEST(arguments, hygon == CPU_MODEL_ERROR);
+        // Zen 4 register values do not make an unknown vendor an AMD part.
+        BUSTER_TEST(arguments, cpu_model_x86_64_from_identity(unknown_vendors[index], family_model_zen4_raphael, false, false) == CPU_MODEL_ERROR);
+    }
+    BUSTER_TEST(arguments, cpu_model_x86_64_from_identity(S8("AuthenticAMD"), family_model_zen4_raphael, false, false) == CPU_MODEL_AMD_ZEN_4);
     return result;
 }
 #endif

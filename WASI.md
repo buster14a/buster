@@ -98,10 +98,24 @@ direct imports or program-provided implementations.
 ## Current backend boundary
 
 The scalar direct emitter deliberately diagnoses unsupported core-ABI cases,
-including aggregate and variadic function ABIs, indirect calls/function tables,
-function-pointer data relocations, atomics/threads/TLS/SIMD, inline assembly,
-computed labels and indirect branches, and Component Model packaging. These
-are explicit errors rather than native fallbacks.
+including aggregate and variadic function ABIs, runtime function addresses,
+indirect calls/function tables, function-pointer data relocations,
+atomics/threads/TLS/SIMD, inline assembly, computed labels and indirect branches,
+and Component Model packaging. These are explicit errors rather than native
+fallbacks.
+
+Ordinary direct calls remain supported. Taking a function address for runtime
+storage, comparison, return or conversion is diagnosed even when no indirect
+call follows: a raw zero-based function index cannot represent a nonnull C
+function pointer. Failed emission returns empty artifact bytes and preserves
+an absent or existing output destination. Wasm64 keeps its nonzero handle ABI.
+
+Fixed frames share the [checked shadow-stack alignment contract](WASM64.md):
+their base satisfies the maximum actual place alignment, including requirements
+greater than 16 bytes. Odd-sized live dynamic allocations do not misalign a
+callee's fixed objects. Returns and deliberate stack-bound traps restore the
+exact entry pointer rather than the padded frame base; padding consumes the
+same checked stack reserve as fixed and dynamic objects.
 
 The synthetic startup reads Preview 1 arguments and environment into guest
 memory and grows memory if they exceed the initial 64 KiB stack reserve. A
