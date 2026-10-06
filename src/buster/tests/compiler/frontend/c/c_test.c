@@ -3368,6 +3368,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unnamed_parameter_definitions(UnitTest
     return result;
 }
 
+// A statement expression that begins with a nested statement expression only
+// splits that nested one off as a leading statement when a `;` follows it.
+// Otherwise the nested value is an operand of what follows, and lowering the
+// rest as a separate statement silently dropped it: `({ ({ ...; 1; }) + 2; })`
+// read 2, and `?:` or a second nested operand failed to lower (#2859).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_statement_expression_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "static int identity(int value) { return value; }\n"
+        "int main(int argc, char** argv) {\n"
+        "    (void)argv;\n"
+        "    int x = argc;\n"
+        "    int failure = 0;\n"
+        "    failure += ({ ({ if (x) x = 5; 1; }) + 2; }) != 3;\n"
+        "    failure += ({ ({ 1; }) + 2; }) != 3;\n"
+        "    failure += ({ ({ if (x) x = 2; 4; }) * ({ if (x) x = 3; 5; }); }) != 20;\n"
+        "    failure += ({ ({ ({ if (x) x = 1; 1; }) + 1; }) + 1; }) != 3;\n"
+        "    failure += ({ identity(({ int y = 0; for (int i = 0; i < 3; i++) y += i; y; })); }) != 3;\n"
+        "    failure += ({ ({ if (x) x = 7; 0; }) ? 10 : 20; }) != 20;\n"
+        "    failure += ({ if (({ if (x) x = 7; 0; })) x = 10; else x = 20; x; }) != 20;\n"
+        "    failure += ({ ({ x = 3; }); ({ if (x) x = 1; 6; }) - x; }) != 5;\n"
+        "    failure += ({ ({ x = 1; }); x + 40; }) != 41;\n"
+        "    return failure;\n"
+        "}\n");
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("nested-statement-expression-operands"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("nested-statement-expression-operands-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form],
+                                     S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("nested statement expression operands {S8} {S8}: {S8}"),
+                                  modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("nested statement expression operands runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -44440,6 +44509,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
     C_TEST_FIXTURE(arguments, c_test_enum_runtime);
     C_TEST_FIXTURE(arguments, c_test_unnamed_parameter_definitions);
+    C_TEST_FIXTURE(arguments, c_test_nested_statement_expression_operands);
     C_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
     C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
     C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);
