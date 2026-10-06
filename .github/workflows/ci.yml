@@ -1038,6 +1038,12 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_producer_check --sequence 70 --             "$driver" build --config Release -t ide
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_corpus --sequence 80 -- "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle --jobs 4
 
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Native result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
@@ -1062,12 +1068,6 @@ jobs:
           BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
         run: python_command=$BUSTER_CI_PYTHON; test -n "$python_command" || python_command=python3; "$python_command" tools/ci_native_observation.py package --root "$BUSTER_CI_OBSERVATION_ROOT" --python "$python_command" --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" --platform "$BUSTER_CI_NATIVE_PLATFORM" --expect-complete "$BUSTER_CI_NATIVE_COMPLETE"
 
-      - name: Retain machine records in existing evidence
-        if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
-        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
-        with:
-          mode: retain
-          retention-directory: ${{ runner.temp }}/native-ci-upload
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
         # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
@@ -1093,12 +1093,6 @@ jobs:
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
 
       # A packing failure already fails this lane; still retain the original tree.
-      - name: Retain machine records in existing evidence 2
-        if: ${{ !cancelled() && steps.pack.outcome != 'success' }}
-        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
-        with:
-          mode: retain
-          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Retain unpacked native logs
         if: ${{ !cancelled() && steps.pack.outcome != 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -91,8 +91,8 @@ still fail CI.
    including runtime requirements, authentication handling and post-job cleanup.
 2. Update workflow literals and `APPROVED` in the checker together. Record
    the action path, full commit, tag/date and compatibility changes here.
-3. Run `python3 tools/check_action_pins.py`, `python3 tools/ci_job_environment_test.py`
-   and `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.
+3. Run `python3 tools/check_action_pins.py`, `python3 tests/action_pins_test.py`,
+   `python3 tools/ci_job_environment_test.py` and `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.
    Mutable references and unapproved SHAs must still fail.
 4. Validate the submitted revision on the affected GitHub jobs before claiming
    those paths pass.
