@@ -746,8 +746,9 @@ static int tp_measure(TpConfig const* config, TpJob const* job, char const* comp
         ok = !p->launch_error && !p->timed_out && !p->signal_number && p->exit_code == 0 && p->wall_seconds > 0.0;
         if (!ok)
         {
-            tp_error("sample %s failed: exit=%d signal=%d timeout=%d launch_error=%d; see %s",
-                     sample_id, p->exit_code, p->signal_number, p->timed_out, p->launch_error, log);
+            tp_error("sample %s failed: exit=%d signal=%d timeout=%d launch_error=%d launch_stage=%s; see %s",
+                     sample_id, p->exit_code, p->signal_number, p->timed_out, p->launch_error,
+                     tp_launch_stage_name(p->launch_stage), log);
         }
         fprintf(capabilities, "{\"sample\":"); tp_json_string(capabilities, sample_id);
         fprintf(capabilities, ",\"exit_code\":%d,\"signal\":%d,\"timeout\":%d,\"launch_error\":%d,\"pmu\":{",
@@ -1311,8 +1312,9 @@ static int tp_compare(char const* root)
                         {
                             TpRow const* row = probes + tp_row_index(job, kind, variant, repeat, 3);
                             TpRow const* reference = rows + tp_row_index(job, 0, variant, 0, pairs);
-                            ok = ok && !strcmp(row->output_hash, reference->output_hash) &&
-                                 row->source_bytes == reference->source_bytes && row->source_lines == reference->source_lines;
+                            ok = ok && row->output_bytes == reference->output_bytes && !strcmp(row->output_hash, reference->output_hash) &&
+                                 row->source_bytes == reference->source_bytes && row->source_lines == reference->source_lines &&
+                                 row->source_functions == reference->source_functions;
                             double value = tp_metric(row, metric);
                             if (isfinite(value)) values[count++] = value;
                         }

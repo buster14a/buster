@@ -328,7 +328,7 @@ BUSTER_GLOBAL_LOCAL VkBool32 buster_vulkan_debug_callback(VkDebugUtilsMessageSev
         message = S8("Message not specified");
     }
 
-    string_print(S8("[{S8}][{S8}] {S8}\n"), severity_string, message_id, message);
+    string_print_error(S8("[{S8}][{S8}] {S8}\n"), severity_string, message_id, message);
 
     if ((message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0)
     {
@@ -940,16 +940,16 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_physical_devices(Arena* arena, VkPhysi
 {
     if (!vkEnumeratePhysicalDevices)
     {
-        string_print(S8("Vulkan physical device enumeration unavailable: instance entry point missing\n"));
+        string_print_error(S8("Vulkan physical device enumeration unavailable: instance entry point missing\n"));
         return false;
     }
 
     u32 capacity = 0;
     VkResult result = vkEnumeratePhysicalDevices(rendering_handle.instance, &capacity, 0);
-    string_print(S8("Vulkan physical device enumeration: query={u64:x}, count={u32}\n"), (u64)(u32)result, capacity);
+    BUSTER_RENDERING_TRACE(S8("Vulkan physical device enumeration: query={u64:x}, count={u32}\n"), (u64)(u32)result, capacity);
     if (result != VK_SUCCESS && result != VK_INCOMPLETE)
     {
-        string_print(S8("Vulkan physical device enumeration failed during count query: result={u64:x}\n"), (u64)(u32)result);
+        string_print_error(S8("Vulkan physical device enumeration failed during count query: result={u64:x}\n"), (u64)(u32)result);
         return false;
     }
 
@@ -965,7 +965,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_physical_devices(Arena* arena, VkPhysi
         VkPhysicalDevice* devices = arena_allocate(arena, VkPhysicalDevice, capacity);
         u32 reported_count = capacity;
         result = vkEnumeratePhysicalDevices(rendering_handle.instance, &reported_count, devices);
-        string_print(S8("Vulkan physical device enumeration: attempt={u32}, result={u64:x}, capacity={u32}, count={u32}\n"), attempt, (u64)(u32)result,
+        BUSTER_RENDERING_TRACE(S8("Vulkan physical device enumeration: attempt={u32}, result={u64:x}, capacity={u32}, count={u32}\n"), attempt, (u64)(u32)result,
                      capacity, reported_count);
         if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
         {
@@ -975,7 +975,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_physical_devices(Arena* arena, VkPhysi
         }
         if (result != VK_SUCCESS && result != VK_INCOMPLETE)
         {
-            string_print(S8("Vulkan physical device enumeration failed: result={u64:x}\n"), (u64)(u32)result);
+            string_print_error(S8("Vulkan physical device enumeration failed: result={u64:x}\n"), (u64)(u32)result);
             return false;
         }
         if (reported_count > capacity)
@@ -988,12 +988,12 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_physical_devices(Arena* arena, VkPhysi
         }
         else
         {
-            string_print(S8("Vulkan physical device enumeration count overflow while retrying\n"));
+            string_print_error(S8("Vulkan physical device enumeration count overflow while retrying\n"));
             return false;
         }
     }
 
-    string_print(S8("Vulkan physical device enumeration did not stabilize after {u32} attempts\n"), VULKAN_ENUMERATION_RETRY_COUNT);
+    string_print_error(S8("Vulkan physical device enumeration did not stabilize after {u32} attempts\n"), VULKAN_ENUMERATION_RETRY_COUNT);
     return false;
 }
 
@@ -1002,7 +1002,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_get_queue_family_properties(Arena* arena, VkPhys
 {
     if (!vkGetPhysicalDeviceQueueFamilyProperties)
     {
-        string_print(S8("Vulkan queue family enumeration unavailable: instance entry point missing\n"));
+        string_print_error(S8("Vulkan queue family enumeration unavailable: instance entry point missing\n"));
         return false;
     }
 
@@ -1022,7 +1022,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_get_queue_family_properties(Arena* arena, VkPhys
         vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &reported_count, properties);
         u32 available_count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &available_count, 0);
-        string_print(S8("Vulkan queue family enumeration: attempt={u32}, capacity={u32}, count={u32}, available={u32}\n"), attempt, capacity, reported_count,
+        BUSTER_RENDERING_TRACE(S8("Vulkan queue family enumeration: attempt={u32}, capacity={u32}, count={u32}, available={u32}\n"), attempt, capacity, reported_count,
                      available_count);
         if (!rendering_vulkan_queue_family_enumeration_needs_retry(capacity, reported_count, available_count))
         {
@@ -1041,12 +1041,12 @@ BUSTER_GLOBAL_LOCAL bool vulkan_get_queue_family_properties(Arena* arena, VkPhys
         }
         else
         {
-            string_print(S8("Vulkan queue family enumeration count overflow while retrying\n"));
+            string_print_error(S8("Vulkan queue family enumeration count overflow while retrying\n"));
             return false;
         }
     }
 
-    string_print(S8("Vulkan queue family enumeration did not stabilize after {u32} attempts\n"), VULKAN_ENUMERATION_RETRY_COUNT);
+    string_print_error(S8("Vulkan queue family enumeration did not stabilize after {u32} attempts\n"), VULKAN_ENUMERATION_RETRY_COUNT);
     return false;
 }
 
@@ -1055,16 +1055,16 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_device_extensions(Arena* arena, VkPhys
 {
     if (!vkEnumerateDeviceExtensionProperties)
     {
-        string_print(S8("Vulkan device extension enumeration unavailable: instance entry point missing\n"));
+        string_print_error(S8("Vulkan device extension enumeration unavailable: instance entry point missing\n"));
         return false;
     }
 
     u32 capacity = 0;
     VkResult result = vkEnumerateDeviceExtensionProperties(physical_device, 0, &capacity, 0);
-    string_print(S8("Vulkan device extension enumeration: query={u64:x}, count={u32}\n"), (u64)(u32)result, capacity);
+    BUSTER_RENDERING_TRACE(S8("Vulkan device extension enumeration: query={u64:x}, count={u32}\n"), (u64)(u32)result, capacity);
     if (result != VK_SUCCESS && result != VK_INCOMPLETE)
     {
-        string_print(S8("Vulkan device extension enumeration failed during count query: result={u64:x}\n"), (u64)(u32)result);
+        string_print_error(S8("Vulkan device extension enumeration failed during count query: result={u64:x}\n"), (u64)(u32)result);
         return false;
     }
 
@@ -1080,7 +1080,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_device_extensions(Arena* arena, VkPhys
         VkExtensionProperties* properties = arena_allocate(arena, VkExtensionProperties, capacity);
         u32 reported_count = capacity;
         result = vkEnumerateDeviceExtensionProperties(physical_device, 0, &reported_count, properties);
-        string_print(S8("Vulkan device extension enumeration: attempt={u32}, result={u64:x}, capacity={u32}, count={u32}\n"), attempt, (u64)(u32)result,
+        BUSTER_RENDERING_TRACE(S8("Vulkan device extension enumeration: attempt={u32}, result={u64:x}, capacity={u32}, count={u32}\n"), attempt, (u64)(u32)result,
                      capacity, reported_count);
         if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
         {
@@ -1090,7 +1090,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_device_extensions(Arena* arena, VkPhys
         }
         if (result != VK_SUCCESS && result != VK_INCOMPLETE)
         {
-            string_print(S8("Vulkan device extension enumeration failed: result={u64:x}\n"), (u64)(u32)result);
+            string_print_error(S8("Vulkan device extension enumeration failed: result={u64:x}\n"), (u64)(u32)result);
             return false;
         }
         if (reported_count > capacity)
@@ -1103,12 +1103,12 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_device_extensions(Arena* arena, VkPhys
         }
         else
         {
-            string_print(S8("Vulkan device extension enumeration count overflow while retrying\n"));
+            string_print_error(S8("Vulkan device extension enumeration count overflow while retrying\n"));
             return false;
         }
     }
 
-    string_print(S8("Vulkan device extension enumeration did not stabilize after {u32} attempts\n"), VULKAN_ENUMERATION_RETRY_COUNT);
+    string_print_error(S8("Vulkan device extension enumeration did not stabilize after {u32} attempts\n"), VULKAN_ENUMERATION_RETRY_COUNT);
     return false;
 }
 
@@ -1381,7 +1381,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_collect_device_candidate(Arena* arena, VkSurface
     candidate->policy.enumeration_index = enumeration_index;
     if (!vkGetPhysicalDeviceProperties)
     {
-        string_print(S8("Vulkan physical device candidate unavailable: properties entry point missing, index={u32}\n"), enumeration_index);
+        string_print_error(S8("Vulkan physical device candidate unavailable: properties entry point missing, index={u32}\n"), enumeration_index);
         return false;
     }
     vkGetPhysicalDeviceProperties(physical_device, &candidate->properties);
@@ -1410,7 +1410,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_collect_device_candidate(Arena* arena, VkSurface
         }
         if (present_result != VK_SUCCESS && properties.queueCount)
         {
-            string_print(S8("Vulkan physical device rejected queue family: device={S8}, family={u32}, present_query={u64:x}\n"), candidate->policy.name,
+            BUSTER_RENDERING_TRACE(S8("Vulkan physical device rejected queue family: device={S8}, family={u32}, present_query={u64:x}\n"), candidate->policy.name,
                          queue_family_index, (u64)(u32)present_result);
         }
         queue_candidates[queue_family_index] = (RenderingVulkanQueueFamilyCandidate){
@@ -1473,29 +1473,29 @@ BUSTER_GLOBAL_LOCAL bool vulkan_collect_device_candidate(Arena* arena, VkSurface
     candidate->composite_alpha = vulkan_choose_composite_alpha(surface_capabilities.supportedCompositeAlpha);
 
     bool eligible = rendering_vulkan_device_candidate_is_eligible(candidate->policy);
-    string_print(S8("Vulkan physical device candidate: index={u32}, name={S8}, type={u32}, score={u64}, eligible={u32}, extension={u32}, features={u32}, "
+    BUSTER_RENDERING_TRACE(S8("Vulkan physical device candidate: index={u32}, name={S8}, type={u32}, score={u64}, eligible={u32}, extension={u32}, features={u32}, "
                     "surface={u32}, queues={u32}, graphics_family={u32}, present_family={u32}\n"),
                  enumeration_index, candidate->policy.name, (u32)candidate->policy.device_type, rendering_vulkan_device_score(candidate->policy), (u32)eligible,
                  (u32)candidate->policy.has_required_extension, (u32)candidate->policy.has_required_features, (u32)candidate->policy.has_surface_support,
                  (u32)candidate->policy.queues.eligible, candidate->policy.queues.graphics_family_index, candidate->policy.queues.present_family_index);
     if (!candidate->policy.has_required_extension)
     {
-        string_print(S8("Vulkan physical device rejected: name={S8}, missing {S8}\n"), candidate->policy.name, S8(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
+        BUSTER_RENDERING_TRACE(S8("Vulkan physical device rejected: name={S8}, missing {S8}\n"), candidate->policy.name, S8(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
     }
     if (!candidate->policy.has_required_features)
     {
-        string_print(S8("Vulkan physical device rejected: name={S8}, required Vulkan features unavailable\n"), candidate->policy.name);
+        BUSTER_RENDERING_TRACE(S8("Vulkan physical device rejected: name={S8}, required Vulkan features unavailable\n"), candidate->policy.name);
     }
     if (!candidate->policy.has_surface_support)
     {
-        string_print(S8("Vulkan physical device rejected: name={S8}, surface/swapchain support unavailable: capabilities={u64:x}, formats={u32}, "
+        BUSTER_RENDERING_TRACE(S8("Vulkan physical device rejected: name={S8}, surface/swapchain support unavailable: capabilities={u64:x}, formats={u32}, "
                         "present_modes={u32}, usage={u32}, composite_alpha={u32}\n"),
                      candidate->policy.name, (u64)(u32)capabilities_result, surface_format_count, present_mode_count, (u32)usage_supported,
                      (u32)composite_alpha_available);
     }
     if (!candidate->policy.queues.eligible)
     {
-        string_print(S8("Vulkan physical device rejected: name={S8}, no usable graphics/presentation queue pair\n"), candidate->policy.name);
+        BUSTER_RENDERING_TRACE(S8("Vulkan physical device rejected: name={S8}, no usable graphics/presentation queue pair\n"), candidate->policy.name);
     }
     return queue_properties_available && extension_enumeration_available && feature_query_available && surface_functions_available;
 }
@@ -1505,7 +1505,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_validate_existing_device_surface(Arena* arena, R
     RenderingVulkanSurfaceCompatibility compatibility = {0};
     if (!rendering->physical_device || !rendering->graphics_queue || !rendering->present_queue)
     {
-        string_print(S8("Vulkan existing device surface validation failed: device or queue handles are unavailable\n"));
+        string_print_error(S8("Vulkan existing device surface validation failed: device or queue handles are unavailable\n"));
         return false;
     }
 
@@ -1559,43 +1559,43 @@ BUSTER_GLOBAL_LOCAL bool vulkan_validate_existing_device_surface(Arena* arena, R
                                     (surface_capabilities.supportedCompositeAlpha & rendering->swapchain_composite_alpha) != 0;
 
     bool compatible = rendering_vulkan_existing_surface_is_compatible(compatibility);
-    string_print(S8("Vulkan existing device surface validation: compatible={u32}, queue_setup={u32}, present_queue={u32}, capabilities={u32}, format={u32}, "
+    BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface validation: compatible={u32}, queue_setup={u32}, present_queue={u32}, capabilities={u32}, format={u32}, "
                     "present_modes={u32}, usage={u32}, image_count={u32}, composite_alpha={u32}\n"),
                  (u32)compatible, (u32)compatibility.queue_setup, (u32)compatibility.present_queue, (u32)compatibility.capabilities, (u32)compatibility.format,
                  (u32)compatibility.present_modes, (u32)compatibility.usage, (u32)compatibility.image_count, (u32)compatibility.composite_alpha);
     if (!compatibility.queue_setup)
     {
-        string_print(S8("Vulkan existing device surface rejected: enabled graphics/present queue setup is no longer valid\n"));
+        BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface rejected: enabled graphics/present queue setup is no longer valid\n"));
     }
     if (!compatibility.present_queue)
     {
-        string_print(S8("Vulkan existing device surface rejected: present family={u32}, query={u64:x}, supported={u32}\n"),
+        BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface rejected: present family={u32}, query={u64:x}, supported={u32}\n"),
                      rendering->present_queue_family_index, (u64)(u32)present_result, (u32)present_supported);
     }
     if (!compatibility.capabilities)
     {
-        string_print(S8("Vulkan existing device surface rejected: capabilities query={u64:x}\n"), (u64)(u32)capabilities_result);
+        BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface rejected: capabilities query={u64:x}\n"), (u64)(u32)capabilities_result);
     }
     if (!compatibility.format)
     {
-        string_print(S8("Vulkan existing device surface rejected: selected swapchain format/color space is unavailable, formats={u32}\n"),
+        BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface rejected: selected swapchain format/color space is unavailable, formats={u32}\n"),
                      surface_format_count);
     }
     if (!compatibility.present_modes)
     {
-        string_print(S8("Vulkan existing device surface rejected: no usable present modes, modes={u32}\n"), present_mode_count);
+        BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface rejected: no usable present modes, modes={u32}\n"), present_mode_count);
     }
     if (!compatibility.usage)
     {
-        string_print(S8("Vulkan existing device surface rejected: required swapchain image usage is unavailable\n"));
+        BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface rejected: required swapchain image usage is unavailable\n"));
     }
     if (!compatibility.image_count)
     {
-        string_print(S8("Vulkan existing device surface rejected: swapchain image count limits are unusable\n"));
+        BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface rejected: swapchain image count limits are unusable\n"));
     }
     if (!compatibility.composite_alpha)
     {
-        string_print(S8("Vulkan existing device surface rejected: selected composite alpha mode is unavailable\n"));
+        BUSTER_RENDERING_TRACE(S8("Vulkan existing device surface rejected: selected composite alpha mode is unavailable\n"));
     }
     return compatible;
 }
@@ -1729,7 +1729,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_create_device_for_candidate(RenderingHandle* ren
     u32 extension_count = 0;
     if (!vulkan_device_extension_supported(device_extension_properties, device_extension_property_count, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
     {
-        string_print(S8("Vulkan logical device skipped: name={S8}, required extension disappeared before creation\n"), candidate->policy.name);
+        string_print_error(S8("Vulkan logical device skipped: name={S8}, required extension disappeared before creation\n"), candidate->policy.name);
         return false;
     }
     extensions[extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
@@ -1774,7 +1774,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_create_device_for_candidate(RenderingHandle* ren
 
     VkDevice device = 0;
     VkResult result = vkCreateDevice(candidate->handle, &create_info, rendering->allocator, &device);
-    string_print(S8("Vulkan logical device creation: name={S8}, result={u64:x}, extensions={u32}, portability_subset={u32}, graphics_family={u32}, "
+    BUSTER_RENDERING_TRACE(S8("Vulkan logical device creation: name={S8}, result={u64:x}, extensions={u32}, portability_subset={u32}, graphics_family={u32}, "
                     "present_family={u32}\n"),
                  candidate->policy.name, (u64)(u32)result, extension_count, (u32)portability_subset_enabled, candidate->policy.queues.graphics_family_index,
                  candidate->policy.queues.present_family_index);
@@ -1794,14 +1794,14 @@ BUSTER_GLOBAL_LOCAL bool vulkan_create_device_for_candidate(RenderingHandle* ren
 
     if (!vulkan_load_device_functions(rendering))
     {
-        string_print(S8("Vulkan logical device rejected after creation: required device entry points unavailable, name={S8}\n"), candidate->policy.name);
+        BUSTER_RENDERING_TRACE(S8("Vulkan logical device rejected after creation: required device entry points unavailable, name={S8}\n"), candidate->policy.name);
         vulkan_destroy_failed_device(rendering);
         return false;
     }
 
     vkGetDeviceQueue(rendering->device, rendering->graphics_queue_family_index, 0, &rendering->graphics_queue);
     vkGetDeviceQueue(rendering->device, rendering->present_queue_family_index, 0, &rendering->present_queue);
-    string_print(
+    BUSTER_RENDERING_TRACE(
         S8("Vulkan queue selection committed: name={S8}, graphics_family={u32}, graphics_queue={u64:x}, present_family={u32}, present_queue={u64:x}\n"),
         candidate->policy.name, rendering->graphics_queue_family_index, (u64)rendering->graphics_queue, rendering->present_queue_family_index,
         (u64)rendering->present_queue);
@@ -1814,7 +1814,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_create_device_for_candidate(RenderingHandle* ren
         .queueFamilyIndex = rendering->graphics_queue_family_index,
     };
     result = vkCreateCommandPool(rendering->device, &command_pool_create_info, rendering->allocator, &rendering->immediate.command_pool);
-    string_print(S8("Vulkan immediate command pool creation: result={u64:x}, command_pool={u64:x}\n"), (u64)(u32)result,
+    BUSTER_RENDERING_TRACE(S8("Vulkan immediate command pool creation: result={u64:x}, command_pool={u64:x}\n"), (u64)(u32)result,
                  (u64)rendering->immediate.command_pool);
     if (result == VK_SUCCESS)
     {
@@ -1825,7 +1825,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_create_device_for_candidate(RenderingHandle* ren
             .commandBufferCount = 1,
         };
         result = vkAllocateCommandBuffers(rendering->device, &command_buffer_allocate_info, &rendering->immediate.command_buffer);
-        string_print(S8("Vulkan immediate command buffer allocation: result={u64:x}, command_buffer={u64:x}\n"), (u64)(u32)result,
+        BUSTER_RENDERING_TRACE(S8("Vulkan immediate command buffer allocation: result={u64:x}, command_buffer={u64:x}\n"), (u64)(u32)result,
                      (u64)rendering->immediate.command_buffer);
     }
     if (result == VK_SUCCESS)
@@ -1835,7 +1835,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_create_device_for_candidate(RenderingHandle* ren
             .flags = VK_FENCE_CREATE_SIGNALED_BIT,
         };
         result = vkCreateFence(rendering->device, &fence_create_info, rendering->allocator, &rendering->immediate.fence);
-        string_print(S8("Vulkan immediate fence creation: result={u64:x}, fence={u64:x}\n"), (u64)(u32)result, (u64)rendering->immediate.fence);
+        BUSTER_RENDERING_TRACE(S8("Vulkan immediate fence creation: result={u64:x}, fence={u64:x}\n"), (u64)(u32)result, (u64)rendering->immediate.fence);
     }
     if (result == VK_SUCCESS)
     {
@@ -1851,19 +1851,19 @@ BUSTER_GLOBAL_LOCAL bool vulkan_create_device_for_candidate(RenderingHandle* ren
             .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
         };
         result = vkCreateSampler(rendering->device, &sampler_create_info, rendering->allocator, &rendering->sampler);
-        string_print(S8("Vulkan sampler creation: result={u64:x}, sampler={u64:x}\n"), (u64)(u32)result, (u64)rendering->sampler);
+        BUSTER_RENDERING_TRACE(S8("Vulkan sampler creation: result={u64:x}, sampler={u64:x}\n"), (u64)(u32)result, (u64)rendering->sampler);
         if (result == VK_SUCCESS)
         {
             sampler_create_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
             sampler_create_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
             sampler_create_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
             result = vkCreateSampler(rendering->device, &sampler_create_info, rendering->allocator, &rendering->blur_sampler);
-            string_print(S8("Vulkan blur sampler creation: result={u64:x}, sampler={u64:x}\n"), (u64)(u32)result, (u64)rendering->blur_sampler);
+            BUSTER_RENDERING_TRACE(S8("Vulkan blur sampler creation: result={u64:x}, sampler={u64:x}\n"), (u64)(u32)result, (u64)rendering->blur_sampler);
         }
     }
     if (result != VK_SUCCESS)
     {
-        string_print(S8("Vulkan logical device setup failed after creation: name={S8}, result={u64:x}\n"), candidate->policy.name, (u64)(u32)result);
+        string_print_error(S8("Vulkan logical device setup failed after creation: name={S8}, result={u64:x}\n"), candidate->policy.name, (u64)(u32)result);
         vulkan_destroy_failed_device(rendering);
         return false;
     }
@@ -1875,13 +1875,13 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_device(RenderingHandle* rendering, Vk
     TemporalArena scratch = scratch_begin(0, 0);
     if (!scratch.arena)
     {
-        string_print(S8("Vulkan device selection failed: no scratch arena\n"));
+        string_print_error(S8("Vulkan device selection failed: no scratch arena\n"));
         return false;
     }
 
     if (!vkGetPhysicalDeviceMemoryProperties || !vkCreateDevice || !vkDestroyDevice)
     {
-        string_print(S8("Vulkan device selection failed: required instance entry points are unavailable\n"));
+        string_print_error(S8("Vulkan device selection failed: required instance entry points are unavailable\n"));
         scratch_end(scratch);
         return false;
     }
@@ -1891,7 +1891,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_device(RenderingHandle* rendering, Vk
     bool devices_available = vulkan_enumerate_physical_devices(scratch.arena, &physical_devices, &physical_device_count);
     if (!devices_available || physical_device_count == 0)
     {
-        string_print(S8("Vulkan device selection failed: no physical devices were enumerated\n"));
+        string_print_error(S8("Vulkan device selection failed: no physical devices were enumerated\n"));
         scratch_end(scratch);
         return false;
     }
@@ -1913,13 +1913,13 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_device(RenderingHandle* rendering, Vk
         RenderingVulkanDeviceSelection selection = rendering_vulkan_select_device(policy_slice);
         if (!selection.found)
         {
-            string_print(S8("Vulkan device selection failed: no eligible physical device supports required extensions, features, queues, and surface\n"));
+            string_print_error(S8("Vulkan device selection failed: no eligible physical device supports required extensions, features, queues, and surface\n"));
             scratch_end(scratch);
             return false;
         }
 
         VulkanPhysicalDeviceCandidate* candidate = &candidates[selection.candidate_index];
-        string_print(S8("Vulkan physical device selected for creation: index={u32}, name={S8}, score={u64}\n"), selection.candidate_index,
+        BUSTER_RENDERING_TRACE(S8("Vulkan physical device selected for creation: index={u32}, name={S8}, score={u64}\n"), selection.candidate_index,
                      candidate->policy.name, selection.score);
         if (vulkan_create_device_for_candidate(rendering, scratch.arena, candidate))
         {
@@ -1929,7 +1929,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_device(RenderingHandle* rendering, Vk
 
         policies[selection.candidate_index].excluded = true;
         candidates[selection.candidate_index].policy.excluded = true;
-        string_print(S8("Vulkan physical device creation failed; trying the next eligible candidate: index={u32}, name={S8}\n"), selection.candidate_index,
+        string_print_error(S8("Vulkan physical device creation failed; trying the next eligible candidate: index={u32}, name={S8}\n"), selection.candidate_index,
                      candidate->policy.name);
     }
 }
@@ -2250,12 +2250,12 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         if (result == VK_SUCCESS)
         {
             shader_modules[i] = shader_module;
-            string_print(S8("Vulkan shader module creation {u32}: vkCreateShaderModule={u64:x}, module={u64:x}, bytes={u64}\n"), (u32)i, (u64)(u32)result,
+            BUSTER_RENDERING_TRACE(S8("Vulkan shader module creation {u32}: vkCreateShaderModule={u64:x}, module={u64:x}, bytes={u64}\n"), (u32)i, (u64)(u32)result,
                          (u64)shader_module, binary.length);
         }
         else
         {
-            string_print(S8("Vulkan shader module creation failed {u32}: vkCreateShaderModule={u64:x}, bytes={u64}\n"), (u32)i, (u64)(u32)result,
+            string_print_error(S8("Vulkan shader module creation failed {u32}: vkCreateShaderModule={u64:x}, bytes={u64}\n"), (u32)i, (u64)(u32)result,
                          binary.length);
             return false;
         }
@@ -2315,13 +2315,13 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
             if (result == VK_SUCCESS)
             {
                 pipeline->descriptor_set_layouts[descriptor_set_layout_index] = layout;
-                string_print(S8("Vulkan descriptor set layout creation {u32}:{u32}: vkCreateDescriptorSetLayout={u64:x}, layout={u64:x}, "
+                BUSTER_RENDERING_TRACE(S8("Vulkan descriptor set layout creation {u32}:{u32}: vkCreateDescriptorSetLayout={u64:x}, layout={u64:x}, "
                                 "bindings={u32}\n"),
                              (u32)pipeline_index, (u32)descriptor_set_layout_index, (u64)(u32)result, (u64)layout, (u32)binding_count);
             }
             else
             {
-                string_print(S8("Vulkan descriptor set layout creation failed {u32}:{u32}: vkCreateDescriptorSetLayout={u64:x}, bindings={u32}\n"),
+                string_print_error(S8("Vulkan descriptor set layout creation failed {u32}:{u32}: vkCreateDescriptorSetLayout={u64:x}, bindings={u32}\n"),
                              (u32)pipeline_index, (u32)descriptor_set_layout_index, (u64)(u32)result, (u32)binding_count);
                 return false;
             }
@@ -2358,13 +2358,13 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         if (result == VK_SUCCESS)
         {
             pipeline->layout = layout;
-            string_print(S8("Vulkan pipeline layout creation {u32}: vkCreatePipelineLayout={u64:x}, layout={u64:x}, descriptor_sets={u32}, "
+            BUSTER_RENDERING_TRACE(S8("Vulkan pipeline layout creation {u32}: vkCreatePipelineLayout={u64:x}, layout={u64:x}, descriptor_sets={u32}, "
                             "push_constants={u32}\n"),
                          (u32)pipeline_index, (u64)(u32)result, (u64)layout, (u32)descriptor_set_layout_count, (u32)push_constant_range_count);
         }
         else
         {
-            string_print(S8("Vulkan pipeline layout creation failed {u32}: vkCreatePipelineLayout={u64:x}, descriptor_sets={u32}, "
+            string_print_error(S8("Vulkan pipeline layout creation failed {u32}: vkCreatePipelineLayout={u64:x}, descriptor_sets={u32}, "
                             "push_constants={u32}\n"),
                          (u32)pipeline_index, (u64)(u32)result, (u32)descriptor_set_layout_count, (u32)push_constant_range_count);
             return false;
@@ -2423,7 +2423,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
     VkPipelineCache pipeline_cache = 0;
     result = vkCreateGraphicsPipelines(rendering_handle.device, pipeline_cache, (u32)graphics_pipeline_count, graphics_pipeline_create_infos, allocator,
                                        pipeline_handles);
-    string_print(S8("Vulkan graphics pipeline creation: vkCreateGraphicsPipelines={u64:x}, pipeline_count={u32}\n"), (u64)(u32)result,
+    BUSTER_RENDERING_TRACE(S8("Vulkan graphics pipeline creation: vkCreateGraphicsPipelines={u64:x}, pipeline_count={u32}\n"), (u64)(u32)result,
                  (u32)graphics_pipeline_count);
 
     if (result == VK_SUCCESS)
@@ -2433,7 +2433,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         for (u32 i = 0; i < graphics_pipeline_count; i += 1)
         {
             rendering_handle.pipelines[i].handle = pipeline_handles[i];
-            string_print(S8("Vulkan graphics pipeline {u32}: handle={u64:x}\n"), i, (u64)pipeline_handles[i]);
+            BUSTER_RENDERING_TRACE(S8("Vulkan graphics pipeline {u32}: handle={u64:x}\n"), i, (u64)pipeline_handles[i]);
         }
 
         for (u32 i = 0; i < shader_count; i += 1)
@@ -2484,7 +2484,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
     // Android (incl. emulator) does not ship the Khronos validation layers, so
     // requesting them would make instance creation fail. Keep validation desktop-only.
     bool enable_validation = !BUSTER_ANDROID && BUSTER_GPU_VALIDATION_ENABLED;
-    string_print(S8("Vulkan rendering initialization: library={u64:x}, validation={u32}\n"), (u64)rendering_handle.vulkan_library, (u32)enable_validation);
+    BUSTER_RENDERING_TRACE(S8("Vulkan rendering initialization: library={u64:x}, validation={u32}\n"), (u64)rendering_handle.vulkan_library, (u32)enable_validation);
     if (rendering_handle.vulkan_library)
     {
         BUSTER_VULKAN_OS_LOAD_FUNCTION(rendering_handle.vulkan_library, vkGetInstanceProcAddr);
@@ -2498,7 +2498,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
             {
                 u32 api_version = 0;
                 result = vkEnumerateInstanceVersion(&api_version);
-                string_print(S8("Vulkan instance version: vkEnumerateInstanceVersion={u64:x}, api_version={u32}\n"), (u64)(u32)result, api_version);
+                BUSTER_RENDERING_TRACE(S8("Vulkan instance version: vkEnumerateInstanceVersion={u64:x}, api_version={u32}\n"), (u64)(u32)result, api_version);
 
                 if (result == VK_SUCCESS && api_version >= VK_API_VERSION_1_3)
                 {
@@ -2526,7 +2526,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                     bool enable_validation_layer = enable_validation && validation_layer_supported;
                     if (enable_validation && !enable_validation_layer)
                     {
-                        string_print(S8("Vulkan validation layer unavailable; continuing without validation\n"));
+                        string_print_error(S8("Vulkan validation layer unavailable; continuing without validation\n"));
                     }
 
                     const char* instance_layer_names[] = {"VK_LAYER_KHRONOS_validation"};
@@ -2574,7 +2574,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
         else                                                                                                                                                   \
         {                                                                                                                                                      \
             missing_required_instance_extension = true;                                                                                                        \
-            string_print(S8("Vulkan required instance extension unavailable: {S8}\n"), string_from_pointer((char8*)(extension_name)));                         \
+            string_print_error(S8("Vulkan required instance extension unavailable: {S8}\n"), string_from_pointer((char8*)(extension_name)));                         \
         }                                                                                                                                                      \
     } while (0)
 
@@ -2622,11 +2622,11 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             BUSTER_VULKAN_ENABLE_OPTIONAL_INSTANCE_EXTENSION(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME, enable_shader_debug_printf);
                             if (!enable_debug_utils)
                             {
-                                string_print(S8("Vulkan debug utils extension unavailable; debug messenger disabled\n"));
+                                string_print_error(S8("Vulkan debug utils extension unavailable; debug messenger disabled\n"));
                             }
                             if (!enable_shader_debug_printf)
                             {
-                                string_print(S8("Vulkan validation features extension unavailable; shader debug printf disabled\n"));
+                                string_print_error(S8("Vulkan validation features extension unavailable; shader debug printf disabled\n"));
                             }
                         }
                     }
@@ -2668,7 +2668,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
 #if defined(VK_USE_PLATFORM_METAL_EXT)
                         portability_enabled = (u32)((instance_create_flags & VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR) != 0);
 #endif
-                        string_print(S8("Vulkan instance creation: extensions={u32}, layers_enabled={u32}, validation_layer_supported={u32}, "
+                        BUSTER_RENDERING_TRACE(S8("Vulkan instance creation: extensions={u32}, layers_enabled={u32}, validation_layer_supported={u32}, "
                                         "debug_utils={u32}, validation_features={u32}, portability={u32}\n"),
                                      enabled_extension_count, enabled_layer_count, (u32)validation_layer_supported, (u32)enable_debug_utils,
                                      (u32)enable_shader_debug_printf, portability_enabled);
@@ -2685,7 +2685,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         };
 
                         result = vkCreateInstance(&instance_create_info, allocator, &rendering_handle.instance);
-                        string_print(S8("Vulkan instance creation: vkCreateInstance={u64:x}, instance={u64:x}\n"), (u64)(u32)result,
+                        BUSTER_RENDERING_TRACE(S8("Vulkan instance creation: vkCreateInstance={u64:x}, instance={u64:x}\n"), (u64)(u32)result,
                                      (u64)rendering_handle.instance);
 
                         if (result == VK_SUCCESS && enable_debug_utils)
@@ -2696,7 +2696,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                             {
                                 VkResult messenger_result =
                                     vkCreateDebugUtilsMessengerEXT(rendering_handle.instance, &messenger_create_info, allocator, &rendering_handle.messenger);
-                                string_print(S8("Vulkan debug messenger creation: vkCreateDebugUtilsMessengerEXT={u64:x}, messenger={u64:x}\n"),
+                                BUSTER_RENDERING_TRACE(S8("Vulkan debug messenger creation: vkCreateDebugUtilsMessengerEXT={u64:x}, messenger={u64:x}\n"),
                                              (u64)(u32)messenger_result, (u64)rendering_handle.messenger);
                             }
                         }
@@ -2704,7 +2704,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                     else
                     {
                         result = VK_ERROR_EXTENSION_NOT_PRESENT;
-                        string_print(S8("Vulkan instance creation skipped: required instance extension support missing\n"));
+                        string_print_error(S8("Vulkan instance creation skipped: required instance extension support missing\n"));
                     }
 
                     if (result == VK_SUCCESS)
@@ -2738,7 +2738,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
                         BUSTER_VULKAN_LOAD_INSTANCE_FUNCTION(rendering_handle.instance, vkDestroySurfaceKHR);
 
                         rendering = &rendering_handle;
-                        string_print(S8("Vulkan instance ready; deferring physical-device selection until a surface exists: instance={u64:x}\n"),
+                        BUSTER_RENDERING_TRACE(S8("Vulkan instance ready; deferring physical-device selection until a surface exists: instance={u64:x}\n"),
                                      (u64)rendering_handle.instance);
                         return rendering;
                     }
@@ -2747,7 +2747,7 @@ __attribute__((noinline)) RenderingHandle* rendering_initialize(Arena* arena)
         }
     }
 
-    string_print(S8("Vulkan rendering initialization {S8}: rendering={u64:x}, instance={u64:x}, physical_device={u64:x}, device={u64:x}, queue={u64:x}\n"),
+    BUSTER_RENDERING_TRACE(S8("Vulkan rendering initialization {S8}: rendering={u64:x}, instance={u64:x}, physical_device={u64:x}, device={u64:x}, queue={u64:x}\n"),
                  rendering ? S8("succeeded") : S8("failed"), (u64)rendering, (u64)rendering_handle.instance, (u64)rendering_handle.physical_device,
                  (u64)rendering_handle.device, (u64)rendering_handle.graphics_queue);
 
@@ -2758,7 +2758,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
 {
     VkSurfaceCapabilitiesKHR surface_capabilities;
     VkResult capabilities_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(rendering->physical_device, window->surface, &surface_capabilities);
-    string_print(S8("Vulkan swapchain recreate: surface={u64:x}, old_swapchain={u64:x}, vkGetPhysicalDeviceSurfaceCapabilitiesKHR={u64:x}\n"),
+    BUSTER_RENDERING_TRACE(S8("Vulkan swapchain recreate: surface={u64:x}, old_swapchain={u64:x}, vkGetPhysicalDeviceSurfaceCapabilitiesKHR={u64:x}\n"),
                  (u64)window->surface, (u64)window->swapchain, (u64)(u32)capabilities_result);
 
     if (capabilities_result == VK_SUCCESS)
@@ -2785,7 +2785,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
         window->last_height = window->height;
         window->width = surface_capabilities.currentExtent.width;
         window->height = surface_capabilities.currentExtent.height;
-        string_print(S8("Vulkan surface capabilities: current={u32}x{u32}, min_images={u32}, max_images={u32}, current_transform={u32}\n"), window->width,
+        BUSTER_RENDERING_TRACE(S8("Vulkan surface capabilities: current={u32}x{u32}, min_images={u32}, max_images={u32}, current_transform={u32}\n"), window->width,
                      window->height, surface_capabilities.minImageCount, surface_capabilities.maxImageCount, surface_capabilities.currentTransform);
 
         VkPresentModeKHR preferred_present_mode = VK_PRESENT_MODE_FIFO_KHR;
@@ -2794,7 +2794,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
         u32 present_mode_count = 0;
         bool present_modes_available = present_mode_scratch.arena && vulkan_enumerate_present_modes(present_mode_scratch.arena, rendering->physical_device,
                                                                                                     window->surface, &present_modes, &present_mode_count);
-        string_print(S8("Vulkan surface present modes: available={u32}, count={u32}\n"), (u32)present_modes_available, present_mode_count);
+        BUSTER_RENDERING_TRACE(S8("Vulkan surface present modes: available={u32}, count={u32}\n"), (u32)present_modes_available, present_mode_count);
         if (present_modes_available && present_mode_count)
         {
             for (u32 i = 0; i < present_mode_count; i += 1)
@@ -2833,7 +2833,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
             };
 
             VkResult create_swapchain_result = vkCreateSwapchainKHR(rendering->device, &swapchain_create_info, rendering->allocator, &window->swapchain);
-            string_print(
+            BUSTER_RENDERING_TRACE(
                 S8("Vulkan swapchain creation: vkCreateSwapchainKHR={u64:x}, swapchain={u64:x}, extent={u32}x{u32}, min_images={u32}, present_mode={u32}\n"),
                 (u64)(u32)create_swapchain_result, (u64)window->swapchain, swapchain_create_info.imageExtent.width, swapchain_create_info.imageExtent.height,
                 swapchain_create_info.minImageCount, swapchain_create_info.presentMode);
@@ -2855,7 +2855,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
                 }
 
                 VkResult get_swapchain_image_count_result = vkGetSwapchainImagesKHR(rendering->device, window->swapchain, &window->swapchain_image_count, 0);
-                string_print(S8("Vulkan swapchain image count: vkGetSwapchainImagesKHR={u64:x}, count={u32}\n"), (u64)(u32)get_swapchain_image_count_result,
+                BUSTER_RENDERING_TRACE(S8("Vulkan swapchain image count: vkGetSwapchainImagesKHR={u64:x}, count={u32}\n"), (u64)(u32)get_swapchain_image_count_result,
                              window->swapchain_image_count);
                 if (get_swapchain_image_count_result == VK_SUCCESS)
                 {
@@ -2871,7 +2871,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
 
                     VkResult get_swapchain_images_result =
                         vkGetSwapchainImagesKHR(rendering->device, window->swapchain, &window->swapchain_image_count, window->swapchain_images);
-                    string_print(S8("Vulkan swapchain images: vkGetSwapchainImagesKHR={u64:x}, count={u32}\n"), (u64)(u32)get_swapchain_images_result,
+                    BUSTER_RENDERING_TRACE(S8("Vulkan swapchain images: vkGetSwapchainImagesKHR={u64:x}, count={u32}\n"), (u64)(u32)get_swapchain_images_result,
                                  window->swapchain_image_count);
                     if (get_swapchain_images_result == VK_SUCCESS)
                     {
@@ -2909,7 +2909,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
 
                             VkResult image_view_creation =
                                 vkCreateImageView(rendering->device, &create_info, rendering->allocator, &window->swapchain_image_views[i]);
-                            string_print(S8("Vulkan swapchain image view {u32}: vkCreateImageView={u64:x}, image={u64:x}, view={u64:x}\n"), i,
+                            BUSTER_RENDERING_TRACE(S8("Vulkan swapchain image view {u32}: vkCreateImageView={u64:x}, image={u64:x}, view={u64:x}\n"), i,
                                          (u64)(u32)image_view_creation, (u64)window->swapchain_images[i], (u64)window->swapchain_image_views[i]);
                             if (image_view_creation != VK_SUCCESS)
                             {
@@ -2928,7 +2928,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
                                         .format = window->swapchain_image_format,
                                         .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                     });
-                string_print(S8("Vulkan render image creation: image={u64:x}, view={u64:x}, memory={u64:x}, extent={u32}x{u32}\n"),
+                BUSTER_RENDERING_TRACE(S8("Vulkan render image creation: image={u64:x}, view={u64:x}, memory={u64:x}, extent={u32}x{u32}\n"),
                              (u64)window->render_image.handle, (u64)window->render_image.view, (u64)window->render_image.memory.handle, window->width,
                              window->height);
             }
@@ -2939,7 +2939,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
             {
                 scratch_end(present_mode_scratch);
             }
-            string_print(S8("Vulkan swapchain recreation skipped: no present modes available\n"));
+            string_print_error(S8("Vulkan swapchain recreation skipped: no present modes available\n"));
         }
     }
 }
@@ -2954,7 +2954,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_XCB);
     xcb_connection_t* native_connection = (xcb_connection_t*)native_surface.display;
     xcb_window_t native_window = (xcb_window_t)(u64)native_surface.window;
-    string_print(S8("Vulkan render window initialization: platform=xcb, native_window={u64:x}, connection={u64:x}\n"), (u64)native_window,
+    BUSTER_RENDERING_TRACE(S8("Vulkan render window initialization: platform=xcb, native_window={u64:x}, connection={u64:x}\n"), (u64)native_window,
                  (u64)native_connection);
     VkXcbSurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
@@ -2965,7 +2965,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     };
 
     VkResult create_surface_result = vkCreateXcbSurfaceKHR(rendering->instance, &surface_create_info, rendering->allocator, &result->surface);
-    string_print(S8("Vulkan surface creation: vkCreateXcbSurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)create_surface_result, (u64)result->surface);
+    BUSTER_RENDERING_TRACE(S8("Vulkan surface creation: vkCreateXcbSurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)create_surface_result, (u64)result->surface);
     if (create_surface_result != VK_SUCCESS)
     {
         os_fail();
@@ -2974,7 +2974,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_WIN32);
     HINSTANCE native_instance = (HINSTANCE)native_surface.display;
     HWND native_window = (HWND)native_surface.window;
-    string_print(S8("Vulkan render window initialization: platform=win32, hwnd={u64:x}, hinstance={u64:x}\n"), (u64)native_window, (u64)native_instance);
+    BUSTER_RENDERING_TRACE(S8("Vulkan render window initialization: platform=win32, hwnd={u64:x}, hinstance={u64:x}\n"), (u64)native_window, (u64)native_instance);
     VkWin32SurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
         .pNext = 0,
@@ -2984,7 +2984,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     };
 
     VkResult create_surface_result = vkCreateWin32SurfaceKHR(rendering->instance, &surface_create_info, rendering->allocator, &result->surface);
-    string_print(S8("Vulkan surface creation: vkCreateWin32SurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)create_surface_result, (u64)result->surface);
+    BUSTER_RENDERING_TRACE(S8("Vulkan surface creation: vkCreateWin32SurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)create_surface_result, (u64)result->surface);
     if (create_surface_result != VK_SUCCESS)
     {
         os_fail();
@@ -2992,7 +2992,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
     BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_ANDROID);
     struct ANativeWindow* native_window = (struct ANativeWindow*)native_surface.window;
-    string_print(S8("Vulkan render window initialization: platform=android, native_window={u64:x}\n"), (u64)native_window);
+    BUSTER_RENDERING_TRACE(S8("Vulkan render window initialization: platform=android, native_window={u64:x}\n"), (u64)native_window);
     VkAndroidSurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
         .pNext = 0,
@@ -3001,18 +3001,18 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     };
 
     VkResult create_surface_result = vkCreateAndroidSurfaceKHR(rendering->instance, &surface_create_info, rendering->allocator, &result->surface);
-    string_print(S8("Vulkan surface creation: vkCreateAndroidSurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)create_surface_result, (u64)result->surface);
+    BUSTER_RENDERING_TRACE(S8("Vulkan surface creation: vkCreateAndroidSurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)create_surface_result, (u64)result->surface);
     if (create_surface_result != VK_SUCCESS)
     {
         os_fail();
     }
 #endif
-    string_print(S8("Vulkan surface ready: surface={u64:x}\n"), result->surface);
+    BUSTER_RENDERING_TRACE(S8("Vulkan surface ready: surface={u64:x}\n"), result->surface);
 
     bool initialize_device = rendering_vulkan_window_requires_device_initialization(rendering->device != 0);
     if (initialize_device && !vulkan_initialize_device(rendering, result->surface))
     {
-        string_print(S8("Vulkan render window initialization failed: no eligible device for surface={u64:x}\n"), (u64)result->surface);
+        string_print_error(S8("Vulkan render window initialization failed: no eligible device for surface={u64:x}\n"), (u64)result->surface);
         vkDestroySurfaceKHR(rendering->instance, result->surface, rendering->allocator);
         result->surface = 0;
         return 0;
@@ -3020,7 +3020,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 
     if (initialize_device && !vulkan_initialize_pipelines(rendering, arena))
     {
-        string_print(S8("Vulkan render window initialization failed: pipeline setup failed after device selection\n"));
+        string_print_error(S8("Vulkan render window initialization failed: pipeline setup failed after device selection\n"));
         vkDestroySurfaceKHR(rendering->instance, result->surface, rendering->allocator);
         result->surface = 0;
         vulkan_destroy_failed_device(rendering);
@@ -3037,7 +3037,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
         }
         if (!compatible)
         {
-            string_print(S8("Vulkan render window initialization failed: existing device is incompatible with surface={u64:x}\n"), (u64)result->surface);
+            string_print_error(S8("Vulkan render window initialization failed: existing device is incompatible with surface={u64:x}\n"), (u64)result->surface);
             vkDestroySurfaceKHR(rendering->instance, result->surface, rendering->allocator);
             result->surface = 0;
             return 0;
@@ -3046,7 +3046,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 
     if (!rendering->device)
     {
-        string_print(S8("Vulkan render window initialization failed: no logical device is available after selection\n"));
+        string_print_error(S8("Vulkan render window initialization failed: no logical device is available after selection\n"));
         vkDestroySurfaceKHR(rendering->instance, result->surface, rendering->allocator);
         result->surface = 0;
         return 0;
@@ -3063,7 +3063,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     result->scale = (RenderingScale){.x = 1.0f, .y = 1.0f};
 
     swapchain_recreate(rendering, result);
-    string_print(S8("Vulkan swapchain ready: swapchain={u64:x}, extent={u32}x{u32}, images={u32}\n"), result->swapchain, result->width, result->height,
+    BUSTER_RENDERING_TRACE(S8("Vulkan swapchain ready: swapchain={u64:x}, extent={u32}x{u32}, images={u32}\n"), result->swapchain, result->width, result->height,
                  result->swapchain_image_count);
     for (u64 frame_index = 0; frame_index < result->frame_count; frame_index += 1)
     {
@@ -3255,7 +3255,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
                 os_fail();
             }
             frame->bound_pipeline = BUSTER_PIPELINE_COUNT;
-            string_print(S8("Vulkan frame resources {u32}: command_pool={u64:x}, command_buffer={u64:x}, render_fence={u64:x}, swapchain_semaphore={u64:x}\n"),
+            BUSTER_RENDERING_TRACE(S8("Vulkan frame resources {u32}: command_pool={u64:x}, command_buffer={u64:x}, render_fence={u64:x}, swapchain_semaphore={u64:x}\n"),
                          frame_i, (u64)frame->command_pool, (u64)frame->command_buffer, (u64)frame->render_fence, (u64)frame->swapchain_semaphore);
         }
     }
@@ -3266,10 +3266,10 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
         {
             os_fail();
         }
-        string_print(S8("Vulkan render semaphore {u32}: semaphore={u64:x}\n"), image_i, (u64)result->render_semaphores[image_i]);
+        BUSTER_RENDERING_TRACE(S8("Vulkan render semaphore {u32}: semaphore={u64:x}\n"), image_i, (u64)result->render_semaphores[image_i]);
     }
 
-    string_print(S8("Vulkan render window initialization succeeded: surface={u64:x}, swapchain={u64:x}, frame_count={u32}, image_count={u32}\n"),
+    BUSTER_RENDERING_TRACE(S8("Vulkan render window initialization succeeded: surface={u64:x}, swapchain={u64:x}, frame_count={u32}, image_count={u32}\n"),
                  (u64)result->surface, (u64)result->swapchain, result->frame_count, result->swapchain_image_count);
 
     return result;
@@ -3317,7 +3317,7 @@ void rendering_window_surface_recreate(RenderingHandle* rendering, WmHandle* win
         .window = native_window,
     };
     VkResult surface_result = vkCreateAndroidSurfaceKHR(rendering->instance, &surface_create_info, rendering->allocator, &window->surface);
-    string_print(S8("Vulkan surface recreate: vkCreateAndroidSurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)surface_result, (u64)window->surface);
+    BUSTER_RENDERING_TRACE(S8("Vulkan surface recreate: vkCreateAndroidSurfaceKHR={u64:x}, surface={u64:x}\n"), (u64)(u32)surface_result, (u64)window->surface);
 
     swapchain_recreate(rendering, window);
 }
@@ -3829,7 +3829,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
     bool log_frame_begin = vulkan_frame_begin_log_count < 3;
     if (log_frame_begin)
     {
-        string_print(S8("Vulkan frame begin {u32}: swapchain={u64:x}, extent={u32}x{u32}, frame_index={u32}, swapchain_image_index={u32}\n"),
+        BUSTER_RENDERING_TRACE(S8("Vulkan frame begin {u32}: swapchain={u64:x}, extent={u32}x{u32}, frame_index={u32}, swapchain_image_index={u32}\n"),
                      vulkan_frame_begin_log_count, (u64)window->swapchain, window->width, window->height, window->frame_index, window->swapchain_image_index);
         vulkan_frame_begin_log_count += 1;
     }
@@ -3842,7 +3842,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         u32 surface_height = surface_capabilities.currentExtent.height;
         if (surface_width && surface_height && (surface_width != window->width || surface_height != window->height))
         {
-            string_print(S8("Vulkan frame begin detected surface resize: stored={u32}x{u32}, current={u32}x{u32}\n"), window->width, window->height,
+            BUSTER_RENDERING_TRACE(S8("Vulkan frame begin detected surface resize: stored={u32}x{u32}, current={u32}x{u32}\n"), window->width, window->height,
                          surface_width, surface_height);
             swapchain_recreate(rendering, window);
             frame = rendering_window_frame(window);
@@ -3862,7 +3862,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
 
         if (next_image_result == VK_ERROR_OUT_OF_DATE_KHR)
         {
-            string_print(S8("Vulkan frame begin acquire out of date: vkAcquireNextImageKHR={u64:x}\n"), (u64)(u32)next_image_result);
+            BUSTER_RENDERING_TRACE(S8("Vulkan frame begin acquire out of date: vkAcquireNextImageKHR={u64:x}\n"), (u64)(u32)next_image_result);
             swapchain_recreate(rendering, window);
             frame = rendering_window_frame(window);
             next_image_result =
@@ -3872,7 +3872,7 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
 
         if (next_image_result != VK_SUCCESS && next_image_result != VK_SUBOPTIMAL_KHR)
         {
-            string_print(S8("Vulkan frame begin acquire failed: vkAcquireNextImageKHR={u64:x}\n"), (u64)(u32)next_image_result);
+            string_print_error(S8("Vulkan frame begin acquire failed: vkAcquireNextImageKHR={u64:x}\n"), (u64)(u32)next_image_result);
             os_fail();
         }
 
@@ -3882,20 +3882,20 @@ void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHan
         bool success = reset_fence_result == VK_SUCCESS && reset_command_buffer_result == VK_SUCCESS;
         if (!success)
         {
-            string_print(S8("Vulkan frame begin reset failed: vkResetFences={u64:x}, vkResetCommandBuffer={u64:x}\n"), (u64)(u32)reset_fence_result,
+            string_print_error(S8("Vulkan frame begin reset failed: vkResetFences={u64:x}, vkResetCommandBuffer={u64:x}\n"), (u64)(u32)reset_fence_result,
                          (u64)(u32)reset_command_buffer_result);
             os_fail();
         }
 
         if (log_frame_begin)
         {
-            string_print(S8("Vulkan frame begin acquire: vkWaitForFences={u64:x}, vkAcquireNextImageKHR={u64:x}, image_index={u32}\n"), (u64)(u32)wait_result,
+            BUSTER_RENDERING_TRACE(S8("Vulkan frame begin acquire: vkWaitForFences={u64:x}, vkAcquireNextImageKHR={u64:x}, image_index={u32}\n"), (u64)(u32)wait_result,
                          (u64)(u32)next_image_result, acquired_image_index);
         }
     }
     else
     {
-        string_print(S8("Vulkan frame begin wait failed: vkWaitForFences={u64:x}\n"), (u64)(u32)wait_result);
+        string_print_error(S8("Vulkan frame begin wait failed: vkWaitForFences={u64:x}\n"), (u64)(u32)wait_result);
         os_fail();
     }
 
@@ -4061,7 +4061,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
     bool presented = false;
     if (vulkan_frame_end_log_count < 3)
     {
-        string_print(S8("Vulkan frame end {u32}: swapchain={u64:x}, render_image={u64:x}, image_index={u32}, extent={u32}x{u32}\n"), vulkan_frame_end_log_count,
+        BUSTER_RENDERING_TRACE(S8("Vulkan frame end {u32}: swapchain={u64:x}, render_image={u64:x}, image_index={u32}, extent={u32}x{u32}\n"), vulkan_frame_end_log_count,
                      (u64)window->swapchain, (u64)window->render_image.handle, window->swapchain_image_index, window->width, window->height);
     }
 
@@ -4437,7 +4437,7 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
 
                 if (vulkan_frame_end_log_count < 3)
                 {
-                    string_print(
+                    BUSTER_RENDERING_TRACE(
                         S8("Vulkan frame end present {u32}: vkQueueSubmit2={u64:x}, vkQueuePresentKHR={u64:x}, result0={u64:x}, render_semaphore={u64:x}\n"),
                         vulkan_frame_end_log_count, (u64)(u32)submit_result, (u64)(u32)present_result, (u64)(u32)results[0], (u64)render_semaphore);
                     vulkan_frame_end_log_count += 1;
@@ -4456,30 +4456,30 @@ void rendering_window_frame_end(RenderingHandle* rendering, RenderingWindowHandl
                 }
                 else if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR)
                 {
-                    string_print(S8("Vulkan frame end present requires swapchain recreate: vkQueuePresentKHR={u64:x}\n"), (u64)(u32)present_result);
+                    BUSTER_RENDERING_TRACE(S8("Vulkan frame end present requires swapchain recreate: vkQueuePresentKHR={u64:x}\n"), (u64)(u32)present_result);
                     swapchain_recreate(rendering, window);
                 }
                 else
                 {
-                    string_print(S8("Vulkan frame end present failed: vkQueuePresentKHR={u64:x}\n"), (u64)(u32)present_result);
+                    string_print_error(S8("Vulkan frame end present failed: vkQueuePresentKHR={u64:x}\n"), (u64)(u32)present_result);
                     os_fail();
                 }
             }
             else
             {
-                string_print(S8("Vulkan frame end submit failed: vkQueueSubmit2={u64:x}\n"), (u64)(u32)submit_result);
+                string_print_error(S8("Vulkan frame end submit failed: vkQueueSubmit2={u64:x}\n"), (u64)(u32)submit_result);
                 os_fail();
             }
         }
         else
         {
-            string_print(S8("Vulkan frame end command buffer failed: vkEndCommandBuffer failed\n"));
+            string_print_error(S8("Vulkan frame end command buffer failed: vkEndCommandBuffer failed\n"));
             os_fail();
         }
     }
     else
     {
-        string_print(S8("Vulkan frame end command buffer failed: vkBeginCommandBuffer failed\n"));
+        string_print_error(S8("Vulkan frame end command buffer failed: vkBeginCommandBuffer failed\n"));
         os_fail();
     }
     bool error_frame = !rendering_command_stream_is_valid(frame->commands);
@@ -4532,7 +4532,7 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
         return;
     }
 
-    string_print(S8("Vulkan render window deinitialize: surface={u64:x}, swapchain={u64:x}, frame_count={u32}, image_count={u32}\n"), (u64)window->surface,
+    BUSTER_RENDERING_TRACE(S8("Vulkan render window deinitialize: surface={u64:x}, swapchain={u64:x}, frame_count={u32}, image_count={u32}\n"), (u64)window->surface,
                  (u64)window->swapchain, window->frame_count, window->swapchain_image_count);
     if (vkDeviceWaitIdle(rendering->device) == VK_SUCCESS)
     {
@@ -4619,7 +4619,7 @@ void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHa
     }
     else
     {
-        string_print(S8("Device failed to wait idle\n"));
+        string_print_error(S8("Device failed to wait idle\n"));
     }
 }
 
@@ -4630,7 +4630,7 @@ void rendering_deinitialize(RenderingHandle* rendering)
         return;
     }
 
-    string_print(S8("Vulkan rendering deinitialize: texture_count={u32}, device={u64:x}, instance={u64:x}\n"), rendering->texture_count, (u64)rendering->device,
+    BUSTER_RENDERING_TRACE(S8("Vulkan rendering deinitialize: texture_count={u32}, device={u64:x}, instance={u64:x}\n"), rendering->texture_count, (u64)rendering->device,
                  (u64)rendering->instance);
     if (!rendering->device || !vkDeviceWaitIdle || vkDeviceWaitIdle(rendering->device) == VK_SUCCESS)
     {
@@ -4700,6 +4700,6 @@ void rendering_deinitialize(RenderingHandle* rendering)
     }
     else
     {
-        string_print(S8("Device failed to wait idle\n"));
+        string_print_error(S8("Device failed to wait idle\n"));
     }
 }

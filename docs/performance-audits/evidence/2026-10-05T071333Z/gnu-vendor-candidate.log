@@ -1,0 +1,1 @@
+cc: error: unsupported target environment: gnu (MinGW's ABI is not implemented; Windows targets use the MSVC ABI, spelled *-windows-msvc)

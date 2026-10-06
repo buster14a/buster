@@ -81,14 +81,20 @@ allocated region is the half-open range from 64 KiB through the static-data end 
 exclusive upper bound is exactly 64 KiB later, and the declared memory minimum contains that
 complete half-open stack region without relying on page-rounding slack or extra host memory.
 
-Every fixed frame starts at the caller's pointer, has its object offsets laid out at their canonical
-alignments, and rounds its end to the 16-byte ABI stack alignment. Dynamic allocations align their
-starting address to the IR-requested power-of-two alignment and then advance by the requested byte
-count; a zero-byte allocation is permitted when its aligned starting address remains in bounds.
-Function returns restore the entry pointer, and canonical stack-save/restore operations used by VLA
-scopes may restore only to an address at or above the fixed-frame end and no later than the stack's
-upper bound. This preserves caller frames across nested calls, recursion, repeated exports, and
-normal or early returns.
+Every fixed frame rounds its base up to the maximum of the 16-byte ABI stack alignment and
+the actual canonical places' and supported snapshots' required alignments. Object offsets honor
+both the type layout and the place guarantee; a strongly aligned offset alone cannot align an
+object against an odd or less strongly aligned caller pointer. The fixed extent still rounds
+to 16 bytes. Dynamic allocations align their starting address to the IR-requested power-of-two
+alignment and then advance by the requested byte count, so their live end may be odd; a zero-byte
+allocation is permitted when its aligned starting address remains in bounds.
+
+The emitter retains the exact unrounded entry pointer separately from the aligned frame base.
+Normal returns and deliberate stack-bound traps restore that entry pointer, preserving a caller's
+live allocation and any space consumed by frame padding. Canonical stack-save/restore operations
+used by VLA scopes may restore only to an address at or above the fixed-frame end and no later than
+the stack's upper bound. This preserves caller frames across nested calls, recursion, repeated
+exports, and normal or early returns.
 
 All layout, alignment, page-count, fixed-frame, and dynamic-allocation additions are checked before
 they can wrap, overlap static data, or cross the exclusive upper bound. A generated allocation may
