@@ -2622,6 +2622,17 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_fixed_enum_range_source = S8_INITIALIZE
     " && aligned_global==4294967296ULL && aligned_value()==4294967296ULL && aligned_widened==4294967296LL"
     " && LOCAL==255 && NEXT==1 && S8_CAST==-1 && U8_CAST==255); }\n");
 
+// A block-scope untagged enum with a fixed underlying type (#2849): `enum :`
+// has the `<identifier> :` shape of a label, which once swallowed the `enum`
+// and left `long { ... }` as a declaration with no declared identifier.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_untagged_local_fixed_enum_source = S8_INITIALIZER(
+    "int main(void) { int failure = 0; enum : long { E1 = 1 }; failure += E1 != 1;"
+    " { enum : unsigned char { B0, B1 }; failure += B1 != 1 || sizeof(B1) != 1; }"
+    " switch (failure) { case 0: { enum : short { S2 = 2 }; failure += S2 != 2; } }"
+    " goto enumeration; enumeration: return failure; }\n");
+#endif
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_enum_ranges(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3371,7 +3382,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("enum-runtime"), S8(".c"));
-    String8 sources[] = {c_test_enum_bit_field_source(arguments->arena), c_test_enum_lowering_source, c_test_fixed_enum_range_source};
+    String8 sources[] = {c_test_enum_bit_field_source(arguments->arena), c_test_enum_lowering_source, c_test_fixed_enum_range_source,
+                         c_test_untagged_local_fixed_enum_source};
     for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
     {
         String8 source_text = sources[fixture];
@@ -8025,6 +8037,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_member_search(UnitTestArgumen
                         string_format(arguments->arena, S8("member={S8} searches={u64} tables={u64}"), member, searches, tables));
         c_test_scratch_end(temporary);
     }
+    return result;
+}
+
+// An initializer walk numbers a record's slots once (GitHub #2861): a
+// designated or positional element costs one table read, not a pass over the
+// members before it, so the member rows the slot helpers read grow with the
+// record's width rather than with its square. The record carries unnamed
+// bit-fields, which hold no slot, and the inferred bounds check that the
+// numbering skipping them is unchanged, in a struct and a union.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_slot_tables(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 widths[] = {512, 2048};
+    u64 visits_by_width[BUSTER_ARRAY_LENGTH(widths)] = {0};
+    for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+    {
+        u32 width = widths[width_index];
+        TemporalArena temporary = scratch_begin(0, 0);
+        u64 capacity = BUSTER_KB(512);
+        char8* source = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        c_test_append_source(source, capacity, &length, S8("struct R {"));
+        for (u32 index = 0; index < width; index += 1)
+        {
+            c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" int m{u32};"), index));
+            if (index % 4 == 3)
+            {
+                c_test_append_source(source, capacity, &length, S8(" int : 3;"));
+            }
+        }
+        c_test_append_source(source, capacity, &length, S8(" };\nstruct R designated = {"));
+        for (u32 index = 0; index < width; index += 1)
+        {
+            c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" .m{u32} = {u32},"), index, index));
+        }
+        c_test_append_source(source, capacity, &length, S8(" };\nstruct R positional = {"));
+        for (u32 index = 0; index < width; index += 1)
+        {
+            c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" {u32},"), index));
+        }
+        // m{width-2} and m{width-1} fill the first element past the trailing
+        // bit-field, so the third value starts a second element.
+        c_test_append_source(source, capacity, &length,
+                             string_format(temporary.arena,
+                                           S8(" };\nstruct R tail[] = {{ [0].m{u32} = 1, 2, 3 };\n"
+                                              "_Static_assert(sizeof tail / sizeof tail[0] == 2, \"tail\");\n"
+                                              "union U {{ int : 2; int u; float f; };\n"
+                                              "union U unions[] = {{ 1, {{ .f = 2 }, 3 };\n"
+                                              "_Static_assert(sizeof unions / sizeof unions[0] == 3, \"unions\");\n"),
+                                           width - 2));
+        BUSTER_TEST(arguments, length < capacity);
+        u64 visits_before = 0;
+        c_test_initializer_slot_member_visits(&visits_before);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){source, length}, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, syntax.diagnostic_count == 0))
+        {
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST_RAW(arguments, analysis.diagnostic_count == 0,
+                            analysis.diagnostic_count ? analysis.diagnostics[0].message : S8("no diagnostic"));
+        }
+        u64 visits = 0;
+        c_test_initializer_slot_member_visits(&visits);
+        visits_by_width[width_index] = visits - visits_before;
+        // The record has width + width / 4 member rows, and each walk over
+        // one of its initializers builds its table once.
+        u64 rows = (u64)width + width / 4;
+        BUSTER_TEST_RAW(arguments, visits_by_width[width_index] != 0 && visits_by_width[width_index] <= 32 * rows,
+                        string_format(arguments->arena, S8("width={u32} rows={u64} visits={u64}"), width, rows, visits_by_width[width_index]));
+        c_test_scratch_end(temporary);
+    }
+    // Four times the members costs about four times the reads, not sixteen.
+    BUSTER_TEST_RAW(arguments, visits_by_width[1] <= 6 * visits_by_width[0],
+                    string_format(arguments->arena, S8("visits {u64} -> {u64}"), visits_by_width[0], visits_by_width[1]));
     return result;
 }
 
@@ -46625,6 +46712,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_pragma_pack_explicit_alignment);
     C_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     C_TEST_FIXTURE(arguments, c_test_promoted_member_search);
+    C_TEST_FIXTURE(arguments, c_test_initializer_slot_tables);
     C_TEST_FIXTURE(arguments, c_test_promoted_union_initializer_overrides);
     C_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
     C_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
