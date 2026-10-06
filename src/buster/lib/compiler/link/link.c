@@ -11211,17 +11211,6 @@ struct LinkUefiPeSection
     u8 reserved[3];
 };
 
-BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
-{
-    return kind == OBJECT_RELOCATION_X86_64_TPOFF32 || kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
-           kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
-           kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-           kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
-           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
-           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ||
-           kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12;
-}
-
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(Arena* arena, ObjectFile* object,
                                                                                  NativeExecutableLinkOptions options)
 {
@@ -11510,7 +11499,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                 {
                     continue;
                 }
-                if (link_uefi_relocation_is_tls(relocation->kind))
+                if (object_relocation_kind_is_tls(relocation->kind))
                 {
                     result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
                     result.symbol = S8("UEFI thread-local storage relocation");
@@ -12030,7 +12019,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                 }
                 else
                 {
-                    result.error = link_uefi_relocation_is_tls(relocation->kind) ? LINK_ERROR_UNSUPPORTED_FEATURE : LINK_ERROR_RELOCATION;
+                    result.error = object_relocation_kind_is_tls(relocation->kind) ? LINK_ERROR_UNSUPPORTED_FEATURE : LINK_ERROR_RELOCATION;
                     result.symbol = symbol->name;
                 }
             }

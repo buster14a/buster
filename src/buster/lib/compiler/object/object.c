@@ -65,6 +65,8 @@
 //                                                  codegen unwind actions
 //   object_relocation_kind_from_codegen            codegen -> format
 //                                                  relocation mapping
+//   object_relocation_properties                   shared field width/TLS
+//                                                  facts for all consumers
 //   object_named_section_plan ..                   the sections `section`
 //   object_named_section_map                        attributes name
 //   object_initializer_section_name ..             how each format spells a
@@ -1477,11 +1479,6 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
-{
-    return kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : object_relocation_kind_width(kind);
-}
-
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_apple(Target target)
 {
     return target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
@@ -1811,7 +1808,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
 BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, ObjectRelocation* relocation,
                                                          ByteSlice section_data)
 {
-    if (relocation && relocation->offset + object_assembly_relocation_size(relocation->kind) <= section_data.length)
+    if (relocation && relocation->offset + object_relocation_kind_width(relocation->kind) <= section_data.length)
     {
         switch (relocation->kind)
         {
@@ -4254,7 +4251,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
                 buffer->error = true;
                 break;
             }
-            cursor += object_assembly_relocation_size(relocation->kind);
+            cursor += object_relocation_kind_width(relocation->kind);
             continue;
         }
         if (section->kind == OBJECT_SECTION_TEXT)
@@ -10495,9 +10492,76 @@ bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind)
            kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX || kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX;
 }
 
+// Format-independent field facts. Keep this ordered like ObjectRelocationKind;
+// the count check and exhaustive public-contract fixture require every row.
+typedef struct ObjectRelocationProperties ObjectRelocationProperties;
+struct ObjectRelocationProperties
+{
+    u8 width;
+    bool is_tls;
+};
+
+static ObjectRelocationProperties const object_relocation_properties[] = {
+    {4, false}, // OBJECT_RELOCATION_X86_64_PC32
+    {4, false}, // OBJECT_RELOCATION_AARCH64_CALL26
+    {4, false}, // OBJECT_RELOCATION_AARCH64_PREL32
+    {8, false}, // OBJECT_RELOCATION_ABSOLUTE64
+    {4, false}, // OBJECT_RELOCATION_ABSOLUTE32
+    {4, false}, // OBJECT_RELOCATION_X86_64_ABSOLUTE32S
+    {4, false}, // OBJECT_RELOCATION_COFF_SECREL32
+    {2, false}, // OBJECT_RELOCATION_COFF_SECTION16
+    {4, false}, // OBJECT_RELOCATION_COFF_ADDR32NB
+    {4, true}, // OBJECT_RELOCATION_X86_64_TPOFF32
+    {4, true}, // OBJECT_RELOCATION_X86_64_GOTTPOFF
+    {4, true}, // OBJECT_RELOCATION_X86_64_TLSGD
+    {4, false}, // OBJECT_RELOCATION_X86_64_PLT32
+    {4, true}, // OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32
+    {4, true}, // OBJECT_RELOCATION_PE_TLS_OFFSET32
+    {4, true}, // OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
+    {4, true}, // OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
+    {4, true}, // OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
+    {4, false}, // OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A
+    {4, false}, // OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L
+    {4, true}, // OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12
+    {4, true}, // OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
+    {4, true}, // OBJECT_RELOCATION_X86_64_MACH_TLV_PC32
+    {4, true}, // OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21
+    {4, true}, // OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_JUMP26
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_PAGE21
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_MACH_PAGE21
+    {4, false}, // OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12
+    {4, false}, // OBJECT_RELOCATION_X86_64_GOTPCREL
+    {4, false}, // OBJECT_RELOCATION_X86_64_GOTPCRELX
+    {4, false}, // OBJECT_RELOCATION_X86_64_REX_GOTPCRELX
+    {4, false}, // OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX
+    {4, true}, // OBJECT_RELOCATION_X86_64_TLSLD
+    {4, true}, // OBJECT_RELOCATION_X86_64_DTPOFF32
+    {8, true}, // OBJECT_RELOCATION_X86_64_DTPOFF64
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12
+    {8, false}, // OBJECT_RELOCATION_X86_64_PC64
+    {8, false}, // OBJECT_RELOCATION_AARCH64_PREL64
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12
+    {4, true}, // OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12
+    {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21
+};
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(object_relocation_properties) == OBJECT_RELOCATION_COUNT);
+
 u32 object_relocation_kind_width(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ? 8 : 4;
+    return (u32)kind < OBJECT_RELOCATION_COUNT ? object_relocation_properties[(u32)kind].width : 0;
+}
+
+bool object_relocation_kind_is_tls(ObjectRelocationKind kind)
+{
+    return (u32)kind < OBJECT_RELOCATION_COUNT && object_relocation_properties[(u32)kind].is_tls;
 }
 
 BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
@@ -11576,23 +11640,6 @@ BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleReloca
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool object_codegen_relocation_width(ObjectRelocationKind kind, u32* width)
-{
-    if (!width)
-    {
-        return false;
-    }
-    switch (kind)
-    {
-        case OBJECT_RELOCATION_ABSOLUTE32:
-        case OBJECT_RELOCATION_X86_64_ABSOLUTE32S: *width = 4; return true;
-        case OBJECT_RELOCATION_X86_64_PC64:
-        case OBJECT_RELOCATION_AARCH64_PREL64:
-        case OBJECT_RELOCATION_ABSOLUTE64: *width = 8; return true;
-        default: *width = 4; return true;
-    }
-}
-
 // The module writer hands the codegen line rows to the DWARF and CodeView
 // builders as DwarfLineEntry rows without copying them, which is sound only
 // while the two records agree byte for byte.
@@ -12367,8 +12414,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                 : source.source == CODEGEN_MODULE_RELOCATION_DATA              ? module->writable_data
                                 : source.source == CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA ? module->thread_local_data
                                                                                                : (ByteSlice){0};
-        u32 relocation_width = 4;
-        object_codegen_relocation_width(kind, &relocation_width);
+        u32 relocation_width = object_relocation_kind_width(kind);
         if (!target_symbol || source.source >= CODEGEN_MODULE_RELOCATION_SOURCE_COUNT || source.offset > source_data.length ||
             relocation_width > source_data.length - source.offset)
         {
@@ -14470,7 +14516,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
     {
         ObjectRelocation* source = object->relocations + relocation;
         result.statistics.relocation_visits += 1;
-        u64 relocation_size = object_assembly_relocation_size(source->kind);
+        u64 relocation_size = object_relocation_kind_width(source->kind);
         u64 section_length = source->section < object->section_count ? object->sections[source->section].data.length : 0;
         if (source->section >= object->section_count || source->symbol >= object->symbol_count || source->kind >= OBJECT_RELOCATION_COUNT ||
             source->offset > section_length || relocation_size > section_length - source->offset)
@@ -14975,23 +15021,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                     break;
                 }
             }
-            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
-                     relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
-                     relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
-                     relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
-                     relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ||
-                     relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
-                     relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
-                     relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-                     relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
-                     relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
+            else if (object_relocation_kind_is_tls(relocation->kind))
             {
                 // A standalone executable image has no thread-pointer or Darwin
                 // TLVP resolver.  Keep these relocations fail-closed rather than
