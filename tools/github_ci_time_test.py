@@ -426,6 +426,24 @@ class AnalyzerCampaignTimingTests(unittest.TestCase):
             sys.path.remove(str(ROOT / "tests"))
         return ci_tools_test.TimingTests().current_sample()
 
+
+    def test_dependency_queue_execution_and_workflow_latency_are_separate(self):
+        run = self.current_sample()
+        for job in run["jobs"]:
+            job["created_at"] = "2026-09-07T12:00:06Z"
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertEqual(sample["job_dependency_seconds"]["Workflow lint"], 6)
+        self.assertEqual(sample["job_queue_seconds"]["Workflow lint"], 4)
+        self.assertEqual(sample["job_seconds"]["Workflow lint"], 60)
+        self.assertEqual(sample["elapsed_seconds"], 70)
+        for job in run["jobs"]:
+            del job["created_at"]
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertIsNone(sample["job_dependency_seconds"]["Workflow lint"])
+        self.assertIsNone(sample["job_queue_seconds"]["Workflow lint"])
+
     def test_candidate_only_and_historical_analyzer_steps_remain_distinct(self):
         old = "Compare reference analysis and aggregate all module shards"
         new = "Analyze candidate and aggregate all module shards"

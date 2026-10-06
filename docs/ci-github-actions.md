@@ -142,9 +142,11 @@ Measure scheduling separately from execution: workflow creation to job creation
 includes dependency wait; job creation to start is runner queue delay; start to
 completion is execution time. Total workflow latency ends at the last required
 completion. Earlier desktop eligibility alone proves no whole-CI speedup.
-The existing `github_ci_time` reports retain per-job queue and execution
-durations and workflow elapsed time; use job API creation timestamps for
-dependency wait and overlap evidence.
+The existing `github_ci_time` reports retain `job_dependency_seconds` from
+workflow creation to job creation, `job_queue_seconds` from creation to start,
+execution durations and workflow elapsed time. Dependency time includes
+scheduler overhead; absent historical job-creation timestamps remain unknown.
+Use the retained job API timestamps for overlap evidence.
 
 ## Supplementary bootstrap scheduling and tested revision
 

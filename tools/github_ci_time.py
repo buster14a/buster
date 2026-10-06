@@ -200,6 +200,8 @@ def measure(run):
         step_seconds = {}
         job_seconds = {}
         job_queue_seconds = {}
+        job_dependency_seconds = {}
+        workflow_created = timestamp(run.get("created_at"))
         for job in jobs:
             name = job["name"]
             required = set()
@@ -257,6 +259,9 @@ def measure(run):
                 busy += job_seconds[name]
             queued = timestamp(job.get("created_at"))
             job_queue_seconds[name] = (start - queued).total_seconds() if queued is not None and start is not None and queued <= start else None
+            job_dependency_seconds[name] = ((queued - workflow_created).total_seconds()
+                                            if queued is not None and workflow_created is not None and
+                                            workflow_created <= queued else None)
             durations = {}
             for step in job.get("steps", []):
                 left, right = timestamp(step.get("started_at")), timestamp(step.get("completed_at"))
@@ -273,7 +278,8 @@ def measure(run):
                           "execution_span_seconds": (max(finishes) - min(starts)).total_seconds(),
                           "initial_queue_seconds": (min(starts) - created).total_seconds(),
                           "runner_seconds": busy, "step_seconds": step_seconds,
-                          "job_seconds": job_seconds, "job_queue_seconds": job_queue_seconds}
+                          "job_seconds": job_seconds, "job_queue_seconds": job_queue_seconds,
+                          "job_dependency_seconds": job_dependency_seconds}
     return result, reason
 
 
@@ -302,6 +308,7 @@ def summarize(data):
     return {"schema": 1, "cohorts": rows, "excluded": dict(excluded),
             "notes": ["Elapsed = workflow creation to last required job completion; queueing is included.",
                       "Execution span still includes any staggered runner starts; runner_seconds sums active job intervals.",
+                      "Per-job dependency time is workflow creation to job creation, including scheduler overhead; queue time is job creation to start.",
                       "Cancelled, failed, partial, rerun and differently configured runs are never pooled into a speedup.",
                       "Cache state and compiler source changes require separate review; these are descriptive medians, not causal claims."]}
 
