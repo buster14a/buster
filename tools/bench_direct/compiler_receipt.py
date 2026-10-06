@@ -23,6 +23,12 @@ so the corpus has a Zen 5 route. Its evidence must be complete and bound to
 the measured binaries; its regressions, like the self-host verdict, are
 reported and never decide.
 
+Pull mode adds SCALING_PROFILE when the pull request also adds or changes
+SCALING_REQUEST (#424): `./build.sh bench_throughput scale` times the
+candidate compiler alone, compiling and linking generated multi-TU inputs with
+-fcompile-jobs=W on whole physical cores. It is report-only too; its bundles
+must be valid and bound to the candidate binary.
+
 Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
     attempt_marker                                         one attempt's check (#2803)
@@ -30,6 +36,7 @@ Map (searchable symbols):
     APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
+    SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -90,6 +97,26 @@ THROUGHPUT_PROFILE = {
     "rounds": 2,
     "warmups": 2,
     "cpu": 2,
+}
+# The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
+# is one `bench_throughput scale` bundle on the candidate binary, with the
+# --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
+# physical core to the runner and other housekeeping and places W workers on
+# whole cores (plus one SMT point over the remaining logical CPUs); "machine"
+# is the separate whole-host series, 8 cores and 8C/16T on the 9700X.
+SCALING_REQUEST = "benchmarks/9700x/scaling.request"
+SCALING_SCHEMA = "buster-throughput-scaling-v1"
+SCALING_PROFILE = {
+    "name": "scaling-v1",
+    "workload": "bench_throughput scale: generated multi-TU compile-and-link with -fcompile-jobs=W on the "
+                "candidate compiler, workers placed on whole physical cores (report-only)",
+    "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
+    "series": {
+        "cores": ["--cpu-set", "auto", "--exclude-core", "0", "--workers", "1,2,4,7", "--allow-smt",
+                  "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
+        "machine": ["--cpu-set", "auto", "--workers", "8", "--allow-smt", "--shape", "equal", "--shape", "skewed",
+                    "--shape", "tiny", "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
+    },
 }
 # A wall-time CI needs at least six complete pairs (uarch_lab sign_test_rank).
 MIN_PAIRS = 6
@@ -261,6 +288,59 @@ def throughput_digest(summary: object) -> dict:
                       for row in comparisons if isinstance(row, dict)]}
 
 
+def classify_scaling(bundles: object, binaries: object) -> list[str]:
+    """Reasons the scaling bundles are not a complete SCALING_PROFILE run on the candidate binary.
+
+    bundles maps each series name to {"summary": scaling.json, "metadata": scaling-metadata.json}.
+    """
+    reasons: list[str] = []
+    bundles = bundles if isinstance(bundles, dict) else {}
+    binaries = binaries if isinstance(binaries, dict) else {}
+    candidate = binaries.get("candidate") if isinstance(binaries.get("candidate"), dict) else {}
+    digest = candidate.get("sha256")
+    for name in SCALING_PROFILE["series"]:
+        bundle = bundles.get(name) if isinstance(bundles.get(name), dict) else {}
+        summary = bundle.get("summary") if isinstance(bundle.get("summary"), dict) else {}
+        metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+        if not summary or not metadata:
+            reasons.append(f"scaling series {name} has no scaling.json or scaling-metadata.json")
+            continue
+        if summary.get("schema") != SCALING_SCHEMA or metadata.get("schema") != SCALING_SCHEMA:
+            reasons.append(f"scaling series {name} is not a {SCALING_SCHEMA} bundle")
+        if summary.get("status") != "valid":
+            reasons.append(f"scaling series {name} is {summary.get('status')!r}: {summary.get('reason')!r}")
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or metadata.get("compiler_sha256") != digest:
+            reasons.append(f"scaling series {name} compiler is not the measured candidate binary")
+        measured = [row for row in summary.get("series", []) if isinstance(row, dict) and isinstance(row.get("points"), list)] \
+            if isinstance(summary.get("series"), list) else []
+        if summary.get("status") == "valid" and not measured:
+            reasons.append(f"scaling series {name} has no measured points")
+    return reasons
+
+
+def scaling_digest(bundles: object) -> dict:
+    """The report's view of each scaling series: placement and every measured point."""
+    bundles = bundles if isinstance(bundles, dict) else {}
+    digest = {}
+    for name in SCALING_PROFILE["series"]:
+        bundle = bundles.get(name) if isinstance(bundles.get(name), dict) else {}
+        summary = bundle.get("summary") if isinstance(bundle.get("summary"), dict) else {}
+        metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+        series = summary.get("series") if isinstance(summary.get("series"), list) else []
+        digest[name] = {
+            "status": summary.get("status"), "cpu_set": metadata.get("cpu_set"),
+            "excluded_cpus": metadata.get("excluded_cpus"), "physical_cores": metadata.get("physical_cores"),
+            "logical_cpus": metadata.get("logical_cpus"),
+            "series": [{"name": row.get("name"), "inputs": row.get("inputs"),
+                        "points": [{key: point.get(key) for key in (
+                            "workers", "placement", "observed_workers", "wall_median", "speedup", "speedup_interval",
+                            "efficiency", "cpu_inflation", "rss_inflation")}
+                            for point in row.get("points", []) if isinstance(point, dict)]}
+                       for row in series if isinstance(row, dict) and isinstance(row.get("points"), list)],
+        }
+    return digest
+
+
 def number(value: object, form: str) -> str:
     return form % value if isinstance(value, (int, float)) and not isinstance(value, bool) else "NA"
 
@@ -302,11 +382,12 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         lines.append("")
     timings = timings if isinstance(timings, dict) else {}
     builds = timings.get("build_seconds") if isinstance(timings.get("build_seconds"), dict) else {}
-    lines.append("Host time: builds %s s, measurement %s s, corpus %s s, total %s s; queue delay before the host "
+    scaled = ", scaling %s s" % number(timings.get("scaling_seconds"), "%.0f") if "scaling_seconds" in timings else ""
+    lines.append("Host time: builds %s s, measurement %s s, corpus %s s%s, total %s s; queue delay before the host "
                  "job %s s." % (
         " + ".join(number(builds.get(key), "%.0f") for key in ("baseline", "candidate", "closure")),
         number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("throughput_seconds"), "%.0f"),
-        number(timings.get("total_seconds"), "%.0f"),
+        scaled, number(timings.get("total_seconds"), "%.0f"),
         number(timings.get("queue_delay_seconds"), "%.0f")))
     corpus = receipt.get("throughput") if isinstance(receipt, dict) else None
     if isinstance(corpus, dict):
@@ -317,6 +398,29 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                   f"{corpus.get('confirmed_regressions', 'NA')} confirmed regressions, "
                   f"{corpus.get('inconclusive_cases', 'NA')} inconclusive (report-only)."
                   + (" " + "; ".join(flagged) + "." if flagged else "")]
+    scaling = receipt.get("scaling") if isinstance(receipt, dict) else None
+    if isinstance(scaling, dict):
+        lines += ["", f"Multi-TU scaling `{SCALING_PROFILE['name']}` (report-only; speedup against the one-worker "
+                  "reference of the same inputs, with conservative 95% bounds; CPU and RSS are inflation over "
+                  "that reference):"]
+        for name in SCALING_PROFILE["series"]:
+            row = scaling.get(name) if isinstance(scaling.get(name), dict) else {}
+            lines += ["", f"Series `{name}`: {row.get('status', 'NA')} on CPU set `{row.get('cpu_set', 'NA')}` "
+                      f"({row.get('physical_cores', 'NA')} cores, {row.get('logical_cpus', 'NA')} logical CPUs"
+                      + (f"; housekeeping `{row.get('excluded_cpus')}` excluded" if row.get("excluded_cpus") else "")
+                      + ").", "", "| Inputs | Workers | Placement | Observed | Wall s | Speedup | 95% bounds | "
+                      "Efficiency | CPU | RSS |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+            for shape in row.get("series", []) if isinstance(row.get("series"), list) else []:
+                for point in shape.get("points", []) if isinstance(shape, dict) else []:
+                    if not isinstance(point, dict) or not point.get("workers"):
+                        continue
+                    bounds = point.get("speedup_interval") if isinstance(point.get("speedup_interval"), list) else []
+                    lines.append("| %s (%s) | %s | %s | %s | %s | %s | [%s, %s] | %s | %s | %s |" % (
+                        shape.get("name"), shape.get("inputs"), point.get("workers"), point.get("placement"),
+                        point.get("observed_workers"), number(point.get("wall_median"), "%.4f"),
+                        number(point.get("speedup"), "%.3f"), number(bounds[0] if len(bounds) == 2 else None, "%.3f"),
+                        number(bounds[1] if len(bounds) == 2 else None, "%.3f"), number(point.get("efficiency"), "%.3f"),
+                        number(point.get("cpu_inflation"), "%.3f"), number(point.get("rss_inflation"), "%.3f")))
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

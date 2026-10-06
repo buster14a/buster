@@ -225,24 +225,32 @@ lanes on explicit CPU sets (#424). On the 8-core/16-thread 9700X, Linux
 normally numbers CPU N and N+8 as siblings; confirm this with
 `lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE` rather than assuming it.
 
-**Physical-core series.** Keep core 0 and its sibling for housekeeping.
-Request the other seven cores together with their siblings, so no other work
-is scheduled on a sibling:
+The routine way to run it there is the pull request route: add or change
+[`benchmarks/9700x/scaling.request`](../../benchmarks/9700x/scaling.request)
+in an owner pull request. The frozen `scaling-v1` profile
+(`compiler_receipt.SCALING_PROFILE`) runs two series on the pull request's
+candidate compiler, and the series do not depend on CPU numbering:
+
+| Series | Arguments | Points on the 9700X |
+|---|---|---|
+| `cores` | `--cpu-set auto --exclude-core 0 --workers 1,2,4,7 --allow-smt` | 1, 2, 4 and 7 whole cores, then 7C/14T |
+| `machine` | `--cpu-set auto --workers 8 --allow-smt`, equal/skewed/tiny shapes | 8 cores, then 8C/16T |
+
+In `cores`, CPU 0's physical core is left to the runner and other
+housekeeping. Each W runs on one logical CPU of each of the first W remaining
+cores; the siblings stay idle except at the SMT point. Report the two series
+separately: `machine` shares core 0 with housekeeping.
+
+To run one by hand on the host, build the tool while the host is idle, then:
 
 ```sh
 build/throughput-tools/throughput scale --compiler /absolute/ide --output /absolute/new-scaling \
-  --cpu-set 1-7,9-15 --workers 1,2,4,7 --repeats 15
+  --cpu-set auto --exclude-core 0 --workers 1,2,4,7 --allow-smt --repeats 15
 ```
 
-Each worker count runs on the first W cores, using one logical CPU from each.
-The siblings stay in the set only so that they stay reserved; no worker uses
-them. A second command with `--cpu-set auto --workers 1,2,4,8 --allow-smt`
-gives the separate whole-machine 8C/16T series. Report the two series
-separately.
-
-**Evidence.** Retain the bundle, the harness revision, the compiler build
-provenance and the `qualify` observations. They are the physical evidence for
-#424's last checkbox; hosted or container runs of `scale` are diagnostic only.
+**Evidence.** The route's artifact keeps each bundle's reports, raw samples
+and logs beside the comparison receipt, with the observed CPU checked by the
+publisher. Hosted or container runs of `scale` are diagnostic only.
 
 ## Platform references
 

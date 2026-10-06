@@ -463,15 +463,23 @@ process tree.
 - No threshold, guard or exit 1 decision.
 - No generated-program timing.
 - Concurrent independent compiler processes are a separate experiment.
-- `--machine-id`/`--lock-file` are not wired into `scale` yet. On the shared
-  9700X, hold the cooperative lease externally.
-- `os_get_logical_thread_count()` does not respect affinity. The compiler can
-  therefore start more workers than its CPU set holds, which is why `scale`
-  only requests W up to the selected physical cores and checks
-  `compilation_workers`.
+- `scale` never asks for more workers than the selected physical cores, and
+  checks the reported `compilation_workers`. Since #2863 the compiler also
+  clamps its own worker count to the affinity mask.
 
-The [dedicated-host guide](DEDICATED.md#multi-tu-scaling-series) covers
-choosing the set on the 9700X.
+**Housekeeping core.** `--exclude-core CPU` removes the whole physical core
+containing CPU from the set, siblings included, before any other check. The
+removed CPUs are recorded as `excluded_cpus`. The CPU must be in the requested
+set, its `thread_siblings_list` must be readable, and at least one CPU must
+remain.
+
+**On the 9700X.** An owner pull request that adds or changes
+[`benchmarks/9700x/scaling.request`](../../benchmarks/9700x/scaling.request)
+runs the frozen `scaling-v1` profile on its candidate compiler inside the pull
+request comparison
+([route](../../benchmarks/9700x/README.md#multi-tu-scaling-of-a-pull-request)).
+The [dedicated-host guide](DEDICATED.md#multi-tu-scaling-series) explains the
+placement it uses.
 
 ## Measurements and their limits
 

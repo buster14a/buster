@@ -47,6 +47,8 @@ captures (#2741).
   the first W physical cores of an explicit, permitted `--cpu-set`, and reports
   speedup beside CPU-work and memory inflation without a gate; see its
   [README section](../../tools/throughput/README.md#multi-tu-scaling-scale).
+  An owner pull request that changes `benchmarks/9700x/scaling.request` runs
+  it on the 9700X inside its compiler comparison.
   `check-workload` provides a separate, non-timing preflight for the pinned
   cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors: it hashes the complete
   staged tree plus compiler and oracle evidence, but always reports

@@ -19,7 +19,10 @@ closure; `tools/uarch_lab.py compare` then times both compilers on that same
 base source. Builds are preparation and are timed separately. Then the
 native throughput corpus (THROUGHPUT_PROFILE, #2761) runs on the same two
 binaries through the base revision's `./build.sh bench_throughput`, and its
-own summary and metadata join the evidence.
+own summary and metadata join the evidence. In pull mode, when the pull
+request also adds or changes SCALING_REQUEST (#424), each SCALING_PROFILE
+series then runs `./build.sh bench_throughput scale` on the candidate binary
+alone, from the same base checkout, and its bundle joins the evidence.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -27,7 +30,8 @@ as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
 
 Map: queue_head (pull-mode supersession), build (one ide), toolchain, collect_evidence,
-measure_throughput (corpus leg), main. Validity rules live in compiler_receipt.classify.
+measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
+main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -45,17 +49,22 @@ import time
 from pathlib import Path
 
 from compiler_github import RECONCILE_DEPTH
-from compiler_receipt import (IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, THROUGHPUT_PROFILE, classify,
-                              classify_throughput, dumps, host_problem, render, throughput_digest)
+from compiler_receipt import (IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE, SCALING_REQUEST, SHA,
+                              THROUGHPUT_PROFILE, classify, classify_scaling, classify_throughput, dumps, host_problem,
+                              render, scaling_digest, throughput_digest)
 from compiler_receipt import observed_cpu_model as cpu_model
 
 BUILD_TIMEOUT_SECONDS = 1800
 LAB_TIMEOUT_SECONDS = 3000
 THROUGHPUT_TIMEOUT_SECONDS = 1800
+SCALING_TIMEOUT_SECONDS = 1200
 GIT_TIMEOUT_SECONDS = 120
 EVIDENCE_FILE_LIMIT = 32 * 1024 * 1024
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
+# A scaling bundle keeps its reports, raw samples and per-sample logs; its
+# generated inputs are reproducible from the recorded seed and hashes.
+SCALING_IGNORE = (*EVIDENCE_IGNORE, "inputs", "*.metrics")
 TOOLS = (("clang", "--version"), ("cmake", "--version"), ("ninja", "--version"), ("tcc", "-v"),
          ("perf", "--version"), ("taskset", "--version"), ("git", "--version"))
 
@@ -172,6 +181,43 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
     return reasons, dict(throughput_digest(documents[0]), exit=status)
 
 
+def scaling_requested(candidate: Path, base: str, head: str) -> bool:
+    """Whether the pull request adds or changes SCALING_REQUEST (it must remain in the head)."""
+    changed = git(candidate, "diff", "--name-only", base, head, "--", SCALING_REQUEST)
+    present = subprocess.run(["git", "-C", str(candidate), "cat-file", "-e", f"{head}:{SCALING_REQUEST}"],
+                             capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
+    return bool(changed) and present
+
+
+def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
+                    binaries: dict) -> tuple[list[str], dict]:
+    """Run every scaling series on the candidate from the checked-out base; (reasons, digest)."""
+    reasons: list[str] = []
+    bundles: dict = {}
+    for name, arguments in SCALING_PROFILE["series"].items():
+        output = work / "scaling" / name
+        output.parent.mkdir(parents=True, exist_ok=True)
+        status = run(["./build.sh", "bench_throughput", "scale", "--compiler", str(bins / "ide-cand"),
+                      "--output", str(output), *arguments], candidate, evidence / f"scaling-{name}.log",
+                     SCALING_TIMEOUT_SECONDS)
+        if output.is_dir():
+            shutil.copytree(output, evidence / "scaling" / name, ignore=shutil.ignore_patterns(*SCALING_IGNORE))
+        documents = []
+        for leaf in ("scaling.json", "scaling-metadata.json"):
+            try:
+                documents.append(json.loads((output / leaf).read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                documents.append(None)
+        bundles[name] = {"summary": documents[0], "metadata": documents[1]}
+        if status != 0:
+            reasons.append(f"bench_throughput scale ({name}) exited {status} (see scaling-{name}.log)")
+    for path in sorted((evidence / "scaling").rglob("*")) if (evidence / "scaling").is_dir() else ():
+        if path.is_file() and path.stat().st_size > EVIDENCE_FILE_LIMIT:
+            path.unlink()
+    reasons.extend(classify_scaling(bundles, binaries))
+    return reasons, scaling_digest(bundles)
+
+
 def parse(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--candidate", type=Path, required=True)
@@ -283,6 +329,12 @@ def main(argv: list[str] | None = None) -> int:
                                                            arguments.head, receipt["binaries"])
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
+        if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
+            measured = time.monotonic()
+            receipt["scaling_profile"] = SCALING_PROFILE
+            scaled, receipt["scaling"] = measure_scaling(candidate, bins, work, evidence, receipt["binaries"])
+            receipt["timings"]["scaling_seconds"] = round(time.monotonic() - measured, 3)
+            reasons.extend(scaled)
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
                 reasons.append(f"{role} binary changed during measurement")

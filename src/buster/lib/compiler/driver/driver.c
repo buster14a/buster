@@ -1455,6 +1455,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.emit_llvm_bitcode = true;
             continue;
         }
+        if (string_equal(argument, S8("-fsource-cache")) || string_equal(argument, S8("-fno-source-cache")))
+        {
+            invocation.enable_source_cache = string_equal(argument, S8("-fsource-cache"));
+            continue;
+        }
         String8 compile_jobs_prefix = S8("-fcompile-jobs=");
         if (string_starts_with_sequence(argument, compile_jobs_prefix))
         {
@@ -4592,6 +4597,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                     .omit_spelled_bytes = invocation.omit_spelled_bytes,
+                                                    .source_cache = invocation.source_cache,
                                                     .preserve_spellings = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
@@ -5460,7 +5466,7 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_worker_limit(CompilerDriverInvocati
 #if !BUSTER_SINGLE_THREADED
     // An embedding caller's existing gang already owns its parallel budget.
     // Do not turn each of its invocations into another gang.
-    if (invocation.compile_jobs > 1 && lane_count() == 1)
+    if (invocation.compile_jobs > 1 && !invocation.source_cache && lane_count() == 1)
     {
         u32 logical = BUSTER_MAX(os_get_logical_thread_count(), (u32)1);
         result = BUSTER_MAX((u32)1, BUSTER_MIN(invocation.compile_jobs, BUSTER_MIN(logical, invocation.input_count)));
@@ -5617,6 +5623,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     u32 fallback_record_capacity = 0;
     CompilerDriverUnit* unit_tasks = 0;
     u32 unit_task_count = 0;
+    CSourceCache* owned_source_cache = 0;
     // Per-input records live outside `result`, which several paths replace
     // wholesale, and are attached at `finish`.
     CompilerDriverInputResult* inputs = 0;
@@ -5636,6 +5643,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("unsupported register allocator; expected fast or quality");
+    }
+    if (invocation.enable_source_cache && !invocation.source_cache)
+    {
+        owned_source_cache = c_source_cache_create(arena, COMPILER_DRIVER_SOURCE_CACHE_BYTE_LIMIT);
+        invocation.source_cache = owned_source_cache;
     }
     if ((measure || invocation.keep_going) && invocation.input_count && invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {
@@ -6578,6 +6590,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
     }
 finish:
+    result.source_cache = c_source_cache_stats(invocation.source_cache);
+    c_source_cache_destroy(owned_source_cache);
     if (archive_state.arena) arena_destroy(archive_state.arena, 1);
     for (u32 index = 0; input_archive_maps && index < invocation.input_count; index += 1) file_map_unmap(input_archive_maps[index]);
     for (u32 index = 0; library_archive_maps && index < invocation.library_count; index += 1) file_map_unmap(library_archive_maps[index]);
