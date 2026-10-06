@@ -2,6 +2,8 @@
 // buster_ios_launch_trace owns fixed-size stderr records; wall time correlates
 // with host receipt, monotonic/process CPU time attributes app work. No clocks
 // here participate in launch admission or alter the launcher's deadline.
+// buster_ios_launch_process_trace adds the kernel's process start wall time,
+// splitting host launch->exec (simulator scheduling) from exec->main (loader).
 #include <buster/lib/entry_point.h>
 #include <buster/lib/system_headers.h>
 #include <stdio.h>
@@ -32,6 +34,36 @@ void buster_ios_launch_trace(String8 stage)
         {
             // One direct write avoids stdio buffering and runtime allocation.
             // A failed/partial write leaves unavailable evidence, never success.
+            ssize_t written = write(STDERR_FILENO, record, (size_t)length);
+            BUSTER_UNUSED(written);
+        }
+    }
+}
+
+void buster_ios_launch_process_trace(void)
+{
+    const char* enabled = getenv("BUSTER_IOS_LAUNCH_TRACE");
+    if (enabled && enabled[0] == '1' && enabled[1] == 0)
+    {
+        u64 start_wall_us = 0;
+        int start_status = -1;
+#if defined(__APPLE__)
+        int name[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid()};
+        struct kinfo_proc process = {0};
+        size_t size = sizeof(process);
+        if (sysctl(name, 4, &process, &size, 0, 0) == 0 && size == sizeof(process))
+        {
+            struct timeval start = process.kp_proc.p_starttime;
+            start_wall_us = (u64)start.tv_sec * 1000000 + (u64)start.tv_usec;
+            start_status = 0;
+        }
+#endif
+        char record[256];
+        int length = snprintf(record, sizeof(record),
+            "BUSTER_IOS_PROCESS_V1 pid=%ld start_wall_us=%llu start_status=%d\n",
+            (long)getpid(), (unsigned long long)start_wall_us, start_status);
+        if (length > 0 && (size_t)length < sizeof(record))
+        {
             ssize_t written = write(STDERR_FILENO, record, (size_t)length);
             BUSTER_UNUSED(written);
         }

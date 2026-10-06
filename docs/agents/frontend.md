@@ -363,7 +363,7 @@ and turns the declaration into empty statements. Ordinary identifiers of the
 same spelling keep theirs. Inner declarations are processed first, so a nested
 redeclaration shadows the outer one. Malformed and file-scope declarations are
 left untouched for the parser to diagnose. Only units that intern `__label__`
-enter the pass. The driver sets `CPreprocessOptions.preserve_local_labels` for
+enter the pass. The driver sets `CPreprocessOptions.preserve_spellings` for
 `-E`, which keeps the source spelling. `c_test_local_labels` covers both token
 forms, macro expansions, shadowing, label addresses, `asm goto` and a rejected
 use outside the block.

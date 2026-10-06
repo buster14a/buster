@@ -284,6 +284,9 @@ typedef enum CDiagnosticKind
     // A reachable direct call to a function declared with GNU
     // `__attribute__((error("message")))`.
     C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL,
+    // GNU's obsolete `member: value` field designator in a strict ISO dialect;
+    // it is accepted as `.member = value` with this warning.
+    C_DIAGNOSTIC_OBSOLETE_DESIGNATOR,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -569,14 +572,16 @@ struct CPreprocessOptions
     // that sums spelling lengths is skipped and the field stays zero. Every
     // other metric is still gathered.
     bool omit_spelled_bytes;
-    // Publish GNU `__label__` declarations and their labels as spelled, for
-    // -E text, instead of the block-unique respelling the parser consumes
-    // (c_preprocess_rename_local_labels).
-    bool preserve_local_labels;
     // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
     u8 position_independent_level;
     // The selected position-independent spelling was a PIE flag.
     bool position_independent_executable;
+    // The token stream is printed as text (-E) rather than parsed, so it keeps
+    // the source's spellings: parser-facing rewrites such as the obsolete
+    // `member:` designator (c_preprocess_rewrite_obsolete_designators) and
+    // the GNU local-label respelling (c_preprocess_rename_local_labels) are
+    // skipped. Consumes padding before phase_arena.
+    bool preserve_spellings;
     // Optional caller-owned arena for state whose last reader is inside the
     // phase: per-file lexed rows, macro records, include tables and line
     // staging. The phase allocates above the arena's position at entry and
@@ -907,7 +912,8 @@ struct CMember
     // and the IR layout in c_gen.c -- asks bit_width_resolved and reads this
     // number; none re-evaluates [bit_width_token_start, +count), which remain
     // only for diagnostics. An unresolved width holds a layout unresolved
-    // rather than reading as zero.
+    // rather than reading as zero. An unresolved width of UINT32_MAX was
+    // already diagnosed where it was declared.
     u32 bit_width;
     u32 bit_width_token_start;
     u32 bit_width_token_count;

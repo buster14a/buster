@@ -7,4 +7,4 @@
 # "9700X compiler benchmark (pull request)" on the head commit, with the lab's
 # summary.json in the run's evidence artifact. See README.md in this directory.
 #
-# request: issue #2802 frontend reservation diagnostics and failed-result publication
+# request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
