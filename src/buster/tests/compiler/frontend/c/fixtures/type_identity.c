@@ -486,6 +486,19 @@ static int identity_conversions(void)
     return failed;
 }
 
+static int identity_selected_values(void)
+{
+    int value = 41;
+    int effects = 0;
+    struct SelectedRecord { int value; } record = {43};
+    int *pointer = _Generic(value, int: &value, default: (int *)0);
+    struct SelectedRecord aggregate = _Generic(value, int: record, default: record);
+    _Generic(value, int: (void)(effects += 1), default: (void)(effects += 100));
+    int default_value = _Generic(1.0, int: 0, default: (effects += 2, 47));
+    int nested = _Generic(value, int: _Generic(pointer, int *: *pointer, default: 0), default: 0);
+    return pointer != &value || *pointer != 41 || aggregate.value != 43 || effects != 3 || default_value != 47 || nested != 41;
+}
+
 int main(void)
 {
     int control = 0;
@@ -498,5 +511,5 @@ int main(void)
     int third = 3 + _Generic(pointer, int*: 29, default: unselected());
     int nested = _Generic(_Generic(floating, double: control, default: floating), int: 31, default: unselected());
     int string_type = _Generic("buster", char*: 37, default: unselected());
-    return identity_family() || identity_parity() || identity_conversions() || first != 17 || second != 23 || third != 32 || nested != 31 || string_type != 37 || control != 0 || selected_calls != 1 || unselected_calls != 0;
+    return identity_family() || identity_parity() || identity_conversions() || identity_selected_values() || first != 17 || second != 23 || third != 32 || nested != 31 || string_type != 37 || control != 0 || selected_calls != 1 || unselected_calls != 0;
 }

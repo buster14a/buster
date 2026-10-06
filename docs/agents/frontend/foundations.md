@@ -125,6 +125,28 @@ indexed and unindexed lowering, both frontend forms and all native allocators.
 The tiled position-index regression compares the window and scalar populations
 with anonymous member colons shifted across window boundaries.
 
+GNU's obsolete field designator `member: value` never reaches the parser
+(GitHub #2855). After macro replacement,
+`c_preprocess_rewrite_obsolete_designators` respells an identifier-colon pair
+that directly follows `{` or `,` inside an initializer brace as `. member =`,
+so every designator scanner sees the ISO form. Label discovery therefore never
+sees the pair and cannot create a phantom label. The rewrite classifies a brace
+as an initializer when `=` precedes it, when it closes a parenthesis that can
+hold a compound-literal type, or when it nests at an element boundary inside
+another initializer brace. A parenthesis can hold that type unless a call,
+declarator, attribute or control keyword precedes it; `return`, `sizeof`, `case`
+and `__extension__` still allow one. Bit-field widths, ternaries, `_Generic`
+associations and labels keep their colons. A one-byte shape scan gates the
+delimiter walk, so a unit without a candidate pays one pass over its shapes. In
+strict ISO dialects every rewrite also records a
+`C_DIAGNOSTIC_OBSOLETE_DESIGNATOR` warning. `-E`
+(`CPreprocessOptions.preserve_spellings`) and assembly preprocessing keep the
+source spelling. `c_test_obsolete_field_designators` covers scalar, nested,
+array-element, compound-literal, returned and statement-expression initializers;
+a designator that shares a real label's name; and `goto` to a designator-only
+name, which is rejected. It runs both frontend forms, every native allocator,
+and GNU17, GNU23 and C17.
+
 A named label can re-enter a token range after control skipped an ordinary
 automatic declaration. Fixed-size objects in a labeled function therefore
 receive their canonical local/place rows before the entry block terminates;
@@ -145,6 +167,22 @@ before alias substitution, including a single entry definition that copies an
 uninitialized owner; disconnected reads keep the ordinary predecessor path.
 The dependency walk is unnecessary when every retained owner already has entry
 initialization; restored loads still become independent definitions first.
+
+A named, non-temporary owner can also take this shortcut outside the entry
+block when its only write is its declaration's initializer. That store must
+directly follow the owner's `LOCAL` event, with no read between them. It may
+sit in the same block or, through `c_ir_emit_initializer_store`, in the join
+block of a branching initializer (`?:`, `&&`, `||`). The store dominates every
+reachable read unless a jump enters the scope past it.
+`c_ir_ssa_record_jump_targets` records each named label with the extent of its
+`goto`s, and each `case`/`default` with its enclosing `switch`.
+`c_ir_ssa_finish_jump_scopes` revokes the shortcut for an owner when a
+recorded target lies in its scope after the declarator starts and a jump to it
+starts before the declarator ends or outside the scope. A switch without a
+braced body disables the shortcut for the whole function, and so does a
+refused scratch carve. `CIRLowerOptions.disable_declaration_shortcut` is the
+differential reference: with and without it, the published IR must be
+identical.
 
 After predecessor propagation finishes, parameter simplification reuses its
 block cursor for a stable list of blocks that still own parameters.
@@ -836,6 +874,25 @@ without facts for identical bitcode and diagnostics.
   values own a fresh context. `c_test_initializer_relocation_index` replays
   random append/clear scripts through both paths and requires identical
   arrays and failure points.
+- Positional scalar stores replace earlier relocation records through the same
+  context clear as designated stores. Explicit braces, strings and compatible
+  compound literals replace the complete selected aggregate; a bare scalar
+  entering it through brace elision preserves its other subobjects. Bit-fields
+  still merge their storage unit. Ordinary scalar tables without relocation
+  records need no additional clear. Member designators update both ends of the
+  selected slot interval in semantic validation and array-bound inference, so
+  the following positional item resumes after the named member.
+  `c_test_positional_initializer_relocations` pins survivor symbols/offsets,
+  zeroed overwritten slots, complete-aggregate replacement and sibling
+  retention across target layouts and both frontend forms, plus native runs
+  through all four allocators.
+- Promoted initializer members retain the selected canonical union type and
+  union-member index separately from the outer aggregate's projection slot.
+  Clearing compares that identity and the union's object offset, so switching
+  promoted anonymous-union members resets the complete union while consecutive
+  writes into the same member preserve its other subobjects.
+  `c_test_promoted_union_initializer_overrides` covers numeric/pointer switches,
+  same-member preservation, nested anonymous promotion and named-union controls.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.

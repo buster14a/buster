@@ -215,8 +215,34 @@ CPU selection, optional-platform refusal and sealed metadata corruption. These
 are infrastructure tests, not compiler or physical-host performance results.
 Physical 9700X A/A and native platform CI must be reported separately when run.
 
-Further workload coverage stays under #346/#423; multicore CPU-set experiments
-under #424. Do not use this single-CPU admission path to claim multicore scaling.
+Further workload coverage stays under #346/#423. Do not use this single-CPU
+admission path to claim multicore scaling; use the `scale` series below.
+
+## Multi-TU scaling series
+
+`scale` ([contract](README.md#multi-tu-scaling-scale)) measures internal TU
+lanes on explicit CPU sets (#424). On the 8-core/16-thread 9700X, Linux
+normally numbers CPU N and N+8 as siblings; confirm this with
+`lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE` rather than assuming it.
+
+**Physical-core series.** Keep core 0 and its sibling for housekeeping.
+Request the other seven cores together with their siblings, so no other work
+is scheduled on a sibling:
+
+```sh
+build/throughput-tools/throughput scale --compiler /absolute/ide --output /absolute/new-scaling \
+  --cpu-set 1-7,9-15 --workers 1,2,4,7 --repeats 15
+```
+
+Each worker count runs on the first W cores, using one logical CPU from each.
+The siblings stay in the set only so that they stay reserved; no worker uses
+them. A second command with `--cpu-set auto --workers 1,2,4,8 --allow-smt`
+gives the separate whole-machine 8C/16T series. Report the two series
+separately.
+
+**Evidence.** Retain the bundle, the harness revision, the compiler build
+provenance and the `qualify` observations. They are the physical evidence for
+#424's last checkbox; hosted or container runs of `scale` are diagnostic only.
 
 ## Platform references
 

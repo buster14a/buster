@@ -43,6 +43,10 @@ captures (#2741).
   `--workload macros --workload aggregate-abi`; custom sets require `--no-guard`
   and preserve the default CI corpus. Their counts/hashes and full job-capacity
   cross product are covered by the native harness tests.
+  `scale` measures native multi-TU compile-and-link with `-fcompile-jobs=W` on
+  the first W physical cores of an explicit, permitted `--cpu-set`, and reports
+  speedup beside CPU-work and memory inflation without a gate; see its
+  [README section](../../tools/throughput/README.md#multi-tu-scaling-scale).
   `check-workload` provides a separate, non-timing preflight for the pinned
   cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors: it hashes the complete
   staged tree plus compiler and oracle evidence, but always reports
@@ -443,7 +447,10 @@ captures (#2741).
   a substitute: hosted timing, static instruction counts, a `znver5` target, a
   request or policy check, or an unrelated self-host benchmark. Correctness and
   native-platform CI stay on their current infrastructure. The comparison
-  routes below cover only the stage-1 self-host compile. Every entry point
+  routes below cover the stage-1 self-host compile and, as profile
+  `throughput-corpus-v1`, the default `bench_throughput` corpus on the same
+  two binaries; the publisher re-checks the corpus's own summary and metadata
+  and binds its compiler hashes to the measured binaries. Every entry point
   that can claim performance validation has a row in
   [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
   either a 9700X route with the consumer that checks its evidence, or an
