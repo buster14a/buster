@@ -258,7 +258,9 @@ the GitHub Actions app. The marked run with the highest ID decides:
   benchmarked. Re-enqueueing builds and measures a new group.
 
 The second collection re-reads the check and stays pending if a newer attempt
-appeared. Success means a valid measurement, never a performance judgement;
+appeared. The pull-request comparison (#2769) publishes under a different name
+and marker, `9700X compiler benchmark (pull request)`, so it never counts
+toward admission. A merge group is always measured as its own candidate. Success means a valid measurement, never a performance judgement;
 slow results are admitted and published like fast ones.
 
 The reconciler runs on every required merge-group workflow completion, on main

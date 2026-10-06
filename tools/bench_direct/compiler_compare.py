@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Compare a merge group's compiler with its predecessor's on the 9700X (#2752).
+"""Compare a candidate's compiler with its base's on the 9700X (#2752, #2769).
 
-Run from trusted `main` by the `compare` job of
-`.github/workflows/9700x-direct-bench.yml`, after `authorize_compiler.py`
-approved the group. The candidate checkout holds the group head with its two
-parents (fetch depth 2) and no persisted credentials. This harness, the build
-commands, the lab and the frozen PROFILE come from `main`.
+Run from trusted `main` by `.github/workflows/9700x-direct-bench.yml` in one
+of two modes (compiler_receipt.MODES), after its hosted authorization:
+    queue  (`compare` job) a main merge-group head against its first parent;
+           the checkout holds the head with both parents (fetch depth 2)
+    pull   (`compare-pull` job) an owner pull request's head against its merge
+           base, requested by benchmarks/9700x/compiler-compare.request
+The checkout has no persisted credentials. This harness, the build commands,
+the lab and the frozen PROFILE come from `main`.
 
 It follows the documented A/B recipe of docs/agents/benchmarking.md in one
 tree: a tests-off Clang Release `ide` of the base (the group's first parent),
@@ -36,7 +39,7 @@ import sys
 import time
 from pathlib import Path
 
-from compiler_receipt import PROFILE, RECEIPT_SCHEMA, SHA, classify, dumps, render
+from compiler_receipt import IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, classify, dumps, host_problem, render
 
 BUILD_TIMEOUT_SECONDS = 1800
 LAB_TIMEOUT_SECONDS = 3000
@@ -70,12 +73,12 @@ def git(candidate: Path, *arguments: str) -> str:
                           text=True, timeout=GIT_TIMEOUT_SECONDS).stdout.strip()
 
 
-def queue_head(repository: str, branch: str) -> str:
-    """The queue ref's current head by an anonymous read; '' when gone, None when unknown."""
+def queue_head(repository: str, ref: str) -> str:
+    """The ref's current head by an anonymous read; '' when gone, None when unknown."""
     environment = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     head = None
     try:
-        result = subprocess.run(["git", "ls-remote", f"https://github.com/{repository}.git", "refs/heads/" + branch],
+        result = subprocess.run(["git", "ls-remote", f"https://github.com/{repository}.git", ref],
                                 capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, env=environment,
                                 check=False)
         if result.returncode == 0:
@@ -155,9 +158,9 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
-    for name in ("repository", "queue-branch", "pull", "pull-head", "base", "base-tree", "head", "head-tree",
-                 "trusted-revision", "request-run-id", "run-id", "run-attempt"):
-        parser.add_argument("--" + name, required=True)
+    parser.add_argument("--mode", choices=sorted(MODES), required=True)
+    for name in IDENTITY_KEYS[1:]:
+        parser.add_argument("--" + name.replace("_", "-"), required=True)
     return parser.parse_args(argv)
 
 
@@ -172,10 +175,8 @@ def main(argv: list[str] | None = None) -> int:
         if directory.exists():
             shutil.rmtree(directory)
         directory.mkdir(parents=True)
-    identity = {key: getattr(arguments, key) for key in (
-        "repository", "queue_branch", "pull", "pull_head", "base", "base_tree", "head", "head_tree",
-        "trusted_revision", "request_run_id", "run_id", "run_attempt")}
-    receipt = {"schema": RECEIPT_SCHEMA, "state": "failed", "reasons": [], "identity": identity,
+    identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
+    receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
                "profile": PROFILE, "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
                "toolchain": toolchain(), "binaries": {}, "lab": {},
                "timings": {"started_at": started_at, "build_seconds": {}}}
@@ -185,10 +186,20 @@ def main(argv: list[str] | None = None) -> int:
     bins.mkdir()
     summary = None
 
-    # Identity first: exact head, base as its first parent, both trees.
+    # Identity first. A queue head has the base as first parent and the pull
+    # request head as second; a pull request head is its own pull head and
+    # descends from the base (its merge base). Both trees must match.
+    problem = host_problem(receipt)
+    if problem:
+        reasons.append(problem)
     try:
-        observed = (git(candidate, "rev-parse", "HEAD"), git(candidate, "rev-parse", "HEAD^1"),
-                    git(candidate, "rev-parse", "HEAD^2"), git(candidate, "rev-parse", "HEAD^{tree}"),
+        if arguments.mode == "queue":
+            parents = (git(candidate, "rev-parse", "HEAD^1"), git(candidate, "rev-parse", "HEAD^2"))
+        else:
+            ancestry = subprocess.run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
+                                      capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
+            parents = (arguments.base if ancestry else "base is not an ancestor", git(candidate, "rev-parse", "HEAD"))
+        observed = (git(candidate, "rev-parse", "HEAD"), *parents, git(candidate, "rev-parse", "HEAD^{tree}"),
                     git(candidate, "rev-parse", arguments.base + "^{tree}"))
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
         observed = None
@@ -197,13 +208,13 @@ def main(argv: list[str] | None = None) -> int:
     if observed is not None and observed != expected:
         reasons.append(f"candidate checkout {observed} does not match the authorized identity {expected}")
 
-    # Skip a group GitHub already replaced or removed; an unknown answer measures.
-    live = queue_head(arguments.repository, arguments.queue_branch) if not reasons else None
+    # Skip a candidate whose ref already moved or vanished; an unknown answer measures.
+    live = queue_head(arguments.repository, arguments.ref) if not reasons else None
     if live is not None and live != arguments.head:
         receipt["state"] = "superseded"
-        reasons.append(f"queue ref {arguments.queue_branch} names {live or 'nothing'} before measurement")
+        reasons.append(f"{arguments.ref} names {live or 'nothing'} before measurement")
     elif live is None and not reasons:
-        receipt["notes"] = ["queue ref could not be read before measurement; measured anyway"]
+        receipt["notes"] = [f"{arguments.ref} could not be read before measurement; measured anyway"]
 
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):

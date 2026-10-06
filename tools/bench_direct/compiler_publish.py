@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Validate a 9700X compiler receipt and publish its exact-head check (#2752).
+"""Validate a 9700X compiler receipt and publish its exact-head check (#2752, #2769).
 
-Run from trusted `main` by the hosted `publish-compiler` job of
-`.github/workflows/9700x-direct-bench.yml`, which alone holds `checks: write`.
-It reads this run's evidence artifact through the API as data (a size-bounded
-zip; nothing in it is executed), re-checks the receipt against the identities
-authorization produced in the same attempt, re-derives validity from the lab's
-own summary.json, and creates one completed check run named CHECK_NAME with
-external ID `buster-9700x-compiler-bench-v1:<head>` on the group head.
+Run from trusted `main` by the hosted `publish-compiler` (queue mode) and
+`publish-pull` (pull mode) jobs of `.github/workflows/9700x-direct-bench.yml`,
+the only jobs there that hold `checks: write`. It reads this run's evidence
+artifact through the API as data (a size-bounded zip; nothing in it is
+executed), re-checks the receipt against the identities authorization produced
+in the same attempt, requires the observed host to be the approved Zen 5 host,
+re-derives validity from the lab's own summary.json, and creates one completed
+check run named check_name(mode) with external ID check_marker(head, mode) on
+the head. Queue admission accepts only the queue mode's name and marker.
 
 Conclusions (the performance verdict never decides; report-only):
     success  a valid core measurement, whatever its direction
@@ -32,17 +34,15 @@ import urllib.request
 import zipfile
 from datetime import datetime
 
-from compiler_receipt import (CHECK_NAME, PROFILE, RECEIPT_SCHEMA, SHA, check_marker, classify, regression_policy,
-                              render)
+from compiler_receipt import (IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, check_marker, check_name, classify,
+                              host_problem, regression_policy, render)
 
 API = "https://api.github.com"
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 ARTIFACT_LIMIT = 64 * 1024 * 1024
 MEMBER_LIMIT = 8 * 1024 * 1024
 TEXT_LIMIT = 60000
-COMPARE_JOB = "Compare the merge group compiler"
-IDENTITY_KEYS = ("repository", "queue_branch", "pull", "pull_head", "base", "base_tree", "head", "head_tree",
-                 "trusted_revision", "request_run_id", "run_id", "run_attempt")
+COMPARE_JOBS = {"queue": "Compare the merge group compiler", "pull": "Compare the pull request compiler"}
 
 
 def artifact_name(head: str, attempt: str) -> str:
@@ -68,8 +68,12 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
         for key in IDENTITY_KEYS:
             if identity.get(key) != expected.get(key):
                 reasons.append(f"receipt {key} {identity.get(key)!r} does not match {expected.get(key)!r}")
+        if receipt.get("mode") != expected.get("mode"):
+            reasons.append(f"receipt mode {receipt.get('mode')!r} is not {expected.get('mode')!r}")
         if receipt.get("profile") != PROFILE:
-            reasons.append("receipt profile is not the frozen queue profile")
+            reasons.append("receipt profile is not the frozen comparison profile")
+        if host_problem(receipt):
+            reasons.append(host_problem(receipt))
         state = receipt.get("state")
         if not reasons and state == "superseded":
             conclusion, title = "neutral", "Superseded before measurement"
@@ -159,11 +163,11 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
     return receipt, summary, problem
 
 
-def queue_delay(api: Api, run_id: str, attempt: str) -> object:
+def queue_delay(api: Api, run_id: str, attempt: str, mode: str) -> object:
     """Seconds the compare job waited for the 9700X runner, or None."""
     delay = None
     jobs = api.request(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
-    rows = [job for job in jobs.get("jobs", []) if isinstance(job, dict) and job.get("name") == COMPARE_JOB] \
+    rows = [job for job in jobs.get("jobs", []) if isinstance(job, dict) and job.get("name") == COMPARE_JOBS[mode]] \
         if isinstance(jobs, dict) else []
     if len(rows) == 1 and isinstance(rows[0].get("created_at"), str) and isinstance(rows[0].get("started_at"), str):
         parse = lambda text: datetime.fromisoformat(text.replace("Z", "+00:00"))  # noqa: E731
@@ -174,13 +178,13 @@ def queue_delay(api: Api, run_id: str, attempt: str) -> object:
 def main() -> int:
     environment = os.environ
     get = lambda key: environment.get(key, "")  # noqa: E731
-    head, attempt, run_id = get("BQ_HEAD_COMMIT"), get("BQ_RUN_ATTEMPT"), get("BQ_RUN_ID")
-    expected = {"repository": get("BQ_REPOSITORY"), "queue_branch": get("BQ_HEAD_BRANCH"), "pull": get("BQ_PULL"),
+    head, attempt, run_id, mode = get("BQ_HEAD_COMMIT"), get("BQ_RUN_ATTEMPT"), get("BQ_RUN_ID"), get("BQ_MODE")
+    expected = {"mode": mode, "repository": get("BQ_REPOSITORY"), "ref": get("BQ_REF"), "pull": get("BQ_PULL"),
                 "pull_head": get("BQ_PULL_HEAD"), "base": get("BQ_BASE_COMMIT"), "base_tree": get("BQ_BASE_TREE"),
                 "head": head, "head_tree": get("BQ_HEAD_TREE"), "trusted_revision": get("BQ_TRUSTED_REVISION"),
                 "request_run_id": get("BQ_REQUEST_RUN_ID"), "run_id": run_id, "run_attempt": attempt}
     code = 1
-    if not (SHA.fullmatch(head) and run_id.isdigit() and attempt.isdigit() and get("GH_TOKEN")):
+    if not (mode in MODES and SHA.fullmatch(head) and run_id.isdigit() and attempt.isdigit() and get("GH_TOKEN")):
         print("BENCH_COMPILER_PUBLISH_FAIL invalid workflow inputs", file=sys.stderr)
     else:
         api = Api(expected["repository"], get("GH_TOKEN"))
@@ -193,12 +197,12 @@ def main() -> int:
                 notes.append(problem)
         conclusion, title, reasons = decide(expected, authorized, get("BQ_COMPARE_RESULT"), receipt, summary,
                                             get("BQ_REGRESSION_POLICY"))
-        shown = dict(receipt) if isinstance(receipt, dict) else {"identity": expected}
+        shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
         shown["reasons"] = reasons
         if isinstance(shown.get("timings"), dict):
-            shown["timings"] = dict(shown["timings"], queue_delay_seconds=queue_delay(api, run_id, attempt))
+            shown["timings"] = dict(shown["timings"], queue_delay_seconds=queue_delay(api, run_id, attempt, mode))
         report = render(shown, summary, conclusion, notes)
-        body = {"name": CHECK_NAME, "head_sha": head, "external_id": check_marker(head),
+        body = {"name": check_name(mode), "head_sha": head, "external_id": check_marker(head, mode),
                 "details_url": get("BQ_DETAILS_URL"), "status": "completed", "conclusion": conclusion,
                 "output": {"title": title[:200], "summary": report[:TEXT_LIMIT],
                            "text": ("```json\n" + json.dumps(shown, sort_keys=True, indent=2))[:TEXT_LIMIT - 4] + "\n```"}}

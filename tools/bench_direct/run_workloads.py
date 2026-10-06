@@ -6,6 +6,11 @@ The candidate checkout supplies only workload sources: single C files directly
 under `benchmarks/9700x/` that the pull request added or modified. This file,
 the compile command, the pinned CPU and the sample plan come from `main`.
 
+A workload may bring one input file, `<name>.data` beside `<name>.c`, of at
+most DATA_LIMIT bytes (#2769). It is copied read-only into the run directory
+as `input.data` before the first run, and its digest is reported; changing
+only the data file also selects its workload.
+
 Each workload is built once with a fixed command, then started as two warmups
 and nine measured fresh processes. Every run's exit state, wall and CPU time,
 peak RSS and captured output is reported. The numbers are diagnostic process
@@ -33,6 +38,8 @@ WORKLOAD_DIRECTORY = "benchmarks/9700x"
 WORKLOAD_NAME = re.compile(r"benchmarks/9700x/[a-z0-9][a-z0-9_-]{0,47}\.c")
 WORKLOAD_LIMIT = 4
 SOURCE_LIMIT = 256 * 1024
+DATA_LIMIT = 8 * 1024 * 1024
+DATA_NAME = "input.data"
 WARMUPS = 2
 SAMPLES = 9
 RUN_TIMEOUT_SECONDS = 10
@@ -52,8 +59,9 @@ def changed_workloads(candidate: Path, base: str, head: str) -> list[str]:
         ["git", "-C", str(candidate), "diff", "--name-only", "--diff-filter=AM", "-z",
          f"{base}...{head}", "--", WORKLOAD_DIRECTORY],
         check=True, capture_output=True, timeout=60).stdout.decode("utf-8")
-    names = sorted(name for name in listing.split("\0") if name)
-    return [name for name in names if WORKLOAD_NAME.fullmatch(name)]
+    names = {name.removesuffix(".data") + ".c" if name.endswith(".data") else name
+             for name in listing.split("\0") if name}
+    return sorted(name for name in names if WORKLOAD_NAME.fullmatch(name))
 
 
 def source_problem(candidate: Path, name: str) -> str:
@@ -63,7 +71,18 @@ def source_problem(candidate: Path, name: str) -> str:
         problem = "not a regular file"
     elif path.stat().st_size > SOURCE_LIMIT:
         problem = f"larger than {SOURCE_LIMIT} bytes"
+    data = data_path(candidate, name)
+    if not problem and (data.exists() or data.is_symlink()):
+        if data.is_symlink() or not data.is_file():
+            problem = f"{data.name} is not a regular file"
+        elif data.stat().st_size > DATA_LIMIT:
+            problem = f"{data.name} is larger than {DATA_LIMIT} bytes"
     return problem
+
+
+def data_path(candidate: Path, name: str) -> Path:
+    """The optional input file beside a workload source."""
+    return candidate / (name.removesuffix(".c") + ".data")
 
 
 def prepare_child(cpu: int) -> None:
@@ -115,12 +134,13 @@ def run_once(program: Path, scratch: Path, cpu: int) -> dict:
     }
 
 
-def render(name: str, source_sha: str, program_sha: str, rows: list[dict]) -> tuple[list[str], bool]:
+def render(name: str, source_sha: str, program_sha: str, rows: list[dict], data_sha: str = "") -> tuple[list[str], bool]:
     measured = rows[WARMUPS:]
     passed = len(rows) == WARMUPS + SAMPLES and all(
         row["exit"] == 0 and not row["timed_out"] for row in rows)
+    data = f", `{DATA_NAME}` sha256 `{data_sha}`" if data_sha else ", no input data"
     lines = [f"### `{name}`", "",
-             f"source sha256 `{source_sha}`, executable sha256 `{program_sha}`", ""]
+             f"source sha256 `{source_sha}`, executable sha256 `{program_sha}`{data}", ""]
     if measured:
         walls = [row["wall_ns"] for row in measured]
         lines += [
@@ -202,10 +222,16 @@ def main() -> int:
             lines += [f"### `{name}`", "", "Compilation failed:", "", "```text",
                       diagnostics.replace("```", "'''").rstrip("\n"), "```", ""]
             continue
+        data = data_path(arguments.candidate, name)
+        data_sha = ""
+        if data.is_file():
+            shutil.copyfile(data, scratch / DATA_NAME)
+            (scratch / DATA_NAME).chmod(0o444)
+            data_sha = hashlib.sha256((scratch / DATA_NAME).read_bytes()).hexdigest()
         rows = [run_once(program, scratch, arguments.cpu) for _ in range(WARMUPS + SAMPLES)]
         section, passed = render(
             name, hashlib.sha256(source.read_bytes()).hexdigest(),
-            hashlib.sha256(program.read_bytes()).hexdigest(), rows)
+            hashlib.sha256(program.read_bytes()).hexdigest(), rows, data_sha)
         lines += section
         if not passed:
             failures.append(f"{name}: a run exited nonzero, was signalled or timed out")

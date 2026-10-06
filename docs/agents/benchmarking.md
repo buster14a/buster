@@ -435,9 +435,17 @@ captures (#2741).
   validation as incomplete. Cloud-only and static evidence is diagnostic, not
   a substitute: hosted timing, static instruction counts, a `znver5` target, a
   request or policy check, or an unrelated self-host benchmark. Correctness and
-  native-platform CI stay on their current infrastructure. The merge-queue
-  comparison below covers only the stage-1 self-host compile; #2761 tracks the
-  per-test inventory.
+  native-platform CI stay on their current infrastructure. The comparison
+  routes below cover only the stage-1 self-host compile. Every entry point
+  that can claim performance validation has a row in
+  [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
+  either a 9700X route with the consumer that checks its evidence, or an
+  explicit `NOT VALIDATED` with a resolution. `tools/bench_direct/performance_inventory_test.py`
+  (part of the required benchmark policy check) discovers entry points from
+  `build.c`, `uarch_lab.py`, `ide`, `tools/` and the workflows, and fails on an
+  unregistered or stale one. Each published 9700X compiler receipt must name
+  the observed CPU, the Ryzen 7 9700X; a runner label, target flag or other
+  host is refused.
 - **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
   The queued benchmark service, its dispatch workflow and the earlier
   `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
@@ -449,10 +457,14 @@ captures (#2741).
   [admission guide](../../benchmarks/9700x/ADMISSION.md). Once enabled, it
   also runs the routine `uarch_lab.py compare` of each owner-authored main
   merge-queue candidate against its first parent (#2752; frozen
-  `queue-compare-v1` profile, report-only). Each comparison is published as
+  `compiler-compare-v1` profile, report-only). Each comparison is published as
   the `9700X compiler benchmark` check on the candidate commit; see
   [merge-queue admission](../merge-queue-admission.md#9700x-compiler-comparison-2752).
-  That is the only sanctioned compiler A/B path on that host; it runs no
+  An owner pull request can request the same comparison of its head against
+  its merge base before merging by changing
+  `benchmarks/9700x/compiler-compare.request` (#2769); see the
+  [workload guide](../../benchmarks/9700x/README.md#compiler-comparison-of-a-pull-request).
+  These are the only sanctioned compiler A/B paths on that host; they run no
   profile steps and no A/A. `native-retirement-performance-v1` remains blocked,
   and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
   removed (#2741; tag `bench-service-final` retains them). Use the local
@@ -667,6 +679,21 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    python3 tools/uarch_lab.py report "$session_root/ab-attempt-1"     # re-render report.md and summary.json
    ```
 
+   **Without perf (#2768).** Before the first timed run the lab runs
+   `perf stat -- true` once (`probe_counters`). If perf is missing, exits
+   nonzero (for example under a strict `perf_event_paranoid`), or writes no
+   task-clock line, every timed run executes the workload directly. Wall time,
+   CPU time (`task_clock`, from wait4's user plus system time) and peak RSS are
+   still measured, and the verdict still comes from wall time. Every perf
+   counter is NA, never zero. `summary.json` records this in `counters`
+   (`perf_stat`, `reason`) and adds a warning. A perf that runs but counts
+   zero is still a degraded measurement, not a fallback. `--profile-steps`
+   need perf: without it, `compare` stops before the first pair with that
+   reason. When no pair completes, `compare` exits nonzero, so a failed series
+   cannot pass for a neutral result. A cloud container therefore yields a
+   usable, diagnostic wall-time A/B; Zen 5 evidence still needs the 9700X
+   routes below.
+
    Both binaries are probed for `-fsource-metrics`/`-fmetrics-out` before
    either is warmed up. Compare enables `-fmetrics-out` in both variants'
    warm-ups, pilot and timed pairs only when both support it; otherwise it
@@ -768,7 +795,8 @@ meaning or a removal bumps the schema id):
   `repo_root`, `cpu`, `host`, `baseline`/`candidate` (`path`, `sha256`,
   `size_bytes`, `runs`, `failed`, `identical_runs`, `deterministic`,
   `metrics_out`, `metrics_out_supported`, `metrics_out_enabled`,
-  `source_metrics`), `phase_metrics` (`enabled`, `reason`), `outputs_identical`, `plan` (`pairs`,
+  `source_metrics`), `phase_metrics` (`enabled`, `reason`), `counters` (`perf_stat`: true, false when
+  timed without perf, or null for an older directory; `reason`), `outputs_identical`, `plan` (`pairs`,
   `reason`, `order`, `fresh_copy`, `seed`, `confidence`,
   `bootstrap_resamples`, `complete_pairs`), `method`, `verdict` (`metric`,
   `outcome`, `ratio`, `ci_low`, `ci_high`, `ci_coverage`, `change_percent`,

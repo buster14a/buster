@@ -78,6 +78,31 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertIn("adds or modifies no workload", result.stdout)
         self.assertFalse((self.root / "work").exists())
 
+    def test_input_data_is_provided_and_reported(self) -> None:
+        reader = ('#include <stdio.h>\nint main(void) { FILE* f = fopen("input.data", "rb"); int c = 0, n = 0;\n'
+                  '  if (!f) return 2; while ((c = fgetc(f)) != EOF) n += c; printf("sum=%d\\n", n); return 0; }\n')
+        self.commit({"benchmarks/9700x/replay.c": reader, "benchmarks/9700x/replay.data": "AB"})
+        result = self.run_harness(git(self.repository, "rev-parse", "HEAD"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("sum=131", result.stdout)
+        self.assertIn("`input.data` sha256", result.stdout)
+        # Changing only the data selects its workload again.
+        self.base = git(self.repository, "rev-parse", "HEAD")
+        shutil.rmtree(self.root / "work")
+        result = self.run_harness(self.commit({"benchmarks/9700x/replay.data": "ABC"}))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("sum=198", result.stdout)
+
+    def test_oversized_data_fails_without_running(self) -> None:
+        self.commit({"benchmarks/9700x/big.c": PASSING})
+        (self.repository / "benchmarks/9700x/big.data").write_bytes(b"\0" * (8 * 1024 * 1024 + 1))
+        git(self.repository, "add", "-A")
+        git(self.repository, "commit", "-q", "-m", "big data")
+        result = self.run_harness(git(self.repository, "rev-parse", "HEAD"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("big.data is larger than", result.stdout)
+        self.assertNotIn("| sample ", result.stdout)
+
     def test_compile_error_fails_without_running(self) -> None:
         result = self.run_harness(self.commit({"benchmarks/9700x/bad.c": "int main(void) { return x; }\n"}))
         self.assertEqual(result.returncode, 1)

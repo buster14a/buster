@@ -2,8 +2,9 @@
 
 The Ryzen 7 9700X is not a general Actions executor. Exactly one workflow may
 reach it: `.github/workflows/9700x-direct-bench.yml`. It compiles and runs the
-owner's own pull-request workloads (#2704), and it compares the compiler of
-each main merge-queue candidate with its predecessor's (#2752). Its hosted
+owner's own pull-request workloads (#2704). It compares the compiler of an
+owner pull request with its merge base on request (#2769), and the compiler
+of each main merge-queue candidate with its predecessor's (#2752). Its hosted
 markers, `.github/workflows/9700x-direct-request.yml` and
 `.github/workflows/9700x-compiler-request.yml`, never select the runner. The queued benchmark service
 and its dispatch workflow are removed (#2708). No other workflow may select
@@ -52,6 +53,24 @@ the intended capability, and it is why the author gate is the whole control:
 there is no containment, host lease or sealed result. Do not widen the author
 list.
 
+`authorize` also reads the pull request's changed files. `bench` runs only
+when a workload or its `.data` file changed. `compare-pull` and `publish-pull`
+run only when `benchmarks/9700x/compiler-compare.request` was added or changed.
+For that comparison `authorize` resolves the merge base with the base branch
+and both trees from GitHub's records. `compare-pull` has the same
+restrictions as `bench`, but checks out the whole pull request head (full
+history, contents on demand), because it builds the compiler at the merge
+base and at the head. That executes the pull request's build as the runner
+account under the same owner-only gate. `publish-pull` is hosted and is the
+only job of that path with `checks: write`. Its check name,
+`9700X compiler benchmark (pull request)`, and marker,
+`buster-9700x-compiler-pr-v1:<head>`, differ from the queue's, so admission
+never reads it.
+
+Every compiler receipt must record the observed CPU model of the host that
+measured it. The harness refuses to measure, and the publisher refuses to
+accept, a receipt whose CPU is not the AMD Ryzen 7 9700X (#2761).
+
 The actor restriction governs who starts the workflow, not who edits its
 definition. Changes to the workflow, its harness or this policy test need
 owner review before they reach `main`.
@@ -81,7 +100,7 @@ workflow from `main`, only while `BENCH_DIRECT_ENABLED` and
   marks a replaced or removed group as superseded without building. Otherwise
   it builds tests-off Clang Release `ide` binaries of the base, then the head,
   then the base again for the frozen workload's generated closure. Finally it
-  runs `tools/uarch_lab.py compare` with the frozen `queue-compare-v1` profile
+  runs `tools/uarch_lab.py compare` with the frozen `compiler-compare-v1` profile
   (`compiler_receipt.PROFILE`). The evidence artifact
   `buster-9700x-compiler-<head>-<attempt>` keeps the receipt, the lab's raw
   pairs, metadata and `summary.json`, and both CMake caches for 90 days. It

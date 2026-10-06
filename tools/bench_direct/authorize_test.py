@@ -90,5 +90,30 @@ class AuthorizeTest(unittest.TestCase):
                 self.assertEqual(base, "")
 
 
+class PlanTest(unittest.TestCase):
+    def test_changed_files_select_workloads_and_comparison(self) -> None:
+        def files(*names: str, status: str = "modified") -> list[dict]:
+            return [{"filename": name, "status": status} for name in names]
+        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.c")), (True, False))
+        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.data")), (True, False))
+        self.assertEqual(authorize.plan(files(authorize.COMPARE_REQUEST)), (False, True))
+        self.assertEqual(authorize.plan(files("benchmarks/9700x/a.c", authorize.COMPARE_REQUEST)), (True, True))
+        self.assertEqual(authorize.plan(files(authorize.COMPARE_REQUEST, status="removed")), (False, False))
+        self.assertEqual(authorize.plan(files("benchmarks/9700x/nested/a.c", "src/x.c")), (False, False))
+        self.assertEqual(authorize.plan(None), (False, False))
+
+    def test_comparison_needs_a_merge_base_and_both_trees(self) -> None:
+        compared = {"merge_base_commit": {"sha": BASE, "commit": {"tree": {"sha": "e" * 40}}}}
+        head = {"sha": HEAD, "commit": {"tree": {"sha": "d" * 40}}}
+        self.assertEqual(authorize.comparison(HEAD, compared, head),
+                         ([], {"merge_base": BASE, "merge_base_tree": "e" * 40, "head_tree": "d" * 40}))
+        for bad_compared, bad_head in ((None, head), ({}, head), (compared, {"sha": BASE}),
+                                       ({"merge_base_commit": {"sha": HEAD, "commit": {"tree": {"sha": "e" * 40}}}}, head)):
+            with self.subTest(compared=bad_compared, head=bad_head):
+                failures, result = authorize.comparison(HEAD, bad_compared, bad_head)
+                self.assertTrue(failures)
+                self.assertEqual(result, {})
+
+
 if __name__ == "__main__":
     unittest.main()

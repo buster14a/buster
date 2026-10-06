@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Shared contract of the 9700X merge-group compiler comparison (#2752).
+"""Shared contract of the 9700X compiler comparison (#2752, #2769, #2761).
 
 Ownership: `tools/bench_direct`, trusted `main` only. The host harness
 (`compiler_compare.py`) writes a receipt; the hosted publisher
 (`compiler_publish.py`) re-validates it as data and publishes one exact-head
-check run; `tools/merge_queue_admission.py` can require that check. All three
-share the names and rules below.
+check run; `tools/merge_queue_admission.py` can require the queue check. All
+three share the names and rules below.
+
+Two modes measure the same way and differ only in what they compare:
+    queue  a main merge-queue group head against its first parent (#2752)
+    pull   an owner pull request head against its merge base with the base
+           branch, on request and without merging (#2769)
+Each mode publishes its own check name and marker, so a pull-request
+measurement can never satisfy queue admission.
 
 Map (searchable symbols):
-    RECEIPT_SCHEMA, LAB_SCHEMA, CHECK_NAME, check_marker   identities
-    PROFILE                                                frozen queue profile
+    RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
+    PROFILE                                                frozen profile
+    APPROVED_HOST, host_problem                            observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     REGRESSION_POLICIES, regression_policy                 report-only switch
     render                                                 readable report
@@ -22,25 +30,33 @@ import re
 
 RECEIPT_SCHEMA = "buster-9700x-compiler-receipt-v1"
 LAB_SCHEMA = "buster-uarch-lab-compare-v2"
-CHECK_NAME = "9700X compiler benchmark"
-MARKER = "buster-9700x-compiler-bench-v1"
+# mode: (check name, external-ID marker prefix).
+MODES = {
+    "queue": ("9700X compiler benchmark", "buster-9700x-compiler-bench-v1"),
+    "pull": ("9700X compiler benchmark (pull request)", "buster-9700x-compiler-pr-v1"),
+}
+CHECK_NAME, MARKER = MODES["queue"]
+# The approved Zen 5 host (#2761): the observed CPU model, never a runner
+# label or target flag, must name the Ryzen 7 9700X.
+APPROVED_HOST = re.compile(r"AMD Ryzen 7 9700X\b")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
-# The routine queue comparison. It is frozen per profile name: changing any
-# value needs a new name so receipts stay comparable. Deeper diagnosis
-# (top-down, sampling, IBS) stays a separate, manually requested lab run.
+# The routine comparison of both modes. It is frozen per profile name:
+# changing any value needs a new name so receipts stay comparable. Deeper
+# diagnosis (top-down, sampling, IBS) stays a separate, manually requested
+# lab run.
 PROFILE = {
-    "name": "queue-compare-v1",
+    "name": "compiler-compare-v1",
     "workload": "uarch_lab compare default: stage-1 self-host compile of the unity "
                 "src/buster/apps/ide/ide.c on the configured base tree",
-    "frozen_source": "group first parent (base)",
+    "frozen_source": "the base revision: a queue group's first parent or a pull request's merge base",
     "build": "./build.sh generate --cc clang --no-include-tests; ./build.sh build --config Release -t ide",
     "cpu": 2,
     "target_minutes": 10,
     "warmups": 1,
     "profile_steps": [],
-    "corpus": "not included in queue-compare-v1",
+    "corpus": "not included in compiler-compare-v1",
 }
 # A wall-time CI needs at least six complete pairs (uarch_lab sign_test_rank).
 MIN_PAIRS = 6
@@ -52,10 +68,28 @@ MEASURED_OUTCOMES = ("faster", "slower", "below-floor", "no detectable differenc
 REGRESSION_POLICIES = ("report-only",)
 
 
-def check_marker(head: str) -> str:
+IDENTITY_KEYS = ("mode", "repository", "ref", "pull", "pull_head", "base", "base_tree", "head", "head_tree",
+                 "trusted_revision", "request_run_id", "run_id", "run_attempt")
+
+
+def check_name(mode: str = "queue") -> str:
+    return MODES[mode][0]
+
+
+def check_marker(head: str, mode: str = "queue") -> str:
     if not (isinstance(head, str) and SHA.fullmatch(head)):
         raise ValueError("check marker needs an exact 40-hex head")
-    return MARKER + ":" + head
+    return MODES[mode][1] + ":" + head
+
+
+def host_problem(receipt: object) -> str:
+    """Why the receipt's observed host is not the approved Zen 5 host, or ''."""
+    host = receipt.get("host") if isinstance(receipt, dict) else None
+    model = host.get("cpu_model") if isinstance(host, dict) else None
+    problem = ""
+    if not (isinstance(model, str) and APPROVED_HOST.search(model)):
+        problem = f"observed CPU {model!r} is not the approved Zen 5 host (AMD Ryzen 7 9700X)"
+    return problem
 
 
 def regression_policy(value: str) -> tuple[str, str]:
@@ -112,19 +146,21 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
     timings = receipt.get("timings", {}) if isinstance(receipt, dict) else {}
     summary = summary if isinstance(summary, dict) else {}
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    mode = receipt.get("mode") if isinstance(receipt, dict) and receipt.get("mode") in MODES else "queue"
     lines = [
-        f"**{CHECK_NAME}: {conclusion}** (performance policy: report-only; a slow result does not block)",
+        f"**{check_name(mode)}: {conclusion}** (performance policy: report-only; a slow result does not block)",
         "",
         verdict.get("text") or "No wall-time verdict.",
         "",
         "| Identity | Value |",
         "| --- | --- |",
     ]
-    for key in ("pull", "pull_head", "base", "base_tree", "head", "head_tree", "queue_branch",
-                "trusted_revision", "request_run_id", "run_id", "run_attempt"):
+    for key in IDENTITY_KEYS:
         lines.append(f"| {key} | `{identity.get(key, 'NA')}` |")
     profile = receipt.get("profile", {}) if isinstance(receipt, dict) else {}
-    lines += ["", f"Profile `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}.", ""]
+    host = receipt.get("host", {}) if isinstance(receipt, dict) else {}
+    lines += ["", f"Profile `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}.",
+              f"Observed host: `{host.get('cpu_model', 'NA') if isinstance(host, dict) else 'NA'}`.", ""]
     metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
     if metrics:
         lines += ["| Metric | A median | B median | B/A | 95% CI | Outcome |", "| --- | --- | --- | --- | --- | --- |"]

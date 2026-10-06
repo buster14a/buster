@@ -44,7 +44,10 @@ DIRECT_TERMS = (
     "(github.run_attempt == 1 || github.triggering_actor == 'davidgmbb')",
 )
 DIRECT_AUTHORIZE_IF = "    if: ${{ " + " && ".join(DIRECT_TERMS) + " }}"
-DIRECT_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING)) + " }}"
+DIRECT_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, "needs.authorize.outputs.workloads == 'true'")) + " }}"
+# The pull-request compiler comparison (#2769) shares the direct gate.
+PULL_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, "needs.authorize.outputs.compare == 'true'")) + " }}"
+PULL_PUBLISH_IF = "    if: ${{ " + " && ".join(("always()", *DIRECT_TERMS, "needs.authorize.outputs.compare == 'true'")) + " }}"
 DIRECT_TRIGGER = (
     "on:",
     "  workflow_run:",
@@ -82,7 +85,9 @@ DIRECT_AUTHORIZER_MARKERS = (
     '("request head repository", full_name(run.get("head_repository")) == repository)',
     '("pull request author", identity(pull.get("user")) == MAINTAINER)',
     '("pull request head repository", full_name(pull["head"].get("repo")) == repository)',
-    'stream.write(f"attempt={attempt}\\nbase={base}\\n")',
+    'stream.write(f"attempt={attempt}\\nbase={base}\\npull={number}\\nworkloads={str(workloads).lower()}\\n"',
+    'COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"',
+    '("comparison merge base", isinstance(base_sha, str) and bool(COMMIT.fullmatch(base_sha)) and base_sha != head)',
 )
 DIRECT_RUN_LINES = (
     "    needs: authorize",
@@ -129,6 +134,8 @@ DIRECT_REQUEST_TRIGGER = (
     "    types: [opened, synchronize, reopened]",
     "    paths:",
     "      - 'benchmarks/9700x/*.c'",
+    "      - 'benchmarks/9700x/*.data'",
+    "      - 'benchmarks/9700x/compiler-compare.request'",
 )
 
 # The merge-group compiler comparison (#2752): main's definition, started by
@@ -224,14 +231,51 @@ COMPILER_RUN_SCRIPT = [
     "          done",
     "          [[ \"$BQ_PULL\" =~ ^[1-9][0-9]*$ ]]",
     "          [[ \"$(git -C candidate rev-parse HEAD)\" == \"$BQ_HEAD_COMMIT\" ]]",
-    "          python3 -B trusted/tools/bench_direct/compiler_compare.py \\",
+    "          python3 -B trusted/tools/bench_direct/compiler_compare.py --mode queue \\",
     "            --candidate candidate --lab trusted/tools/uarch_lab.py \\",
     "            --work \"$RUNNER_TEMP/compiler-bench/work\" --evidence \"$RUNNER_TEMP/compiler-bench/evidence\" \\",
-    "            --summary \"$GITHUB_STEP_SUMMARY\" --repository \"$BQ_REPOSITORY\" --queue-branch \"$BQ_QUEUE_BRANCH\" \\",
+    "            --summary \"$GITHUB_STEP_SUMMARY\" --repository \"$BQ_REPOSITORY\" --ref \"refs/heads/$BQ_QUEUE_BRANCH\" \\",
     "            --pull \"$BQ_PULL\" --pull-head \"$BQ_PULL_HEAD\" --base \"$BQ_BASE_COMMIT\" --base-tree \"$BQ_BASE_TREE\" \\",
     "            --head \"$BQ_HEAD_COMMIT\" --head-tree \"$BQ_HEAD_TREE\" --trusted-revision \"$BQ_TRUSTED_REVISION\" \\",
     "            --request-run-id \"$BQ_REQUEST_RUN_ID\" --run-id \"$BQ_RUN_ID\" --run-attempt \"$BQ_RUN_ATTEMPT\"",
 ]
+PULL_RUN_SCRIPT = [line.replace("--mode queue", "--mode pull")
+                   .replace("--ref \"refs/heads/$BQ_QUEUE_BRANCH\"", "--ref \"refs/pull/$BQ_PULL/head\"")
+                   .replace("--pull-head \"$BQ_PULL_HEAD\"", "--pull-head \"$BQ_HEAD_COMMIT\"")
+                   .replace(" \"$BQ_PULL_HEAD\" \"$BQ_TRUSTED_REVISION\"", " \"$BQ_TRUSTED_REVISION\"")
+                   for line in COMPILER_RUN_SCRIPT]
+PULL_RUN_LINES = (
+    "    needs: authorize",
+    PULL_RUN_IF,
+    "    runs-on:",
+    "      group: buster-9700x-service-dispatch",
+    "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
+    "      BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}",
+    "      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}",
+)
+PULL_CHECKOUTS = (
+    COMPILER_CHECKOUTS[0],
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          ref: ${{ github.event.workflow_run.head_sha }}",
+        "          path: candidate",
+        "          fetch-depth: 0",
+        "          filter: blob:none",
+        "          persist-credentials: false",
+    ),
+    COMPILER_CHECKOUTS[2],
+)
+PULL_PUBLISH_BLOCKS = (
+    ("    needs: [authorize, compare-pull]", PULL_PUBLISH_IF, "    runs-on: ubuntu-24.04",
+     "    permissions:", "      actions: read", "      checks: write", "    timeout-minutes: 10"),
+    TRUSTED_TOOLS_CHECKOUT,
+    ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
+    ("          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}",
+     "          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}",
+     "          BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}"),
+    ("        run: python3 -B tools/bench_direct/compiler_publish.py",),
+)
 COMPILER_PUBLISH_BLOCKS = (
     ("    needs: [authorize-compiler, compare]", COMPILER_PUBLISH_IF, "    runs-on: ubuntu-24.04",
      "    permissions:", "      actions: read", "      checks: write", "    timeout-minutes: 10"),
@@ -308,9 +352,10 @@ def check_direct_workflow(errors: list[str]) -> None:
     direct = DIRECT.read_text(encoding="utf-8")
     lines = direct.splitlines()
     jobs = job_blocks(direct)
-    if list(jobs) != ["authorize", "bench", "authorize-compiler", "compare", "publish-compiler"]:
-        errors.append(f"direct workflow jobs must be authorize, bench, authorize-compiler, compare, "
-                      f"publish-compiler: {list(jobs)}")
+    if list(jobs) != ["authorize", "bench", "compare-pull", "publish-pull", "authorize-compiler", "compare",
+                      "publish-compiler"]:
+        errors.append(f"direct workflow jobs must be authorize, bench, compare-pull, publish-pull, "
+                      f"authorize-compiler, compare, publish-compiler: {list(jobs)}")
     authorize, run = jobs.get("authorize", []), jobs.get("bench", [])
 
     # The trigger block is exact: no other event or workflow may start it.
@@ -319,7 +364,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     if tuple(trigger) != DIRECT_TRIGGER:
         errors.append("direct workflow trigger must be exactly the reviewed workflow_run block")
     declarations = [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")]
-    if declarations != ["permissions: {}", "    permissions:", "    permissions:", "    permissions:"]:
+    if declarations != ["permissions: {}"] + ["    permissions:"] * 4:
         errors.append("direct workflow must grant GITHUB_TOKEN permissions only to its hosted authorize "
                       "and publish jobs")
 
@@ -436,6 +481,32 @@ def check_compiler_path(errors: list[str]) -> None:
                        "pull-requests: write", "actions: write", "statuses: write"):
             if any(marker in line for line in job):
                 errors.append(f"compiler {name} job must not use: {marker}")
+
+    compare_pull, publish_pull = jobs.get("compare-pull", []), jobs.get("publish-pull", [])
+    for line in PULL_RUN_LINES:
+        if line not in compare_pull:
+            errors.append(f"pull compare job is missing exact line: {line.strip()}")
+    if [line for line in compare_pull if line.startswith("    if:")] != [PULL_RUN_IF]:
+        errors.append("pull compare job is missing its exact condition")
+    for marker in ("GH_TOKEN", "github.token", "curl ", "api.github.com", "permissions:", "sudo",
+                   "environment:", "buster-bench", "secrets.", "--sudo", "--profile-steps"):
+        if any(marker in line for line in compare_pull):
+            errors.append(f"pull compare job must not use: {marker}")
+    if len([line for line in compare_pull if "uses:" in line]) != len(PULL_CHECKOUTS) or \
+            not all(contains_block(compare_pull, block) for block in PULL_CHECKOUTS):
+        errors.append("pull compare job must use exactly two credential-free checkouts and the evidence upload")
+    if run_scripts(compare_pull) != [PULL_RUN_SCRIPT]:
+        errors.append("pull compare job must run only main's harness with validated identities")
+    for block in PULL_PUBLISH_BLOCKS:
+        if not contains_block(publish_pull, block):
+            errors.append(f"pull publish job is missing exact block starting: {block[0].strip()}")
+    if len([line for line in publish_pull if "uses:" in line]) != 1 or \
+            len([line for line in publish_pull if "run:" in line]) != 1:
+        errors.append("pull publish job must be one trusted checkout and one publisher call")
+    for marker in ("buster-zen5", "ryzen-9700x", "self-hosted", "path: candidate", "contents: write",
+                   "pull-requests: write", "actions: write", "statuses: write"):
+        if any(marker in line for line in publish_pull):
+            errors.append(f"pull publish job must not use: {marker}")
 
     request = COMPILER_REQUEST.read_text(encoding="utf-8")
     request_lines = request.splitlines()
