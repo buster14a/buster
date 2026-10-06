@@ -158,8 +158,10 @@ UI_WidgetResult ui_slider(String8 string, f32 value, f32 minimum, f32 maximum)
     UI_Signal signal = ui_signal_from_box(box);
     UI_WidgetResult result = ui_widget_result(box, signal);
     result.value_f32 = BUSTER_CLAMP(minimum, value, maximum);
+    // Activation alone is not a value change; only the paths below set it.
+    result.changed = false;
     f32 span = maximum - minimum;
-    if (span > 0.0f && (ui_dragging(signal) || ui_clicked(signal)))
+    if (span > 0.0f && (ui_dragging(signal) || (signal.f & UI_SignalFlag_LeftClicked)))
     {
         f32 width = box->rect.x1 - box->rect.x0;
         if (width > 0.0f)

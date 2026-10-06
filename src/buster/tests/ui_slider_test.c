@@ -412,11 +412,58 @@ BUSTER_GLOBAL_LOCAL void ui_test_text_edit_destructive_shift(UnitTestArguments* 
     }
 }
 
+BUSTER_GLOBAL_LOCAL void ui_test_slider_keyboard_activation_ignores_pointer(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    UnitTestResult result_local = {0};
+#define result result_local
+    WmKey activation_keys[] = {WM_KEY_RETURN, WM_KEY_SPACE};
+    f32 mouse_x[] = {0.0f, 70.0f, 170.0f};
+    for (u64 key_index = 0; key_index < BUSTER_ARRAY_LENGTH(activation_keys); key_index += 1)
+    {
+        for (u64 mouse_index = 0; mouse_index < BUSTER_ARRAY_LENGTH(mouse_x); mouse_index += 1)
+        {
+            for (u32 reverse = 0; reverse < 2; reverse += 1)
+            {
+                UI_State* state = ui_state_allocate(0, 0);
+                UI_WidgetResult slider;
+                UI_Signal neighbor;
+                ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+                ui_test_slider_pair(0.5f, 0, false, &slider, &neighbor);
+                ui_build_end();
+                UI_Key slider_key = slider.box->key;
+                UI_EventList events = ui_test_key_event(arguments->arena, UI_EventKind_Press, WM_KEY_TAB, 0, float2_make(0, 0), S8(""));
+                ui_test_frame(state, arguments->arena, events, 0.016);
+                ui_test_slider_pair(0.5f, 0, false, &slider, &neighbor);
+                ui_build_end();
+                BUSTER_TEST(arguments, ui_key_match(state->focus_active_key, slider_key));
+
+                // The pointer only moves; no button is pressed or released.
+                events = (UI_EventList){0};
+                UI_Event move = {.kind = UI_EventKind_MouseMove, .pos = float2_make(mouse_x[mouse_index], 35)};
+                UI_Event activation = {.kind = UI_EventKind_Press, .key = activation_keys[key_index]};
+                ui_event_list_push(arguments->arena, &events, &move);
+                ui_event_list_push(arguments->arena, &events, &activation);
+                ui_test_frame(state, arguments->arena, events, 0.016);
+                ui_test_slider_pair(0.5f, 0, !!reverse, &slider, &neighbor);
+                ui_build_end();
+                BUSTER_TEST(arguments, ui_clicked(slider.signal));
+                BUSTER_TEST(arguments, slider.value_f32 == 0.5f && !slider.changed);
+                BUSTER_TEST(arguments, float2_element(state->mouse, AXIS2_X) == mouse_x[mouse_index]);
+                ui_state_deinitialize(state);
+            }
+        }
+    }
+#undef result
+    result->succeeded_test_count += result_local.succeeded_test_count;
+    result->test_count += result_local.test_count;
+}
+
 UnitTestResult ui_slider_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     ui_test_slider_keyboard_ownership(arguments, &result);
     ui_test_slider_release_chronology(arguments, &result);
+    ui_test_slider_keyboard_activation_ignores_pointer(arguments, &result);
     ui_test_slider_preserves_editor_arrows(arguments, &result);
     ui_test_text_edit_destructive_shift(arguments, &result);
     return result;
