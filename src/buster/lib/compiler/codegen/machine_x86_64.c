@@ -10888,14 +10888,14 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_float_comparison_conditions[] = {
      MACHINE_X64_FCMP_SETCC_STEP(set_id, set_hash), MACHINE_X64_FCMP_PARITY_SETNP_STEP, MACHINE_X64_FCMP_PARITY_AND_STEP, MACHINE_X64_FCMP_MOVZX_STEP}
 
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_fcmp_set_sequence_steps[12][7] = {
-    [0] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10265u, 0x261b81212af08017),
-    [1] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10267u, 0x99647caf50cf7fff),
+    [0] = MACHINE_X64_FCMP_STEPS(10430u, 0x758a837bb57fa186, 10265u, 0x261b81212af08017),
+    [1] = MACHINE_X64_FCMP_STEPS(10430u, 0x758a837bb57fa186, 10267u, 0x99647caf50cf7fff),
     [2] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10261u, 0x0bc47fa18ee6a6de),
     [3] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10269u, 0x73419bd793371f04),
     [4] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10271u, 0x4c681fe5d1e14b1),
     [5] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10263u, 0x7022443cd4a81cf5),
-    [6] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10265u, 0x261b81212af08017),
-    [7] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10267u, 0x99647caf50cf7fff),
+    [6] = MACHINE_X64_FCMP_STEPS(10457u, 0xf0a4b9d9331f46de, 10265u, 0x261b81212af08017),
+    [7] = MACHINE_X64_FCMP_STEPS(10457u, 0xf0a4b9d9331f46de, 10267u, 0x99647caf50cf7fff),
     [8] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10261u, 0x0bc47fa18ee6a6de),
     [9] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10269u, 0x73419bd793371f04),
     [10] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10271u, 0x4c681fe5d1e14b1),
@@ -12760,6 +12760,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
     {S8_INITIALIZER("XGETBV"), 55},
     {S8_INITIALIZER("MOVDQU"), 76},
     {S8_INITIALIZER("FNSTCW"), 66},
+    {S8_INITIALIZER("FCOMIP"), 84},
     {S8_INITIALIZER("SETNBE"), 72},
     {S8_INITIALIZER("MOVUPS"), 83},
     {S8_INITIALIZER("CMPXCHG"), 34},
@@ -12781,9 +12782,9 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
 
 // First row of each length, indexed by length - 2, with a closing bound. There
 // Closing bound for each mnemonic length group.
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 65, 71, 76, 79, 81, 83};
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 65, 72, 77, 80, 82, 84};
 
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 83);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 84);
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
                 MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH + 2u);
 
@@ -13178,6 +13179,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_x87(void)
     }
     pair[0] = machine_x64_x87_operand(0); pair[1] = machine_x64_x87_operand(1);
     (void)machine_x64_metadata_shape_cache_add(S8("FUCOMIP"), pair + 1, 1, features, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("FCOMIP"), pair + 1, 1, features, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("FSTP"), pair, 1, features, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("FCHS"), 0, 0, features, attributes);
     u8 const comparisons[] = {
@@ -16006,7 +16008,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[2], 80);
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[1], 80);
         BusterX86MetadataPhysicalOperand operands[] = {machine_x64_x87_operand(0), machine_x64_x87_operand(1)};
-        (void)machine_x64_emit_x87(encoder, S8("FUCOMIP"), operands + 1, 1);
+        // == and != are quiet (fucomip); the relational payloads are
+        // signaling (fcomip), so a quiet NaN raises FE_INVALID only there.
+        (void)machine_x64_emit_x87(encoder, instruction->payload < 2 ? S8("FUCOMIP") : S8("FCOMIP"), operands + 1, 1);
         (void)machine_x64_emit_x87(encoder, S8("FSTP"), operands, 1);
         u32 condition = machine_x64_float_comparison_conditions[instruction->payload];
         String8 mnemonic = buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_SET, condition);

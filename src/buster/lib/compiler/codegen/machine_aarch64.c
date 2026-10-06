@@ -9452,7 +9452,10 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                 // unordered-false C semantics.
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[2], 0, 0, 1);
-                machine_a64_emit(&encoder, (instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u);
+                // == and != are quiet (fcmp); the relational conditions are
+                // signaling (fcmpe, opcode2 bit 4), as in GCC and Clang.
+                machine_a64_emit(&encoder, ((instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u) |
+                                           (((instruction->payload & 0xfu) > 1u) ? 0x10u : 0u));
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_CSET, operand_registers[0], 0, 0, instruction->payload & 0xfu);
                 break;
             case MACHINE_A64_CVT_F32_TO_F64:

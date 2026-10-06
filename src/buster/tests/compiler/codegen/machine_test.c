@@ -10172,14 +10172,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_frame_chunk);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes.
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 274);
+    // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes; the
+    // signaling x87 compare adds the FCOMIP shape beside FUCOMIP.
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 275);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
-    // The gang prewarm resolves every registered closed-set query: 343
-    // registrations share 274 signatures. LEAVE contributes one registration;
+    // The gang prewarm resolves every registered closed-set query: 344
+    // registrations share 275 signatures. LEAVE contributes one registration;
     // MOVUPS loads and stores contribute six across the three memory shapes.
     // No entry is left pending for a worker lane to fill.
-    BUSTER_TEST(arguments, metadata_shape_cache.registered_queries == 343);
+    BUSTER_TEST(arguments, metadata_shape_cache.registered_queries == 344);
     BUSTER_TEST(arguments, metadata_shape_cache.resolved_rows == metadata_shape_cache.prepared_rows);
     BUSTER_TEST(arguments, metadata_shape_cache.pending_rows == 0);
 

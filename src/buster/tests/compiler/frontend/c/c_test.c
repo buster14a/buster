@@ -34430,6 +34430,192 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
     return result;
 }
 
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+// IEC 60559 compareQuietEqual: == and != never raise FE_INVALID for a quiet NaN,
+// while the relational operators are signaling and always do (C17 F.3). Each
+// type is tested through values and through a branch condition. The same source
+// runs under the host GCC and Clang, which pin the expectation to the reference
+// compilers (GCC: comisd/fcomip for relations, ucomisd/fucomip for equality;
+// Clang never signals for relations, so it is built with -DSIG=0).
+BUSTER_GLOBAL_LOCAL String8 const c_test_quiet_nan_compare_source = S8_INITIALIZER(
+    "int feclearexcept(int);\n"
+    "int fetestexcept(int);\n"
+    "#define EXCEPT_INVALID 1\n"
+    "#ifndef SIG\n"
+    "#define SIG 1\n"
+    "#endif\n"
+    "#define CHECK(NAME, EXPR, VALUE, RAISES) do { feclearexcept(EXCEPT_INVALID); volatile int r = (EXPR); \\\n"
+    "if (r != (VALUE) || !!fetestexcept(EXCEPT_INVALID) != (RAISES)) failed |= 1; } while (0)\n"
+    "#define BRANCH(EXPR, RAISES) do { feclearexcept(EXCEPT_INVALID); int taken = 0; if (EXPR) taken = 1; \\\n"
+    "if (taken || !!fetestexcept(EXCEPT_INVALID) != (RAISES)) failed |= 2; } while (0)\n"
+    "#define DEFINE_TEST(NAME, TYPE) \\\n"
+    "static int NAME(void) \\\n"
+    "{ \\\n"
+    "int failed = 0; \\\n"
+    "volatile TYPE zero = 0; volatile TYPE qn = zero / zero; volatile TYPE one = 1; \\\n"
+    "feclearexcept(EXCEPT_INVALID); \\\n"
+    "CHECK(eq, qn == qn, 0, 0); CHECK(eq, qn == one, 0, 0); CHECK(eq, one == qn, 0, 0); \\\n"
+    "CHECK(ne, qn != qn, 1, 0); CHECK(ne, qn != one, 1, 0); CHECK(ne, one != qn, 1, 0); \\\n"
+    "CHECK(lt, qn < one, 0, SIG); CHECK(lt, one < qn, 0, SIG); CHECK(le, qn <= one, 0, SIG); CHECK(le, one <= qn, 0, SIG); \\\n"
+    "CHECK(gt, qn > one, 0, SIG); CHECK(gt, one > qn, 0, SIG); CHECK(ge, qn >= one, 0, SIG); CHECK(ge, one >= qn, 0, SIG); \\\n"
+    "CHECK(lt, qn < qn, 0, SIG); CHECK(ge, qn >= qn, 0, SIG); \\\n"
+    "BRANCH(qn == one, 0); BRANCH(qn == qn, 0); BRANCH(!(qn != one), 0); BRANCH(qn < one, SIG); BRANCH(qn >= one, SIG); \\\n"
+    "CHECK(eq, one == one, 1, 0); CHECK(ne, one != one, 0, 0); CHECK(lt, zero < one, 1, 0); CHECK(ge, one >= one, 1, 0); \\\n"
+    "return failed; \\\n"
+    "}\n"
+    "DEFINE_TEST(float_test, float)\n"
+    "DEFINE_TEST(double_test, double)\n"
+    "DEFINE_TEST(long_double_test, long double)\n"
+    "int main(void) { return float_test() | (double_test() << 2) | (long_double_test() << 4); }\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("quiet-nan-compare"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_quiet_nan_compare_source));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("quiet-nan-compare-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), modes[mode], forms[form], S8("-O0"), S8("-fverify-codegen"),
+                    S8("-o"), output, input, S8("-lm")};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("quiet NaN compare mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 command_line[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult run = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("quiet NaN compare mode={u32} form={u32}: status={u32} timeout={u32}"),
+                                mode, form, run.platform_status, (u32)run.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                scratch_end(temporary);
+            }
+        }
+#if BUSTER_LINUX
+        String8 references[] = {S8("gcc"), S8("clang")};
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("quiet-nan-compare-reference"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+            {
+                String8 command[] = {compiler, S8("-O0"), S8("-nostdinc"), S8("-fno-fast-math"), reference == 1 ? S8("-DSIG=0") : S8("-DSIG=1"), input, S8("-o"), output, S8("-lm")};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                    (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                        .use_process_environment = true, .search_path = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult build = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !build.timed_out && build.result == PROCESS_RESULT_SUCCESS,
+                        BYTE_SLICE_TO_STRING(8, build.streams[STANDARD_STREAM_ERROR]));
+                    if (!build.timed_out && build.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 command_line[] = {output};
+                        ProcessSpawnResult executable = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, executable.handle != 0))
+                        {
+                            ProcessWaitResult run = os_process_wait_deadline(temporary.arena, executable, 30000000);
+                            BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("quiet NaN compare reference={S8}: status={u32} timeout={u32}"),
+                                    references[reference], run.platform_status, (u32)run.timed_out));
+                        }
+                        BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+#endif
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_test_count_object_words(ByteSlice object, u32 word)
+{
+    u32 count = 0;
+    for (u64 offset = 0; offset + 4 <= object.length; offset += 4)
+    {
+        u32 value = (u32)object.pointer[offset] | ((u32)object.pointer[offset + 1] << 8) | ((u32)object.pointer[offset + 2] << 16) |
+                    ((u32)object.pointer[offset + 3] << 24);
+        count += value == word;
+    }
+    return count;
+}
+
+// AArch64 `==` and `!=` are quiet (fcmp); `<`, `<=`, `>` and `>=` are signaling
+// (fcmpe), as in GCC. Each function compares V0 (Sn/Dn) with V1, so the word is
+// 0x1e202000 | type << 22 | 1 << 16, with bit 4 set for fcmpe.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aarch64_float_compare_quiet_signaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 quiet_word;
+        u32 signaling_word;
+    } cases[] = {
+        {S8("int f(float a, float b) { return a == b; } int g(float a, float b) { return a != b; }"), 0x1e212000u, 0x1e212010u},
+        {S8("int f(double a, double b) { return a == b; } int g(double a, double b) { return a != b; }"), 0x1e612000u, 0x1e612010u},
+        {S8("int f(float a, float b) { return a < b; } int g(float a, float b) { return a >= b; } int h(float a, float b) { return a > b; } int i(float a, float b) { return a <= b; }"), 0x1e212000u, 0x1e212010u},
+        {S8("int f(double a, double b) { return a < b; } int g(double a, double b) { return a >= b; } int h(double a, double b) { return a > b; } int i(double a, double b) { return a <= b; }"), 0x1e612000u, 0x1e612010u},
+    };
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("aarch64-float-compare"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("aarch64-float-compare"), S8(".o"));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source)));
+            String8 command[] = {S8("-nostdinc"), S8("-O0"), modes[mode], S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-c"),
+                S8("-o"), output, input};
+            CompilerDriverResult compiled =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                ByteSlice object = file_read(arena, output, (FileReadOptions){0});
+                u32 quiet = c_test_count_object_words(object, cases[index].quiet_word);
+                u32 signaling = c_test_count_object_words(object, cases[index].signaling_word);
+                bool relational = index >= 2;
+                BUSTER_TEST_RAW(arguments, relational ? (quiet == 0 && signaling == 4) : (quiet == 2 && signaling == 0),
+                    string_format(arena, S8("aarch64 float compare case={u32} mode={u32}: fcmp={u32} fcmpe={u32}"), index, mode, quiet, signaling));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // A static x87 initializer is a constant expression over literals, and an
 // aggregate of them is one too.  These are the shapes musl's src/math needs:
 // `1/LDBL_EPSILON` in floorl.c and the coefficient tables in atanl.c.
@@ -44008,6 +44194,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);
 
 
     {

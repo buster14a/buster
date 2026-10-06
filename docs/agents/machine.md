@@ -401,7 +401,10 @@ fixture as well as compiling both architectures.
   emits closed metadata-backed x87 transactions, with one explicit ST(i)
   operand and architectural ST(0) left implicit in the exact token. Arithmetic,
   negation, comparison and conversion rows carry memory/barrier membership;
-  no x87 register class is allocated. Comparisons repair unordered flags,
+  no x87 register class is allocated. Comparisons repair unordered flags and
+  follow C17 F.3: `==`/`!=` are quiet (`ucomis[sd]`, `fucomip`, A64 `fcmp`) and
+  never raise FE_INVALID for a quiet NaN, while `<`, `<=`, `>`, `>=` are
+  signaling (`comis[sd]`, `fcomip`, A64 `fcmpe`), matching GCC,
   integer casts save/restore the caller's control word, and only call/return
   bridges carry live ST results. Frame sizes and operation payloads are checked
   by the MIR verifier. Scalar loads/stores copy ten payload bytes, while
