@@ -28774,16 +28774,19 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             }
         }
         u64 mark = machine->scratch_arena->position;
-        if (builtin == C_SYMBOL_BUILTIN_FRAME_ADDRESS)
+        if (builtin == C_SYMBOL_BUILTIN_FRAME_ADDRESS || builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS)
         {
+            bool frame = builtin == C_SYMBOL_BUILTIN_FRAME_ADDRESS;
             CParseConstant level = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, index + 2, close);
             if (!level.valid || level.is_float)
             {
-                message = S8("__builtin_frame_address requires an integer constant level");
+                message = frame ? S8("__builtin_frame_address requires an integer constant level")
+                                : S8("__builtin_return_address requires an integer constant level");
             }
             else if (level.integer || level.integer_high)
             {
-                message = S8("__builtin_frame_address is supported only for the current frame (level 0)");
+                message = frame ? S8("__builtin_frame_address is supported only for the current frame (level 0)")
+                                : S8("__builtin_return_address is supported only for the current frame (level 0)");
             }
             location = index;
         }

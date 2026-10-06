@@ -5874,6 +5874,15 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             error = IR_VALIDATION_OPERATION;
         }
     }
+    else if (instruction->opcode == IR_OPCODE_RETURN_ADDRESS)
+    {
+        IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!pointer || pointer->kind != IR_TYPE_POINTER || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
     else if (instruction->opcode == IR_OPCODE_STACK_RESTORE)
     {
         IrType* restored =

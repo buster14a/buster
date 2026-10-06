@@ -15505,6 +15505,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_isnormal"), all_targets},
         {S8("__builtin_fpclassify"), all_targets},
         {S8("__is_target_arch"), all_targets},
+        {S8("__builtin_return_address"), native_targets},
+        {S8("__builtin_return_address_extra"), 0},
         {S8("not_a_builtin"), 0},
         {S8("__atomic_"), 0},
         {S8("__atomic_load"), native_targets},
@@ -15546,6 +15548,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             CBuiltinQueryCase query = queries[query_index];
             u32 expected = (query.targets & (1U << target.cpu_arch)) != 0;
+            // Windows frames keep no fixed return-address slot, so it is refused there.
+            expected &= !(target.os == OPERATING_SYSTEM_WINDOWS && string_equal(query.name, S8("__builtin_return_address")));
             String8 source = string_format(temporary.arena,
                 S8("#if __has_builtin({S8}) != {u32}\n#error unexpected builtin capability\n#endif\nint builtin_query_probe;\n"),
                 query.name, expected);
@@ -15605,6 +15609,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
             }
             c_test_scratch_end(temporary);
         }
+    }
+
+    // __builtin_return_address(0) lowers to one canonical RETURN_ADDRESS row
+    // (not a stack save) on both frontend forms; other levels are refused.
+    for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("void* query_return_address(void) { return __builtin_return_address(0); }\n");
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = targets[0]});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("return-address.c"), preprocess, parse, targets[0],
+                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                IrFunction* function = c_test_find_ir_function(module, S8("query_return_address"));
+                if (BUSTER_REQUIRE(arguments, function != 0))
+                {
+                    u32 return_addresses = 0;
+                    u32 stack_saves = 0;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        return_addresses += function->instructions[instruction_index].opcode == IR_OPCODE_RETURN_ADDRESS;
+                        stack_saves += function->instructions[instruction_index].opcode == IR_OPCODE_STACK_SAVE;
+                    }
+                    BUSTER_TEST(arguments, return_addresses == 1 && stack_saves == 0);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    String8 invalid_return_address_sources[] = {
+        S8("void* f(void) { return __builtin_return_address(1); }"),
+        S8("void* f(int n) { return __builtin_return_address(n); }"),
+        S8("void* f(void) { return __builtin_return_address(1.0); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_return_address_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_return_address_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count != 0, invalid_return_address_sources[index]);
+        scratch_end(temporary);
     }
 
     String8 invalid_ffs_sources[] = {

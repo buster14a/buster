@@ -133,7 +133,13 @@ Never admit an arbitrary `__atomic_` or `__c11_atomic_` suffix by prefix.
 The active target admits atomic builtins on x86-64/AArch64, and complex
 construction there and on Wasm64. Wasm64 and eBPF reject atomic IR; eBPF also
 rejects floating IR. Operand types and access widths are still validated by
-lowering. A positive runtime builtin query does not assert that the builtin
+lowering. `__builtin_return_address(0)` lowers to `IR_OPCODE_RETURN_ADDRESS`
+(not `IR_OPCODE_STACK_SAVE`, which is the stack pointer): the x86-64 and
+AArch64 MIR selectors read the frame record every non-Windows MIR function
+builds (`[rbp+8]`, `[x29+8]`), so the query answers 1 only there. Windows
+frames, Wasm64 and eBPF refuse it with a structured diagnostic, as does any
+non-zero or non-constant level; `compiler_driver_test_return_address` runs it.
+A positive runtime builtin query does not assert that the builtin
 can be folded in every constant initializer; the complex global-initializer
 work is tracked separately in #675.
 

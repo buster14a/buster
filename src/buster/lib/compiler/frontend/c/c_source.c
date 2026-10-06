@@ -4028,6 +4028,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_ia32_psrlqi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
     { S8_INITIALIZER("__builtin_unreachable"), C_SYMBOL_BUILTIN_UNREACHABLE },
     { S8_INITIALIZER("__builtin_frame_address"), C_SYMBOL_BUILTIN_FRAME_ADDRESS },
+    { S8_INITIALIZER("__builtin_return_address"), C_SYMBOL_BUILTIN_RETURN_ADDRESS },
     { S8_INITIALIZER("__builtin_alloca"), C_SYMBOL_BUILTIN_ALLOCA },
     { S8_INITIALIZER("__builtin_complex"), C_SYMBOL_BUILTIN_COMPLEX },
     { S8_INITIALIZER("__builtin_strlen"), C_SYMBOL_BUILTIN_STRLEN },
@@ -7069,7 +7070,7 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
                                         String8* name_out, bool* quoted_out);
 BUSTER_C_INTERNAL u32 c_include_name_token_count(CToken* tokens, u32 token_count);
 
-BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch)
+BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch, OperatingSystem os)
 {
     static char const* supported[] = {
         "__builtin___clear_cache", "__builtin_acos",
@@ -7135,8 +7136,12 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         // restrictions remain the responsibility of semantic lowering.
         CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
         bool native = cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64;
+        // __builtin_return_address reads the frame record of the System V and
+        // Darwin native backends; Win64/Windows-AArch64 frames, Wasm64 and
+        // eBPF refuse it, so those targets answer 0.
         result = (builtin == C_SYMBOL_BUILTIN_ATOMIC && native) ||
-                 (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64));
+                 (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
+                 (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
 
     return result;
@@ -7340,7 +7345,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]),
-                                                                    options ? options->target.cpu_arch : CPU_ARCH_COUNT)
+                                                                    options ? options->target.cpu_arch : CPU_ARCH_COUNT,
+                                                                    options ? options->target.os : OPERATING_SYSTEM_FREESTANDING)
                                     : c_conditional_attribute_supported(base, arguments[0],
                                                                         options ? options->target : target_native);
         }

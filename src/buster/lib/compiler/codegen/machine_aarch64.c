@@ -911,6 +911,27 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_save(MachineA64Selector* selec
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_return_address(MachineA64Selector* selector, u32 result_register)
+{
+    // Every MIR function stores the X29/X30 frame record at X29 in its
+    // prologue, so the incoming link register is the doubleword at [X29 + 8].
+    // LOAD_INCOMING's payload is the X29-relative byte offset, so 8 reads the
+    // link register slot; the Windows frame places its save area elsewhere,
+    // so that target is refused.
+    bool selected = false;
+    if (result_register != UINT32_MAX && selector->target.os != OPERATING_SYSTEM_WINDOWS)
+    {
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = 8,
+                                                       .opcode = MACHINE_A64_LOAD_INCOMING,
+                                                   });
+        machine_a64_define(selector, result_register, row);
+        selected = true;
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_restore(MachineA64Selector* selector, IrInstruction* instruction)
 {
     bool selected = false;
@@ -5840,6 +5861,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
             break;
         case IR_OPCODE_STACK_SAVE:
             selected = machine_a64_select_stack_save(selector, result_register);
+            break;
+        case IR_OPCODE_RETURN_ADDRESS:
+            selected = machine_a64_select_return_address(selector, result_register);
             break;
         case IR_OPCODE_STACK_RESTORE:
             selected = machine_a64_select_stack_restore(selector, instruction);

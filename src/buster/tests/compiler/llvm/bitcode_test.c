@@ -1675,6 +1675,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_records(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_return_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    IrType types[] = {
+        {.kind = IR_TYPE_VOID, .layout = {.resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_POINTER, .element_type = {.value = 0},
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 1}, .layout = {.resolved = true}},
+    };
+    IrSymbol symbols[] = {{.name = S8("return_address"), .link_name = S8("return_address"), .type = {.value = 2},
+                           .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true}};
+    IrValueId returned[] = {{.value = 0}};
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_RETURN_ADDRESS, .canonical_type = {.value = 1}, .result = {.value = 0}},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .operands = returned, .operand_count = 1},
+    };
+    IrValue values[1] = {{.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE}};
+    instructions[0].next = (IrInstructionId){.value = 1};
+    instructions[1].next = IR_INSTRUCTION_ID_INVALID;
+    IrBlock blocks[] = {{.first_instruction = {.value = 0}, .last_instruction = {.value = 1}, .terminated = true, .sealed = true}};
+    IrFunction functions[] = {{.name = S8("return_address"), .symbol = {.value = 0}, .canonical_type = {.value = 2},
+                               .entry = {.value = 0}, .blocks = blocks, .instructions = instructions, .values = values,
+                               .block_count = 1, .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+                               .value_count = 1, .state = IR_FUNCTION_LOWERED}};
+    IrModule modules[] = {{.name = S8("return_address"), .functions = functions, .function_count = 1, .lowered_function_count = 1}};
+    IrProgram program = {.arena = arena, .modules = modules, .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)},
+                         .symbols = {.symbols = symbols, .count = 1}, .module_count = 1, .lowered_function_count = 1};
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.data_layout = S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    if (!llvm_bitcode_artifact_is_valid(first))
+    {
+        arguments->show(arguments, S8("LLVM return address rejected: {S8} block={u32} instruction={u32}: {S8}\n"),
+                        llvm_bitcode_error_code_name(first.error.code), first.error.block.value, first.error.instruction.value,
+                        first.error.message);
+    }
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
+    // The definition plus the llvm.returnaddress declaration.
+    BUSTER_TEST(arguments, first.stats.function_count == 2 && first.stats.defined_function_count == 1);
+    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length && first.bytes.length &&
+                           !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+    symbols[0].link_name = S8("llvm.returnaddress");
+    LlvmBitcodeArtifact collision = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(collision) && !collision.bytes.length);
+    BUSTER_TEST(arguments, collision.error.code == LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL);
+    return result;
+}
+
 // Independent, bounded reader for the unabbreviated records this writer emits.
 // Decode the serialized value instead of duplicating the encoder's sign mapping.
 typedef struct LlvmBitcodeTestReader
@@ -4156,6 +4209,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     result.test_count += consumers.test_count;
     result.succeeded_test_count += consumers.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_lifecycle);
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_return_address);
     UnitTestResult fixed_allocas = llvm_bitcode_test_fixed_allocas(arguments);
     result.test_count += fixed_allocas.test_count;
     result.succeeded_test_count += fixed_allocas.succeeded_test_count;

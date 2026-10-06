@@ -2441,6 +2441,7 @@ struct CIrPreparedCall
     bool builtin_spin_pause;
     bool builtin_unreachable;
     bool builtin_frame_address;
+    bool builtin_return_address;
     bool builtin_alloca;
     bool builtin_complex;
     bool builtin_strlen;
@@ -7523,6 +7524,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_stack_save(CIntegerIrBuilder* builder, IrS
     instruction.result = checkpoint;
     c_ir_append_instruction(builder, instruction, instruction_source);
     return checkpoint;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_return_address(CIntegerIrBuilder* builder, IrSourceRange source)
+{
+    IrTypeId address_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+    IrValueId address = c_ir_add_result(builder, address_type);
+    if (address_type.value == IR_ID_UNDERLYING_INVALID || address.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrSourceRange instruction_source = source;
+    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_RETURN_ADDRESS, address_type);
+    instruction.result = address;
+    c_ir_append_instruction(builder, instruction, instruction_source);
+    return address;
 }
 
 BUSTER_C_INTERNAL bool c_ir_emit_stack_restore(CIntegerIrBuilder* builder, IrValueId checkpoint, IrSourceRange source)
@@ -21389,6 +21405,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         bool builtin_spin_pause = builtin_kind == C_SYMBOL_BUILTIN_SPIN_PAUSE;
         bool builtin_unreachable = builtin_kind == C_SYMBOL_BUILTIN_UNREACHABLE;
         bool builtin_frame_address = builtin_kind == C_SYMBOL_BUILTIN_FRAME_ADDRESS;
+        bool builtin_return_address = builtin_kind == C_SYMBOL_BUILTIN_RETURN_ADDRESS;
         bool builtin_alloca = builtin_kind == C_SYMBOL_BUILTIN_ALLOCA;
         // `__builtin_complex(re, im)` builds a complex value out of its two
         // real parts. It is what C11's CMPLX macros expand to in musl's
@@ -21609,7 +21626,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
             (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_object_size &&
-             !builtin_assume_aligned && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_alloca && !builtin_complex && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
+             !builtin_assume_aligned && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_return_address && !builtin_alloca && !builtin_complex && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_unary == IR_UNARY_COUNT &&
              builtin_simd == C_IR_SIMD_BUILTIN_NONE && builtin_sse2_immediate_shift == C_IR_SSE2_IMMEDIATE_SHIFT_NONE && !indirect &&
@@ -21667,6 +21684,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_spin_pause = builtin_spin_pause,
             .builtin_unreachable = builtin_unreachable,
             .builtin_frame_address = builtin_frame_address,
+            .builtin_return_address = builtin_return_address,
             .builtin_alloca = builtin_alloca,
             .builtin_complex = builtin_complex,
             .builtin_atomic_gnu = atomic_spelling.gnu,
@@ -23683,23 +23701,33 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         // A non-zero level asks for a caller's frame, which needs a frame
         // pointer chain this backend does not promise, so it is refused
         // instead of answered approximately.
-        if (selected->builtin_frame_address)
+        // `__builtin_return_address(0)` answers the current function's return
+        // address through IR_OPCODE_RETURN_ADDRESS, which each native backend
+        // reads from the frame record its prologue always builds. Frame
+        // address and stack save are not usable for it: the former is the
+        // stack pointer. A caller's return address (level above 0) needs the
+        // frame-pointer chain walked, so it is refused like frame_address.
+        if (selected->builtin_frame_address || selected->builtin_return_address)
         {
             CIrConstantValue frame_level = {0};
             if (selected->close_index <= selected->open_index + 1 ||
                 !c_ir_constant_evaluate(builder, selected->open_index + 1, selected->close_index, &frame_level) || frame_level.kind != C_IR_CONSTANT_INTEGER)
             {
-                builder->failure_message = S8("__builtin_frame_address requires an integer constant level");
+                builder->failure_message = selected->builtin_return_address ? S8("__builtin_return_address requires an integer constant level")
+                                                                            : S8("__builtin_frame_address requires an integer constant level");
                 builder->failure_token_index = selected->token_index;
                 return false;
             }
             if (frame_level.integer)
             {
-                builder->failure_message = S8("__builtin_frame_address is supported only for the current frame (level 0)");
+                builder->failure_message = selected->builtin_return_address
+                                               ? S8("__builtin_return_address is supported only for the current frame (level 0)")
+                                               : S8("__builtin_frame_address is supported only for the current frame (level 0)");
                 builder->failure_token_index = selected->token_index;
                 return false;
             }
-            IrValueId frame_address = c_ir_emit_stack_save(builder, c_ir_token_source_range(builder, token));
+            IrValueId frame_address = selected->builtin_return_address ? c_ir_emit_return_address(builder, c_ir_token_source_range(builder, token))
+                                                                      : c_ir_emit_stack_save(builder, c_ir_token_source_range(builder, token));
             if (frame_address.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
