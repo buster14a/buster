@@ -679,9 +679,16 @@ fi
                 self.assertEqual(owner["cancellation_signal"], str(signum or 0))
                 self.assertEqual(owner["caller_lost"], str(int(caller_lost)))
                 self.assertEqual(owner["native_reaped"], "1")
-                self.assertEqual(owner["keeper_reaped"], "1")
                 self.assertEqual(owner["group_authority_released"], "1")
-                self.assertEqual(Path(str(prefix) + ".log").read_bytes(), b"completion-control")
+                if caller_lost:
+                    # Caller loss has no post-cap reap/drain grace. Final owned
+                    # dispatch is required even when reap is not yet observed.
+                    self.assertEqual(owner["kill_group_attempted"], "1")
+                    self.assertEqual(owner["capture_status"], "124")
+                else:
+                    self.assertEqual(owner["keeper_reaped"], "1")
+                    self.assertEqual(owner["capture_status"], "0")
+                    self.assertEqual(Path(str(prefix) + ".log").read_bytes(), b"completion-control")
                 errors = (self.root / ("direct-errors-%d" % self.sequence)).read_text()
                 self.assertEqual(errors, "")
                 self.assertLess(time.monotonic() - started, 5)
