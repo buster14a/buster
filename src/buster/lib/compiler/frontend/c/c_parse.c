@@ -27059,14 +27059,6 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
             if (!diagnostic.message.length && !address && current.value < result->type_count && result->types[current.value].kind != C_TYPE_ARRAY)
                 diagnostic.message = S8("a subscripted compound literal without an '&' is a value rather than an address");
         }
-        if (!static_storage)
-        {
-            for (u32 cursor = open + 1; !diagnostic.message.length && cursor < close; cursor += 1)
-            {
-                if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_ELLIPSIS))
-                    diagnostic.message = S8("range designators are only supported for static aggregate initializers");
-            }
-        }
         diagnostic.token = index;
         diagnostic.container = type;
     }
@@ -27350,16 +27342,6 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             if (!simple_conversion_failure && entity->type.value < result->type_count && result->types[entity->type.value].kind == C_TYPE_NULLPTR &&
                 c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type, shape_start, shape_end, true, 0))
                 c_parse_lowering_constraint_consider(diagnostic, S8("only a value of type nullptr_t may be converted to nullptr_t"), start, shape_end);
-            if (!entity->is_static_storage)
-            {
-                for (u32 token = shape_start; token < shape_end; token += 1)
-                {
-                    if (c_token_is_punctuator(&preprocess.tokens[token], C_PUNCTUATOR_ELLIPSIS))
-                    {
-                        c_parse_lowering_constraint_consider(diagnostic, S8("range designators are only supported for static aggregate initializers"), start, location);
-                    }
-                }
-            }
             if (shape.message.length)
             {
                 String8 message = simple_conversion_failure ? simple_conversion_message
