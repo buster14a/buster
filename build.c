@@ -21735,21 +21735,22 @@ BUSTER_GLOBAL_LOCAL void test_musl_action_add(Arena* arena, TestMuslOptions opti
 
 // ---------------------------------------------------------------------------
 // CPython compatibility harness.  An external, pristine CPython v3.13.9
-// checkout is configured and built twice with its own autoconf build system
-// -- once with `ide cc`, once with clang -- and CPython's own regression
-// suite is the oracle: the gate is the verdict comparison, a test the Buster
-// build fails while the Clang build of the same tree passes.  Fixed seeds and
+// checkout is configured and built five times with its own autoconf build
+// system -- once with clang, once per register allocator with `ide cc` --
+// and CPython's own regression suite is the oracle: the gate is the verdict
+// comparison, a test the Buster FAST build fails while the Clang build of
+// the same tree passes.  Fixed seeds and
 // environment keep both runs deterministic; nothing here touches the network
 // (`-u none` withholds every optional resource).
 //
 // What this harness does NOT gate: the modules Setup.local disables (the
-// seven shared-only test modules -- the driver has no -shared -- and
+// seven shared-only test modules, see cpython_write_setup_local, and
 // _testinternalcapi, whose static build cannot link into the _freeze_module
 // bootstrap under ANY toolchain, since it references getpath.o's
 // _Py_Get_Getpath_CodeObject while the bootstrap deliberately links
 // getpath_noop.o); refleak hunting; the resource-gated suite
 // surface; and performance.  pyconfig.h must match the Clang configure
-// exactly except for the three expected divergences asserted below.
+// exactly except for the one expected divergence asserted below.
 
 BUSTER_GLOBAL_LOCAL String8 cpython_trim_ascii_space(String8 text)
 {
@@ -22057,8 +22058,11 @@ BUSTER_GLOBAL_LOCAL bool cpython_set_stack_limit(u64 requested_bytes)
 }
 
 // The modules both trees disable, and why each is here rather than built:
-// the driver has no -shared, so the seven modules upstream marks *shared*
-// (each exists to exercise shared-object import) cannot be produced; and a
+// the seven modules upstream marks *shared* each exist to exercise
+// shared-object import. The harness predates the driver's x86-64 Linux
+// -shared/PIE support (#1712) and still builds every module statically
+// (MODULE_BUILDTYPE=static), so they stay excluded until a pristine harness
+// run can requalify a shared-module build; and a
 // static _testinternalcapi cannot link into the _freeze_module bootstrap
 // under any toolchain -- it references _Py_Get_Getpath_CodeObject, defined
 // only by getpath.o, while the bootstrap deliberately links getpath_noop.o.
@@ -22066,7 +22070,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_set_stack_limit(u64 requested_bytes)
 BUSTER_GLOBAL_LOCAL bool cpython_write_setup_local(Arena* arena, String8 tree_directory)
 {
     String8 path = path_join(arena, path_join(arena, tree_directory, S8("Modules")), S8("Setup.local"));
-    String8 content = S8("# test_cpython harness: the driver has no -shared; these modules exist only\n"
+    String8 content = S8("# test_cpython harness: modules build statically; these modules exist only\n"
                          "# as shared libraries, so both trees exclude them and their tests skip alike.\n"
                          "*disabled*\n"
                          "# _testinternalcapi references _Py_Get_Getpath_CodeObject, which only\n"
@@ -22513,8 +22517,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     // not gated on; the reverse direction (Clang fails, Buster passes) is
     // reported for the record and never fails the run.  test_gdb's two
     // tests are the one expected buster-only divergence: gdb inspects a
-    // running python, and Buster-linked executables carry no .symtab
-    // (issue 843).
+    // running python, and they were recorded when Buster-linked
+    // executables carried no .symtab (issue 843, GitHub #80). The ELF
+    // symbol-table writer has since landed (#606); the exemption stays
+    // until a pristine harness run shows whether gdb now agrees.
     String8 expected_divergences[] = {
         S8("test.test_gdb.test_misc"),
         S8("test.test_gdb.test_pretty_print"),
