@@ -21067,6 +21067,63 @@ BUSTER_C_INTERNAL u32 c_parse_statement_delimiter_close(CPreprocessResult prepro
     return close;
 }
 
+// Statement ends already found for one range, so nested statements share their walks instead of
+// each re-walking the prefix of every statement inside it (#2676). `ends` holds, per token of
+// [base, base + count), the end c_parse_statement_end found for the statement starting there --
+// UINT32_MAX when that statement is not closed -- or zero when none has been asked. An end
+// depends only on the tokens and the range limit, so one memo serves every query with the same
+// `end`. `pending` is the walk's own stack of (position, suffix depth) pairs and needs
+// 2 * (count + 1) entries; it is empty between walks.
+typedef struct CParseStatementEnds CParseStatementEnds;
+struct CParseStatementEnds
+{
+    u32* ends;
+    u32* pending;
+    u32 base;
+    u32 count;
+};
+
+BUSTER_C_INTERNAL CParseStatementEnds c_parse_statement_ends_create(Arena* arena, u32 base, u32 count)
+{
+    CParseStatementEnds memo = {
+        .ends = arena_allocate(arena, u32, count ? count : 1),
+        .pending = arena_allocate(arena, u32, (u64)(count + 1) * 2),
+        .base = base,
+        .count = count,
+    };
+    memset(memo.ends, 0, sizeof(*memo.ends) * (count ? count : 1));
+    return memo;
+}
+
+// The memoized end of the statement starting at `position` (zero when unknown). An unknown one
+// is queued as pending at suffix depth `level`: it ends when the walk's suffix stack is back to
+// `level`, whatever statements it nests.
+BUSTER_C_INTERNAL u32 c_parse_statement_ends_probe(CParseStatementEnds* memo, u32* pending_count, u32 position, u32 level)
+{
+    u32 known = 0;
+    if (memo && position - memo->base < memo->count)
+    {
+        known = memo->ends[position - memo->base];
+        if (!known)
+        {
+            memo->pending[*pending_count * 2] = position;
+            memo->pending[*pending_count * 2 + 1] = level;
+            *pending_count += 1;
+        }
+    }
+    return known;
+}
+
+// Every pending statement entered at suffix depth `level` or deeper ends at `value`.
+BUSTER_C_INTERNAL void c_parse_statement_ends_finish(CParseStatementEnds* memo, u32* pending_count, u32 level, u32 value)
+{
+    while (*pending_count && memo->pending[(*pending_count - 1) * 2 + 1] >= level)
+    {
+        *pending_count -= 1;
+        memo->ends[memo->pending[*pending_count * 2] - memo->base] = value;
+    }
+}
+
 // One past the last token of the single statement beginning at `start`, or UINT32_MAX when that
 // statement is not closed inside [start, end).
 //
@@ -21087,46 +21144,64 @@ BUSTER_C_INTERNAL u32 c_parse_statement_delimiter_close(CPreprocessResult prepro
 // match each delimiter by scanning. With the table every header, block and do-while
 // condition is skipped in one read, so a statement nested in D others costs the tokens
 // of its own prefix and not a rescan of every inner block (#2676).
-BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 const* matching, u32 start, u32 end, u8* suffix, u32 suffix_capacity)
+//
+// `memo`, when given, also removes the prefix walk of a braceless nest: every statement the walk
+// passes through is recorded with its end, and a walk reaching a recorded statement jumps to its
+// end. `while (c) while (c) ... x;` is then walked once however many of its statements are
+// asked about. All callers of one memo must pass the same `end`. A statement that is not closed
+// is recorded as such, so the same malformed input fails at once on every later query and
+// answers UINT32_MAX exactly as the unmemoized walk does.
+BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 const* matching, u32 start, u32 end, u8* suffix, u32 suffix_capacity,
+                                            CParseStatementEnds* memo)
 {
     u32 cursor = start;
     u32 suffix_count = 0;
-    while (cursor < end)
+    u32 pending_count = 0;
+    bool failed = false;
+    bool finished = false;
+    while (!failed && !finished && cursor < end)
     {
         bool prefix = true;
-        while (prefix && cursor < end && preprocess.tokens[cursor].kind == C_TOKEN_IDENTIFIER)
+        u32 known = c_parse_statement_ends_probe(memo, &pending_count, cursor, suffix_count);
+        while (!known && !failed && prefix && cursor < end && preprocess.tokens[cursor].kind == C_TOKEN_IDENTIFIER)
         {
             CToken cursor_token = preprocess.tokens[cursor];
             bool conditional = c_token_is_well_known(preprocess.spelling_base, cursor_token, C_SYMBOL_WELL_KNOWN_IF);
+            C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_STATEMENT_END_STEPS, 1);
             if (conditional || c_token_in_well_known_set(preprocess.spelling_base, cursor_token, C_PARSE_LOOP_HEADER_KEYWORDS))
             {
                 if (cursor + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
-                    return UINT32_MAX;
+                    failed = true;
                 }
-                u32 header_close = c_parse_statement_delimiter_close(preprocess, matching, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (header_close == end)
+                else
                 {
-                    return UINT32_MAX;
-                }
-                if (conditional)
-                {
-                    if (suffix_count == suffix_capacity)
+                    u32 header_close = c_parse_statement_delimiter_close(preprocess, matching, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (header_close == end || (conditional && suffix_count == suffix_capacity))
                     {
-                        return UINT32_MAX;
+                        failed = true;
                     }
-                    suffix[suffix_count++] = C_PARSE_STATEMENT_SUFFIX_ELSE;
+                    else
+                    {
+                        if (conditional)
+                        {
+                            suffix[suffix_count++] = C_PARSE_STATEMENT_SUFFIX_ELSE;
+                        }
+                        cursor = header_close + 1;
+                    }
                 }
-                cursor = header_close + 1;
             }
             else if (c_token_is_well_known(preprocess.spelling_base, cursor_token, C_SYMBOL_WELL_KNOWN_DO))
             {
                 if (suffix_count == suffix_capacity)
                 {
-                    return UINT32_MAX;
+                    failed = true;
                 }
-                suffix[suffix_count++] = C_PARSE_STATEMENT_SUFFIX_DO_WHILE;
-                cursor += 1;
+                else
+                {
+                    suffix[suffix_count++] = C_PARSE_STATEMENT_SUFFIX_DO_WHILE;
+                    cursor += 1;
+                }
             }
             else if (cursor + 1 < end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_COLON))
             {
@@ -21136,25 +21211,38 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 co
             {
                 prefix = false;
             }
+            if (!failed && prefix && cursor < end)
+            {
+                known = c_parse_statement_ends_probe(memo, &pending_count, cursor, suffix_count);
+            }
         }
-        if (cursor >= end)
+        failed = failed || known == UINT32_MAX;
+        if (!failed && known)
         {
-            return UINT32_MAX;
+            cursor = known;
         }
-        if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
+        else if (!failed && cursor >= end)
+        {
+            failed = true;
+        }
+        else if (!failed && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
         {
             u32 close = c_parse_statement_delimiter_close(preprocess, matching, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
             if (close == end)
             {
-                return UINT32_MAX;
+                failed = true;
             }
-            cursor = close + 1;
+            else
+            {
+                cursor = close + 1;
+            }
         }
-        else
+        else if (!failed)
         {
             u32 simple_start = cursor;
             u32 depth = 0;
-            while (cursor < end)
+            bool simple_done = false;
+            while (!failed && !simple_done && cursor < end)
             {
                 CToken token = preprocess.tokens[cursor];
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
@@ -21165,57 +21253,76 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 co
                 else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
                          c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
                 {
-                    if (!depth)
-                    {
-                        return UINT32_MAX;
-                    }
-                    depth -= 1;
+                    failed = !depth;
+                    depth -= depth != 0;
                 }
                 else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
                 {
-                    break;
+                    simple_done = true;
                 }
-                cursor += 1;
+                cursor += !failed && !simple_done;
             }
             C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS, cursor - simple_start);
             if (cursor == end)
             {
-                return UINT32_MAX;
+                failed = true;
             }
-            cursor += 1;
-        }
-        bool continued = false;
-        while (suffix_count && !continued)
-        {
-            if (suffix[suffix_count - 1] == C_PARSE_STATEMENT_SUFFIX_DO_WHILE)
-            {
-                if (!c_parse_statement_keyword_at(preprocess, cursor, end, C_SYMBOL_WELL_KNOWN_WHILE) || cursor + 1 >= end ||
-                    !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    return UINT32_MAX;
-                }
-                u32 close = c_parse_statement_delimiter_close(preprocess, matching, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (close == end || close + 1 == end || !c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_SEMICOLON))
-                {
-                    return UINT32_MAX;
-                }
-                cursor = close + 2;
-                suffix_count -= 1;
-                continue;
-            }
-            suffix_count -= 1;
-            if (c_parse_statement_keyword_at(preprocess, cursor, end, C_SYMBOL_WELL_KNOWN_ELSE))
+            else if (!failed)
             {
                 cursor += 1;
-                continued = true;
             }
         }
-        if (!continued)
+        if (!failed)
         {
-            return cursor;
+            bool continued = false;
+            c_parse_statement_ends_finish(memo, &pending_count, suffix_count, cursor);
+            while (!failed && suffix_count && !continued)
+            {
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_STATEMENT_END_STEPS, 1);
+                if (suffix[suffix_count - 1] == C_PARSE_STATEMENT_SUFFIX_DO_WHILE)
+                {
+                    if (!c_parse_statement_keyword_at(preprocess, cursor, end, C_SYMBOL_WELL_KNOWN_WHILE) || cursor + 1 >= end ||
+                        !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        failed = true;
+                    }
+                    else
+                    {
+                        u32 close = c_parse_statement_delimiter_close(preprocess, matching, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                        if (close == end || close + 1 == end || !c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_SEMICOLON))
+                        {
+                            failed = true;
+                        }
+                        else
+                        {
+                            cursor = close + 2;
+                            suffix_count -= 1;
+                            c_parse_statement_ends_finish(memo, &pending_count, suffix_count, cursor);
+                        }
+                    }
+                }
+                else
+                {
+                    suffix_count -= 1;
+                    if (c_parse_statement_keyword_at(preprocess, cursor, end, C_SYMBOL_WELL_KNOWN_ELSE))
+                    {
+                        cursor += 1;
+                        continued = true;
+                    }
+                    else
+                    {
+                        c_parse_statement_ends_finish(memo, &pending_count, suffix_count, cursor);
+                    }
+                }
+            }
+            finished = !failed && !continued;
         }
     }
-    return UINT32_MAX;
+    if (!finished)
+    {
+        c_parse_statement_ends_finish(memo, &pending_count, 0, UINT32_MAX);
+    }
+    return finished ? cursor : UINT32_MAX;
 }
 
 // Whether the controlling expression [start, end) defines a tag. A definition
@@ -21261,6 +21368,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     // statement's scope. Zero for every other scope.
     u32* scope_header_end = arena_allocate(temporary.arena, u32, body_token_count + 1);
     u8* statement_suffix = arena_allocate(temporary.arena, u8, body_token_count + 1);
+    CParseStatementEnds statement_ends = {0};
     u32 scope_count = 1;
     scope_stack[0] = scope;
     scope_end_stack[0] = UINT32_MAX;
@@ -21376,7 +21484,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         {
             u32 header_close = c_parse_matching_delimiter(preprocess, index + 1, body_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             u32 statement_end = header_close < body_end && c_parse_controlling_expression_defines_tag(token_shapes, preprocess, index + 2, header_close)
-                                    ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), index, body_end, statement_suffix, body_token_count + 1)
+                                    ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), index, body_end, statement_suffix, body_token_count + 1, 0)
                                     : UINT32_MAX;
             if (statement_end != UINT32_MAX)
             {
@@ -21502,8 +21610,13 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 // The loop scope covers the whole controlled statement, compound or not, so the
                 // init declaration stays visible across every form of body.
                 c_parse_position_index_ensure(result, preprocess);
+                // Created on the first loop: a body without one never pays for the memo.
+                if (!statement_ends.ends)
+                {
+                    statement_ends = c_parse_statement_ends_create(temporary.arena, body_start, body_token_count);
+                }
                 u32 loop_end = c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, body_end, statement_suffix,
-                                                     body_token_count + 1);
+                                                     body_token_count + 1, &statement_ends);
                 u32 first_separator = UINT32_MAX;
                 depth = 0;
                 for (u32 scan = index + 2; scan < header_close; scan += 1)
@@ -27483,7 +27596,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                   c_token_is_punctuator(&preprocess.tokens[switch_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
     u32 header_close = header ? c_parse_matching_delimiter_indexed(result, preprocess, switch_index + 1) : function_end;
     u32 switch_end = header_close < function_end && header_close + 1 < function_end
-        ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, function_end, suffix, function_end - header_close)
+        ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, function_end, suffix, function_end - header_close, 0)
         : UINT32_MAX;
     bool braced_body = header_close < function_end && header_close + 1 < function_end &&
                        c_token_is_punctuator(&preprocess.tokens[header_close + 1], C_PUNCTUATOR_LEFT_BRACE);
@@ -27556,7 +27669,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                         u32 nested_header = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
                         u32 nested_end = nested_header + 1 < switch_end
                                              ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), nested_header + 1, switch_end, suffix,
-                                                                     switch_end - nested_header)
+                                                                     switch_end - nested_header, 0)
                                              : UINT32_MAX;
                         if (nested_end != UINT32_MAX)
                         {
@@ -29234,6 +29347,10 @@ BUSTER_C_INTERNAL void c_parse_validate_control_statements(CTypeParseMachine* ma
     u64 mark = machine->scratch_arena->position;
     CParseControlRange* ranges = arena_allocate(machine->scratch_arena, CParseControlRange, end - start);
     u8* suffix = arena_allocate(machine->scratch_arena, u8, end - start + 1);
+    // Every loop and switch asks where its statement ends, and a braceless nest
+    // makes each answer contain the next: one memo walks the nest once. It is
+    // created at the first of them, so a body without one pays nothing.
+    CParseStatementEnds statement_ends = {0};
     u32 count = 0;
     u32 loops = 0;
     u32 switches = 0;
@@ -29272,7 +29389,11 @@ BUSTER_C_INTERNAL void c_parse_validate_control_statements(CTypeParseMachine* ma
             {
                 body = c_parse_matching_delimiter_indexed(result, preprocess, body) + 1;
             }
-            u32 limit = body < end ? c_parse_statement_end(preprocess, matching, body, end, suffix, end - start + 1) : UINT32_MAX;
+            if (!statement_ends.ends)
+            {
+                statement_ends = c_parse_statement_ends_create(machine->scratch_arena, start, end - start);
+            }
+            u32 limit = body < end ? c_parse_statement_end(preprocess, matching, body, end, suffix, end - start + 1, &statement_ends) : UINT32_MAX;
             if (limit <= end)
             {
                 ranges[count++] = (CParseControlRange){.end = limit, .loop = loop};

@@ -28880,15 +28880,26 @@ enum
     C_TEST_NESTED_CONTROL_IF,
     C_TEST_NESTED_CONTROL_FOR,
     C_TEST_NESTED_CONTROL_FAMILIES,
+    // Braceless nests: every statement is the body of the one above it, so
+    // there is no block to skip and each statement's end is the same token.
+    C_TEST_NESTED_CONTROL_BRACELESS_WHILE = C_TEST_NESTED_CONTROL_FAMILIES,
+    C_TEST_NESTED_CONTROL_BRACELESS_FOR,
+    C_TEST_NESTED_CONTROL_BRACELESS_IF_WHILE,
+    C_TEST_NESTED_CONTROL_ALL_FAMILIES,
 };
 
 BUSTER_GLOBAL_LOCAL String8 c_test_nested_control_source(Arena* arena, u32 family, u32 depth)
 {
+    bool braceless = family >= C_TEST_NESTED_CONTROL_FAMILIES;
     String8 prefix = S8("int f(int x) { ");
-    String8 header = family == C_TEST_NESTED_CONTROL_WHILE ? S8("while (x > 1) { ")
-                     : family == C_TEST_NESTED_CONTROL_IF  ? S8("if (x > 1) { ")
-                                                           : S8("for (int i = 0; i < x; i += 1) { ");
-    String8 core = S8("x -= 1; ");
+    String8 header = family == C_TEST_NESTED_CONTROL_WHILE                ? S8("while (x > 1) { ")
+                     : family == C_TEST_NESTED_CONTROL_IF                 ? S8("if (x > 1) { ")
+                     : family == C_TEST_NESTED_CONTROL_FOR                ? S8("for (int i = 0; i < x; i += 1) { ")
+                     : family == C_TEST_NESTED_CONTROL_BRACELESS_WHILE    ? S8("while (x > 1) ")
+                     : family == C_TEST_NESTED_CONTROL_BRACELESS_FOR      ? S8("for (int i = 0; i < x; i += 1) ")
+                                                                           : S8("if (x > 1) while (x > 1) ");
+    // The innermost if of the last family takes the else, as the grammar says.
+    String8 core = family == C_TEST_NESTED_CONTROL_BRACELESS_IF_WHILE ? S8("x -= 1; else x += 1; ") : S8("x -= 1; ");
     String8 suffix = S8("return x; }\n");
     u64 capacity = prefix.length + (header.length + core.length + 2) * depth + core.length + suffix.length;
     char8* bytes = arena_allocate(arena, char8, capacity);
@@ -28899,7 +28910,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_nested_control_source(Arena* arena, u32 famil
         c_test_append_source(bytes, capacity, &length, header);
     }
     c_test_append_source(bytes, capacity, &length, core);
-    for (u32 level = 0; level < depth; level += 1)
+    for (u32 level = 0; level < depth && !braceless; level += 1)
     {
         c_test_append_source(bytes, capacity, &length, S8("} "));
         c_test_append_source(bytes, capacity, &length, core);
@@ -29014,6 +29025,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_lookup_work_growth(UnitTestArgum
     // about 4x the probes. A linear scan grows 16x.
     BUSTER_TEST_RAW(arguments, small != UINT64_MAX && large != UINT64_MAX && small >= SMALL && large <= small * 6 && large <= LARGE * 16,
                     string_format(arguments->arena, S8("label find probes small={u64} large={u64}"), small, large));
+    return result;
+}
+
+// Braceless nests (#2676): `while (c) while (c) ... x;` has no block for a
+// delimiter table to skip, so each statement's end used to be found by walking
+// the prefix of every statement inside it. The walk's steps must grow with the
+// depth, not its square.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braceless_control_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 200, DEEP = 800 };
+    for (u32 family = C_TEST_NESTED_CONTROL_FAMILIES; family < C_TEST_NESTED_CONTROL_ALL_FAMILIES; family += 1)
+    {
+        u64 shallow = c_test_nested_control_work(family, SHALLOW, C_TEST_PARSE_NESTING_STATEMENT_END_STEPS);
+        u64 deep = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_STATEMENT_END_STEPS);
+        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && shallow >= SHALLOW && deep <= shallow * 5 && deep <= DEEP * 16,
+                        string_format(arguments->arena, S8("statement-end steps family={u32} shallow={u64} deep={u64}"), family, shallow, deep));
+        u64 tokens_shallow = c_test_nested_control_work(family, SHALLOW, C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS);
+        u64 tokens_deep = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS);
+        BUSTER_TEST_RAW(arguments, tokens_shallow != UINT64_MAX && tokens_deep != UINT64_MAX && tokens_deep <= tokens_shallow * 5 + DEEP,
+                        string_format(arguments->arena, S8("statement-end tokens family={u32} shallow={u64} deep={u64}"), family, tokens_shallow, tokens_deep));
+    }
     return result;
 }
 
@@ -44439,6 +44472,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_braceless_control_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_lowering_scope_levels);
     C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
