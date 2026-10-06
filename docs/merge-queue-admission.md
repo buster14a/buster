@@ -71,8 +71,8 @@ wait policy from independently checked-out main, checks that the predecessor
 did not change admission or rebinding policy, and requires the queue ref to
 retain the same group identity at admission. Its bounded 310-minute job accommodates the
 five-hour wait.
-The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
-not a `merge_group` workflow, so the queue does not schedule it.
+The self-hosted 9700X direct workload workflow runs only for the owner's
+pull requests, not as a `merge_group` workflow, so the queue does not schedule it.
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed

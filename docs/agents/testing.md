@@ -467,45 +467,6 @@ timeout/descendant cleanup, argv, diagnostics and dedicated-host locking.
 SHA-256 and recoverable file/path contracts also run in the registered hash and
 OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 
-## Bench service self-test
-
-`./build.sh bench_service self-test` (and its `--sanitize` variant) runs the
-POSIX queue, materializer, journal-replay and fake-worker regressions plus the
-Linux lease-handoff and result-evidence suites; see
-`tools/bench_service/README.md` for the full contract. `mcp_tests.c` is included
-by this same registered suite: it checks bounded JSON/Unicode/duplicate keys,
-lifecycle and tool schemas, no-ID write suppression, uint64 string identities,
-validated receipt privacy and a real authenticated Unix-socket daemon with a
-disposable journal and no worker configuration. Socket cases cover the six
-job tools and program upload, lost-reply idempotency/reconnect,
-conflicting-key refusal, foreign-job privacy, durable cancellation and
-disconnected-service errors. Artifact receipt/slice retrieval is covered at
-the codec and reply-binding level only. None of this proves an off-host
-cache, a web/Codex installation or retrieval from a real installed job.
-Interrupted workers
-retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
-index, a bundle-only crash prefix completes idempotently, and invalid
-published controls are never repaired. The coordinator removes the
-`.lease-handoff` socket before the worker is continued. On Linux the suite
-also runs a materializer-to-recipe bridge: a real `bq_materialize` fixture
-feeds the real `bench_service_recipe` build graph through
-`bench_service_recipe_self_test JOB TOKEN WORKSPACE BASE CANDIDATE RESULT`,
-with only the external build and throughput programs stubbed, followed by the
-fixed no-argument recipe suite. These tests are fake-backend and
-stubbed-external evidence; privileged live-systemd and deployment
-qualification remain explicit operator gates and are not covered here.
-`./build.sh bench_service_broker self-test` also compiles the opt-in
-`systemd-broker-live-test` probe. Run that probe only in a provisioned,
-disposable real-systemd container while an exact outer unit holds the lease;
-it exercises the constrained socket instance and positive/negative private
-state requests. The broker self-test also runs the probe's unprivileged
-identity-policy controls. Opt-in `--isolation-only JOB ATTEMPT` checks actual
-account groups and non-destructive private-file/traversal denial without
-manager calls; it is not live broker evidence. `service-tests
---cleanup-identity-only` needs disposable root-capable infrastructure and the
-three fixed accounts, and tests the real cleanup helper under the service UID.
-See `tools/bench_service/deploy/SYSTEMD_BROKER.md` for both gates.
-
 ## Configured external compiler fixtures
 
 The registered driver PIC fixture uses `BUSTER_HOST_C_COMPILER_ID`, supplied

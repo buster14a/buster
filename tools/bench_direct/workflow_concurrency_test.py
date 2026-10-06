@@ -6,7 +6,7 @@ import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKFLOWS = ("bench-service-policy", "broker-entry-gate-systemd", "credential-gate-systemd")
+WORKFLOWS = ("bench-service-policy",)
 
 
 def scalar(token, context):
@@ -124,7 +124,7 @@ class StatelessConcurrencyTests(unittest.TestCase):
 
     def test_regression_runs_in_benchmark_policy(self):
         text = (ROOT / ".github/workflows/bench-service-policy.yml").read_text(encoding="utf-8")
-        self.assertIn("run: python3 -B tools/bench_service/workflow_concurrency_test.py -v", text)
+        self.assertIn("run: python3 -B tools/bench_direct/workflow_concurrency_test.py -v", text)
 
 
 if __name__ == "__main__":
