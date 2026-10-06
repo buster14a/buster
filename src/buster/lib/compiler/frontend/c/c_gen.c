@@ -16682,6 +16682,43 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* bu
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
 
+// Whether [start, end) is a bare member chain: an identifier followed only by
+// `.name`, `->name`, `[...]` and call `(...)` suffixes. Such a group is lowered as a place
+// child; any other group (`p + 1`, `p++`, `q = p + 1`) is an expression whose
+// value must be computed exactly once and cannot be re-walked as a place.
+BUSTER_C_INTERNAL bool c_ir_place_group_is_member_chain(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER;
+    u32 index = start + 1;
+    while (result && index < end)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            result = close < end;
+            index = close + 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            // A call is prepared before place lowering; its value is a chain base.
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            result = close < end;
+            index = close + 1;
+        }
+        else if ((c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW)) && index + 1 < end &&
+                 builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            index += 2;
+        }
+        else
+        {
+            result = false;
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -16756,6 +16793,14 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             dereference_count += 1;
             leading_dereference = true;
             start += 1;
+        }
+        if (leading_dereference && start + 1 < end &&
+            (c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
+             c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_MINUS_MINUS)))
+        {
+            // `*p++` is `*(p++)`: the postfix update is part of the pointer
+            // operand, so evaluate that operand once as an expression.
+            goto c_ir_place_expression_base;
         }
         u32 index = start;
         u32 base_index = index;
@@ -16862,8 +16907,7 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             // child, then resume this frame at the outer suffix; treating the
             // group as a single identifier would otherwise reject valid
             // postfix updates in Lua's buffered-reader macro.
-            if (!depth && nested_end > nested_start + 1 &&
-                builder->preprocess.tokens[nested_start].kind == C_TOKEN_IDENTIFIER)
+            if (!depth && nested_end > nested_start + 1 && c_ir_place_group_is_member_chain(builder, nested_start, nested_end))
             {
                 IrSourceRange group_source = c_ir_token_source_range(builder, builder->preprocess.tokens[nested_start]);
                 frame->as.place.local = 0;
@@ -17151,8 +17195,17 @@ c_ir_place_base_resolved:
             // The expression child only materializes a value to return it.
             // Retract its terminal read when the existing recovery contract
             // proves it is unused, retaining all earlier operand effects.
-            IrValueId direct_place = c_ir_recover_place_from_value(builder, place);
-            if (direct_place.value == IR_ID_UNDERLYING_INVALID)
+            // A pointer value that is about to be dereferenced is the operand
+            // itself: re-reading the place it was loaded from would observe
+            // side effects of the operand (`*(p++)` would use the incremented
+            // `p`). Without a pending dereference the expression covers the
+            // whole place and the recovered place is the final object.
+            IrType* value_type = place.value < builder->function->value_count
+                                     ? ir_type_from_id(&builder->program->types, builder->function->values[place.value].canonical_type) : 0;
+            bool pointer_value = frame->as.place.dereference_count && value_type && value_type->kind == IR_TYPE_POINTER &&
+                                 builder->function->values[place.value].category != IR_VALUE_PLACE;
+            IrValueId direct_place = pointer_value ? IR_VALUE_ID_INVALID : c_ir_recover_place_from_value(builder, place);
+            if (!pointer_value && direct_place.value == IR_ID_UNDERLYING_INVALID)
             {
                 direct_place = c_ir_ssa_read_place(builder, place, false);
             }
@@ -17164,7 +17217,7 @@ c_ir_place_base_resolved:
             // the addressable source from that load for complex postfix
             // operands such as `(ptr - 2)[index]++`; plain arithmetic values
             // remain invalid places and are rejected below.
-            if (place.value < builder->function->value_count && builder->function->values[place.value].category != IR_VALUE_PLACE)
+            if (!pointer_value && place.value < builder->function->value_count && builder->function->values[place.value].category != IR_VALUE_PLACE)
             {
                 IrInstructionId definition = builder->function->values[place.value].definition;
                 if (definition.value < builder->function->instruction_count)
@@ -26640,6 +26693,13 @@ BUSTER_C_INTERNAL bool c_ir_atomic_operation(CConditionalOperator operation, IrA
 // Both views alias one object each, which is what makes the reinterpretation
 // legal rather than a copy.
 //
+// The same loop serves every compound assignment with no single fetch-op
+// (#1387): `*=`, `/=`, `%=`, `<<=`, `>>=` on integers, every operator on an
+// `_Atomic _Bool`, and any operator whose right operand is floating point.
+// `right` arrives unconverted, so the operation runs in the usual-arithmetic
+// common type (an `_Atomic int` minus 0.5 is computed in double) and the result
+// is converted to the object's type exactly once, before the exchange.
+//
 // `previous_out` receives the value the object held before the last successful
 // exchange and `result_out` the one it holds after, which are what `E op= x`
 // and the two spellings of `++E` answer.
@@ -26664,13 +26724,13 @@ BUSTER_C_INTERNAL bool c_ir_emit_atomic_float_update(CIntegerIrBuilder* builder,
     IrTypeId bits_pointer_type = bits_type.value != IR_ID_UNDERLYING_INVALID
                                      ? c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type)
                                      : IR_TYPE_ID_INVALID;
-    bool result = width && (width == 4 || width == 8) && atomic_bits_pointer_type.value != IR_ID_UNDERLYING_INVALID &&
+    bool result = width && (width == 1 || width == 2 || width == 4 || width == 8) && atomic_bits_pointer_type.value != IR_ID_UNDERLYING_INVALID &&
                   bits_pointer_type.value != IR_ID_UNDERLYING_INVALID;
     if (!result)
     {
         // An x87 long double is eighty bits in an object no integer is the
         // width of, so it has no bit pattern this loop can carry.
-        builder->failure_message = S8("C IR lowering does not yet support a read-modify-write of this atomic floating-point width");
+        builder->failure_message = S8("C IR lowering does not yet support a read-modify-write of this atomic object width");
     }
     IrValueId object_address = result ? c_ir_emit_address_of_place(builder, place, object_type, source) : IR_VALUE_ID_INVALID;
     IrValueId object_bits_address = result ? c_ir_emit_cast(builder, object_address, atomic_bits_pointer_type, source) : IR_VALUE_ID_INVALID;
@@ -26773,6 +26833,15 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
     bool pointer_arithmetic = unqualified && unqualified->kind == IR_TYPE_POINTER && (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT);
     IrValueId previous = IR_VALUE_ID_INVALID;
     IrValueId operation_right = right;
+    // A single atomic fetch-op applies only to an integer object, an operator
+    // that has one, and an integer right operand (a floating one must be
+    // combined before conversion, which only the compare-exchange loop does).
+    IrAtomicOperation fetch_atomic_operation = IR_ATOMIC_OPERATION_COUNT;
+    IrType* right_type = right.value < builder->function->value_count
+                             ? ir_type_from_id(&builder->program->types, builder->function->values[right.value].canonical_type) : 0;
+    bool fetch_operation = atomic && unqualified && unqualified->kind == IR_TYPE_INTEGER && right_type &&
+                           (right_type->kind == IR_TYPE_INTEGER || right_type->kind == IR_TYPE_BOOLEAN || right_type->kind == IR_TYPE_ENUM) &&
+                           c_ir_atomic_operation(operation, &fetch_atomic_operation);
     if (pointer_arithmetic && atomic)
     {
         IrType* element = ir_type_from_id(&builder->program->types, unqualified->element_type);
@@ -26788,7 +26857,8 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
     // and the usual arithmetic conversions. Only the existing atomic RMW path
     // needs a destination-typed operand here; non-atomic stores/results convert
     // after c_ir_apply_operation, not before it (C17 6.5.16.2).
-    else if (atomic && !pointer_arithmetic && c_ir_bit_field_promotion(builder, c_ir_bit_field_from_place(builder, place)) == C_IR_BIT_FIELD_PROMOTION_NONE)
+    else if (atomic && !pointer_arithmetic && fetch_operation &&
+             c_ir_bit_field_promotion(builder, c_ir_bit_field_from_place(builder, place)) == C_IR_BIT_FIELD_PROMOTION_NONE)
     {
         right = c_ir_emit_cast(builder, right, value_type, source);
         operation_right = right;
@@ -26797,11 +26867,12 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
     {
         return false;
     }
-    if (atomic && unqualified && unqualified->kind == IR_TYPE_FLOAT)
+    if (atomic && !pointer_arithmetic && !fetch_operation && unqualified &&
+        (unqualified->kind == IR_TYPE_FLOAT || unqualified->kind == IR_TYPE_INTEGER || unqualified->kind == IR_TYPE_BOOLEAN))
     {
-        // No hardware has a floating-point atomic read-modify-write, so this
-        // one is a compare-exchange loop over the object's bit pattern rather
-        // than a single instruction.
+        // No hardware has a floating-point atomic read-modify-write, and none
+        // has a multiply, divide, shift or `_Bool` one either, so these are a
+        // compare-exchange loop over the object's bit pattern.
         return c_ir_emit_atomic_float_update(builder, place, type, value_type, operation, operation_right, source, previous_out, result_out);
     }
     if (atomic)
@@ -38870,7 +38941,9 @@ BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
           index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
           c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_CASE) ||
           c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
-          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_ENUM) ||
+          // `enum : long { ... };` opens an enum with a fixed underlying type; a tag keyword is never a label.
+          c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[index],
+                                    C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM)) ||
           !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON)))
     {
         // Peel any attribute sequence prefixing the label, so the three
@@ -44374,6 +44447,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         bool braced = c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
                                       c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
                                       c_ir_matching_delimiter_cached(builder, value_start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
+                        bool empty_scalar = false;
                         IrType* initializer_type = ir_type_from_id(&builder->program->types, local_type);
                         bool aggregate = initializer_type && (initializer_type->kind == IR_TYPE_ARRAY || initializer_type->kind == IR_TYPE_VECTOR ||
                                                               initializer_type->kind == IR_TYPE_STRUCT || initializer_type->kind == IR_TYPE_UNION);
@@ -44392,24 +44466,35 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         else if (braced)
                         {
                             u32 scalar_end = end - 1;
+                            // Only `{}` itself is the empty initializer; `{,}` is a separator
+                            // with no initializer before it and stays rejected.
+                            empty_scalar = scalar_end == value_start + 1;
                             if (scalar_end > value_start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[scalar_end - 1], C_PUNCTUATOR_COMMA))
                             {
                                 scalar_end -= 1;
                             }
-                            if (scalar_end <= value_start + 1)
+                            if (!empty_scalar && scalar_end <= value_start + 1)
                             {
                                 return false;
                             }
                             child.as.expression.start = value_start + 1;
                             child.as.expression.end = scalar_end;
                         }
-                        state->child_local = local;
-                        state->child_name = name;
-                        state->child_source = c_ir_token_source_range(builder, assign);
-                        c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
-                                              C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER, child);
-                        state->task_count = task_count;
-                        return false;
+                        if (empty_scalar)
+                        {
+                            // C23 6.7.10 empty initializer: `T x = {};` zero-initializes a scalar.
+                            value = c_ir_emit_zero_value(builder, local_type, assign);
+                        }
+                        else
+                        {
+                            state->child_local = local;
+                            state->child_name = name;
+                            state->child_source = c_ir_token_source_range(builder, assign);
+                            c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                                                  C_IR_LOWER_BODY_CONTINUE_DECLARATION_INITIALIZER, child);
+                            state->task_count = task_count;
+                            return false;
+                        }
                     }
                     if (value.value == IR_ID_UNDERLYING_INVALID ||
                         !c_ir_emit_initializer_store(builder, local, value, c_ir_token_source_range(builder, assign)))
@@ -51268,11 +51353,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                     }
                     else
                     {
+                        // A pointer with no symbol is a bare address: the null
+                        // pointer, or the offsetof idiom `&((T *)0)->m`, whose
+                        // member offset rides in the addend. Its integer value
+                        // is that addend.
                         success = source.kind == C_IR_CONSTANT_INTEGER ||
-                                  (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID && source.addend == 0);
+                                  (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID);
                         if (success)
                         {
-                            u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer : 0;
+                            u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer : (u64)source.addend;
                             IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? source_type : 0;
                             // Replay a negative narrow source's sign before the
                             // target mask. Narrowing still discards the high bits.
@@ -53265,6 +53354,15 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
             {
                 global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
             }
+            else if (converted.symbol.value == IR_ID_UNDERLYING_INVALID)
+            {
+                // A bare address with no symbol -- the offsetof idiom
+                // `(char *)&((T *)0)->m` -- is its addend as raw pointer bits.
+                u8* bytes = arena_allocate_zeroed(builder->arena, u8, type->layout.size);
+                c_ir_store_pointer_bits(builder, type, bytes, 0, (u64)converted.addend);
+                global->bytes = (ByteSlice){.pointer = bytes, .length = type->layout.size};
+                global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+            }
             else
             {
                 global->initializer_kind = IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
@@ -53735,12 +53833,9 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
                 builder->failure_message = S8("invalid initializer separator");
                 return false;
             }
-            if (c_preprocess_dialect_is_c23(preprocess.dialect))
-            {
-                global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
-                return true;
-            }
-            return false;
+            // C23 6.7.10 empty initializer; a GNU extension in earlier dialects.
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+            return true;
         }
         if (c_initializer_has_top_level_comma(preprocess.tokens, start, end))
         {
