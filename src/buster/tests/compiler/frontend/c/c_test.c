@@ -9201,6 +9201,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_abstract_pointer_array_sizeof(UnitTest
         "}\n"));
 }
 
+// A parameter-list ellipsis inside a cast or initializer is not a GNU range
+// designator: `(int(*)(int, ...))0` was refused as one in a function body
+// (#2840), while `[0 ... 2] = 1` in a static initializer must keep working.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast(UnitTestArguments* arguments)
+{
+    return c_test_run_exit_zero_program(arguments, S8("variadic-function-pointer-cast"), S8(
+        "static int total(int count, ...) { return count; }\n"
+        "static int ranges[6] = { [0 ... 2] = 1, [3 ... 5] = 2 };\n"
+        "static int (*table[2])(int, ...) = { (int (*)(int, ...))0, total };\n"
+        "int main(void)\n"
+        "{\n"
+        "    long null_value = (long)(int(*)(int, ...))0;\n"
+        "    int (*local[2])(int, ...) = { (int (*)(int, ...))0, (int (*)(int, ...))total };\n"
+        "    int (*through)(int, ...) = (int (*)(int, ...))total;\n"
+        "    int failures = 0;\n"
+        "    failures |= (null_value != 0) << 0;\n"
+        "    failures |= (local[0] != 0 || local[1] != total) << 1;\n"
+        "    failures |= (through(7) != 7) << 2;\n"
+        "    failures |= ((*(int (*)(int, ...))total)(9) != 9) << 3;\n"
+        "    failures |= (table[0] != 0 || table[1] != total) << 4;\n"
+        "    failures |= (ranges[0] != 1 || ranges[2] != 1 || ranges[3] != 2 || ranges[5] != 2) << 5;\n"
+        "    return failures;\n"
+        "}\n"));
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -44677,6 +44702,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_validation_candidates);
     C_TEST_FIXTURE(arguments, c_test_variable_member_types);
     C_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
+    C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast);
     C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
     C_TEST_FIXTURE(arguments, c_test_vla_row_places);
     C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);

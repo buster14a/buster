@@ -825,6 +825,42 @@ BUSTER_C_INTERNAL u32 c_parse_matching_delimiter_indexed(CParseResult* result, C
     return open < preprocess.token_count ? result->position_index->matching_delimiters_plus_one[open] - 1 : UINT32_MAX;
 }
 
+// Whether the `...` at index is a GNU range designator rather than a
+// parameter-list ellipsis: only an ellipsis whose innermost enclosing delimiter
+// (searching back no further than begin) is `[` spells a range. The backward
+// scan balances every delimiter kind, so `(int(*)(int, ...))0` is not a range.
+BUSTER_C_INTERNAL bool c_parse_ellipsis_is_range_designator(CPreprocessResult preprocess, u32 begin, u32 index)
+{
+    u32 depth = 0;
+    bool found = false;
+    bool range = false;
+    for (u32 cursor = index; !found && cursor > begin;)
+    {
+        cursor -= 1;
+        CPunctuator punctuator = preprocess.tokens[cursor].punctuator;
+        bool closer = punctuator == C_PUNCTUATOR_RIGHT_BRACKET || punctuator == C_PUNCTUATOR_RIGHT_BRACKET_DIGRAPH ||
+                      punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACE ||
+                      punctuator == C_PUNCTUATOR_RIGHT_BRACE_DIGRAPH;
+        bool bracket = punctuator == C_PUNCTUATOR_LEFT_BRACKET || punctuator == C_PUNCTUATOR_LEFT_BRACKET_DIGRAPH;
+        bool opener = bracket || punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACE ||
+                      punctuator == C_PUNCTUATOR_LEFT_BRACE_DIGRAPH;
+        if (closer)
+        {
+            depth += 1;
+        }
+        else if (opener && depth)
+        {
+            depth -= 1;
+        }
+        else if (opener)
+        {
+            found = true;
+            range = bracket;
+        }
+    }
+    return range;
+}
+
 // First recorded position in [start, end), or UINT32_MAX. Positions are
 // stored ascending, so the lowest match is the same one the removed linear
 // scans found first.
@@ -26772,7 +26808,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
         {
             for (u32 cursor = open + 1; !diagnostic.message.length && cursor < close; cursor += 1)
             {
-                if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_ELLIPSIS))
+                if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_ELLIPSIS) && c_parse_ellipsis_is_range_designator(preprocess, open + 1, cursor))
                     diagnostic.message = S8("range designators are only supported for static aggregate initializers");
             }
         }
@@ -27063,7 +27099,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             {
                 for (u32 token = shape_start; token < shape_end; token += 1)
                 {
-                    if (c_token_is_punctuator(&preprocess.tokens[token], C_PUNCTUATOR_ELLIPSIS))
+                    if (c_token_is_punctuator(&preprocess.tokens[token], C_PUNCTUATOR_ELLIPSIS) && c_parse_ellipsis_is_range_designator(preprocess, shape_start, token))
                     {
                         c_parse_lowering_constraint_consider(diagnostic, S8("range designators are only supported for static aggregate initializers"), start, location);
                     }
