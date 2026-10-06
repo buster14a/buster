@@ -519,7 +519,7 @@ class Fakes:
         if refuse:
             with open(perf) as handle:
                 script = handle.read()
-            write_script(perf, script.replace("#!/usr/bin/env python3\n", "#!/usr/bin/env python3\nREFUSE = %r\n" % (list(refuse),), 1), {})
+            write_script(perf, script, {"REFUSE": list(refuse)})
         write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": mode,
                                         "COMPILE_LOG": os.path.join(root, "compile.jsonl")}, **(compiler or {})))
         output = os.path.join(root, "out")
