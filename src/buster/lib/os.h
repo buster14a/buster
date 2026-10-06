@@ -620,8 +620,14 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 // assumption. BUSTER_ASSERT is diagnostic only and disappears in optimized
 // builds. BUSTER_VALIDATE retains both its branch and defined failure in every
 // build, so resource and input failures must use it (or return an error).
+//
+// Only optimized unsanitized builds take the assumption/unevaluated forms.
+// Sanitized builds keep both diagnostics at every optimization level, so a
+// sanitized Release run reports a false invariant as "assertion failed"
+// instead of compiling it into undefined behavior. Operands still must not
+// carry required work: ordinary Release never evaluates a BUSTER_ASSERT.
 #define BUSTER_VALIDATE(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("validation failed")), 0) : 0))
-#if BUSTER_OPTIMIZE
+#if BUSTER_OPTIMIZE && !BUSTER_SANITIZE
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
 #define BUSTER_ASSERT(ok) ((void)sizeof(!!(ok)))
 #else

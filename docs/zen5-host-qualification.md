@@ -4,7 +4,7 @@
 
 This document defines the repository-owned evidence formats used to qualify the dedicated Ryzen 7 9700X for performance acceptance. It does **not** make a machine qualified merely because a script exits successfully, and it does not create another execution path to the host.
 
-The physical run must occur inside the server-owned benchmark-service reservation and quiet phase. The service owns materialization, preparation, execution, cleanup, sealing, and export. `tools/zen5_host_qualification.py` and `tools/zen5_aa_noise.py` only capture/replay fixed facts inside that admitted job or validate the exported bytes offline.
+The benchmark service this contract relies on was removed (#2708); no physical run can satisfy it until a replacement reservation mechanism exists. The physical run must occur inside the server-owned benchmark-service reservation and quiet phase. The service owns materialization, preparation, execution, cleanup, sealing, and export. `tools/zen5_host_qualification.py` and `tools/zen5_aa_noise.py` only capture/replay fixed facts inside that admitted job or validate the exported bytes offline.
 
 The ownership boundaries remain:
 

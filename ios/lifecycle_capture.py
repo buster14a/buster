@@ -755,7 +755,15 @@ def main(argv=None):
                 if owner.reconcile_cancellation() or owner.facts_dirty or bridge.caller_lost:
                     owner.publish()
                 result = owner.result()
-                bridge.write(bridge.completion, "COMPLETE %s %d\n" % (bridge.generation, result))
+                try:
+                    bridge.write(bridge.completion, "COMPLETE %s %d\n" % (bridge.generation, result))
+                except (OSError, BridgeProtocolError) as error:
+                    # The collector can reach its capture cap before this final
+                    # notification. Retain failure only in this private generation;
+                    # never retry the pipe or replace deadline/cancellation facts.
+                    owner.helper_failure(error)
+                    owner.publish()
+                    result = owner.result()
         finally:
             if bridge is not None:
                 bridge.close(owner)

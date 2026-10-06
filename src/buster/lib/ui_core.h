@@ -63,6 +63,22 @@ struct UI_EventNode
     UI_EventNode* next;
     UI_EventNode* prev;
     UI_Event v;
+    // Router bookkeeping (ui_route_event_owners): the next event, in list
+    // order, with the same nonzero owner key; the build that routed this node;
+    // and whether the event has been consumed (ui_eat_event_node).
+    UI_EventNode* owner_next;
+    u64 routed_build_index;
+    bool eaten;
+};
+
+// One owner key of the current build's routed events and the chronological
+// chain of its events. Slots are an open-addressed power-of-two table.
+typedef struct UI_EventOwnerSlot UI_EventOwnerSlot;
+struct UI_EventOwnerSlot
+{
+    u64 key;
+    UI_EventNode* first;
+    UI_EventNode* last;
 };
 
 typedef struct UI_EventList UI_EventList;
@@ -347,6 +363,13 @@ struct UI_Box
     // persistent hash links
     UI_Box* hash_next;
     UI_Box* hash_prev;
+    // Key-lookup index chain. Unlike hash_next/hash_prev, which define the
+    // active-list order, this link only serves ui_box_from_key.
+    UI_Box* index_next;
+
+    // Scratch for focus navigation: equal to UI_State.focus_scope_stamp when
+    // this box was last marked as a strict descendant of the navigation scope.
+    u64 focus_scope_stamp;
 
     // per-build tree links
     UI_Box* first;
@@ -620,8 +643,16 @@ struct UI_State
     // tree has been constructed.
     UI_Box* previous_root;
     UI_Box* first_free_box;
+    // Fixed-size ordering table: it defines the active list's slot/chain order
+    // and gives O(1) append/remove, but is never searched by key.
     u64 box_table_size;
     UI_BoxHashSlot* box_table;
+    // Key-lookup index: a power-of-two array of chain heads that doubles
+    // whenever the keyed population exceeds its size, so chains stay short at
+    // any scale. box_index_shift is 64 - log2(box_index_size).
+    u64 box_index_size;
+    u64 box_index_shift;
+    UI_Box** box_index;
     // Dense view of the keyed boxes in the last completed build.  It keeps
     // the hash table's slot/chain order, but lets frame-wide passes skip the
     // empty slots and lets pre-build event routing use the preceding frame.
@@ -629,6 +660,26 @@ struct UI_State
     u64 active_box_count;
     u64 active_box_capacity;
     u64 box_count;
+    // Work counters for scalability regressions. They only ever increase and
+    // cost one add per inspected chain node, rehashed box, focus-scope step, or
+    // UTF-8 sequence decoded to turn a byte offset into a column, or event
+    // inspected by a box signal.
+    u64 box_key_lookups;
+    u64 box_key_probes;
+    u64 box_index_grows;
+    u64 box_index_moves;
+    u64 focus_navigation_calls;
+    u64 focus_scope_steps;
+    u64 focus_scope_stamp;
+    u64 utf8_column_decodes;
+    u64 signal_event_inspections;
+    // Per-owner chains of the routed events, so a box's signal visits only the
+    // events it owns. They are valid for the build named by
+    // event_owner_chains_build_index; otherwise signals scan the whole list.
+    UI_EventOwnerSlot* event_owner_slots;
+    u64 event_owner_slot_count;
+    u64 event_owner_slot_bits;
+    u64 event_owner_chains_build_index;
     UI_DrawCommand* draw_commands;
     u64 draw_command_count;
     u64 draw_command_capacity;

@@ -4154,6 +4154,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyReloca
     case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; break;
     case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; break;
     case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; break;
+    case ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21: *object_kind = OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21; break;
     default: valid = false; break;
     }
     return valid;
@@ -4232,6 +4233,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             .global = symbol.global,
             .weak = symbol.weak,
             .hidden = symbol.hidden,
+            .untyped = symbol.untyped,
         };
     }
     for (u32 index = 0; index < unit.relocation_count; index += 1)
@@ -4954,6 +4956,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
     if (pipeline.log.length)
     {
         compiler_driver_warning_append_text(warnings, pipeline.log);
+    }
+    if (pipeline.log_truncated)
+    {
+        compiler_driver_warning_append_text(warnings, string_format(arena, S8("GPU tool output truncated: {u64} bytes not retained\n"), pipeline.log_dropped_bytes));
     }
     if (invocation.save_gpu_temporaries && pipeline.temporary_directory.length)
     {

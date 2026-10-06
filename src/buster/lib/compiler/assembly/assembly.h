@@ -70,6 +70,10 @@ typedef enum AssemblyRelocationKind
     ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19,
     ASSEMBLY_RELOCATION_AARCH64_PREL32,
     ASSEMBLY_RELOCATION_AARCH64_PREL64,
+    // ADR to a label. A unit folds a binding-invariant same-section target in
+    // place and keeps every other one for the ELF writer, which spells it
+    // R_AARCH64_ADR_PREL_LO21 (#2706).
+    ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
 

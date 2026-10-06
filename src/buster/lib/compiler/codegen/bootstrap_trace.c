@@ -57,7 +57,14 @@ BootstrapTrace bootstrap_trace_open(Arena* arena, String8 path, String8 kind)
 {
     String8Z terminated = {0};
     bool path_valid = string8z_copy_arena(arena, path, &terminated);
-    BootstrapTrace result = {.stream = path_valid ? fopen((char const*)terminated.pointer, "wb") : 0};
+#if defined(__linux__)
+    // glibc, musl and bionic accept "e", which atomically sets close-on-exec so
+    // a concurrent spawn cannot inherit the trace.
+    char const* mode = "wbe";
+#else
+    char const* mode = "wb";
+#endif
+    BootstrapTrace result = {.stream = path_valid ? fopen((char const*)terminated.pointer, mode) : 0};
     result.failed = !result.stream;
     if (!result.failed)
     {

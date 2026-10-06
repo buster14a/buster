@@ -16,6 +16,26 @@ shared checkout still reads source that another session can edit. Follow the
 workload includes `build/generated`. No live-use lock protects `generate`:
 coordination and isolation are required before removing or regenerating a tree.
 
+`generate` only deletes a directory it can prove is disposable
+(`generate_build_directory_verdict` in `build.c`), so a mistyped
+`--build-directory` cannot erase a checkout. The target must be missing, an
+empty directory, a tree carrying the `.buster-build-tree` marker that every
+generation writes, a CMake tree whose `CMakeCache.txt` has
+`CMAKE_HOME_DIRECTORY` equal to this repository (compared by real path), or
+anything inside the repository's ignored `build/` directory. Whatever the
+contents, it refuses the repository root, any ancestor of it (including `/`),
+the home directory, `.git`, `.github`, `cmake`, `docs`, `src`, `tests` and
+`tools` and anything inside them, and a path that is not a directory. Links and
+`.`/`..` are resolved first. A refusal prints the reason, deletes nothing and
+exits nonzero, as does a removal that cannot finish, so `generate` never
+configures on top of a half-deleted tree. Every internal caller (the
+combination matrix, `test_mode_matrix`, self-host, the x86-64 completion census)
+goes through the same check. To reuse a directory that is none of these, empty
+or remove it yourself. `remove_path_recursive` removes through the library's
+iterative, link-safe `os_directory_delete` and reports failure.
+`generate_guard_self_test` covers the guard with sentinel trees and runs in the
+combination-matrix preflight.
+
 ## Self-hosting — reproduce first
 
 All contributors—humans and coding agents—should reproduce the current
@@ -86,13 +106,6 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
-The separately installed Benchpress recipe driver is compiled from the
-reviewed `build.c` with Clang and checked for a nonexecutable `GNU_STACK`
-header. Its transient unit keeps `MemoryDenyWriteExecute=yes`; the TCC
-bootstrap executable lacks that header and cannot spawn stages there. This
-installed artifact is reviewed by digest and is never a local-bootstrap
-substitute. See the [broker installation contract](../../tools/bench_service/deploy/SYSTEMD_BROKER.md).
-
 Because every hosted driver is Clang-built, the `Workflow lint` job in
 `.github/workflows/ci.yml` also runs the Ubuntu image's GCC over `build.c` with
 `-Wall -Werror -fsyntax-only` and the driver's usual flags. It covers only the
@@ -109,13 +122,8 @@ commit below, records `tcc -v`, removes
 the local bootstrap cache, and runs `./build.sh time_trace_summary_self_test`
 twice to prove both cold publication and warm reuse. This check does not select
 the dedicated benchmark runner or require privileged installation.
-The same hosted check runs native service tests, their ASan/UBSan variant, and
-the fixed smoke recipe self-test through this TCC-built driver. It also builds
-the broker and both static gates and runs their component regressions with
-`bench_service_broker self-test`. These use
-temporary fixtures and do not provision or qualify the benchmark host. It also
-runs the [source-size report and change ratchet](../source-size.md) on the
-validated merge revision against its first parent.
+It also runs the [source-size report and change ratchet](../source-size.md) on
+the validated merge revision against its first parent.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
@@ -173,26 +181,6 @@ ID|version|path, and a changed signature re-probes every candidate (each
 does not need `./build.sh generate`; `tools/native_target_compatibility_test.py`
 covers this behavior.
 
-The Linux fixed `bench_service_recipe` publishes private frozen-tree receipts
-after each successful base-build and candidate-build cleanup. The files
-`validate-buster-v1.base-build.inventory` and
-`validate-buster-v1.candidate-build.inventory` contain complete bounded node
-identities, modes and owners, executable SHA-256 digests, exact recipe
-job/token/revisions, boot ID and scan-completion monotonic time. The source
-publishes each receipt without replacement and syncs its file and result
-directory before reporting that stage successful; a scan, identity, capacity
-or publication failure prevents the next stage from launching. These private
-result files are conserved by the existing BQ bundle index. A separate 64 MiB
-serialized-file limit applies in addition to node, depth, path and hashing
-limits; overflow fails the recipe. These are source-owned statements, while
-the external stage observer records its own inventory and timing independently.
-The build and result descriptors are pinned at preparation, before the stages
-create anything, so every tree walk (locking, receipts, temporary sweeps and
-syncs) reads a fresh open file of the same inode rather than a dup: btrfs
-(Linux 6.5+) never lists entries created after a directory's open file, and a
-consumed offset hides them everywhere (`BENCH_SERVICE_RECIPE_PINNED_WALK_TEST`).
-A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
-
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)
 ./build.sh                          # build the configured tree (Debug by default)
@@ -225,7 +213,7 @@ header that defines functions must be included before the test region, as
 Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
-`test_timing_summary_self_test`, `musl_directory_self_test`,
+`test_timing_summary_self_test`, `musl_directory_self_test`, `generate_guard_self_test`,
 `compiler_discovery_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
