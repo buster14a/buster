@@ -1208,15 +1208,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_abbrev(DwarfBuffer* buffer, u32 number, u32
 
 BUSTER_GLOBAL_LOCAL bool dwarf_model_base_is_float(DebugType* type)
 {
-    if (!type || type->kind != DEBUG_TYPE_BASE || !type->name.length)
-    {
-        return false;
-    }
-    // Buster's builtin names use f32/f64-style spellings.  C frontend scalar
-    // types retain their source spellings, including the padded SysV
-    // long-double name, so recognize those exact names too.
-    return type->name.pointer[0] == 'f' || type->name.pointer[0] == 'F' || string_equal(type->name, S8("float")) ||
-           string_equal(type->name, S8("double")) || string_equal(type->name, S8("long double"));
+    return type && type->kind == DEBUG_TYPE_BASE && type->is_float;
 }
 
 BUSTER_GLOBAL_LOCAL bool dwarf_model_base_has_bit_size(DebugType* type)

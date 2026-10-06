@@ -58,7 +58,11 @@ COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS fo
 LEGACY_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 HISTORICAL_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
-SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
+# #2657 moved sanitized Debug to build-only portability coverage, so the
+# current split owners are sanitized Release and portability. The #2120 and
+# #2659 layouts with a separate sanitized-debug job remain historical cohorts.
+HISTORICAL_SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
+SPLIT_CHECK_SHARDS = ("sanitized-release", "portability")
 SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS AArch64", "Windows x86-64")
 SPLIT_QUALIFICATION_BRANCH = "codex/ci-checks-split-overlap"
 SPLIT_QUALIFICATION_BRANCHES = (SPLIT_QUALIFICATION_BRANCH, "codex/2120-evidence-v2-split-overlap")
@@ -79,9 +83,17 @@ SPLIT_COMBINATION_JOBS = SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + 
 HISTORICAL_SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
 HISTORICAL_SPLIT_COMBINATION_JOBS = tuple(
     f"{platform} {shard}" for platform in PLATFORMS
-    for shard in (("release",) + SPLIT_CHECK_SHARDS
+    for shard in (("release",) + HISTORICAL_SPLIT_CHECK_SHARDS
                   if platform in HISTORICAL_SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS)
 ) + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+# The 29-job #2659 layout with a full-runtime sanitized-debug job on all four
+# split platforms, before #2657; likewise a separate historical cohort only.
+MACOS_SPLIT_COMBINATION_PLATFORMS = tuple(
+    f"{platform} {shard}" for platform in PLATFORMS
+    for shard in (("release",) + HISTORICAL_SPLIT_CHECK_SHARDS
+                  if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
+MACOS_SPLIT_COMBINATION_JOBS = MACOS_SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + (
+    "Workflow lint", "CI complete")
 # Only these retained Apple jobs may defer on first-attempt draft PRs. Draft
 # pull requests always run the default split layout.
 MACOS_RUNNER_JOBS = tuple(name for name in SPLIT_COMBINATION_PLATFORMS + NATIVE + MOBILE
@@ -89,6 +101,19 @@ MACOS_RUNNER_JOBS = tuple(name for name in SPLIT_COMBINATION_PLATFORMS + NATIVE 
 DEFERRED_SUFFIX = " (deferred for draft PR)"
 DEFERRAL_STEP = "Defer macOS runner lane for draft pull request"
 MAIN_REUSE_JOB = "Main CI reuse decision"
+# GitHub leaves job-level names unexpanded when their root job is skipped.
+# Pin the exact observed expression spelling; never accept arbitrary expressions.
+ORDINARY_INACTIVE_LINT_NAMES = (
+    "Ordinary lint (inactive)",
+    "github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)'",
+    "${{ github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)' }}",
+)
+QUEUE_INACTIVE_LINT_NAMES = (
+    "Queue lint preflight (inactive)",
+    "github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)'",
+    "${{ github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)' }}",
+)
+INACTIVE_LINT_JOBS = ORDINARY_INACTIVE_LINT_NAMES + QUEUE_INACTIVE_LINT_NAMES
 # Same exact-head provenance contract as .github/scripts/recover-ci.py and
 # the trusted merge_queue_admission publisher. Names alone authorize nothing.
 RECONCILED_CHECK_MARKERS = {
@@ -155,11 +180,12 @@ def measure(run):
     result = None
     # The read-only main admission is extra metadata, never a workload. A
     # reused main run is a separate cohort and cannot be pooled with full runs.
-    jobs = [job for job in run.get("jobs", []) if job.get("name") != MAIN_REUSE_JOB]
+    jobs, inactive_errors = separate_inactive_lint(run.get("jobs", []), run.get("event"))
+    jobs = [job for job in jobs if job.get("name") != MAIN_REUSE_JOB]
     names = sorted(job.get("name", "") for job in jobs)
     combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS),
                              sorted(COMBINATION_JOBS), sorted(HISTORICAL_SPLIT_COMBINATION_JOBS),
-                             sorted(SPLIT_COMBINATION_JOBS))
+                             sorted(MACOS_SPLIT_COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS))
     suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
                        sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS)) or combinations
     sharded = names == sorted(SHARDED_JOBS) or suites
@@ -173,6 +199,8 @@ def measure(run):
             job.get("name") in NATIVE + MOBILE + UEFI and job.get("conclusion") == "skipped"
             for job in jobs):
         reason = "reused-queue-coverage"
+    elif inactive_errors:
+        reason = "invalid-inactive-lint"
     elif names != sorted(HISTORICAL_PLATFORMS) and not sharded:
         reason = "incomplete-or-different-matrix"
     elif not run.get("workflow_blob_sha"):
@@ -184,10 +212,13 @@ def measure(run):
         step_seconds = {}
         job_seconds = {}
         job_queue_seconds = {}
+        job_dependency_seconds = {}
+        workflow_created = timestamp(run.get("created_at"))
         for job in jobs:
             name = job["name"]
             required = set()
-            if name in HISTORICAL_PLATFORMS + HISTORICAL_COMBINATION_PLATFORMS + SPLIT_COMBINATION_PLATFORMS:
+            if name in HISTORICAL_PLATFORMS + HISTORICAL_COMBINATION_PLATFORMS + MACOS_SPLIT_COMBINATION_PLATFORMS + \
+                    SPLIT_COMBINATION_PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
                 if combinations:
@@ -241,6 +272,9 @@ def measure(run):
                 busy += job_seconds[name]
             queued = timestamp(job.get("created_at"))
             job_queue_seconds[name] = (start - queued).total_seconds() if queued is not None and start is not None and queued <= start else None
+            job_dependency_seconds[name] = ((queued - workflow_created).total_seconds()
+                                            if queued is not None and workflow_created is not None and
+                                            workflow_created <= queued else None)
             durations = {}
             for step in job.get("steps", []):
                 left, right = timestamp(step.get("started_at")), timestamp(step.get("completed_at"))
@@ -257,7 +291,8 @@ def measure(run):
                           "execution_span_seconds": (max(finishes) - min(starts)).total_seconds(),
                           "initial_queue_seconds": (min(starts) - created).total_seconds(),
                           "runner_seconds": busy, "step_seconds": step_seconds,
-                          "job_seconds": job_seconds, "job_queue_seconds": job_queue_seconds}
+                          "job_seconds": job_seconds, "job_queue_seconds": job_queue_seconds,
+                          "job_dependency_seconds": job_dependency_seconds}
     return result, reason
 
 
@@ -275,7 +310,7 @@ def summarize(data):
             excluded[reason] += 1
         else:
             runners = tuple(sorted((job["name"], tuple(sorted(job.get("labels", []))))
-                                   for job in run["jobs"] if job.get("name") != MAIN_REUSE_JOB))
+                                   for job in run["jobs"] if job.get("name") not in (MAIN_REUSE_JOB,) + INACTIVE_LINT_JOBS))
             cohorts[(run["workflow_blob_sha"], runners)].append(sample)
     rows = []
     for (revision, runners), samples in sorted(cohorts.items()):
@@ -286,6 +321,7 @@ def summarize(data):
     return {"schema": 1, "cohorts": rows, "excluded": dict(excluded),
             "notes": ["Elapsed = workflow creation to last required job completion; queueing is included.",
                       "Execution span still includes any staggered runner starts; runner_seconds sums active job intervals.",
+                      "Per-job dependency time is workflow creation to job creation, including scheduler overhead; queue time is job creation to start.",
                       "Cancelled, failed, partial, rerun and differently configured runs are never pooled into a speedup.",
                       "Cache state and compiler source changes require separate review; these are descriptive medians, not causal claims."]}
 
@@ -714,10 +750,35 @@ def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
     return latest
 
 
-def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False):
-    """Keep the optional cheap admission out of the required job contract."""
-    decision = [job for job in jobs if job.get("name") == MAIN_REUSE_JOB]
+def separate_inactive_lint(jobs, event):
+    """Remove only an explicitly skipped, event-inactive lint branch.
+
+    The executing lint keeps its real Workflow lint identity and is validated
+    normally. Never rename a job or substitute a skipped branch for execution.
+    Historical workflows without an inactive branch remain readable.
+    """
+    inactive = [job for job in jobs if job.get("name") in INACTIVE_LINT_JOBS]
+    expected = ORDINARY_INACTIVE_LINT_NAMES if event == "merge_group" else QUEUE_INACTIVE_LINT_NAMES
     errors = []
+    if len(inactive) > 1:
+        errors.append("inactive lint branch is duplicated or ambiguous")
+    for job in inactive:
+        if (job.get("name") not in expected or job.get("status") != "completed" or
+                job.get("conclusion") != "skipped"):
+            errors.append("inactive lint branch has an invalid event or result")
+    return [job for job in jobs if job.get("name") not in INACTIVE_LINT_JOBS], errors
+
+
+def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False, event=None):
+    """Keep the optional cheap admission out of the required job contract."""
+    inactive = [job for job in jobs if job.get("name") in INACTIVE_LINT_JOBS]
+    jobs, errors = separate_inactive_lint(jobs, event)
+    for job in inactive:
+        if (job.get("run_id") != run_id or job.get("head_sha") != head_sha or
+                type(job.get("run_attempt")) is not int or
+                not 1 <= job["run_attempt"] <= run_attempt):
+            errors.append("inactive lint branch has an invalid run, source or attempt")
+    decision = [job for job in jobs if job.get("name") == MAIN_REUSE_JOB]
     if len(decision) > 1 or (required and len(decision) != 1):
         errors.append("main reuse decision is missing or ambiguous")
     for job in decision:
@@ -826,7 +887,7 @@ def require_jobs(args):
                 errors = [_metadata_pending(f"job-attempt inventory is inconsistent: {error}")]
             else:
                 jobs, decision_errors = separate_reuse_job(
-                    jobs, args.run_id, args.run_attempt, head_sha)
+                    jobs, args.run_id, args.run_attempt, head_sha, event=run.get("event"))
                 errors = decision_errors + validate_required_jobs(
                     jobs, args.run_id, args.run_attempt, head_sha, draft,
                     expected_names=expected_names)

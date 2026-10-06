@@ -54,6 +54,8 @@
 #define BUSTER_X11_XDND_TYPE_REPLY_ATOMS ((u32)256)
 #define BUSTER_X11_XDND_MAX_TYPE_ATOMS ((u32)1024)
 #define BUSTER_X11_XDND_MAX_RETAINED_BYTES (BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES + BUSTER_KB(64))
+// Core X11 EventMask defines bits 0..24; high bits are reserved.
+#define BUSTER_X11_CORE_EVENT_MASK ((u32)0x01ffffff)
 #define BUSTER_X11_XIM_MAX_INPUT_BYTES ((u64)4096)
 #define BUSTER_X11_XIM_MAX_OUTPUT_BYTES ((u64)16384)
 #define BUSTER_X11_XIM_MAX_POLL_BYTES BUSTER_KB(64)
@@ -109,6 +111,8 @@ struct WmHandle
     u32 xdnd_type_test_reply_count;
     u32 xdnd_type_test_max_reply_atoms;
     u32 xdnd_type_test_scanned_atoms;
+    u32 native_error_count;
+    u32 native_event_mask_sequence;
 #endif
     Arena* poll_arena;
     WmEventList* poll_event_list;
@@ -187,4 +191,6 @@ BUSTER_F_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f
 // Synthetic callback reducer controls do not establish a live XIM provider.
 BUSTER_F_DECL bool wm_x11_xim_commit_for_test(WmHandle* handle, WmWindowHandle* window, u64 input_length, String8 text);
 BUSTER_F_DECL bool wm_x11_xdnd_append_for_test(WmHandle* handle, String8 bytes);
+BUSTER_F_DECL bool wm_xim_create_ic_publication_for_test(WmWindowHandle* window, bool queued, bool synchronous_completion, xcb_xic_t synchronous_ic);
+BUSTER_F_DECL void wm_xim_disconnect_for_test(WmHandle* handle);
 #endif

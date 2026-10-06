@@ -1304,6 +1304,36 @@ console_log_for_label() {
     fi
 }
 
+# run_one_bundle owns the three first-receipt counters. Bash dynamic locals
+# keep them private to that bundle, including a final scan after stream drain.
+observe_launch_output() {
+    local label=$1 console_log=$2 launch_started=$3
+    # These are host polling observations, not native event times. They
+    # share the existing launch clock and never reset/extend its deadline.
+    if [[ $first_console == unavailable && -s $console_log ]]; then
+        first_console=$((SECONDS - launch_started))
+        printf 'BUSTER_IOS_LAUNCH_OBSERVATION label=%s event=first-console observed_after_seconds=%s clock=bash-seconds\n' "$label" "$first_console" || true
+    fi
+    if [[ $first_trace == unavailable ]] && grep -q '^BUSTER_IOS_LAUNCH_V1 ' "$console_log"; then
+        first_trace=$((SECONDS - launch_started))
+        # The file may grow after the size check above. A matched app
+        # record is itself console receipt, even in that polling race.
+        if [[ $first_console == unavailable ]]; then
+            first_console=$first_trace
+            printf 'BUSTER_IOS_LAUNCH_OBSERVATION label=%s event=first-console observed_after_seconds=%s clock=bash-seconds\n' "$label" "$first_console" || true
+        fi
+        printf 'BUSTER_IOS_LAUNCH_OBSERVATION label=%s event=first-app-trace observed_after_seconds=%s clock=bash-seconds\n' "$label" "$first_trace" || true
+    fi
+    if [[ $first_fixture == unavailable ]] && grep -q '^TEST_FIXTURE_START_V1 ' "$console_log"; then
+        first_fixture=$((SECONDS - launch_started))
+        if [[ $first_console == unavailable ]]; then
+            first_console=$first_fixture
+            printf 'BUSTER_IOS_LAUNCH_OBSERVATION label=%s event=first-console observed_after_seconds=%s clock=bash-seconds\n' "$label" "$first_console" || true
+        fi
+        printf 'BUSTER_IOS_LAUNCH_OBSERVATION label=%s event=first-fixture observed_after_seconds=%s clock=bash-seconds\n' "$label" "$first_fixture" || true
+    fi
+}
+
 run_one_bundle() {
     local label=$1
     local app_bundle=$2
@@ -1318,6 +1348,7 @@ run_one_bundle() {
     local deadline
     local result
     local early_exit_reported
+    local first_console=unavailable first_trace=unavailable first_fixture=unavailable
 
     console_log=$(console_log_for_label "$label")
     mkdir -p "$(dirname "$console_log")"
@@ -1360,13 +1391,14 @@ run_one_bundle() {
     mkfifo "$active_launch_pipe_dir/console"
     tee "$console_log" <"$active_launch_pipe_dir/console" &
     active_launch_reader_pid=$!
-    "$timeout_bin" --kill-after=10s "${launch_timeout_seconds}s" \
+    SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE=1 "$timeout_bin" --kill-after=10s "${launch_timeout_seconds}s" \
         xcrun simctl launch --console-pty "$udid" "$bundle_id" test --verbose=1 --ci=1 \
         >"$active_launch_pipe_dir/console" 2>&1 &
     launch_stream_pid=$!
     active_launch_stream_pid=$launch_stream_pid
 
     while true; do
+        observe_launch_output "$label" "$console_log" "$launch_started"
         if grep -qF "$result_marker_success" "$console_log"; then
             result=success
             break
@@ -1414,7 +1446,10 @@ run_one_bundle() {
                 :
             else
                 process_status=$?
-                if [[ $process_status -eq 1 ]]; then
+                # A terminal probe received after the launch clock expires
+                # cannot retrospectively establish an early app exit. Keep
+                # the deadline failure below authoritative in that race.
+                if [[ $process_status -eq 1 ]] && (( SECONDS < deadline )); then
                     if [[ $early_exit_reported -eq 0 ]]; then
                         echo "error: iOS ${label} app terminated before emitting a buster result marker; this is an early app/console exit, not a timeout" >&2
                         collect_launch_diagnostics "$label" "$console_log" "$app_pid"
@@ -1422,6 +1457,7 @@ run_one_bundle() {
                     fi
                     stop_launch_stream "$launch_stream_pid"
                     active_launch_stream_pid=
+                    observe_launch_output "$label" "$console_log" "$launch_started"
                     echo "TIMING_IOS test_seconds label=$label value=$((SECONDS - launch_started))"
                     return 1
                 fi
@@ -1436,6 +1472,7 @@ run_one_bundle() {
             fi
             stop_launch_stream "$launch_stream_pid"
             active_launch_stream_pid=
+            observe_launch_output "$label" "$console_log" "$launch_started"
             collect_launch_diagnostics "$label" "$console_log" "$app_pid"
             echo "TIMING_IOS test_seconds label=$label value=$((SECONDS - launch_started))"
             return 1
@@ -1448,6 +1485,7 @@ run_one_bundle() {
     # shutdown after the full batch.
     stop_launch_stream "$launch_stream_pid"
     active_launch_stream_pid=
+    observe_launch_output "$label" "$console_log" "$launch_started"
     echo "TIMING_IOS test_seconds label=$label value=$((SECONDS - launch_started))"
     if [[ $result == success ]]; then
         echo "iOS ${label} tests passed."
