@@ -1,0 +1,1 @@
+object_emission_exit=0; emission alone does not qualify native/external ARM linking.

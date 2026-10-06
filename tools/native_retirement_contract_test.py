@@ -413,7 +413,12 @@ class ContractTests(unittest.TestCase):
                        contract.NEXT_SUPPORT_CONTRACT_SHA256,
                        contract.APPLE_CI_SUPPORT_CONTRACT_SHA256,
                        contract.PROPOSED_SUPPORT_CONTRACT_SHA256,
-                       contract.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256):
+                       contract.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
+                       contract.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
+                       contract.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
+                       contract.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
+                       contract.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+                       contract.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
@@ -1387,6 +1392,48 @@ class ContractTests(unittest.TestCase):
 
 
 class CheckedInDependencyTests(unittest.TestCase):
+    def test_native_dispatch_cannot_register_retired_direct_emitter(self):
+        root = Path(__file__).resolve().parents[1]
+        codegen = (root / "src/buster/lib/compiler/codegen/codegen.c").read_text(encoding="utf-8")
+        private = (root / "src/buster/lib/compiler/codegen/codegen_internal.h").read_text(encoding="utf-8")
+        public = (root / "src/buster/lib/compiler/codegen/codegen.h").read_text(encoding="utf-8")
+        cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
+        unity = (root / "src/buster/apps/ide/ide.c").read_text(encoding="utf-8")
+
+        self.assertIn("machine_select_validated_canonical_function(", codegen)
+        self.assertIn("options.register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;", codegen)
+        self.assertIn("machine_stack_placement_build(", codegen)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_NONE", public)
+        for retired in ("CCanonicalEmitter", "CCanonicalBranchPatch", "X64Builder",
+                        "CodegenRegisterAllocation", "X64Evex", "CODEGEN_X64_X87_SCRATCH_SIZE",
+                        "x64_emit_vector_native_memory", "x64_emit_vector_native_binary_operation",
+                        "codegen_canonical_x64_metadata_vector",
+                        "x64_emit_vzeroupper", "a64_emit_initialize_aggregate_result",
+                        "a64_emit_copy_memory_registers(", "a64_emit_float_load_offset(",
+                        "a64_emit_float_store_offset(", "x64_target_supports_native_vector(",
+                        "CodegenRelocation", "CodegenCanonicalCallArgument", "CodegenCanonicalCallLayout",
+                        "codegen_canonical_x64_call_layout", "CodegenCanonicalX64F80",
+                        "codegen_canonical_x64_f80_cache_", "codegen_canonical_x64_type_contains_f80",
+                        "codegen_canonical_x64_type_is_f80_x87_shape", "allocated_register_base",
+                        "a64_emit_stack_address", "a64_emit_store_offset", "a64_emit_store_value_component",
+                        "a64_value_component_offset", "a64_value_offset", "codegen_canonical_a64_adjust_stack",
+                        "codegen_canonical_aggregate_abi", "codegen_canonical_abi_part_is_float", "codegen_canonical_x64_abi_is_f80_complex_result",
+                        "codegen_canonical_x64_abi_value_in_registers", "codegen_canonical_x64_adjust_stack",
+                        "codegen_canonical_x64_native_vector_width", "codegen_canonical_x64_non_power_vector",
+                        "codegen_canonical_x64_stack_argument_offset", "codegen_canonical_x64_vector_result",
+                        "codegen_canonical_x64_type_is_f80_bytes_cached", "codegen_canonical_x64_type_is_f80_complex_cached",
+                        "codegen_canonical_x64_type_is_f80_opaque_cached", "codegen_canonical_x64_windows_non_power_vector_indirect",
+                        "canonical_prep", "canonical_emit("):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, codegen + private)
+
+        # Both source graphs register the shared codegen module. Neither may
+        # grow a second native emitter or link the archived reference compiler.
+        self.assertIn('buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")', cmake)
+        self.assertIn('#include <buster/lib/compiler/codegen/codegen.c>', unity)
+        for registry in (cmake, unity):
+            self.assertNotRegex(registry, r'(?m)^(?:.*register_module|\s*#include)\b[^\n]*(?:direct_native|native_direct|retirement_reference)')
+
     def test_historical_gap_ledger_maps_to_current_row_numbers(self):
         root = Path(__file__).resolve().parents[1]
         _fields, inputs = read_table(root / "docs/native-retirement-support-v1.tsv")
