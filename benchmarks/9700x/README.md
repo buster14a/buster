@@ -78,8 +78,11 @@ gate applies, and these jobs follow `authorize`:
 - `compare-pull` (the 9700X) builds tests-off Clang Release `ide` binaries of
   the pull request's merge base and of its head. It times both with
   `tools/uarch_lab.py compare` on the same frozen merge-base source, using the
-  `compiler-compare-v1` profile. A head that moved before measurement is
-  recorded as superseded.
+  `compiler-compare-v1` profile. It then runs the native throughput corpus
+  (`./build.sh bench_throughput run` from the merge base, profile
+  `throughput-corpus-v1`: the default CI corpus under every allocator mode,
+  20 pairs in each of two rounds) on the same two binaries (#2761). A head
+  that moved before measurement is recorded as superseded.
 - `start-pull` (hosted) shows the check
   `9700X compiler benchmark (pull request)` on the head commit as soon as the
   request is authorized: queued while the 9700X is busy, then in progress
@@ -88,8 +91,12 @@ gate applies, and these jobs follow `authorize`:
 - `publish-pull` (hosted) validates the evidence, including that the observed
   CPU is the Ryzen 7 9700X, and completes that same check. Its summary
   states the identities, the pair count, the verdict with its 95% CI, the
+  corpus case count with its confirmed regressions and inconclusive cases, the
   host time spent, and links to the workflow attempt and the evidence. The run's artifact `buster-9700x-compiler-<head>-<attempt>`
-  holds `receipt.json` and the lab's `summary.json` and raw pairs.
+  holds `receipt.json`, the lab's `summary.json` and raw pairs, and the
+  corpus's `throughput/summary.json`, `metadata.json` and raw samples. A
+  missing, partial or invalid corpus run, or one whose compiler hashes are
+  not the measured binaries, fails the check like a failed self-host run.
 
 The verdict is report-only and blocks nothing; the comparison of each commit
 after it lands on main publishes under a different name. A comparison takes a pilot
