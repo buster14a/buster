@@ -447,6 +447,8 @@ struct CPreprocessDetail
     // Actual include-identity table slot examinations for end-to-end scaling
     // fixtures. Tests-disabled builds neither store nor increment this value.
     u64 include_file_probe_count;
+    // Path comparisons made while assigning canonical file-table indices.
+    u64 file_table_compare_count;
 #endif
     u32 lexed_file_count;
 };

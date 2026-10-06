@@ -871,9 +871,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
     return result;
 }
 
+// Deterministic scaling fixtures for the preprocessor's identity tables
+// (issue #1313). Inputs are generated in memory at two sizes and the actual
+// comparison counts, not a clock, must grow about linearly with the size.
+BUSTER_GLOBAL_LOCAL void c_identity_scaling_append(char8* bytes, u64 capacity, u64* length, String8 text)
+{
+    BUSTER_CHECK(*length + text.length <= capacity);
+    memcpy(bytes + *length, text.pointer, text.length);
+    *length += text.length;
+}
+
+// `count` linemarkers each naming a distinct logical file, so the canonical
+// file table sees `count` different paths in one translation unit.
+BUSTER_GLOBAL_LOCAL u64 c_file_table_scaling_work(UnitTestArguments* arguments, u32 count, u64* files)
+{
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 capacity = (u64)count * 64 + 64;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_identity_scaling_append(bytes, capacity, &length,
+                                  string_format(temporary.arena, S8("#line 1 \"scaling_header_{u32}.h\"\nint v{u32};\n"), index, index));
+    }
+    String8 source = {.pointer = bytes, .length = length};
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("file-table-scaling.c")});
+    u64 work = UINT64_MAX;
+    if (preprocess.error_count == 0 && preprocess.diagnostic_count == 0)
+    {
+        work = c_preprocess_detail(preprocess)->file_table_compare_count;
+        *files = preprocess.file_count;
+    }
+    scratch_end(temporary);
+    return work;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_file_table_scaling_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 1000, DEEP = 4000 };
+    u64 shallow_files = 0;
+    u64 deep_files = 0;
+    u64 shallow = c_file_table_scaling_work(arguments, SHALLOW, &shallow_files);
+    u64 deep = c_file_table_scaling_work(arguments, DEEP, &deep_files);
+    BUSTER_TEST(arguments, shallow_files >= SHALLOW && deep_files >= DEEP);
+    // Hashing keeps each lookup to a handful of comparisons: bound the work
+    // by a constant per file and by linear growth between the two sizes.
+    BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && shallow != 0 && deep <= (u64)DEEP * 8 && deep <= shallow * 6,
+                    string_format(arguments->arena, S8("file table compares shallow={u64} deep={u64}"), shallow, deep));
+    return result;
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_file_table_scaling_tests);
     BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
     BUSTER_TEST_FIXTURE(arguments, c_skipped_group_text_tests);
     BUSTER_TEST_FIXTURE(arguments, c_punctuator_separator_tests);

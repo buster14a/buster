@@ -5162,6 +5162,31 @@ BUSTER_C_INTERNAL String8 c_macro_va_opt_violation(CToken const* replacement, u3
     return message;
 }
 
+// Full-length name hash for the cold identity tables (file paths, macro
+// parameters). The symbol-table key above samples only the first and last
+// eight bytes, which would collide for long paths that differ in the middle.
+BUSTER_C_INTERNAL u32 c_name_hash(String8 name)
+{
+    u64 hash = (name.length + 1) * UINT64_C(0x9E3779B97F4A7C15);
+    u64 offset = 0;
+    for (; offset + 8 <= name.length; offset += 8)
+    {
+        u64 word;
+        memcpy(&word, name.pointer + offset, sizeof(word));
+        hash = (hash ^ word) * UINT64_C(0xC2B2AE3D27D4EB4F);
+        hash ^= hash >> 29;
+    }
+    u64 tail = 0;
+    for (u64 shift = 0; offset < name.length; offset += 1, shift += 8)
+    {
+        tail |= (u64)(u8)name.pointer[offset] << shift;
+    }
+    hash = (hash ^ tail) * UINT64_C(0xD6E8FEB86659FD93);
+    hash ^= hash >> 32;
+    hash *= UINT64_C(0x9E3779B97F4A7C15);
+    return (u32)(hash >> 32);
+}
+
 // The spelling ladder behind the definition-time parameter index: which
 // parameter, if any, `name` spells.
 BUSTER_C_INTERNAL s32 c_macro_parameter_index(CMacro* macro, String8 name)
@@ -9022,15 +9047,24 @@ BUSTER_C_INTERNAL u32 c_preprocess_builtin_line(CMacro* first)
     return result;
 }
 
+// Distinct file identities in first-seen order. `slots` is an open-addressing
+// index (index + 1, zero marking empty) over `files`, kept at most half full
+// and rebuilt at double capacity, so a lookup compares only paths whose full
+// hash slot chain it walks instead of every file seen so far.
 typedef struct CPreprocessFileTable CPreprocessFileTable;
 struct CPreprocessFileTable
 {
     String8* files;
+    u32* slots;
     String8 memo_path;
     u32 memo_index;
     u32 count;
     u32 capacity;
-    u32 reserved;
+    u32 slot_capacity;
+#if BUSTER_INCLUDE_TESTS
+    // Path comparisons performed, for scaling fixtures.
+    u64 compare_count;
+#endif
 };
 
 BUSTER_C_INTERNAL u32 c_preprocess_file_index(Arena* arena, CPreprocessFileTable* table, String8 path)
@@ -9042,13 +9076,39 @@ BUSTER_C_INTERNAL u32 c_preprocess_file_index(Arena* arena, CPreprocessFileTable
     }
     else
     {
-        u32 index = table->count;
-        for (u32 existing = 0; existing < table->count; existing += 1)
+        if ((u64)(table->count + 1) * 2 > table->slot_capacity)
         {
-            if (string_equal(table->files[existing], path))
+            u32 slot_capacity = table->slot_capacity ? table->slot_capacity * 2 : 32;
+            u32* slots = arena_allocate(arena, u32, slot_capacity);
+            memset(slots, 0, slot_capacity * sizeof(*slots));
+            for (u32 existing = 0; existing < table->count; existing += 1)
             {
-                index = existing;
-                break;
+                u32 slot = c_name_hash(table->files[existing]) & (slot_capacity - 1);
+                while (slots[slot])
+                {
+                    slot = (slot + 1) & (slot_capacity - 1);
+                }
+                slots[slot] = existing + 1;
+            }
+            table->slots = slots;
+            table->slot_capacity = slot_capacity;
+        }
+        u32 mask = table->slot_capacity - 1;
+        u32 slot = c_name_hash(path) & mask;
+        u32 index = table->count;
+        while (table->slots[slot] && index == table->count)
+        {
+            u32 candidate = table->slots[slot] - 1;
+#if BUSTER_INCLUDE_TESTS
+            table->compare_count += 1;
+#endif
+            if (string_equal(table->files[candidate], path))
+            {
+                index = candidate;
+            }
+            else
+            {
+                slot = (slot + 1) & mask;
             }
         }
         if (index == table->count)
@@ -9065,6 +9125,7 @@ BUSTER_C_INTERNAL u32 c_preprocess_file_index(Arena* arena, CPreprocessFileTable
                 table->capacity = capacity;
             }
             table->files[table->count++] = path;
+            table->slots[slot] = table->count;
         }
         table->memo_path = path;
         table->memo_index = index;
@@ -10281,7 +10342,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
 // fields still follow the explicit rehoming rules below.
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 608 + 8 * BUSTER_INCLUDE_TESTS);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 608 + 16 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
 BUSTER_CT_CHECK(sizeof(CPackAlignment) == 8);
 
@@ -12192,6 +12253,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     c_source_map_finish_origins(arena, &map, &file_table, &result);
     result.files = file_table.files;
     result.file_count = file_table.count;
+#if BUSTER_INCLUDE_TESTS
+    result.detail->file_table_compare_count = file_table.compare_count;
+#endif
     c_source_map_publish(arena, recovery, &map);
     // Respelling queries the published prefix and may append regions (moving
     // their backing array). Rebuild keys only for that appended tail; without
