@@ -139,7 +139,14 @@
     X(COMMIT_TRUNCATED_ROWS, commit_truncated_rows) \
     X(COMMIT_REOPENED_MARKERS, commit_reopened_markers) \
     X(COMMIT_FINALIZED_BLOCKS, commit_finalized_blocks) \
-    X(CFG_TERMINATOR_CHECKS, cfg_terminator_checks)
+    X(CFG_TERMINATOR_CHECKS, cfg_terminator_checks) \
+    X(VALIDATION_LABEL_SET_WORK, validation_label_set_work) \
+    X(VALIDATION_LABEL_PATH_WORK, validation_label_path_work) \
+    X(VALIDATION_LABEL_OWNER_ROWS, validation_label_owner_rows) \
+    X(VALIDATION_LABEL_OWNER_PROBES, validation_label_owner_probes) \
+    X(VALIDATION_LABEL_SCRATCH_BYTES, validation_label_scratch_bytes) \
+    X(C_STATEMENT_EXTENT_SPANS, c_statement_extent_spans) \
+    X(C_DELIMITER_FALLBACK_TOKENS, c_delimiter_fallback_tokens)
 
 typedef enum IrConstructionCounter
 {

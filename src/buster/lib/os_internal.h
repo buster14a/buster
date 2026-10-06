@@ -57,6 +57,31 @@ BUSTER_F_DECL bool os_process_capture_step(OsProcessCaptureState* state, OsProce
 BUSTER_F_DECL ProcessResult os_process_capture_result(const OsProcessCaptureState* state, ProcessResult child_result);
 #if BUSTER_INCLUDE_TESTS
 
+// Deterministic retained-payload collection through the production append and
+// flatten boundaries. read_size zero feeds the input in one call; positive
+// sizes split it into bounded fragments. Empty inputs still feed an empty read.
+// The collector owns no native process or global failure state.
+typedef struct OsProcessCaptureTestInput OsProcessCaptureTestInput;
+struct OsProcessCaptureTestInput
+{
+    StandardStream stream;
+    ByteSlice bytes;
+    u64 read_size;
+};
+
+typedef struct OsProcessCaptureTestResult OsProcessCaptureTestResult;
+struct OsProcessCaptureTestResult
+{
+    ProcessWaitResult wait;
+    // Requested scratch-arena bytes, including chunk headers and alignment,
+    // before flattening into the caller's arena; not committed bytes or RSS.
+    u64 storage_bytes;
+    u64 chunk_count[(size_t)STANDARD_STREAM_COUNT];
+};
+
+BUSTER_F_DECL OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, ProcessSpawnResult spawn,
+    OsProcessCaptureTestInput const* inputs, u64 input_count);
+
 #if BUSTER_LINUX || BUSTER_MACOS
 // One failure on this thread in an ordinary (non-group) wait. WAIT/READ skip
 // the syscall and report ENOMEM/EBADF; CLOSE releases the real descriptor,
@@ -116,6 +141,9 @@ BUSTER_F_DECL bool os_process_group_ownership_loss_self_test(void);
 BUSTER_F_DECL bool os_process_group_escaped_capture_self_test(Arena* arena);
 #endif
 #if BUSTER_LINUX
+BUSTER_F_DECL bool os_linux_proc_context_select_self_test(String8 status, s32 process_id, bool identity_valid,
+                                                           u32* namespace_index, u32* namespace_depth);
+BUSTER_F_DECL bool os_linux_proc_context_live_self_test(void);
 BUSTER_F_DECL bool os_linux_process_stat_parse_self_test(void);
 BUSTER_F_DECL bool os_linux_proc_read_self_test(void);
 BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);

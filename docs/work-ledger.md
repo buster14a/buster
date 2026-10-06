@@ -13,15 +13,25 @@ moving it. It is never a timing subject.
 The counters live in the existing allocation diagnostic build
 (`BUSTER_BENCH_ALLOCATIONS`); ordinary builds expand `WORK_LEDGER_RECORD` and
 `WORK_LEDGER_PHASE` to nothing and keep no storage. Build a diagnostic compiler
-in a separate directory and ask it for metrics:
+in a separate directory and ask it for metrics. First use the
+[session-owned detached worktree](agents/workflow.md#parallel-sessions-on-one-machine)
+and run from `"$session_root/src"`; the session directory's generated name
+keeps this diagnostic tree distinct:
 
 ```sh
-./build.sh generate --build-directory build-census -- -DBUSTER_BENCH_ALLOCATIONS=ON
-./build.sh build --build-directory build-census --config Release -t ide
-build-census/Release/ide cc -g0 -c tests/basic_c_operations.c -o build-census/o.o \
-    -fsource-metrics=build-census/o.metrics
-grep '^work\.' build-census/o.metrics
+census_build="build-$(basename "$session_root")-census"
+./build.sh generate --build-directory "$census_build" -- -DBUSTER_BENCH_ALLOCATIONS=ON
+./build.sh build --build-directory "$census_build" --config Release -t ide
+"$census_build/Release/ide" cc -g0 -c tests/basic_c_operations.c -o "$census_build/o.o" \
+    -fsource-metrics="$census_build/o.metrics"
+grep '^work\.' "$census_build/o.metrics"
 ```
+
+Retain the diagnostic binary hash, cache and compile commands with its metrics.
+Keep its build and output paths owned by this session, and wait for every user
+before regeneration or cleanup. These counters are diagnostic evidence; use
+the separate tests-off [trusted performance recipe](agents/benchmarking.md#benchmarking-a-compiler-change-ab)
+for timing comparisons.
 
 Every counter is written as `work.<mechanism>.<name>=<count>` beside the
 existing `ir_construction.*` and `allocation.*` keys; keys are only ever added.
