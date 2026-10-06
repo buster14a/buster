@@ -51,7 +51,9 @@ fixture as well as compiling both architectures.
   or entry-first layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
   including when the prior projection was identity. Module label-address initializers
-  resolve through that projection before selector scratch is released. The
+  and label differences (`IrGlobalLabelDifference`, written into the data image by
+  `codegen_resolve_label_differences`) resolve through that projection before
+  selector scratch is released. The
   expanded-label-table regression executes both destinations after an i128
   divide in every native allocator mode.
 - Struct/union identity casts retain an independent complete MIR frame image,

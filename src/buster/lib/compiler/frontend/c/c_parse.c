@@ -26728,6 +26728,8 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
     return bad;
 }
 
+BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 index);
+
 BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTypeParseMachine* machine, CParseResult* result,
                                                                               CPreprocessResult preprocess, CScopeId scope,
                                                                               CTypeId destination, u32 start, u32 end, bool constexpr_value)
@@ -26755,6 +26757,13 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
             cursor += 1;
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
+        // A label address, as in the GNU difference `&&b - &&a`, is an
+        // address constant like `&object`: IR lowering decides it.
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                 (c_parse_label_address_prefix_proven(&preprocess, start, cursor) ||
+                  (cursor > start && c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                   c_parse_label_address_cast_at(result, preprocess, scope, start, cursor))))
+            numeric = false;
         else if (token.kind == C_TOKEN_IDENTIFIER && (!c_parse_declaration_keyword_at(result, preprocess, cursor) ||
                  string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) ||
                  c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))))
@@ -28604,6 +28613,44 @@ BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPrep
     return label;
 }
 
+// Whether the `&&` at `index`, already proven a label address, is the minuend
+// of a GNU label difference `&&b - &&a`: closing parentheses, a binary minus,
+// then only parentheses, casts' type words and pointer stars before another
+// proven label address. The difference is an integer, not a label value, so
+// the result is the index just past the subtrahend's label name, or zero.
+BUSTER_C_INTERNAL u32 c_parse_label_difference_end(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 index, u32 end)
+{
+    u32 cursor = index + 2;
+    while (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        cursor += 1;
+    }
+    u32 difference_end = 0;
+    if (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_MINUS))
+    {
+        bool scanning = true;
+        for (cursor += 1; scanning && cursor + 1 < end; cursor += 1)
+        {
+            CToken token = preprocess.tokens[cursor];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND))
+            {
+                scanning = false;
+                bool label = preprocess.tokens[cursor + 1].kind == C_TOKEN_IDENTIFIER &&
+                             (c_parse_label_address_prefix_proven(&preprocess, start, cursor) ||
+                              (cursor > start && c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                               c_parse_label_address_cast_at(result, preprocess, scope, start, cursor)));
+                difference_end = label ? cursor + 2 : 0;
+            }
+            else
+            {
+                scanning = token.kind == C_TOKEN_IDENTIFIER || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                           c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_STAR);
+            }
+        }
+    }
+    return difference_end;
+}
+
 // Source label facts are compact entity flags. Aggregate storage keeps the
 // union of its possible labels; canonical control-flow validation still owns
 // the exact target edges and subobject provenance of generated branches.
@@ -28619,6 +28666,12 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
             label = c_parse_label_address_prefix_proven(&preprocess, start, index) ||
                     (index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
                      c_parse_label_address_cast_at(result, preprocess, scope, start, index));
+            u32 difference_end = label ? c_parse_label_difference_end(result, preprocess, scope, start, index, end) : 0;
+            if (difference_end)
+            {
+                label = false;
+                index = difference_end - 1;
+            }
         }
         else if (token.kind == C_TOKEN_IDENTIFIER)
         {

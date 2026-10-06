@@ -2691,6 +2691,12 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
                          record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
             return false;
         }
+        if (global->label_difference_count)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
+                         llvm_bc_s8("LLVM bitcode label-difference global initializer is unsupported"), 0, 0, 0, global->symbol);
+            return false;
+        }
         if (global->relocation_count && global->initializer_kind != IR_GLOBAL_INITIALIZER_BYTES)
         {
             llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
