@@ -5996,7 +5996,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 replacement_index + 1 < definition->replacement_count)
             {
                 u32 parameter_index = parameter_indices[replacement_index + 1];
-                if (parameter_index != C_MACRO_PARAMETER_NONE)
+                if (parameter_index != C_MACRO_PARAMETER_NONE && arguments)
                 {
                     CPpToken stringified = c_macro_stringify(space, arguments[parameter_index], stamp);
                     stringified.preceded_by_space = replacement_space;
