@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import authorize  # noqa: E402
+import compiler_receipt  # noqa: E402
 
 REPOSITORY = "buster14a/buster"
 HEAD = "a" * 40
@@ -101,6 +102,10 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(authorize.plan(files(authorize.COMPARE_REQUEST, status="removed")), (False, False))
         self.assertEqual(authorize.plan(files("benchmarks/9700x/nested/a.c", "src/x.c")), (False, False))
         self.assertEqual(authorize.plan(None), (False, False))
+        # A scaling request runs inside a compiler comparison (#424).
+        self.assertEqual(authorize.plan(files(authorize.SCALING_REQUEST)), (False, True))
+        self.assertEqual(authorize.plan(files(authorize.SCALING_REQUEST, status="removed")), (False, False))
+        self.assertEqual(authorize.SCALING_REQUEST, compiler_receipt.SCALING_REQUEST)
 
     def test_comparison_needs_a_merge_base_and_both_trees(self) -> None:
         compared = {"merge_base_commit": {"sha": BASE, "commit": {"tree": {"sha": "e" * 40}}}}

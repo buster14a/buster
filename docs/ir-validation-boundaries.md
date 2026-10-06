@@ -128,6 +128,10 @@ without label relocations allocate no owner index. Symbol kind/definition,
 block bounds, addends, initializer extents and relocation overlap remain
 independent rejection conditions (#2444).
 
+Global label differences (`IrGlobalLabelDifference`) share that owner index:
+`ir_validate_label_differences` requires a lowered owner, both blocks in
+range, a byte initializer and a 1, 2, 4 or 8-byte slot that is still zero.
+
 Label sets and provenance paths retain their caller-supplied order. Validation
 borrows ordered arrays and constructs immutable radix-sorted scratch views for
 larger unordered arrays; sets of at most eight IDs use bounded small-set work.

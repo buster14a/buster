@@ -43,6 +43,8 @@
 //                                              c_lex dispatches and
 //                                              c_lex_reference is the
 //                                              differential baseline
+//   CSourceCache, c_source_cache_lex            bounded raw lex templates before
+//                                              fresh symbol interning
 //   c_token_preceded_by_space,                 source spacing: the `#` white-
 //   c_token_requires_separator                 space test and the lexical-
 //                                              join guard -E and quoting
@@ -83,9 +85,10 @@
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
 //                                              parsing
-//   c_preprocess_respell_identifiers,          final-stream rewrites: C23 and
-//   c_preprocess_rewrite_obsolete_designators  UCN respellings, and GNU
-//                                              `member:` as `.member =`
+//   c_preprocess_respell_token,                final-stream rewrites: C23 and
+//   c_preprocess_respell_identifiers,          UCN respellings, GNU `member:`
+//   c_preprocess_rewrite_obsolete_designators, as `.member =`, and block-
+//   c_preprocess_rename_local_labels           unique GNU `__label__` names
 //   c_preprocess_seal, c_phase_arena_retire    the phase boundary: the result
 //                                              copied out of the phase arena
 //                                              before its release
@@ -1334,11 +1337,11 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offse
     while (!stopped && source.length - offset >= 64)
     {
         Simd512 chunk = simd512_load(source.pointer + offset);
-        Mask64 stop_mask = simd512_equal_byte(chunk, carriage_return) | simd512_equal_byte(chunk, line_feed) |
-                           simd512_equal_byte(chunk, backslash);
+        Mask64 stop_mask = simd512_equal_u8(chunk, carriage_return) | simd512_equal_u8(chunk, line_feed) |
+                           simd512_equal_u8(chunk, backslash);
         if (trigraphs)
         {
-            stop_mask |= simd512_equal_byte(chunk, simd512_splat('?'));
+            stop_mask |= simd512_equal_u8(chunk, simd512_splat('?'));
         }
         if (stop_mask)
         {
@@ -1496,15 +1499,15 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 while (source.length - input >= 64)
                 {
                     Simd512 chunk = simd512_load(source.pointer + input);
-                    Mask64 carriage = simd512_equal_byte(chunk, simd512_splat('\r'));
-                    Mask64 line_feed = simd512_equal_byte(chunk, simd512_splat('\n'));
-                    Mask64 backslash = simd512_equal_byte(chunk, simd512_splat('\\'));
+                    Mask64 carriage = simd512_equal_u8(chunk, simd512_splat('\r'));
+                    Mask64 line_feed = simd512_equal_u8(chunk, simd512_splat('\n'));
+                    Mask64 backslash = simd512_equal_u8(chunk, simd512_splat('\\'));
                     u64 stops = carriage | (backslash & ((line_feed | carriage) >> 1)) | (backslash & (UINT64_C(1) << 63));
                     if (trigraphs)
                     {
                         // Stop at the first question mark, including the last
                         // lanes whose raw triple belongs to the next chunk.
-                        stops |= simd512_equal_byte(chunk, simd512_splat('?'));
+                        stops |= simd512_equal_u8(chunk, simd512_splat('?'));
                     }
                     u64 limit = stops ? (u64)__builtin_ctzll(stops) : 64;
                     if (!limit)
@@ -2955,28 +2958,29 @@ BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_range(u64 low, u64 high)
 }
 
 // Sixteen finished rows: the compressed start, length, kind and punctuator
-// bytes widen to 32-bit lanes, the metadata dword assembles as
-// length | kind<<16 | punctuator<<24, and three masked vpermi2d interleave
-// offsets and metadata into the 48 dwords of sixteen 12-byte CToken rows —
-// 192 stored bytes.  The zero symbol dwords come from the permutes' own
-// zeroing masks rather than from sacrificial zero lanes, which is what
+// bytes widen to u32 lanes, the metadata u32 assembles as
+// length | kind<<16 | punctuator<<24, and three masked
+// simd512_permute2_u32 (vpermt2d) interleave offsets and metadata into the
+// 48 u32 lanes of sixteen 12-byte CToken rows — 192 stored bytes.  The zero
+// symbol u32 lanes come from the permutes' own zeroing masks rather than
+// from sacrificial zero lanes, which is what
 // lets one pass cover sixteen rows where the earlier eight-row form spent
 // the offset vector's masked-off upper lanes as its zero source.
 BUSTER_C_INLINE BUSTER_INLINE void c_lex_store_rows(CToken* out, CTokenShape* shapes_out, u64 shape_mask, __m512i starts, __m512i lengths,
                                                         __m512i kinds, __m512i punctuators, __m512i shapes, __m512i base, __m512i index_0,
                                                         __m512i index_1, __m512i index_2)
 {
-    __m512i start_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(starts));
-    __m512i length_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(lengths));
-    __m512i kind_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(kinds));
-    __m512i punctuator_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(punctuators));
-    __m512i offsets = _mm512_add_epi32(start_wide, base);
-    __m512i metadata = _mm512_or_si512(length_wide, _mm512_or_si512(_mm512_slli_epi32(kind_wide, 16), _mm512_slli_epi32(punctuator_wide, 24)));
-    u32* dwords = (u32*)out;
-    _mm512_storeu_si512((__m512i*)dwords, _mm512_maskz_permutex2var_epi32(0xDB6D, offsets, index_0, metadata));
-    _mm512_storeu_si512((__m512i*)(dwords + 16), _mm512_maskz_permutex2var_epi32(0x6DB6, offsets, index_1, metadata));
-    _mm512_storeu_si512((__m512i*)(dwords + 32), _mm512_maskz_permutex2var_epi32(0xB6DB, offsets, index_2, metadata));
-    _mm512_mask_storeu_epi8(shapes_out, (__mmask64)shape_mask, shapes);
+    Simd512 start_wide = simd512_widen_u8((Simd512)starts, 0);
+    Simd512 length_wide = simd512_widen_u8((Simd512)lengths, 0);
+    Simd512 kind_wide = simd512_widen_u8((Simd512)kinds, 0);
+    Simd512 punctuator_wide = simd512_widen_u8((Simd512)punctuators, 0);
+    Simd512 offsets = simd512_add_u32(start_wide, (Simd512)base);
+    Simd512 metadata = simd512_or(length_wide, simd512_or(simd512_shift_left_u32(kind_wide, 16), simd512_shift_left_u32(punctuator_wide, 24)));
+    u32* row_lanes = (u32*)out;
+    simd512_store(row_lanes, simd512_permute2_u32(0xDB6D, offsets, (Simd512)index_0, metadata));
+    simd512_store(row_lanes + 16, simd512_permute2_u32(0x6DB6, offsets, (Simd512)index_1, metadata));
+    simd512_store(row_lanes + 32, simd512_permute2_u32(0xB6DB, offsets, (Simd512)index_2, metadata));
+    simd512_store_masked(shapes_out, shape_mask, (Simd512)shapes);
 }
 
 BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
@@ -3815,6 +3819,224 @@ BUSTER_C_INTERNAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, St
     return c_lex_dispatch(arena, space, source, false, trigraphs, dialect);
 }
 
+// Bounded process-local raw lexical templates. Entries are captured before
+// symbol interning; no path, macro, target, source-map or IR identity is retained.
+// Every import owns its copies, so eviction cannot invalidate a compilation.
+enum { C_SOURCE_CACHE_ENTRY_LIMIT = 64 };
+typedef struct CSourceCacheEntry CSourceCacheEntry;
+struct CSourceCacheEntry
+{
+    String8 source;
+    // Phase-one replacement and dialect-owned identifier decoding change the
+    // lexical template, so they are part of the key beside the raw bytes.
+    bool trigraphs;
+    CPreprocessDialect dialect;
+    CLexResult lex;
+};
+
+struct CSourceCache
+{
+    Arena* storage;
+    u64 start;
+    CSourceCacheStats stats;
+    CSourceCacheEntry entries[C_SOURCE_CACHE_ENTRY_LIMIT];
+};
+
+CSourceCache* c_source_cache_create(Arena* owner, u64 byte_limit)
+{
+    CSourceCache* result = 0;
+    u64 metadata_position;
+    bool fits = owner && owner->position >= arena_minimum_position && owner->position <= owner->reserved_size &&
+                align_forward_checked(owner->position, BUSTER_ALIGN_OF(CSourceCache), &metadata_position) &&
+                metadata_position <= owner->reserved_size && sizeof(CSourceCache) <= owner->reserved_size - metadata_position;
+    if (fits && byte_limit && byte_limit <= BUSTER_MB(64))
+    {
+        u64 owner_start = owner->position;
+        CSourceCache* metadata = arena_allocate_zeroed(owner, CSourceCache, 1);
+        // Commit at creation: a failed optional reservation returns null;
+        // subsequent admitted captures cannot require a failing growth commit.
+        u64 reservation = byte_limit + BUSTER_KB(64);
+        Arena* storage = arena_create((ArenaCreation){
+            .reserved_size = reservation,
+            .initial_size = reservation,
+            .granularity = BUSTER_KB(64),
+            .flags = {.no_pool = 1},
+        });
+        if (storage)
+        {
+            result = metadata;
+            result->storage = storage;
+            result->start = storage->position;
+            result->stats.byte_limit = byte_limit;
+        }
+        else
+        {
+            arena_release_to_position(owner, owner_start);
+        }
+    }
+    return result;
+}
+
+void c_source_cache_clear(CSourceCache* cache)
+{
+    if (cache && cache->storage)
+    {
+        cache->stats.entry_count = 0;
+        cache->stats.retained_bytes = 0;
+        cache->stats.resets += 1;
+        arena_release_to_position(cache->storage, cache->start);
+    }
+}
+
+void c_source_cache_destroy(CSourceCache* cache)
+{
+    if (cache && cache->storage)
+    {
+        c_source_cache_clear(cache);
+        arena_destroy(cache->storage, 1);
+        cache->storage = 0;
+    }
+}
+
+CSourceCacheStats c_source_cache_stats(CSourceCache const* cache)
+{
+    CSourceCacheStats result = {0};
+    if (cache)
+    {
+        result = cache->stats;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL CLexResult c_source_cache_copy(Arena* arena, CSpellingSpace* space, CLexResult const* source)
+{
+    CLexResult result = *source;
+    // Translation shrinks its raw-size reservation to this final compact size.
+    u64 size = source->translated_source.length + 1;
+    char8* text = space ? c_space_allocate(space, size) : arena_allocate(arena, char8, size);
+    memcpy(text, source->translated_source.pointer, size);
+    result.translated_source.pointer = text;
+    result.translated_offset = space ? c_space_offset(space, text) : 0;
+    result.spelling_base = space ? space->base : text;
+    result.tokens = arena_allocate(arena, CToken, source->token_count);
+    result.token_shapes = arena_allocate(arena, CTokenShape, source->token_count);
+    for (u64 index = 0; index < source->token_count; index += 1)
+    {
+        CToken token = source->tokens[index];
+        token.offset = token.offset - source->translated_offset + result.translated_offset;
+        token.symbol = 0;
+        result.tokens[index] = token;
+    }
+    memcpy(result.token_shapes, source->token_shapes, source->token_count * sizeof(*result.token_shapes));
+    result.checkpoints = arena_allocate(arena, IrSourceCheckpoint, source->checkpoint_count);
+    result.checkpoint_offsets = arena_allocate(arena, u32, source->checkpoint_count);
+    result.checkpoint_pages = arena_allocate(arena, u32, source->checkpoint_page_count);
+    memcpy(result.checkpoints, source->checkpoints, source->checkpoint_count * sizeof(*result.checkpoints));
+    memcpy(result.checkpoint_offsets, source->checkpoint_offsets, source->checkpoint_count * sizeof(*result.checkpoint_offsets));
+    memcpy(result.checkpoint_pages, source->checkpoint_pages, source->checkpoint_page_count * sizeof(*result.checkpoint_pages));
+    result.diagnostics = 0;
+    result.diagnostic_count = 0;
+    result.location_cursor = 0;
+    return result;
+}
+
+BUSTER_C_INTERNAL CLexResult c_source_cache_lex(Arena* arena, CSpellingSpace* space, String8 source, bool trigraphs, CPreprocessDialect dialect, CSourceCache* cache)
+{
+    CLexResult result;
+    CSourceAllocationPlan plan;
+    TemporalArena snapshot_scope = {0};
+    bool eligible = cache && cache->storage && arena && space && (!source.length || source.pointer) &&
+                    c_source_allocation_plan(source.length, &plan) &&
+                    space->used <= UINT32_MAX && plan.translated_capacity <= UINT32_MAX - space->used &&
+                    source.length <= cache->stats.byte_limit;
+    if (eligible)
+    {
+        Arena* conflicts[] = {arena, cache->storage};
+        snapshot_scope = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        eligible = snapshot_scope.arena && snapshot_scope.arena->position <= snapshot_scope.arena->reserved_size &&
+                   source.length <= snapshot_scope.arena->reserved_size - snapshot_scope.arena->position;
+    }
+    if (eligible)
+    {
+        // One owned byte snapshot feeds lookup, cold lexing and capture alike.
+        // A mutable file mapping must never be compared and then lexed separately.
+        char8* snapshot = arena_allocate(snapshot_scope.arena, char8, source.length);
+        if (source.length)
+        {
+            memcpy(snapshot, source.pointer, source.length);
+        }
+        String8 captured = {.pointer = snapshot, .length = source.length};
+        CSourceCacheEntry const* found = 0;
+        for (u32 index = 0; index < cache->stats.entry_count && !found; index += 1)
+        {
+            CSourceCacheEntry const* entry = &cache->entries[index];
+            // Sixty-four entries bound the scan. No hash collision or metadata
+            // shortcut can admit a hit: equality always reads the captured bytes.
+            if (entry->trigraphs == trigraphs && entry->dialect == dialect && string_equal(captured, entry->source))
+            {
+                found = entry;
+            }
+        }
+        if (found)
+        {
+            result = c_source_cache_copy(arena, space, &found->lex);
+            cache->stats.hits += 1;
+            cache->stats.reused_bytes += source.length;
+            cache->stats.reused_tokens += result.token_count;
+        }
+        else
+        {
+            cache->stats.misses += 1;
+            result = c_lex_space(arena, space, captured, trigraphs, dialect);
+            // Source bounds make every product and sum representable in u64.
+            // Seven allocations below each need less than eight padding bytes.
+            u64 needed = source.length + result.translated_source.length + 1 +
+                         result.token_count * (sizeof(CToken) + sizeof(CTokenShape)) +
+                         (u64)result.checkpoint_count * (sizeof(IrSourceCheckpoint) + sizeof(u32)) +
+                         (u64)result.checkpoint_page_count * sizeof(u32) + 64;
+            if (!result.diagnostic_count && result.token_count && needed <= cache->stats.byte_limit)
+            {
+                if (cache->stats.entry_count == C_SOURCE_CACHE_ENTRY_LIMIT ||
+                    needed > cache->stats.byte_limit - cache->stats.retained_bytes)
+                {
+                    c_source_cache_clear(cache);
+                }
+                CSourceCacheEntry* entry = &cache->entries[cache->stats.entry_count];
+                char8* raw = arena_allocate(cache->storage, char8, captured.length);
+                if (captured.length)
+                {
+                    memcpy(raw, captured.pointer, captured.length);
+                }
+                *entry = (CSourceCacheEntry){
+                    .source = {.pointer = raw, .length = captured.length},
+                    .trigraphs = trigraphs,
+                    .dialect = dialect,
+                    .lex = c_source_cache_copy(cache->storage, 0, &result),
+                };
+                cache->stats.entry_count += 1;
+                cache->stats.retained_bytes = cache->storage->position - cache->start;
+            }
+            else
+            {
+                cache->stats.bypasses += 1;
+            }
+        }
+    }
+    else
+    {
+        if (cache && cache->storage)
+        {
+            cache->stats.bypasses += 1;
+        }
+        result = c_lex_space(arena, space, source, trigraphs, dialect);
+    }
+    if (snapshot_scope.arena)
+    {
+        scratch_end(snapshot_scope);
+    }
+    return result;
+}
+
 #if BUSTER_INCLUDE_TESTS
 CLexResult c_test_lex_dialect(Arena* arena, String8 source, CPreprocessDialect dialect, bool force_scalar)
 {
@@ -4099,6 +4321,16 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_acos"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fabsf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fabs"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fabsl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmaxf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmax"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmaxl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fminf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmin"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fminl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_powif"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_powi"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_powil"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_roundf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
@@ -4132,18 +4364,49 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin___memcpy_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin___memmove_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin___memset_chk"), C_SYMBOL_BUILTIN_MEMORY },
+    // The string forms GCC documents among its library builtins; like the
+    // memory family they lower to the ordinary libc call.
+    { S8_INITIALIZER("__builtin_strcmp"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin_strcpy"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin_strchr"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     // The `l` spellings take unsigned long, which is target-dependent (LP64
     // versus LLP64). The shared signature policy below selects their operand
     // width before the count operation; all these spellings return int.
     { S8_INITIALIZER("__builtin_clzl"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
+    // clrsb counts the bits after the sign bit that equal it; the operand is
+    // signed and is rewritten so the count is a clz of a nonzero value.
+    { S8_INITIALIZER("__builtin_clrsb"), C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS },
+    { S8_INITIALIZER("__builtin_clrsbl"), C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS },
+    { S8_INITIALIZER("__builtin_clrsbll"), C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzl"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzll"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ffs"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsl"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsll"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
+    // The typed checked-arithmetic forms: the spelling fixes the operand
+    // type, the third argument points at the wrapped result, and the call
+    // answers whether the exact result did not fit.
+    { S8_INITIALIZER("__builtin_sadd_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_saddl_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_saddll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_uadd_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_uaddl_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_uaddll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_ssub_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_ssubl_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_ssubll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_usub_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_usubl_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_usubll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_smul_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_smull_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_smulll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_umul_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_umull_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_umulll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
@@ -4155,21 +4418,22 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_buster_simd_load_masked"), C_SYMBOL_BUILTIN_SIMD },
     { S8_INITIALIZER("__builtin_buster_simd_store"), C_SYMBOL_BUILTIN_SIMD },
     { S8_INITIALIZER("__builtin_buster_simd_store_masked"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_splat_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_equal_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_less_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_sign_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_test_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_permute2_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_store_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_widen_byte"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_shift_left_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_ternary_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_equal_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_splat_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_less_word"), C_SYMBOL_BUILTIN_SIMD },
-    { S8_INITIALIZER("__builtin_buster_simd_compress_word"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_splat_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_equal_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_less_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_sign_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_test_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_permute2_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_store_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_widen_u8"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_shift_left_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_ternary_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_equal_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_splat_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_less_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_u32"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_permute2_u32"), C_SYMBOL_BUILTIN_SIMD },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)
@@ -4196,9 +4460,10 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
     return C_SYMBOL_BUILTIN_NONE;
 }
 
-// Fixed GNU signatures for clz/ctz/popcount. The operation kind is shared by
-// three spellings; the suffix determines the parameter width, while the C
-// result type is always int. CTypeKind retains the target's long data model.
+// Fixed GNU signatures for clz/ctz/popcount/clrsb. The operation kind is
+// shared by three spellings; the suffix determines the parameter width, while
+// the C result type is always int. clrsb alone takes a signed operand.
+// CTypeKind retains the target's long data model.
 CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling)
 {
     CTypeKind result = C_TYPE_INVALID;
@@ -4207,6 +4472,11 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
     {
         result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_UNSIGNED_LONG_LONG :
                  string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+    }
+    else if (builtin == C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS)
+    {
+        result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_LONG : C_TYPE_INT;
     }
     return result;
 }
@@ -4600,7 +4870,7 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
 
 enum
 {
-    C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 256,
+    C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 512,
 };
 
 BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling);
@@ -4678,7 +4948,7 @@ BUSTER_C_INTERNAL void c_symbols_intern_tokens(CSymbolTable* table, char8 const*
         for (u64 window_base = 0; window_base < token_count; window_base += 64)
         {
             Mask64 window_mask = mask64_prefix(token_count - window_base);
-            Mask64 identifiers = simd512_equal_byte(simd512_load_masked(shapes + window_base, window_mask), identifier_shape);
+            Mask64 identifiers = simd512_equal_u8(simd512_load_masked(shapes + window_base, window_mask), identifier_shape);
             while (identifiers)
             {
                 u64 index = window_base + mask64_first_set(identifiers);
@@ -7076,7 +7346,9 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
     static char const* supported[] = {
         "__builtin___clear_cache", "__builtin_acos",
         "__builtin_acosf",         "__builtin_ceil",
-        "__builtin_ceilf",         "__builtin_clz",
+        "__builtin_ceilf",         "__builtin_clrsb",
+        "__builtin_clrsbl",        "__builtin_clrsbll",
+        "__builtin_clz",
         "__builtin_clzl",          "__builtin_clzll",
         "__builtin_cos",           "__builtin_cosf",
         "__builtin_ctz",           "__builtin_ctzl",
@@ -7084,12 +7356,36 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_ffs",
         "__builtin_ffsl",
         "__builtin_ffsll",
+        "__builtin_sadd_overflow",
+        "__builtin_saddl_overflow",
+        "__builtin_saddll_overflow",
+        "__builtin_uadd_overflow",
+        "__builtin_uaddl_overflow",
+        "__builtin_uaddll_overflow",
+        "__builtin_ssub_overflow",
+        "__builtin_ssubl_overflow",
+        "__builtin_ssubll_overflow",
+        "__builtin_usub_overflow",
+        "__builtin_usubl_overflow",
+        "__builtin_usubll_overflow",
+        "__builtin_smul_overflow",
+        "__builtin_smull_overflow",
+        "__builtin_smulll_overflow",
+        "__builtin_umul_overflow",
+        "__builtin_umull_overflow",
+        "__builtin_umulll_overflow",
         "__builtin_popcount",      "__builtin_popcountl",
         "__builtin_popcountll",
         "__builtin_assume_aligned", "__builtin_choose_expr",
         "__builtin_constant_p",    "__builtin_object_size",
         "__builtin_expect",        "__builtin_expect_with_probability",
         "__builtin_fabs",          "__builtin_fabsf",
+        "__builtin_fabsl",
+        "__builtin_fmax",          "__builtin_fmaxf",
+        "__builtin_fmaxl",         "__builtin_fmin",
+        "__builtin_fminf",         "__builtin_fminl",
+        "__builtin_powi",          "__builtin_powif",
+        "__builtin_powil",
         "__builtin_floor",         "__builtin_floorf",
         "__builtin_fmod",          "__builtin_fmodf",
         "__builtin_pow",           "__builtin_powf",
@@ -7105,6 +7401,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_memset",        "__builtin_memcmp",
         "__builtin___memcpy_chk", "__builtin___memmove_chk", "__builtin___memset_chk",
         "__builtin_sqrt",          "__builtin_sqrtf",
+        "__builtin_strchr",        "__builtin_strcmp",
+        "__builtin_strcpy",
         "__builtin_strlen",        "__builtin_trap",
         "__builtin_ia32_pause",
         "__builtin_ia32_pslldi128", "__builtin_ia32_psllqi128",
@@ -7764,10 +8062,10 @@ BUSTER_C_INTERNAL void c_pp_class_masks_build(Arena* arena, CPpClassMasks* masks
             u64 window_base = word_index * C_PP_CLASS_MASK_WINDOW;
             Mask64 window_mask = mask64_prefix(token_count - window_base);
             Simd512 window = simd512_load_masked(shapes + window_base, window_mask);
-            masks->stop[word_index] = mask64_or(simd512_equal_byte(window, newline_shape), simd512_equal_byte(window, end_shape));
-            masks->identifier[word_index] = simd512_equal_byte(window, identifier_shape);
-            masks->parenthesis_left[word_index] = simd512_equal_byte(window, left_shape);
-            masks->parenthesis_right[word_index] = simd512_equal_byte(window, right_shape);
+            masks->stop[word_index] = mask64_or(simd512_equal_u8(window, newline_shape), simd512_equal_u8(window, end_shape));
+            masks->identifier[word_index] = simd512_equal_u8(window, identifier_shape);
+            masks->parenthesis_left[word_index] = simd512_equal_u8(window, left_shape);
+            masks->parenthesis_right[word_index] = simd512_equal_u8(window, right_shape);
         }
         masks->word_count = word_count;
     }
@@ -10159,6 +10457,38 @@ BUSTER_C_SHARED bool c_preprocess_dialect_is_c23(CPreprocessDialect dialect)
     return dialect == C_PREPROCESS_DIALECT_GNU23 || dialect == C_PREPROCESS_DIALECT_C23;
 }
 
+// Respell the published token at `index` in place: the new spelling goes to
+// the end of the space under a source-map stamp at the token's old location,
+// and the symbol and shape travel with it.
+BUSTER_C_INTERNAL void c_preprocess_respell_token(CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result, u64 index, String8 spelling,
+                                                  CTokenKind kind, CPunctuator punctuator, IrSourceMapCursor* cursor)
+{
+    CToken* token = result->tokens + index;
+    CSourceLocation location = c_preprocess_token_location_cursor(result, *token, cursor);
+    CToken copy = c_space_token(space, spelling, kind, punctuator);
+    c_source_map_append(map, (IrSourceRegion){
+                                 .start = copy.offset,
+                                 .source = location.file,
+                                 .stamp = c_position_from_source_location(location),
+                                 .kind = IR_SOURCE_REGION_STAMP,
+                                 .origin_plus_one = location.map_offset + 1,
+                             });
+    // Appends can move the region array; keep the result's view (the
+    // recovery above reads through it) current. The new region is at
+    // the tail, past every key already published, so the lookups keep
+    // answering through the keys until the map is republished.
+    result->recovery->map.regions = map->regions;
+    token->offset = copy.offset;
+    token->length = copy.length;
+    token->kind = copy.kind;
+    token->punctuator = copy.punctuator;
+    result->recovery->token_shapes[index] = c_token_shape_from_token(*token);
+    // The symbol travels with the spelling: a respelled token must
+    // re-intern or every symbol-keyed consumer would classify it as
+    // the old name.
+    token->symbol = result->symbols && kind == C_TOKEN_IDENTIFIER ? c_symbol_intern(result->symbols, c_token_spelling(space->base, copy)) : 0;
+}
+
 // After macro replacement, canonical identifier bytes and C23 underscore
 // aliases travel to consumers that retain names as well as symbol ids. Fuse
 // both respellings in the existing final pass; ordinary pre-C23 units whose
@@ -10207,26 +10537,203 @@ BUSTER_C_INTERNAL void c_preprocess_respell_identifiers(CSpellingSpace* space, C
         }
         if (respelled.length)
         {
-            CSourceLocation location = c_preprocess_token_location_cursor(result, *token, &cursor);
-            CToken copy = c_space_token(space, respelled, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
-            c_source_map_append(map, (IrSourceRegion){
-                                         .start = copy.offset,
-                                         .source = location.file,
-                                         .stamp = c_position_from_source_location(location),
-                                         .kind = IR_SOURCE_REGION_STAMP,
-                                         .origin_plus_one = location.map_offset + 1,
-                                     });
-            // Appends can move the region array; keep the result's view (the
-            // recovery above reads through it) current. The new region is at
-            // the tail, past every key already published, so the lookups keep
-            // answering through the keys until the map is republished.
-            result->recovery->map.regions = map->regions;
-            token->offset = copy.offset;
-            token->length = copy.length;
-            // The symbol travels with the spelling: a respelled token must
-            // re-intern or every symbol-keyed consumer would classify it as
-            // the old name.
-            token->symbol = result->symbols ? c_symbol_intern(result->symbols, respelled) : 0;
+            c_preprocess_respell_token(space, map, result, index, respelled, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE, &cursor);
+        }
+    }
+}
+
+// True when `token` is an identifier spelling `name`; `symbol` is the id the
+// name was interned under (0 when it never was), and uninterned tokens fall
+// back to the spelling.
+BUSTER_GLOBAL_LOCAL bool c_local_label_word(char8 const* base, CToken token, u32 symbol, String8 name)
+{
+    bool result = token.kind == C_TOKEN_IDENTIFIER;
+    if (result)
+    {
+        result = token.symbol && symbol ? token.symbol == symbol : c_token_spelling_equal(base, token, name);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_local_label_punctuator(CToken token, CPunctuator punctuator)
+{
+    return token.kind == C_TOKEN_PUNCTUATOR && token.punctuator == punctuator;
+}
+
+// True when `index` is in a label position for the local-label rename: a
+// definition `name :` after a statement boundary, `goto name`, or the GNU
+// address `&&name` in unary position. Labels share no namespace with
+// ordinary identifiers, so every other use keeps its spelling.
+BUSTER_GLOBAL_LOCAL bool c_local_label_use(char8 const* base, CToken const* tokens, u64 index, u64 end)
+{
+    CToken previous = tokens[index - 1];
+    bool result = false;
+    if (index + 1 < end && c_local_label_punctuator(tokens[index + 1], C_PUNCTUATOR_COLON))
+    {
+        result = c_local_label_punctuator(previous, C_PUNCTUATOR_SEMICOLON) || c_local_label_punctuator(previous, C_PUNCTUATOR_LEFT_BRACE) ||
+                 c_local_label_punctuator(previous, C_PUNCTUATOR_RIGHT_BRACE) || c_local_label_punctuator(previous, C_PUNCTUATOR_COLON) ||
+                 c_local_label_word(base, previous, 0, S8("else")) || c_local_label_word(base, previous, 0, S8("do"));
+    }
+    if (!result && c_local_label_word(base, previous, 0, S8("goto")))
+    {
+        result = true;
+    }
+    if (!result && c_local_label_punctuator(previous, C_PUNCTUATOR_AMPERSAND_AMPERSAND))
+    {
+        // Binary `&&` follows an operand: a non-keyword identifier, a
+        // literal, `)`, `]`, or a postfix increment.
+        CToken operand = tokens[index - 2];
+        switch ((CTokenKind)operand.kind)
+        {
+        case C_TOKEN_IDENTIFIER:
+            result = c_local_label_word(base, operand, 0, S8("return"));
+            break;
+        case C_TOKEN_PUNCTUATOR:
+            result = operand.punctuator != C_PUNCTUATOR_RIGHT_PARENTHESIS && operand.punctuator != C_PUNCTUATOR_RIGHT_BRACKET &&
+                     operand.punctuator != C_PUNCTUATOR_PLUS_PLUS && operand.punctuator != C_PUNCTUATOR_MINUS_MINUS;
+            break;
+        default:
+            break;
+        }
+    }
+    return result;
+}
+
+// The end (exclusive) of the label list of the `asm goto` whose `goto`
+// qualifier is at `index`, with the list's first token in *start_out, or 0
+// when the statement has no label list: the operands after the fourth
+// top-level colon inside the parentheses.
+BUSTER_GLOBAL_LOCAL u64 c_local_label_asm_goto_list(CToken const* tokens, u64 index, u64 end, u64* start_out)
+{
+    u64 result = 0;
+    u64 open = index + 1;
+    while (open < end && tokens[open].kind == C_TOKEN_IDENTIFIER)
+    {
+        open += 1;
+    }
+    u32 depth = 0;
+    u32 colons = 0;
+    bool closed = !(open < end && c_local_label_punctuator(tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS));
+    for (u64 scan = open; scan < end && !closed; scan += 1)
+    {
+        CToken token = tokens[scan];
+        if (c_local_label_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            depth += 1;
+        }
+        else if (c_local_label_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            depth -= 1;
+            closed = depth == 0;
+            result = closed && colons == 4 ? scan : 0;
+        }
+        else if (depth == 1 && c_local_label_punctuator(token, C_PUNCTUATOR_COLON))
+        {
+            colons += 1;
+            *start_out = scan + 1;
+        }
+    }
+    return result;
+}
+
+// GNU local labels. `__label__ a, b;` at the start of a block scopes those
+// label names to the block, so a statement-expression macro can define its
+// labels once per expansion. Lowering keys a function's labels by spelling,
+// so the block's label uses -- definitions, `goto`, `&&` and `asm goto`
+// lists -- are respelled to a name unique in the translation unit and the
+// declaration becomes empty statements. Declarations are visited innermost
+// (last) first: an inner redeclaration renames its own uses before the
+// enclosing one scans the same range, and those no longer match. A
+// malformed or file-scope declaration is left for the parser to diagnose.
+// Only units that intern `__label__` enter the pass.
+BUSTER_C_INTERNAL void c_preprocess_rename_local_labels(Arena* arena, CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result)
+{
+    String8 keyword = S8("__label__");
+    u32 keyword_symbol = result->symbols ? c_symbol_find(result->symbols, keyword) : 0;
+    if (keyword_symbol && result->token_count)
+    {
+        CToken* tokens = result->tokens;
+        u64 count = result->token_count;
+        // Declarations, then each declaration's block end; `pending` holds
+        // the declarations whose block is still open and `opens` the pending
+        // depth at each open brace.
+        u64* declarations = arena_allocate(arena, u64, count);
+        u64* block_ends = arena_allocate(arena, u64, count);
+        u64* pending = arena_allocate(arena, u64, count);
+        u64* opens = arena_allocate(arena, u64, count);
+        u64 declaration_count = 0;
+        u64 pending_count = 0;
+        u64 open_count = 0;
+        for (u64 index = 0; index < count; index += 1)
+        {
+            CToken token = tokens[index];
+            if (c_local_label_punctuator(token, C_PUNCTUATOR_LEFT_BRACE))
+            {
+                opens[open_count++] = pending_count;
+            }
+            else if (c_local_label_punctuator(token, C_PUNCTUATOR_RIGHT_BRACE) && open_count)
+            {
+                u64 floor = opens[--open_count];
+                while (pending_count > floor)
+                {
+                    block_ends[pending[--pending_count]] = index;
+                }
+            }
+            else if (open_count && c_local_label_word(space->base, token, keyword_symbol, keyword))
+            {
+                block_ends[declaration_count] = count - 1;
+                pending[pending_count++] = declaration_count;
+                declarations[declaration_count++] = index;
+            }
+        }
+        IrSourceMapCursor cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+        for (u64 declaration = declaration_count; declaration-- > 0;)
+        {
+            u64 start = declarations[declaration];
+            u64 end = block_ends[declaration];
+            u64 semicolon = start + 1;
+            bool valid = semicolon < end && tokens[semicolon].kind == C_TOKEN_IDENTIFIER;
+            while (valid && semicolon < end && !c_local_label_punctuator(tokens[semicolon], C_PUNCTUATOR_SEMICOLON))
+            {
+                bool name_slot = ((semicolon - start) & 1) != 0;
+                valid = name_slot ? tokens[semicolon].kind == C_TOKEN_IDENTIFIER : c_local_label_punctuator(tokens[semicolon], C_PUNCTUATOR_COMMA);
+                semicolon += 1;
+            }
+            valid = valid && semicolon < end && ((semicolon - start) & 1) == 0;
+            if (valid)
+            {
+                for (u64 name_index = start + 1; name_index < semicolon; name_index += 2)
+                {
+                    char8 const* base = space->base;
+                    CToken name_token = tokens[name_index];
+                    String8 name = c_token_spelling(base, name_token);
+                    u32 name_symbol = name_token.symbol;
+                    String8 renamed = string_format(arena, S8("__local_label_{u64}_{S8}"), declaration, name);
+                    u64 list_start = 0;
+                    u64 list_end = 0;
+                    for (u64 index = semicolon + 1; index < end; index += 1)
+                    {
+                        CToken token = tokens[index];
+                        if (index >= list_end && c_local_label_word(base, token, 0, S8("goto")) &&
+                            (c_local_label_word(base, tokens[index - 1], 0, S8("asm")) || c_local_label_word(base, tokens[index - 1], 0, S8("__asm")) ||
+                             c_local_label_word(base, tokens[index - 1], 0, S8("__asm__")) || c_local_label_word(base, tokens[index - 1], 0, S8("volatile")) ||
+                             c_local_label_word(base, tokens[index - 1], 0, S8("__volatile__")) || c_local_label_word(base, tokens[index - 1], 0, S8("inline"))))
+                        {
+                            list_end = c_local_label_asm_goto_list(tokens, index, end, &list_start);
+                        }
+                        bool in_asm_list = index >= list_start && index < list_end;
+                        if (c_local_label_word(base, token, name_symbol, name) && (in_asm_list || c_local_label_use(base, tokens, index, end)))
+                        {
+                            c_preprocess_respell_token(space, map, result, index, renamed, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE, &cursor);
+                            base = space->base;
+                        }
+                    }
+                }
+                for (u64 index = start; index < semicolon; index += 1)
+                {
+                    c_preprocess_respell_token(space, map, result, index, S8(";"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_SEMICOLON, &cursor);
+                }
+            }
         }
     }
 }
@@ -10847,7 +11354,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // Preprocessed input already completed phase one; synthesized spellings
     // and command definitions likewise lex with replacement disabled.
     bool trigraphs = !options.already_preprocessed && c_translate_trigraphs_enabled(options.dialect);
-    CLexResult root_lex = c_lex_space(arena, space, source, trigraphs, options.dialect);
+    CLexResult root_lex = c_source_cache_lex(arena, space, source, trigraphs, options.dialect, options.source_cache);
     CSourceMetricsFileSet metrics_files = {0};
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
     {
@@ -10881,6 +11388,33 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     standard_replacement[1] = standard_version.length ? c_space_token(space, standard_version, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE) : (CToken){0};
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__BUSTER__"), standard_replacement, 1, 0, 0, false, false);
+    // Transitional word-idiom builtin spellings (#129). The frozen
+    // native-retirement fixtures still call these, and their bytes are pinned
+    // until a support-policy transition migrates them; delete these aliases in
+    // that change. Object-like macros keep the predefined-symbol range and the
+    // builtin table to the bit-width names only.
+    static char const* simd_word_idiom_aliases[][2] = {
+        {"__builtin_buster_simd_splat_byte", "__builtin_buster_simd_splat_u8"},
+        {"__builtin_buster_simd_equal_byte", "__builtin_buster_simd_equal_u8"},
+        {"__builtin_buster_simd_less_byte", "__builtin_buster_simd_less_u8"},
+        {"__builtin_buster_simd_sign_byte", "__builtin_buster_simd_sign_u8"},
+        {"__builtin_buster_simd_test_byte", "__builtin_buster_simd_test_u8"},
+        {"__builtin_buster_simd_permute2_byte", "__builtin_buster_simd_permute2_u8"},
+        {"__builtin_buster_simd_compress_byte", "__builtin_buster_simd_compress_u8"},
+        {"__builtin_buster_simd_compress_store_byte", "__builtin_buster_simd_compress_store_u8"},
+        {"__builtin_buster_simd_widen_byte", "__builtin_buster_simd_widen_u8"},
+        {"__builtin_buster_simd_shift_left_word", "__builtin_buster_simd_shift_left_u32"},
+        {"__builtin_buster_simd_ternary_word", "__builtin_buster_simd_ternary_u32"},
+        {"__builtin_buster_simd_equal_word", "__builtin_buster_simd_equal_u32"},
+        {"__builtin_buster_simd_splat_word", "__builtin_buster_simd_splat_u32"},
+        {"__builtin_buster_simd_less_word", "__builtin_buster_simd_less_u32"},
+        {"__builtin_buster_simd_compress_word", "__builtin_buster_simd_compress_u32"},
+    };
+    for (u32 alias_index = 0; alias_index < BUSTER_ARRAY_LENGTH(simd_word_idiom_aliases); alias_index += 1)
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)simd_word_idiom_aliases[alias_index][0]),
+                                   string_from_pointer((char8*)simd_word_idiom_aliases[alias_index][1]));
+    }
     // The GNU version macros are not a dialect switch.  Both reference
     // compilers predefine them in every standard mode -- `clang -std=c99
     // -dM -E` reports `__GNUC__ 4` beside `__STRICT_ANSI__ 1`, and gcc does
@@ -11948,7 +12482,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                     include_file->once = true;
                                 }
                                 include_file->included = true;
-                                CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source, trigraphs, options.dialect);
+                                CLexResult include_lex = include_once ? (CLexResult){0} : c_source_cache_lex(arena, space, include_source, trigraphs, options.dialect, options.source_cache);
                                 // A suppressed include lexed nothing and adds
                                 // zeroes; its path was already counted by the
                                 // inclusion that did the lexing, and its
@@ -12423,6 +12957,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                 ? 0 : c_preprocess_rewrite_obsolete_designators(arena, space, &map, &result);
     output_count += designator_tokens;
     result.detail->preprocessed.tokens += designator_tokens;
+    if (!options.preserve_spellings && !options.assembly_comment_lines)
+    {
+        c_preprocess_rename_local_labels(arena, space, &map, &result);
+    }
     c_source_map_publish_appended(arena, recovery, &map);
     u32 page_count = (u32)((space->used >> IR_SOURCE_MAP_PAGE_SHIFT) + 1);
     u32* pages = arena_allocate(arena, u32, page_count);

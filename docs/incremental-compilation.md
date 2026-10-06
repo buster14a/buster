@@ -1,3 +1,8 @@
+Current production increment: [bounded raw source translation/lex reuse](source-lex-reuse.md)
+(#1470). It is default-off and separate from the historical encoded-function
+prototype below. Its correctness and qualified performance gates are recorded
+on the implementation PR; historical timings do not qualify it.
+
 # Incremental code generation (research prototype)
 
 ## Status and scope
