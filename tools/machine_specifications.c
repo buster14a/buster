@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <sys/utsname.h>
 #include <sys/statvfs.h>
+#include <sys/stat.h>
 #if defined(__linux__)
 #include <sched.h>
 #include <sys/vfs.h>
@@ -334,9 +335,14 @@ static void named(MsReport *r, const char *text, const char *name, const char *k
     {
         const char *next = strchr(line, '\n');
         size_t size = next ? (size_t)(next - line) : strlen(line);
-        if (size > length && strncmp(line, name, length) == 0 && line[length] == ':')
+        const char *delimiter = line + (size >= length ? length : size);
+        while ((size_t)(delimiter - line) < size && (*delimiter == ' ' || *delimiter == '\t'))
         {
-            const char *start = line + length + 1;
+            ++delimiter;
+        }
+        if (size > length && strncmp(line, name, length) == 0 && *delimiter == ':')
+        {
+            const char *start = delimiter + 1;
             while (*start == ' ' || *start == '\t')
             {
                 ++start;
@@ -856,6 +862,91 @@ static uint64_t milliseconds(void)
 #endif
     return result;
 }
+
+#if defined(__linux__)
+static int fixture_text(const char *directory, const char *name, const char *text)
+{
+    int result = 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    FILE *file = fopen(path, "wb");
+    if (file)
+    {
+        size_t length = strlen(text);
+        result = fwrite(text, 1, length, file) == length;
+        result &= fclose(file) == 0;
+    }
+    return result;
+}
+static int linux_probe_tests(void)
+{
+    int failures = 0;
+    MsReport r;
+    initialize(&r);
+    named(&r, "model name\t: Actual exposed brand\nvendor_id\t: ExposedVendor\n", "model name", "cpu_model", 0);
+    named(&r, "vendor_id\t: ExposedVendor\n", "vendor_id", "cpu_vendor", 0);
+    failures += strcmp(field(&r, "cpu_model")->value, "Actual exposed brand") != 0;
+    failures += strcmp(field(&r, "cpu_vendor")->value, "ExposedVendor") != 0;
+    named(&r, "MemTotal: 8192 kB\n", "MemTotal", "memory_total_bytes", 1);
+    failures += strcmp(field(&r, "memory_total_bytes")->value, "8388608") != 0;
+    named(&r, "MemAvailable: not-a-number kB\n", "MemAvailable", "memory_available_bytes", 1);
+    failures += strcmp(field(&r, "memory_available_bytes")->status, "unknown") != 0;
+    char directory[] = "/tmp/buster-machine-spec-test-XXXXXX";
+    char *created = mkdtemp(directory);
+    if (created)
+    {
+        uint64_t quota = 0, period = 0;
+        failures += !fixture_text(directory, "memory.max", "8192\n");
+        failures += !fixture_text(directory, "cpu.max", "100000 100000\n");
+        failures += !fixture_text(directory, "cpuset.cpus.effective", "0-3\n");
+        cgroup_at(&r, directory, 1, &quota, &period);
+        failures += strcmp(field(&r, "memory_limit_bytes")->value, "8192") != 0;
+        failures += quota != 100000 || period != 100000;
+        failures += !fixture_text(directory, "memory.max", "4096\n");
+        failures += !fixture_text(directory, "cpu.max", "50000 100000\n");
+        failures += !fixture_text(directory, "cpuset.cpus.effective", "0-1\n");
+        cgroup_at(&r, directory, 1, &quota, &period);
+        failures += strcmp(field(&r, "memory_limit_bytes")->value, "4096") != 0;
+        failures += quota != 50000 || period != 100000;
+        failures += strcmp(field(&r, "cpu_cpuset_limit")->value, "0-1\n") != 0;
+        failures += !fixture_text(directory, "memory.max", "max\n");
+        failures += !fixture_text(directory, "cpu.max", "max 100000\n");
+        failures += !fixture_text(directory, "cpuset.cpus.effective", "0-7\n");
+        cgroup_at(&r, directory, 1, &quota, &period);
+        failures += strcmp(field(&r, "memory_limit_bytes")->value, "4096") != 0;
+        failures += quota != 50000 || period != 100000;
+        failures += strcmp(field(&r, "cpu_cpuset_limit")->value, "0-1\n") != 0;
+        failures += !fixture_text(directory, "memory.limit_in_bytes", "2048\n");
+        failures += !fixture_text(directory, "cpu.cfs_quota_us", "25000\n");
+        failures += !fixture_text(directory, "cpu.cfs_period_us", "100000\n");
+        failures += !fixture_text(directory, "cpuset.cpus", "0\n");
+        cgroup_at(&r, directory, 0, &quota, &period);
+        failures += strcmp(field(&r, "memory_limit_bytes")->value, "2048") != 0;
+        failures += quota != 25000 || period != 100000;
+        failures += strcmp(field(&r, "cpu_cpuset_limit")->value, "0\n") != 0;
+        const char *names[] =
+        {
+            "memory.max", "cpu.max", "cpuset.cpus.effective",
+            "memory.limit_in_bytes", "cpu.cfs_quota_us", "cpu.cfs_period_us", "cpuset.cpus"
+        };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s", directory, names[i]);
+            failures += unlink(path) != 0;
+        }
+        cgroup_at(&r, directory, 1, &quota, &period);
+        failures += strcmp(field(&r, "memory_limit_bytes")->value, "2048") != 0;
+        failures += rmdir(directory) != 0;
+    }
+    else
+    {
+        ++failures;
+    }
+    return failures;
+}
+#endif
+
 static int self_test(void)
 {
     int failures = 0;
@@ -903,6 +994,9 @@ static int self_test(void)
             ++failures;
         }
     }
+#if defined(__linux__)
+    failures += linux_probe_tests();
+#endif
     printf("Machine specifications self-test: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }
