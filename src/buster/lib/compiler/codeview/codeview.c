@@ -281,6 +281,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_function_address(ByteWriter* symbols, Cod
         .offset = symbols->count,
         .function = function_index,
         .kind = CODEVIEW_RELOCATION_SECREL32,
+        .addend = addend,
     };
     byte_writer_emit_u32_le(symbols, addend);
     relocations[(*relocation_count)++] = (CodeviewRelocation){

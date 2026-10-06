@@ -656,6 +656,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                                                                  });
     BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);
     BUSTER_TEST(arguments, model_built.relocation_count == 16);
+    u32 nonzero_addends = 0;
     for (u32 relocation_index = 0; relocation_index + 1 < model_built.relocation_count; relocation_index += 2)
     {
         CodeviewRelocation address = model_built.relocations[relocation_index];
@@ -666,9 +667,14 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         if (address.offset + 6 <= model_built.symbols.length)
         {
             BUSTER_TEST(arguments, codeview_test_u32(model_built.symbols.pointer + address.offset) <= 24);
+            // The relocation carries the in-place COFF addend explicitly, so
+            // a linker that overwrites the field keeps the range start (#2736).
+            BUSTER_TEST(arguments, address.addend == codeview_test_u32(model_built.symbols.pointer + address.offset));
+            nonzero_addends += address.addend != 0;
             BUSTER_TEST(arguments, codeview_test_u16(model_built.symbols.pointer + section.offset) == 0);
         }
     }
+    BUSTER_TEST(arguments, nonzero_addends != 0);
     // A model containing only locals must not create a zero-length
     // DEBUG_S_SYMBOLS subsection: MSVC link.exe rejects that stream.
     UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 2, 1, 2, 1);

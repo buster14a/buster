@@ -25639,12 +25639,22 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, codeview_signature == 4);
             u32 secrel_count = 0;
             u32 section_count = 0;
+            u32 secrel_nonzero_addends = 0;
             for (u32 relocation_index = 0; relocation_index < codeview_object->relocation_count; relocation_index += 1)
             {
                 ObjectRelocation relocation = codeview_object->relocations[relocation_index];
                 if (relocation.section != OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS)
                 {
                     continue;
+                }
+                if (relocation.kind == OBJECT_RELOCATION_COFF_SECREL32 && relocation.offset + 4 <= codeview_symbols.length)
+                {
+                    // The in-place field and the canonical addend must agree: the
+                    // source->exe link overwrites the field from the addend (#2736).
+                    u32 in_place = 0;
+                    memcpy(&in_place, codeview_symbols.pointer + relocation.offset, sizeof(in_place));
+                    BUSTER_TEST(arguments, relocation.addend == (s64)(s32)in_place);
+                    secrel_nonzero_addends += relocation.addend != 0;
                 }
                 secrel_count += relocation.kind == OBJECT_RELOCATION_COFF_SECREL32;
                 section_count += relocation.kind == OBJECT_RELOCATION_COFF_SECTION16;
@@ -25654,6 +25664,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // Functions and materialized globals each contribute matching
             // section-relative and section-index slots.
             BUSTER_TEST(arguments, secrel_count != 0 && secrel_count == section_count);
+            BUSTER_TEST(arguments, secrel_nonzero_addends != 0);
         }
         scratch_end(codeview_temporary);
     }
