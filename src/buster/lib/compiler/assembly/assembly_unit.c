@@ -42,6 +42,7 @@
 enum
 {
     ASSEMBLY_UNIT_SECTION_CAPACITY = 32,
+    ASSEMBLY_UNIT_SECTION_STACK_CAPACITY = 16,
     ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY = 16,
     ASSEMBLY_UNIT_OPERAND_CAPACITY = 64,
     // `.Lnum.` plus a 20-digit value, a dot, and a 10-digit ordinal.
@@ -128,6 +129,11 @@ struct AssemblyUnitBuilder
     u32 symbol_capacity;
     u32 relocation_capacity;
     u32 current_section;
+    // `.previous` swaps with the section selected before the current one;
+    // `.pushsection`/`.popsection` nest on the stack.
+    u32 previous_section;
+    u32 section_stack_count;
+    u32 section_stack[ASSEMBLY_UNIT_SECTION_STACK_CAPACITY];
     u32 line;
     u32 column;
     u64 statement;
@@ -574,7 +580,13 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_split_operands(String8 text, String8* oper
 
 // ------------------------------------------------------------- directives
 
-BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* builder, String8 operands)
+BUSTER_GLOBAL_LOCAL void assembly_unit_section_switch(AssemblyUnitBuilder* builder, u32 section)
+{
+    builder->previous_section = builder->current_section;
+    builder->current_section = section;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* builder, String8 operands, bool push)
 {
     String8 parts[4] = {0};
     u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
@@ -606,13 +618,43 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
     {
         return false;
     }
-    u32 section = assembly_unit_section_select(builder, name, kind);
-    if (section == UINT32_MAX)
+    bool valid = true;
+    if (push)
     {
-        return false;
+        valid = builder->section_stack_count < ASSEMBLY_UNIT_SECTION_STACK_CAPACITY && assembly_unit_section_current(builder);
+        if (valid)
+        {
+            builder->section_stack[builder->section_stack_count++] = builder->current_section;
+        }
+        else
+        {
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many nested '.pushsection' directives"));
+        }
     }
-    builder->current_section = section;
-    return true;
+    u32 section = valid ? assembly_unit_section_select(builder, name, kind) : UINT32_MAX;
+    if (section != UINT32_MAX)
+    {
+        assembly_unit_section_switch(builder, section);
+    }
+    return section != UINT32_MAX;
+}
+
+// `.popsection` and `.previous` need an earlier section to return to.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_return(AssemblyUnitBuilder* builder, bool pop)
+{
+    u32 target = pop ? (builder->section_stack_count ? builder->section_stack[builder->section_stack_count - 1] : UINT32_MAX) : builder->previous_section;
+    bool valid = target != UINT32_MAX;
+    if (valid)
+    {
+        builder->section_stack_count -= pop ? 1 : 0;
+        assembly_unit_section_switch(builder, target);
+    }
+    else
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT,
+                                 pop ? S8("'.popsection' without a matching '.pushsection'") : S8("'.previous' without an earlier section"));
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* builder, String8 directive, String8 operands)
@@ -1233,12 +1275,23 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
             return false;
         }
         u32 section = assembly_unit_section_select(builder, directive, kind);
-        builder->current_section = section;
+        if (section != UINT32_MAX)
+        {
+            assembly_unit_section_switch(builder, section);
+        }
         return section != UINT32_MAX;
     }
     if (string_equal(directive, S8(".section")))
     {
-        return assembly_unit_directive_section(builder, operands);
+        return assembly_unit_directive_section(builder, operands, false);
+    }
+    if (string_equal(directive, S8(".pushsection")))
+    {
+        return assembly_unit_directive_section(builder, operands, true);
+    }
+    if (string_equal(directive, S8(".popsection")) || string_equal(directive, S8(".previous")))
+    {
+        return !operands.length && assembly_unit_directive_section_return(builder, string_equal(directive, S8(".popsection")));
     }
     if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")) ||
         string_equal(directive, S8(".weak")) || string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
@@ -2046,6 +2099,7 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
         .target = options.target,
         .syntax = options.syntax == ASSEMBLY_SYNTAX_DEFAULT && options.target.cpu_arch == CPU_ARCH_X86_64 ? ASSEMBLY_SYNTAX_ATT : options.syntax,
         .current_section = UINT32_MAX,
+        .previous_section = UINT32_MAX,
         .column = 1,
     };
     builder.result.diagnostics = arena_allocate(arena, AssemblyDiagnostic, ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY);

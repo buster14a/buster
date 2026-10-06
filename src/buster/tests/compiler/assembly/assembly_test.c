@@ -2711,6 +2711,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_section_stack(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        // The pushed section takes bytes, and the pop resumes the earlier one;
+        // a bare name and an explicit flags string both push.
+        AssemblyUnitResult nested = assembly_unit_encode(arguments->arena,
+            S8(".data\n.byte 1\n.pushsection .rodata\n.byte 2\n.pushsection .mysec,\"a\",@progbits\n.byte 3\n.popsection\n.byte 4\n"
+               ".popsection\n.byte 5\n"),
+            (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, nested.diagnostic_count == 0 && nested.section_count == 3);
+        if (!nested.diagnostic_count && nested.section_count == 3)
+        {
+            BUSTER_TEST(arguments, string_equal(nested.sections[0].name, S8(".data")) && nested.sections[0].data.length == 2 &&
+                                   nested.sections[0].data.pointer[0] == 1 && nested.sections[0].data.pointer[1] == 5);
+            BUSTER_TEST(arguments, string_equal(nested.sections[1].name, S8(".rodata")) && nested.sections[1].data.length == 2 &&
+                                   nested.sections[1].data.pointer[0] == 2 && nested.sections[1].data.pointer[1] == 4);
+            BUSTER_TEST(arguments, string_equal(nested.sections[2].name, S8(".mysec")) && nested.sections[2].data.length == 1 &&
+                                   nested.sections[2].data.pointer[0] == 3);
+        }
+        AssemblyUnitResult previous = assembly_unit_encode(arguments->arena,
+            S8(".data\n.byte 1\n.section .rodata\n.byte 2\n.previous\n.byte 3\n.previous\n.byte 4\n"), (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, previous.diagnostic_count == 0 && previous.section_count == 2);
+        if (!previous.diagnostic_count && previous.section_count == 2)
+        {
+            BUSTER_TEST(arguments, previous.sections[0].data.length == 2 && previous.sections[0].data.pointer[1] == 3 &&
+                                   previous.sections[1].data.length == 2 && previous.sections[1].data.pointer[1] == 4);
+        }
+        String8 rejected[] = {
+            S8(".popsection\n"), S8(".previous\n"), S8(".data\n.popsection\n"), S8(".pushsection\n"), S8(".pushsection .mysec\n"),
+            S8(".data\n.popsection extra\n"),
+        };
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[row], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count >= 1);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4346,6 +4392,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_data_widths);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_quoted_instruction_symbols);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_bare_sections);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_stack);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
