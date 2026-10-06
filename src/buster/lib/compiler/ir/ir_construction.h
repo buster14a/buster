@@ -144,7 +144,9 @@
     X(VALIDATION_LABEL_PATH_WORK, validation_label_path_work) \
     X(VALIDATION_LABEL_OWNER_ROWS, validation_label_owner_rows) \
     X(VALIDATION_LABEL_OWNER_PROBES, validation_label_owner_probes) \
-    X(VALIDATION_LABEL_SCRATCH_BYTES, validation_label_scratch_bytes)
+    X(VALIDATION_LABEL_SCRATCH_BYTES, validation_label_scratch_bytes) \
+    X(C_STATEMENT_EXTENT_SPANS, c_statement_extent_spans) \
+    X(C_DELIMITER_FALLBACK_TOKENS, c_delimiter_fallback_tokens)
 
 typedef enum IrConstructionCounter
 {

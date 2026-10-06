@@ -166,6 +166,12 @@ controller or discarded values. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 
+Prepared `_Generic` lowering consumes the selected token range and lets its
+ordinary child expression produce the value and canonical type. It does not
+predict a selected type that the caller discards. Association duplicate checks
+keep up to sixteen type IDs locally; larger lists grow on accepted typed arms,
+independently of their expression token spans, and rewind at query completion.
+
 `c_test_type_identity_authority` inspects the independent expected return
 constants in raw canonical IR for both frontend forms on six native layouts.
 The `fixtures/type_identity.c` fixture beside the frontend tests repeats qualifier, decay, function
@@ -229,6 +235,36 @@ conjunction operator shares the spelling; a body with a goto label and
 `a && b` is not walked, and a parenthesized sizeof/alignof operand before
 `&&` is that operator's operand, not a cast. `c_test_label_values_gate` pins
 the gate through the private seam beside the unchanged diagnostics.
+
+## Reservation failure contract
+
+Required preprocessing spelling/token/shape/phase and semantic machine/phase
+reservations produce an error row in the caller's result arena, with the phase
+and requested size in its message. Parsing has no private arena reservation;
+it forwards failed preprocessing and diagnoses absent or oversized token input.
+Semantic analysis stays incomplete on a reservation failure. Lowering refuses
+an incomplete semantic model and never publishes its partially constructed
+program after a required arena reservation fails, including scratch growth.
+The driver preserves these diagnostics for syntax-only and object actions and
+has a nonempty fallback for an incomplete producer result.
+
+`c_test_frontend_reservation_failures` and
+`compiler_driver_test_frontend_reservation_failures` select each mandatory
+phase-local creation through a calling-thread private seam, which arms the
+existing `arena_test_fail_next_reserve` immediately at that creation and
+disables pool reuse for that attempt. Both SSA forms cover all four
+preprocessing, two analysis and one ordinary lowering reservations, failed
+result publication and successful next-call recovery. Driver coverage includes
+syntax-only for phases it actually executes. Oversized query/function growth
+uses the same reservation boundary and reports the requested bytes. A private
+tests-only initial function budget forces real growth with a small valid input;
+a synthetic query extent refuses its mapping before any oversized source walk.
+The attribute-role regression also forces its deep semantic spill reservation
+and checks recovery. The frontend reservation fixture releases each complete
+preprocessed unit with `c_preprocess_release` before rewinding scratch, so the
+test-unit registry is unregistered and cannot retain destroyed arena pointers. Existing scratch-limit regressions cover checked plan refusal.
+The lexer diagnostic arena remains an optional optimization with a tested
+result-arena fallback; failure there retains the original lexical diagnostics.
 
 ## Regression contract
 

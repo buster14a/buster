@@ -89,6 +89,11 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+A cached driver whose recorded dependency was deleted is a normal cache miss:
+the wrapper quietly rejects it and selects another valid entry or rebuilds.
+A missing dependency in a fresh TCC closure still fails with a diagnostic.
+The canonical hosted TCC workflow covers deletion, rebuild and warm reuse.
+
 Absolute dependency paths may contain lexical `..` components, as TinyCC
 resource paths can when its installation prefix contains them. Cold publication
 and warm validation hash the files at those paths and retain their spelling in
