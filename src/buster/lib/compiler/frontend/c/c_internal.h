@@ -269,7 +269,10 @@ struct CDeclarationBinding
     bool is_weak;
     bool is_constructor;
     bool is_destructor;
-    u8 reserved[5];
+    // __attribute__((returns_twice)): a call to the function may return a
+    // second time, as setjmp does (issue 1431).
+    bool is_returns_twice;
+    u8 reserved[4];
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
@@ -767,6 +770,8 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONSTRUCTOR_GNU,
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR,
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU,
+    C_SYMBOL_WELL_KNOWN_RETURNS_TWICE,
+    C_SYMBOL_WELL_KNOWN_RETURNS_TWICE_GNU,
     // The two decorations c_parse_skip_attributes steps over beside the
     // attribute spellings above; every specifier scan runs it once per
     // declaration, so the ladder it replaced ran on every identifier there.
@@ -797,6 +802,7 @@ BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
 #define C_ATTRIBUTE_WORDS_ALIAS (C_SYMBOL_WELL_KNOWN_BIT(ALIAS) | C_SYMBOL_WELL_KNOWN_BIT(ALIAS_GNU))
 #define C_ATTRIBUTE_WORDS_CONSTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU))
 #define C_ATTRIBUTE_WORDS_DESTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU))
+#define C_ATTRIBUTE_WORDS_RETURNS_TWICE (C_SYMBOL_WELL_KNOWN_BIT(RETURNS_TWICE) | C_SYMBOL_WELL_KNOWN_BIT(RETURNS_TWICE_GNU))
 
 // _Noreturn is a declaration specifier, not a GNU attribute query spelling.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_noreturn_word(String8 spelling)

@@ -331,6 +331,8 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             {
                 binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
                                                               C_ATTRIBUTE_WORDS_WEAK);
+                binding->is_returns_twice |= c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                                                       C_ATTRIBUTE_WORDS_RETURNS_TWICE);
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
                                               C_ATTRIBUTE_WORDS_CONSTRUCTOR))
                 {
@@ -55451,6 +55453,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // which for a static target nothing else names it would not.
     CEntityId* entity_alias_targets = arena_allocate(arena, CEntityId, parse.entity_count);
     bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
+    bool* entity_returns_twice = arena_allocate(arena, bool, parse.entity_count);
+    memset(entity_returns_twice, 0, sizeof(*entity_returns_twice) * parse.entity_count);
     memset(entity_alias_targets, 0xff, sizeof(*entity_alias_targets) * parse.entity_count);
     memset(entity_weak, 0, sizeof(*entity_weak) * parse.entity_count);
     // __attribute__((constructor))/((destructor)) per entity, for the same
@@ -55478,6 +55482,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
         entity_weak[declaration.entity.value] |= binding.is_weak;
+        entity_returns_twice[declaration.entity.value] |= binding.is_returns_twice && declaration.kind == C_DECLARATION_FUNCTION;
         if (declaration.kind == C_DECLARATION_FUNCTION && binding.is_constructor)
         {
             entity_constructor_priority[declaration.entity.value] = binding.constructor_priority;
@@ -55848,6 +55853,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_returns_twice = entity_returns_twice[entity_index],
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -55897,6 +55903,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_returns_twice = entity_returns_twice[entity_index],
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -56427,6 +56434,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                         .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                         .is_definition = declaration.is_definition,
                                                         .is_weak = declaration.entity.value < parse.entity_count && entity_weak[declaration.entity.value],
+                                                        .is_returns_twice = declaration.entity.value < parse.entity_count && entity_returns_twice[declaration.entity.value],
                                                     });
             if (declaration.entity.value < parse.entity_count)
             {

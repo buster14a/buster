@@ -8375,7 +8375,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_attribute_queries(UnitTestArgument
                    "#error destructor target query\n#endif\n"
                    "#if !__has_attribute(packed) || !__has_attribute(__aligned__) || !__has_attribute(vector_size)\n"
                    "#error layout control\n#endif\n"
-                   "#if __has_attribute(returns_twice) || __has_attribute(weakref) || __has_attribute(unused) || __has_attribute(buster_unknown)\n"
+                   "#if !__has_attribute(returns_twice) || !__has_attribute(__returns_twice__)\n"
+                   "#error returns_twice query\n#endif\n"
+                   "#if __has_attribute(weakref) || __has_attribute(unused) || __has_attribute(buster_unknown)\n"
                    "#error ignored attribute control\n#endif\n"
                    "#if __has_attribute(_Noreturn) || __has_attribute(__noreturn) || __has_attribute(__weak) || __has_attribute(__alias)\n"
                    "#error unimplemented spelling control\n#endif\n"
@@ -8516,6 +8518,170 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_noreturn(UnitTestArgumen
         }
         scratch_end(noreturn_temporary);
     }
+    return result;
+}
+
+// #1431: __attribute__((returns_twice)) on a declaration reaches the canonical
+// symbol, so a call to it under any name is a returns-twice call. `my_setjmp`
+// is no listed spelling: it reaches `_setjmp` through an asm label, the same
+// shape a platform header or context-save routine has. The unmarked
+// `my_plain` control proves an unlisted name is still no returns-twice call,
+// and the spelled-out `setjmp` proves the name list is kept.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_returns_twice_attribute_ir(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    if (BUSTER_REQUIRE(arguments, target.error == TARGET_PARSE_ERROR_NONE))
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        String8 source = S8("int my_setjmp(void*) __attribute__((returns_twice)) __asm__(\"_setjmp\");\n"
+                            "int my_reserved(void*) __attribute__((__returns_twice__));\n"
+                            "int my_plain(void*);\n"
+                            "int setjmp(void*);\n"
+                            "int use_attributed(void* p) { return my_setjmp(p); }\n"
+                            "int use_reserved(void* p) { return my_reserved(p); }\n"
+                            "int use_plain(void* p) { return my_plain(p); }\n"
+                            "int use_listed(void* p) { return setjmp(p); }\n"
+                            "int (*pointer)(void*) = my_setjmp;\n"
+                            "int use_pointer(void* p) { return pointer(p); }\n");
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("returns-twice-attribute.c"), target.target, &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            struct
+            {
+                String8 name;
+                bool returns_twice;
+                bool barrier;
+            } cases[] = {
+                {S8("use_attributed"), true, true}, {S8("use_reserved"), true, true}, {S8("use_plain"), false, false},
+                {S8("use_listed"), true, true},
+                // A call through a pointer names no declaration, so the attribute is
+                // not tracked there; it is still a local-promotion barrier.
+                {S8("use_pointer"), false, true},
+            };
+            BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, cases[index].name);
+                if (BUSTER_REQUIRE(arguments, function != 0))
+                {
+                    u32 calls = 0;
+                    bool returns_twice = false;
+                    bool barrier = false;
+                    for (u32 row = 0; row < function->instruction_count; row += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + row;
+                        if (instruction->opcode == IR_OPCODE_CALL)
+                        {
+                            calls += 1;
+                            returns_twice |= ir_call_returns_twice(program, instruction);
+                            barrier |= ir_local_promotion_call_barrier(program, instruction);
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, calls == 1, cases[index].name);
+                    BUSTER_TEST_RAW(arguments, returns_twice == cases[index].returns_twice, cases[index].name);
+                    BUSTER_TEST_RAW(arguments, barrier == cases[index].barrier, cases[index].name);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// #1431: a function whose setjmp wrapper carries the attribute keeps the values
+// it set before the first return across the second, in every allocator mode.
+// `a0..a11` are last read before the temporaries that follow, so frame storage
+// shared between the two groups could overwrite them before `longjmp`.
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL String8 const c_test_returns_twice_attribute_runtime_source =
+    S8_INITIALIZER("typedef long jump_buffer[64];\n"
+       "extern int my_setjmp(jump_buffer) __attribute__((returns_twice)) __asm__(\"_setjmp\");\n"
+       "extern void longjmp(jump_buffer, int);\n"
+       "static jump_buffer buffer;\n"
+       "static unsigned long long sink;\n"
+       "static unsigned long long first_sum;\n"
+       "static unsigned long long second_sum;\n"
+       "static int jumps;\n"
+       "__attribute__((noinline)) static unsigned long long mix(unsigned long long x)\n"
+       "{ x ^= x >> 31; x *= 0x9E3779B97F4A7C15ull; x ^= x >> 29; sink += x; return x; }\n"
+       "__attribute__((noinline)) static void maybe_jump(unsigned long long x)\n"
+       "{ sink ^= x; if (jumps++ == 0) longjmp(buffer, 1); }\n"
+       "#define T12(p, seed) \\\n"
+       "    unsigned long long p##0 = mix(seed), p##1 = mix(p##0 + 1), p##2 = mix(p##1 + 2), p##3 = mix(p##2 + 3), \\\n"
+       "        p##4 = mix(p##3 + 4), p##5 = mix(p##4 + 5), p##6 = mix(p##5 + 6), p##7 = mix(p##6 + 7), \\\n"
+       "        p##8 = mix(p##7 + 8), p##9 = mix(p##8 + 9), p##10 = mix(p##9 + 10), p##11 = mix(p##10 + 11)\n"
+       "#define S12(p) (p##0 + 3 * p##1 + 5 * p##2 + 7 * p##3 + 11 * p##4 + 13 * p##5 + 17 * p##6 + 19 * p##7 + \\\n"
+       "    23 * p##8 + 29 * p##9 + 31 * p##10 + 37 * p##11)\n"
+       "__attribute__((noinline)) void f(unsigned long long seed)\n"
+       "{\n"
+       "    T12(a, seed);\n"
+       "    my_setjmp(buffer);\n"
+       "    unsigned long long s = S12(a);\n"
+       "    if (jumps == 0) first_sum = s; else second_sum = s;\n"
+       "    T12(t, s ^ 0x5555);\n"
+       "    maybe_jump(S12(t));\n"
+       "}\n"
+       "int main(void)\n"
+       "{\n"
+       "    for (unsigned long long k = 1; k < 4; k += 1)\n"
+       "    {\n"
+       "        jumps = 0; first_sum = 0; second_sum = 0;\n"
+       "        f(k);\n"
+       "        if (jumps != 2 || first_sum == 0 || first_sum != second_sum) return 1;\n"
+       "    }\n"
+       "    return 0;\n"
+       "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_returns_twice_attribute_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+        CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("returns-twice-attribute-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_returns_twice_attribute_runtime_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("returns-twice-attribute-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("returns_twice runtime {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
     return result;
 }
 
@@ -17731,8 +17897,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
 
     // #639: __has_attribute answers for the GNU attributes this frontend
     // implements, in every spelling the parser accepts, and denies one it only
-    // steps over. `returns_twice` is the control for that: clang implements it
-    // and answers 1, this frontend skips it and must answer 0. The C attribute
+    // steps over. `unused` is the control for that: clang implements it and
+    // answers 1, this frontend skips it and must answer 0. `returns_twice` is
+    // implemented (#1431) and answers 1. The C attribute
     // operator keeps its own namespace and answers 0 throughout, including for
     // the bare GNU names the GNU operator answers 1 for and for a namespaced
     // spelling, which clang 18 also answers 0 and 1 for respectively.
@@ -17747,8 +17914,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
                         "#if !__has_attribute(vector_size) || !__has_attribute(__vector_size__) || !__has_attribute(__vector_size)\n"
                         "#error vector_size attribute query\n"
                         "#endif\n"
-                        "#if __has_attribute(buster_nonexistent_attribute) || __has_attribute(returns_twice) || __has_attribute(_Alignas)\n"
+                        "#if __has_attribute(buster_nonexistent_attribute) || __has_attribute(unused) || __has_attribute(_Alignas)\n"
                         "#error unimplemented attribute query\n"
+                        "#endif\n"
+                        "#if !__has_attribute(returns_twice) || !__has_attribute(__returns_twice__)\n"
+                        "#error returns_twice attribute query\n"
                         "#endif\n"
                         "#if __has_c_attribute(packed) || __has_c_attribute(aligned) || __has_c_attribute(vector_size)\n"
                         "#error C attribute query answered a GNU name\n"
@@ -44598,6 +44768,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
     C_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
     C_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
+    C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_ir);
+    C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_runtime);
     C_TEST_FIXTURE(arguments, c_test_runtime_place_updates);
     C_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_scope_interval_index);
