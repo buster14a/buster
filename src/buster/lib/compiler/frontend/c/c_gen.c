@@ -17328,11 +17328,16 @@ BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* b
         {
             break;
         }
+        // Only a leading `({ ... });` expression statement splits off a tail.
+        // Without the semicolon the nested statement expression is an operand
+        // of the following tokens (`({ ... }) + 2;`), so the whole body must be
+        // lowered as one unit or the operand's value is lost.
         u32 tail_start = nested_close + 2;
-        if (tail_start < close && c_token_is_punctuator(&builder->preprocess.tokens[tail_start], C_PUNCTUATOR_SEMICOLON))
+        if (tail_start >= close || !c_token_is_punctuator(&builder->preprocess.tokens[tail_start], C_PUNCTUATOR_SEMICOLON))
         {
-            tail_start += 1;
+            break;
         }
+        tail_start += 1;
         if (tail_start >= close)
         {
             break;
