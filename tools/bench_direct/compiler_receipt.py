@@ -16,6 +16,7 @@ Each mode publishes its own check name and marker.
 
 Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
+    attempt_marker                                         one attempt's check (#2803)
     PROFILE                                                frozen profile
     APPROVED_HOST, host_problem                            observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
@@ -41,6 +42,7 @@ CHECK_NAME, MARKER = MODES["main"]
 APPROVED_HOST = re.compile(r"AMD Ryzen 7 9700X\b")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+DECIMAL = re.compile(r"[1-9][0-9]*\Z")
 
 # The routine comparison of both modes. It is frozen per profile name:
 # changing any value needs a new name so receipts stay comparable. Deeper
@@ -80,6 +82,20 @@ def check_marker(head: str, mode: str = "main") -> str:
     if not (isinstance(head, str) and SHA.fullmatch(head)):
         raise ValueError("check marker needs an exact 40-hex head")
     return MODES[mode][1] + ":" + head
+
+
+def attempt_marker(head: str, mode: str, request_run_id: str, request_attempt: str, run_attempt: str) -> str:
+    """External ID of one measurement attempt's check (#2803).
+
+    The request run and its attempt name the scheduling, the bench attempt the
+    measurement, so a transport retry finds the same check while a deliberate
+    re-run (of either workflow) gets its own. The external ID is only a lookup
+    key; ownership also needs the GitHub Actions app, the name and the head.
+    """
+    for value in (request_run_id, request_attempt, run_attempt):
+        if not (isinstance(value, str) and DECIMAL.fullmatch(value)):
+            raise ValueError("attempt marker needs decimal run and attempt numbers")
+    return f"{check_marker(head, mode)}:{request_run_id}.{request_attempt}:{run_attempt}"
 
 
 def host_problem(receipt: object) -> str:
