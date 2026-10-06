@@ -310,6 +310,7 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
                 bool shift = !!(event->modifiers & (1u << WM_MODIFIER_SHIFT));
                 bool control = !!(event->modifiers & (1u << WM_MODIFIER_CONTROL));
                 u64 old_cursor = state->cursor;
+                bool deleted = false;
                 if (event->key == WM_KEY_HOME)
                 {
                     state->cursor = 0;
@@ -346,6 +347,7 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
                         ui_text_delete_range(value, first, last);
                         state->cursor = first;
                         result.changed = true;
+                        deleted = true;
                     }
                 }
                 else if (event->key == WM_KEY_DELETE)
@@ -365,6 +367,7 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
                         ui_text_delete_range(value, first, last);
                         state->cursor = first;
                         result.changed = true;
+                        deleted = true;
                     }
                 }
                 else if (control && event->key == WM_KEY_A)
@@ -379,7 +382,8 @@ UI_TextEditResult ui_text_edit(UI_TextEditState* state, String8 label, String8* 
                 {
                     continue;
                 }
-                if (shift)
+                // A destructive edit collapses the selection even with Shift held.
+                if (shift && !deleted)
                 {
                     state->mark = state->mark == old_cursor ? old_cursor : state->mark;
                     state->selecting = true;

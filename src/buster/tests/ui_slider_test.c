@@ -1,5 +1,6 @@
 // Slider component regressions owned by ui_slider_tests. The fixture helpers
-// below cover horizontal-arrow ownership and completed-click coordinates;
+// below cover horizontal-arrow ownership, completed-click coordinates and text-edit
+// selection state;
 // ui_slider_component_test.c runs this module against the real UI front doors.
 #include <buster/tests/ui_slider_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -337,12 +338,87 @@ BUSTER_GLOBAL_LOCAL void ui_test_slider_preserves_editor_arrows(UnitTestArgument
     result->test_count += result_local.test_count;
 }
 
+BUSTER_GLOBAL_LOCAL void ui_test_text_edit_destructive_shift_case(UnitTestArguments* arguments, UnitTestResult* output, WmKey key, bool shift, bool split,
+                                                                  const char8* initial, u64 initial_cursor, u64 initial_mark, const char8* expected,
+                                                                  u64 expected_cursor)
+{
+    UnitTestResult result_local = {0};
+#define result result_local
+    UI_State* state = ui_state_allocate(0, 0);
+    char8 memory[16] = {0};
+    u64 initial_length = strlen(initial);
+    memcpy(memory, initial, initial_length);
+    String8 value = {.pointer = memory, .length = initial_length};
+    UI_TextEditState edit = {0};
+    ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+    UI_TextEditResult built = ui_text_edit(&edit, S8("Destructive##text"), &value, BUSTER_ARRAY_LENGTH(memory));
+    ui_build_end();
+    float2 center = ui_test_box_center(built.widget.box);
+    UI_EventList events = ui_test_single_event(arguments->arena, UI_EventKind_Press, WM_KEY_MOUSE_LEFT, center, float2_make(0, 0), S8(""));
+    ui_test_frame(state, arguments->arena, events, 0.016);
+    ui_text_edit(&edit, S8("Destructive##text"), &value, BUSTER_ARRAY_LENGTH(memory));
+    ui_build_end();
+    edit.cursor = initial_cursor;
+    edit.mark = initial_mark;
+
+    u8 modifiers = shift ? (u8)(1u << WM_MODIFIER_SHIFT) : 0;
+    UI_Event press = {.kind = UI_EventKind_Press, .key = key, .modifiers = modifiers, .pos = center};
+    UI_Event text = {.kind = UI_EventKind_Text, .string = S8("X"), .pos = center};
+    events = (UI_EventList){0};
+    ui_event_list_push(arguments->arena, &events, &press);
+    if (!split)
+    {
+        ui_event_list_push(arguments->arena, &events, &text);
+    }
+    ui_test_frame(state, arguments->arena, events, 0.016);
+    UI_TextEditResult deleted = ui_text_edit(&edit, S8("Destructive##text"), &value, BUSTER_ARRAY_LENGTH(memory));
+    ui_build_end();
+    if (split)
+    {
+        BUSTER_TEST(arguments, deleted.mark == deleted.cursor && deleted.mark <= deleted.value.length && !edit.selecting);
+        events = (UI_EventList){0};
+        ui_event_list_push(arguments->arena, &events, &text);
+        ui_test_frame(state, arguments->arena, events, 0.016);
+        deleted = ui_text_edit(&edit, S8("Destructive##text"), &value, BUSTER_ARRAY_LENGTH(memory));
+        ui_build_end();
+    }
+    BUSTER_STRING_TEST(arguments, value, string_from_pointer_length(expected, strlen(expected)));
+    BUSTER_TEST(arguments, deleted.changed && deleted.cursor == expected_cursor && deleted.mark == expected_cursor && !edit.selecting &&
+                               deleted.mark <= value.length && state->events.count == 0);
+    ui_state_deinitialize(state);
+#undef result
+    output->succeeded_test_count += result_local.succeeded_test_count;
+    output->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_text_edit_destructive_shift(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    for (u32 split = 0; split < 2; split += 1)
+    {
+        for (u32 shift = 0; shift < 2; shift += 1)
+        {
+            // Unselected deletion at the end, interior and start, plus both selection directions and multibyte text.
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "abc", 3, 3, "abX", 3);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "abc", 1, 1, "Xbc", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "abc", 0, 0, "Xbc", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "abc", 2, 2, "abX", 3);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "abc", 0, 3, "X", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "abc", 3, 0, "X", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "abc", 0, 3, "X", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "abc", 3, 0, "X", 1);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_BACKSPACE, shift, split, "a\xc3\xa9", 3, 3, "aX", 2);
+            ui_test_text_edit_destructive_shift_case(arguments, result, WM_KEY_DELETE, shift, split, "\xc3\xa9z", 0, 0, "Xz", 1);
+        }
+    }
+}
+
 UnitTestResult ui_slider_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     ui_test_slider_keyboard_ownership(arguments, &result);
     ui_test_slider_release_chronology(arguments, &result);
     ui_test_slider_preserves_editor_arrows(arguments, &result);
+    ui_test_text_edit_destructive_shift(arguments, &result);
     return result;
 }
 #endif
