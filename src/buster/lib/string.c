@@ -1566,6 +1566,14 @@ void string_print(String8 format, ...)
     va_end(variable_arguments);
 }
 
+void string_print_error(String8 format, ...)
+{
+    va_list variable_arguments;
+    va_start(variable_arguments, format);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(2));
+    va_end(variable_arguments);
+}
+
 // Needles shorter than this use the direct sliding comparison; longer needles
 // use the allocation-free Crochemore-Perrin two-way search, which bounds the
 // work at O(haystack + needle) even for long repeated-prefix inputs.

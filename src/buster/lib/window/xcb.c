@@ -1914,7 +1914,7 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
         if (event_type == 0)
         {
             xcb_generic_error_t* error = (xcb_generic_error_t*)event;
-            string_print(S8("XCB error: code {u8}, major {u8}, minor {u16}\n"), error->error_code, error->major_code, error->minor_code);
+            string_print_error(S8("XCB error: code {u8}, major {u8}, minor {u16}\n"), error->error_code, error->major_code, error->minor_code);
             free(event);
             continue;
         }
@@ -4343,7 +4343,11 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                 break;
                 default:
                 {
-                    string_print(S8("Unknown event type: {u8:x}\n"), event_type);
+                    // Unhandled event types are normal; report them only on request.
+                    if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+                    {
+                        string_print(S8("Unknown event type: {u8:x}\n"), event_type);
+                    }
                 }
                 }
             }
@@ -4504,7 +4508,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
     }
     else
     {
-        string_print(S8("No screen found\n"));
+        string_print_error(S8("No screen found\n"));
     }
     return result;
 }

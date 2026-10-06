@@ -11,6 +11,10 @@
 //   instruction_counter_open                     STEP_INSTRUCTIONS hardware
 //                                                counters (Linux only)
 //   build_gcc_*, build_compiler_discovery_*      GCC selection and identity checks
+//   generate_build_directory_*, generate_add     generate's guarded replacement of
+//                                                its build directory (verdict,
+//                                                marker, prepare) and
+//                                                generate_guard_self_test
 //   build_artifact_fanout_*, self_host_*         self-host stages, stage
 //                                                comparison, and the
 //                                                provenance-checked artifact
@@ -103,6 +107,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_TIMING_SUMMARY,
     BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
     BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST,
+    BUILD_COMMAND_GENERATE_GUARD_SELF_TEST,
     BUILD_COMMAND_LUA_STAGING_SELF_TEST,
     BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST,
     BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST,
@@ -1522,70 +1527,17 @@ BUSTER_GLOBAL_LOCAL void make_directory_recursive(Arena* arena, String8 path)
     }
 }
 
-BUSTER_GLOBAL_LOCAL void remove_path_recursive(Arena* arena, String8 path)
+// Removes `path` and everything under it through the library's iterative,
+// link-safe walk (os_directory_delete), so tree depth never becomes stack depth
+// and symbolic links are removed rather than followed. A non-directory at
+// `path` is deleted as a file. Returns true only when nothing remains at
+// `path` (including when it never existed); false when any entry could not be
+// removed.
+BUSTER_GLOBAL_LOCAL bool remove_path_recursive(Arena* arena, String8 path)
 {
-    String8 path_z = string_duplicate_arena(arena, path, true);
-#if BUSTER_WINDOWS
-    TemporalArena temp = scratch_begin(&arena, 1);
-    String16 path_w = string16_from_string8(temp.arena, path_z, true);
-    DWORD attributes = GetFileAttributesW(path_w.pointer);
-    if (attributes != INVALID_FILE_ATTRIBUTES)
-    {
-        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT))
-        {
-            String8 pattern = path_join(temp.arena, path_z, S8("*"));
-            String16 pattern_w = string16_from_string8(temp.arena, pattern, true);
-            WIN32_FIND_DATAW find_data;
-            HANDLE find = FindFirstFileW(pattern_w.pointer, &find_data);
-            if (find != INVALID_HANDLE_VALUE)
-            {
-                do
-                {
-                    String8 name =
-                        string8_from_string16(temp.arena, (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
-                    if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
-                    {
-                        remove_path_recursive(arena, path_join(temp.arena, path_z, name));
-                    }
-                } while (FindNextFileW(find, &find_data));
-                FindClose(find);
-            }
-            RemoveDirectoryW(path_w.pointer);
-        }
-        else
-        {
-            DeleteFileW(path_w.pointer);
-        }
-    }
-    scratch_end(temp);
-#else
-    struct stat st;
-    if (lstat((const char*)path_z.pointer, &st) == 0)
-    {
-        if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode))
-        {
-            DIR* directory = opendir((const char*)path_z.pointer);
-            if (directory)
-            {
-                struct dirent* entry;
-                while ((entry = readdir(directory)) != 0)
-                {
-                    String8 name = string_from_pointer((char8*)entry->d_name);
-                    if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
-                    {
-                        remove_path_recursive(arena, path_join(arena, path_z, name));
-                    }
-                }
-                closedir(directory);
-            }
-            rmdir((const char*)path_z.pointer);
-        }
-        else
-        {
-            unlink((const char*)path_z.pointer);
-        }
-    }
-#endif
+    BUSTER_UNUSED(arena);
+    bool result = os_directory_delete(path) || os_file_delete(path);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, String8 compiler, bool cmake_override, String8 expected_error)
@@ -1710,10 +1662,330 @@ BUSTER_GLOBAL_LOCAL String8 generate_config(Generate generate)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate generate)
+// --- generate build-directory guard ---------------------------------------
+// `generate` replaces its build directory: it removes whatever is there and
+// configures a fresh tree. --build-directory is user input, so the removal
+// must first prove the target is disposable (generate_build_directory_verdict).
+// Nothing is deleted unless the target is missing, empty, a tree this driver
+// or CMake generated for this repository, or inside the repository's ignored
+// build/ scratch directory, and it is never the repository, an ancestor of it,
+// a source tree, or the home directory.
+#define GENERATE_BUILD_TREE_MARKER ".buster-build-tree"
+
+typedef enum GenerateTreeVerdict
 {
-    remove_path_recursive(arena, generate.build_directory);
-    make_directory_recursive(arena, generate.build_directory);
+    GENERATE_TREE_ACCEPTED_MISSING,
+    GENERATE_TREE_ACCEPTED_EMPTY,
+    GENERATE_TREE_ACCEPTED_MARKER,
+    GENERATE_TREE_ACCEPTED_CMAKE_CACHE,
+    GENERATE_TREE_ACCEPTED_BUILD_SCRATCH,
+    GENERATE_TREE_REFUSED_EMPTY_PATH,
+    GENERATE_TREE_REFUSED_NO_REPOSITORY,
+    GENERATE_TREE_REFUSED_REPOSITORY_ROOT,
+    GENERATE_TREE_REFUSED_ANCESTOR,
+    GENERATE_TREE_REFUSED_SOURCE_TREE,
+    GENERATE_TREE_REFUSED_HOME,
+    GENERATE_TREE_REFUSED_NOT_DIRECTORY,
+    GENERATE_TREE_REFUSED_UNRECOGNIZED,
+} GenerateTreeVerdict;
+
+typedef enum GeneratePathKind
+{
+    GENERATE_PATH_MISSING,
+    GENERATE_PATH_DIRECTORY,
+    GENERATE_PATH_OTHER,
+} GeneratePathKind;
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_string(String8 cache, String8 name, String8* value);
+
+BUSTER_GLOBAL_LOCAL bool generate_tree_accepted(GenerateTreeVerdict verdict)
+{
+    bool result = verdict < GENERATE_TREE_REFUSED_EMPTY_PATH;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 generate_tree_verdict_reason(GenerateTreeVerdict verdict)
+{
+    String8 result = S8("it is not recognized as a previous build tree for this repository");
+    switch (verdict)
+    {
+    case GENERATE_TREE_REFUSED_EMPTY_PATH:
+        result = S8("the build directory path is empty");
+        break;
+    case GENERATE_TREE_REFUSED_NO_REPOSITORY:
+        result = S8("the repository root could not be resolved");
+        break;
+    case GENERATE_TREE_REFUSED_REPOSITORY_ROOT:
+        result = S8("it is the repository root");
+        break;
+    case GENERATE_TREE_REFUSED_ANCESTOR:
+        result = S8("it contains the repository or the home directory");
+        break;
+    case GENERATE_TREE_REFUSED_SOURCE_TREE:
+        result = S8("it is, or is inside, a repository source tree");
+        break;
+    case GENERATE_TREE_REFUSED_HOME:
+        result = S8("it is the home directory");
+        break;
+    case GENERATE_TREE_REFUSED_NOT_DIRECTORY:
+        result = S8("it exists but is not a directory");
+        break;
+    case GENERATE_TREE_REFUSED_UNRECOGNIZED:
+    default:
+        break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 generate_path_trimmed_length(String8 path)
+{
+    u64 result = path.length;
+    while (result > 1 && path_is_separator(path.pointer[result - 1]))
+    {
+        result -= 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL char8 generate_path_fold(char8 c)
+{
+    char8 result = c == '\\' ? '/' : c;
+#if BUSTER_WINDOWS
+    result = ascii_to_lower(result);
+#endif
+    return result;
+}
+
+// True when `path` is `directory` or lies below it. Lexical: callers pass
+// canonical absolute paths.
+BUSTER_GLOBAL_LOCAL bool generate_path_within(String8 path, String8 directory)
+{
+    u64 path_length = path.pointer ? generate_path_trimmed_length(path) : 0;
+    u64 directory_length = directory.pointer ? generate_path_trimmed_length(directory) : 0;
+    bool result = directory_length != 0 && directory_length <= path_length;
+    for (u64 i = 0; result && i < directory_length; i += 1)
+    {
+        result = generate_path_fold(path.pointer[i]) == generate_path_fold(directory.pointer[i]);
+    }
+    if (result && path_length > directory_length)
+    {
+        result = path_is_separator(path.pointer[directory_length]) || path_is_separator(path.pointer[directory_length - 1]);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool generate_path_same(String8 left, String8 right)
+{
+    bool result = generate_path_within(left, right) && generate_path_within(right, left);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL GeneratePathKind generate_path_kind(Arena* arena, String8 path)
+{
+    GeneratePathKind result = GENERATE_PATH_MISSING;
+    String8 path_z = string_duplicate_arena(arena, path, true);
+#if BUSTER_WINDOWS
+    TemporalArena temp = scratch_begin(&arena, 1);
+    String16 path_w = string16_from_string8(temp.arena, path_z, true);
+    DWORD attributes = GetFileAttributesW(path_w.pointer);
+    if (attributes != INVALID_FILE_ATTRIBUTES)
+    {
+        result = (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT) ? GENERATE_PATH_DIRECTORY : GENERATE_PATH_OTHER;
+    }
+    else
+    {
+        DWORD error = GetLastError();
+        result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? GENERATE_PATH_MISSING : GENERATE_PATH_OTHER;
+    }
+    scratch_end(temp);
+#else
+    struct stat st;
+    if (lstat((const char*)path_z.pointer, &st) == 0)
+    {
+        result = S_ISDIR(st.st_mode) ? GENERATE_PATH_DIRECTORY : GENERATE_PATH_OTHER;
+    }
+    else if (errno != ENOENT)
+    {
+        result = GENERATE_PATH_OTHER;
+    }
+#endif
+    return result;
+}
+
+// An unreadable directory counts as non-empty so the caller fails closed.
+BUSTER_GLOBAL_LOCAL bool generate_directory_has_entries(Arena* arena, String8 path)
+{
+    bool result = false;
+    String8 path_z = string_duplicate_arena(arena, path, true);
+#if BUSTER_WINDOWS
+    TemporalArena temp = scratch_begin(&arena, 1);
+    String8 pattern = path_join(temp.arena, path_z, S8("*"));
+    String16 pattern_w = string16_from_string8(temp.arena, pattern, true);
+    WIN32_FIND_DATAW find_data;
+    HANDLE find = FindFirstFileW(pattern_w.pointer, &find_data);
+    result = find == INVALID_HANDLE_VALUE;
+    if (find != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            String8 name = string8_from_string16(temp.arena, (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
+            result = !string_equal(name, S8(".")) && !string_equal(name, S8(".."));
+        } while (!result && FindNextFileW(find, &find_data));
+        FindClose(find);
+    }
+    scratch_end(temp);
+#else
+    DIR* directory = opendir((const char*)path_z.pointer);
+    result = directory == 0;
+    if (directory)
+    {
+        struct dirent* entry;
+        while (!result && (entry = readdir(directory)) != 0)
+        {
+            String8 name = string_from_pointer((char8*)entry->d_name);
+            result = !string_equal(name, S8(".")) && !string_equal(name, S8(".."));
+        }
+        closedir(directory);
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool generate_cache_names_repository(Arena* arena, String8 directory, String8 repository_root)
+{
+    bool result = false;
+    String8 cache_path = path_join(arena, directory, S8("CMakeCache.txt"));
+    ByteSlice cache_bytes = file_read(arena, cache_path, (FileReadOptions){.map_required = 0});
+    String8 cache = BYTE_SLICE_TO_STRING(8, cache_bytes);
+    String8 home_directory = {0};
+    if (cache.pointer && build_artifact_fanout_cache_string(cache, S8("CMAKE_HOME_DIRECTORY"), &home_directory) && home_directory.length)
+    {
+        String8 resolved = os_path_absolute(arena, string_duplicate_arena(arena, home_directory, true), true);
+        result = generate_path_same(resolved.length ? resolved : home_directory, repository_root);
+    }
+    return result;
+}
+
+// Decides whether `generate` may delete `build_directory`. `repository_root`
+// and `home` must be canonical absolute paths (`home` may be empty). Reads the
+// file system but modifies nothing.
+BUSTER_GLOBAL_LOCAL GenerateTreeVerdict generate_build_directory_verdict(Arena* arena, String8 build_directory, String8 repository_root, String8 home)
+{
+    GenerateTreeVerdict result = GENERATE_TREE_REFUSED_UNRECOGNIZED;
+    GeneratePathKind kind = build_directory.length ? generate_path_kind(arena, build_directory) : GENERATE_PATH_OTHER;
+    if (!build_directory.length)
+    {
+        result = GENERATE_TREE_REFUSED_EMPTY_PATH;
+    }
+    else if (!repository_root.length)
+    {
+        result = GENERATE_TREE_REFUSED_NO_REPOSITORY;
+    }
+    else if (kind == GENERATE_PATH_MISSING)
+    {
+        result = GENERATE_TREE_ACCEPTED_MISSING;
+    }
+    else
+    {
+        // Resolve links and dot components so `.`, `..` and aliases cannot hide
+        // the repository from the comparisons below.
+        String8 target = os_path_absolute(arena, string_duplicate_arena(arena, build_directory, true), true);
+        String8 protected_trees[] = {S8(".git"), S8(".github"), S8("cmake"), S8("docs"), S8("src"), S8("tests"), S8("tools")};
+        bool source_tree = false;
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(protected_trees) && !source_tree; i += 1)
+        {
+            source_tree = generate_path_within(target, path_join(arena, repository_root, protected_trees[i]));
+        }
+        String8 scratch = path_join(arena, repository_root, S8("build"));
+        String8 scratch_resolved = os_path_absolute(arena, scratch, true);
+        if (!target.length || generate_path_kind(arena, target) != GENERATE_PATH_DIRECTORY)
+        {
+            result = GENERATE_TREE_REFUSED_NOT_DIRECTORY;
+        }
+        else if (generate_path_same(target, repository_root))
+        {
+            result = GENERATE_TREE_REFUSED_REPOSITORY_ROOT;
+        }
+        else if (generate_path_within(repository_root, target) || (home.length && generate_path_within(home, target) && !generate_path_same(target, home)))
+        {
+            result = GENERATE_TREE_REFUSED_ANCESTOR;
+        }
+        else if (home.length && generate_path_same(target, home))
+        {
+            result = GENERATE_TREE_REFUSED_HOME;
+        }
+        else if (source_tree)
+        {
+            result = GENERATE_TREE_REFUSED_SOURCE_TREE;
+        }
+        else if (!generate_directory_has_entries(arena, target))
+        {
+            result = GENERATE_TREE_ACCEPTED_EMPTY;
+        }
+        else if (generate_path_kind(arena, path_join(arena, target, S8(GENERATE_BUILD_TREE_MARKER))) == GENERATE_PATH_OTHER)
+        {
+            result = GENERATE_TREE_ACCEPTED_MARKER;
+        }
+        else if (generate_cache_names_repository(arena, target, repository_root))
+        {
+            result = GENERATE_TREE_ACCEPTED_CMAKE_CACHE;
+        }
+        else if (generate_path_within(target, scratch_resolved.length ? scratch_resolved : scratch))
+        {
+            result = GENERATE_TREE_ACCEPTED_BUILD_SCRATCH;
+        }
+    }
+    return result;
+}
+
+// Verifies, removes the previous tree, recreates the directory and stamps it
+// with the marker so a failed or partial configure is still recognized next
+// time. Reports the reason and returns false, leaving the target untouched,
+// when the guard refuses; returns false after reporting if removal is partial.
+BUSTER_GLOBAL_LOCAL bool generate_build_directory_prepare_in(Arena* arena, String8 build_directory, String8 repository_root, String8 home)
+{
+    GenerateTreeVerdict verdict = generate_build_directory_verdict(arena, build_directory, repository_root, home);
+    bool result = generate_tree_accepted(verdict);
+    if (!result)
+    {
+        string_print(S8("error: refusing to replace build directory '{S8}': {S8}; generate deletes its build directory, so pass a missing or empty directory, or a previously generated build tree\n"),
+                     build_directory, generate_tree_verdict_reason(verdict));
+    }
+    else if (!remove_path_recursive(arena, build_directory))
+    {
+        string_print(S8("error: could not completely remove the previous build directory '{S8}'; close programs using it or remove it manually\n"), build_directory);
+        result = false;
+    }
+    else
+    {
+        make_directory_recursive(arena, build_directory);
+        String8 marker = path_join(arena, build_directory, S8(GENERATE_BUILD_TREE_MARKER));
+        result = file_write(marker, BUSTER_SLICE_TO_BYTE_SLICE(S8("Buster build tree: `generate` may delete and recreate this directory.\n")));
+        if (!result)
+        {
+            string_print(S8("error: could not write {S8}\n"), marker);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool generate_build_directory_prepare(Arena* arena, String8 build_directory)
+{
+    // `cmake -B` uses the current directory as the source tree, so it is the
+    // repository this generation belongs to.
+    String8 repository_root = os_path_absolute(arena, S8("."), true);
+#if BUSTER_WINDOWS
+    String8 home_variable = os_get_environment_variable(S8("USERPROFILE"));
+#else
+    String8 home_variable = os_get_environment_variable(S8("HOME"));
+#endif
+    String8 home = home_variable.length ? os_path_absolute(arena, string_duplicate_arena(arena, home_variable, true), true) : (String8){0};
+    bool result = generate_build_directory_prepare_in(arena, build_directory, repository_root, home);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void generate_command_add(Arena* arena, BuildStep* step, Generate generate)
+{
     if (generate.cmake_profile_set)
     {
         make_directory_recursive(arena, path_parent(arena, generate.cmake_profile));
@@ -1838,6 +2110,19 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
                 .use_process_environment = 1,
             },
     };
+}
+
+// Plans the CMake configure step after the guarded replacement of the build
+// directory. Returns false, having printed why, when the directory may not be
+// replaced; the caller must then fail instead of running the graph.
+BUSTER_GLOBAL_LOCAL bool generate_add(Arena* arena, BuildStep* step, Generate generate)
+{
+    bool result = generate_build_directory_prepare(arena, generate.build_directory);
+    if (result)
+    {
+        generate_command_add(arena, step, generate);
+    }
+    return result;
 }
 
 typedef struct CmakeBuildOptions CmakeBuildOptions;
@@ -4677,7 +4962,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
         generate.config = config;
         generate.config_set = true;
         BuildStep* generate_step = step_add(arena);
-        generate_add(arena, generate_step, generate);
+        if (!generate_add(arena, generate_step, generate))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
     }
     String8 ide_name =
 #if BUSTER_WINDOWS
@@ -16755,25 +17043,29 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_add(Arena* arena, String8 bui
 {
     String8 config = cmake_build_config(options);
     String8 cmake_cache = path_join(arena, build_directory, S8("CMakeCache.txt"));
+    bool generated = true;
     if (!path_exists(arena, cmake_cache))
     {
         generate.build_directory = build_directory;
         generate.config = config;
         generate.config_set = true;
         BuildStep* generate_step = step_add(arena);
-        generate_add(arena, generate_step, generate);
+        generated = generate_add(arena, generate_step, generate);
     }
-    String8 targets[] = {S8("ide")};
-    build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
-    BuildStep* step = step_add(arena);
-    ProcessRun* run = run_add(arena, step);
-    TestModeMatrixOptions* action_options = arena_allocate(arena, TestModeMatrixOptions, 1);
-    *action_options = (TestModeMatrixOptions){
-        .build_directory = build_directory,
-        .config = config,
-    };
-    *run = (ProcessRun){.callback = test_mode_matrix_action, .callback_data = action_options};
-    return PROCESS_RESULT_SUCCESS;
+    if (generated)
+    {
+        String8 targets[] = {S8("ide")};
+        build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
+        BuildStep* step = step_add(arena);
+        ProcessRun* run = run_add(arena, step);
+        TestModeMatrixOptions* action_options = arena_allocate(arena, TestModeMatrixOptions, 1);
+        *action_options = (TestModeMatrixOptions){
+            .build_directory = build_directory,
+            .config = config,
+        };
+        *run = (ProcessRun){.callback = test_mode_matrix_action, .callback_data = action_options};
+    }
+    return generated ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 // --- QuickJS compatibility harness ---------------------------------------
@@ -18737,6 +19029,141 @@ BUSTER_GLOBAL_LOCAL ProcessResult musl_directory_self_test(Arena* arena)
     }
     string_print(S8("MUSL_DIRECTORY_SELF_TEST status={S8} files_per_order={u64} symlink_checked={u32}\n"), passed ? S8("pass") : S8("fail"), (u64)FILE_COUNT,
                  (u32)symlink_checked);
+    return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
+// generate_guard_self_test: the build-directory guard of `generate` against
+// sentinel trees. The verdict function is exercised directly with an explicit
+// repository root and home directory (a fake repository inside a claimed
+// scratch directory), so no CMake run and no real checkout path is involved.
+BUSTER_GLOBAL_LOCAL bool generate_guard_self_test_verdict(Arena* arena, String8 label, String8 directory, String8 root, String8 home,
+                                                          GenerateTreeVerdict expected)
+{
+    GenerateTreeVerdict actual = generate_build_directory_verdict(arena, directory, root, home);
+    bool result = actual == expected;
+    if (!result)
+    {
+        string_print(S8("error: generate guard self-test: {S8}: verdict {u32}, expected {u32}\n"), label, (u32)actual, (u32)expected);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult generate_guard_self_test(Arena* arena)
+{
+    String8 scratch = {0};
+    bool passed = summary_self_test_claim_directory(arena, S8("generate-guard"), &scratch);
+    if (passed)
+    {
+        String8 base = os_path_absolute(arena, scratch, true);
+        String8 root = path_join(arena, base, S8("repo"));
+        String8 home = path_join(arena, base, S8("home"));
+        String8 root_trees[] = {S8("src"), S8("src/nested"), S8("tests"), S8("tools"), S8("docs"), S8("build"), S8("build/tree")};
+        make_directory_recursive(arena, home);
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(root_trees); i += 1)
+        {
+            make_directory_recursive(arena, path_join(arena, root, root_trees[i]));
+        }
+        root = os_path_absolute(arena, root, true);
+        home = os_path_absolute(arena, home, true);
+        passed = root.length && home.length;
+
+        // The reported repro: a checkout-like tree that is not a build tree.
+        String8 victim = path_join(arena, base, S8("victim"));
+        String8 victim_config = path_join(arena, victim, S8(".git/config"));
+        String8 victim_source = path_join(arena, victim, S8("src/main.c"));
+        make_directory_recursive(arena, path_join(arena, victim, S8(".git")));
+        make_directory_recursive(arena, path_join(arena, victim, S8("src")));
+        passed = summary_self_test_write_text(victim_config, S8("[core]\n")) && summary_self_test_write_text(victim_source, S8("int x;\n")) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("checkout-like tree"), victim, root, home, GENERATE_TREE_REFUSED_UNRECOGNIZED) && passed;
+        passed = !generate_build_directory_prepare_in(arena, victim, root, home) && passed;
+        passed = path_exists(arena, victim_config) && path_exists(arena, victim_source) && !path_exists(arena, path_join(arena, victim, S8(GENERATE_BUILD_TREE_MARKER))) && passed;
+
+        // Forbidden targets, including spellings that reach them indirectly.
+        passed = generate_guard_self_test_verdict(arena, S8("repository root"), root, root, home, GENERATE_TREE_REFUSED_REPOSITORY_ROOT) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("repository root with trailing separator"), path_join(arena, root, S8("")), root, home,
+                                                  GENERATE_TREE_REFUSED_REPOSITORY_ROOT) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("repository root via dot components"), path_join(arena, root, S8("src/..")), root, home,
+                                                  GENERATE_TREE_REFUSED_REPOSITORY_ROOT) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("ancestor of the repository"), base, root, home, GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("parent of the repository"), path_join(arena, root, S8("..")), root, home,
+                                                  GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("home directory"), home, root, home, GENERATE_TREE_REFUSED_HOME) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("ancestor of home"), base, root, path_join(arena, home, S8("")), GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("src tree"), path_join(arena, root, S8("src")), root, home, GENERATE_TREE_REFUSED_SOURCE_TREE) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("inside src tree"), path_join(arena, root, S8("src/nested")), root, home,
+                                                  GENERATE_TREE_REFUSED_SOURCE_TREE) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("tests tree"), path_join(arena, root, S8("tests")), root, home, GENERATE_TREE_REFUSED_SOURCE_TREE) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("tools tree"), path_join(arena, root, S8("tools")), root, home, GENERATE_TREE_REFUSED_SOURCE_TREE) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("empty path"), (String8){0}, root, home, GENERATE_TREE_REFUSED_EMPTY_PATH) && passed;
+        // The real working directory spelled `.` and `..` must be refused too.
+        String8 real_root = os_path_absolute(arena, S8("."), true);
+        passed = generate_guard_self_test_verdict(arena, S8("dot is the checkout"), S8("."), real_root, (String8){0}, GENERATE_TREE_REFUSED_REPOSITORY_ROOT) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("dot-dot is above the checkout"), S8(".."), real_root, (String8){0}, GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+#if !BUSTER_WINDOWS
+        passed = generate_guard_self_test_verdict(arena, S8("filesystem root"), S8("/"), real_root, (String8){0}, GENERATE_TREE_REFUSED_ANCESTOR) && passed;
+#endif
+        String8 plain_file = path_join(arena, base, S8("plain-file"));
+        passed = summary_self_test_write_text(plain_file, S8("not a directory")) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("regular file"), plain_file, root, home, GENERATE_TREE_REFUSED_NOT_DIRECTORY) && passed;
+        passed = !generate_build_directory_prepare_in(arena, plain_file, root, home) && path_exists(arena, plain_file) && passed;
+
+        // A nonexistent and an empty directory carry nothing to lose.
+        String8 missing = path_join(arena, base, S8("missing"));
+        String8 empty = path_join(arena, base, S8("empty"));
+        make_directory_recursive(arena, empty);
+        passed = generate_guard_self_test_verdict(arena, S8("missing"), missing, root, home, GENERATE_TREE_ACCEPTED_MISSING) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("empty"), empty, root, home, GENERATE_TREE_ACCEPTED_EMPTY) && passed;
+
+        // Previously generated trees: this driver's marker, a CMake cache for
+        // this repository, and the repository's ignored build/ scratch tree.
+        String8 marked = path_join(arena, base, S8("marked"));
+        String8 marked_keep = path_join(arena, base, S8("marked-keep"));
+        make_directory_recursive(arena, path_join(arena, marked, S8("deep/er")));
+        make_directory_recursive(arena, marked_keep);
+        String8 marked_keep_file = path_join(arena, marked_keep, S8("keep.txt"));
+        passed = summary_self_test_write_text(path_join(arena, marked, S8(GENERATE_BUILD_TREE_MARKER)), S8("marker\n")) && passed;
+        passed = summary_self_test_write_text(path_join(arena, marked, S8("deep/er/object.o")), S8("object")) && passed;
+        passed = summary_self_test_write_text(marked_keep_file, S8("outside the tree")) && passed;
+#if BUSTER_LINUX || BUSTER_APPLE
+        // A link inside the old tree must be removed as a link, not followed.
+        passed = symlink((const char*)marked_keep.pointer, (const char*)path_join(arena, marked, S8("deep/link")).pointer) == 0 && passed;
+#endif
+        passed = generate_guard_self_test_verdict(arena, S8("marker tree"), marked, root, home, GENERATE_TREE_ACCEPTED_MARKER) && passed;
+
+        String8 cached = path_join(arena, base, S8("cached"));
+        make_directory_recursive(arena, cached);
+        String8 cache_text = string_format(arena, S8("CMAKE_CACHEFILE_DIR:INTERNAL={S8}\nCMAKE_HOME_DIRECTORY:INTERNAL={S8}\n"), cached, root);
+        passed = summary_self_test_write_text(path_join(arena, cached, S8("CMakeCache.txt")), cache_text) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("cmake cache of this repository"), cached, root, home, GENERATE_TREE_ACCEPTED_CMAKE_CACHE) && passed;
+
+        String8 foreign = path_join(arena, base, S8("foreign"));
+        make_directory_recursive(arena, foreign);
+        String8 foreign_text = string_format(arena, S8("CMAKE_HOME_DIRECTORY:INTERNAL={S8}\n"), path_join(arena, base, S8("another-repository")));
+        passed = summary_self_test_write_text(path_join(arena, foreign, S8("CMakeCache.txt")), foreign_text) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("cmake cache of another source tree"), foreign, root, home, GENERATE_TREE_REFUSED_UNRECOGNIZED) && passed;
+
+        String8 scratch_tree = path_join(arena, root, S8("build/tree"));
+        passed = summary_self_test_write_text(path_join(arena, scratch_tree, S8("anything.txt")), S8("generated")) && passed;
+        passed = generate_guard_self_test_verdict(arena, S8("build scratch tree"), scratch_tree, root, home, GENERATE_TREE_ACCEPTED_BUILD_SCRATCH) && passed;
+
+        // Replacing an accepted tree removes all of it and stamps the marker.
+        passed = generate_build_directory_prepare_in(arena, marked, root, home) && passed;
+        passed = !path_exists(arena, path_join(arena, marked, S8("deep/er/object.o"))) && path_exists(arena, path_join(arena, marked, S8(GENERATE_BUILD_TREE_MARKER))) &&
+                 path_exists(arena, marked_keep_file) && passed;
+        passed = generate_build_directory_prepare_in(arena, cached, root, home) && !path_exists(arena, path_join(arena, cached, S8("CMakeCache.txt"))) &&
+                 path_exists(arena, path_join(arena, cached, S8(GENERATE_BUILD_TREE_MARKER))) && passed;
+        passed = generate_build_directory_prepare_in(arena, missing, root, home) && path_exists(arena, path_join(arena, missing, S8(GENERATE_BUILD_TREE_MARKER))) && passed;
+        passed = generate_build_directory_prepare_in(arena, empty, root, home) && path_exists(arena, path_join(arena, empty, S8(GENERATE_BUILD_TREE_MARKER))) && passed;
+        // The stamped directory is itself recognized the next time around.
+        passed = generate_guard_self_test_verdict(arena, S8("stamped empty tree"), empty, root, home, GENERATE_TREE_ACCEPTED_MARKER) && passed;
+        // The previous tree was removed before any new content: failure to
+        // remove is reported, and an absent path is not a failure.
+        passed = remove_path_recursive(arena, path_join(arena, base, S8("never-existed"))) && passed;
+        passed = remove_path_recursive(arena, plain_file) && !path_exists(arena, plain_file) && passed;
+
+        passed = remove_path_recursive(arena, scratch) && passed;
+    }
+    string_print(S8("GENERATE_GUARD_SELF_TEST status={S8}\n"), passed ? S8("pass") : S8("fail"));
     return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
@@ -22244,7 +22671,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult x86_completion_census_prepare_output_action(Ar
     return path_exists(arena, plan->output_path) ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL void x86_completion_census_add(Arena* arena, String8 build_directory, bool ci)
+BUSTER_GLOBAL_LOCAL bool x86_completion_census_add(Arena* arena, String8 build_directory, bool ci)
 {
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS)
     String8 ide_name =
@@ -22300,7 +22727,8 @@ BUSTER_GLOBAL_LOCAL void x86_completion_census_add(Arena* arena, String8 build_d
     };
 
     BuildStep* generate_step = step_add(arena);
-    generate_add(arena, generate_step, canonical);
+    // A refused generation fails the command; the steps below stay unexecuted.
+    bool result = generate_add(arena, generate_step, canonical);
     BuildStep* capture_step = step_add(arena);
     ProcessRun* capture_run = run_add(arena, capture_step);
     *capture_run = (ProcessRun){
@@ -22349,7 +22777,9 @@ BUSTER_GLOBAL_LOCAL void x86_completion_census_add(Arena* arena, String8 build_d
     BuildStep* unsupported_step = step_add(arena);
     ProcessRun* unsupported_run = run_add(arena, unsupported_step);
     *unsupported_run = (ProcessRun){.callback = x86_completion_census_validate_action};
+    bool result = true;
 #endif
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void x86_completion_census_add_existing(Arena* arena, BuildArtifactFanout* fanout)
@@ -25221,6 +25651,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         {
             focused_test_result = musl_directory_self_test(arena);
         }
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            focused_test_result = generate_guard_self_test(arena);
+        }
 #if BUSTER_LINUX || BUSTER_APPLE
         if (focused_test_result == PROCESS_RESULT_SUCCESS)
         {
@@ -25359,7 +25793,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                 : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
-        generate_add(arena, generate_step, generate);
+        if (!generate_add(arena, generate_step, generate))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
         matrix_phase_wrap(arena, generate_step->last_process, matrix_phase_find_tree(build_directory), S8("configure"), S8(""), 0);
         if (cmake_profile)
         {
@@ -37084,6 +37521,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_TIMING_SUMMARY] = S8_INITIALIZER("test_timing_summary"),
         [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
         [BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST] = S8_INITIALIZER("musl_directory_self_test"),
+        [BUILD_COMMAND_GENERATE_GUARD_SELF_TEST] = S8_INITIALIZER("generate_guard_self_test"),
         [BUILD_COMMAND_LUA_STAGING_SELF_TEST] = S8_INITIALIZER("lua_staging_self_test"),
         [BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST] = S8_INITIALIZER("compatibility_spawn_self_test"),
         [BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST] = S8_INITIALIZER("compiler_discovery_self_test"),
@@ -38183,7 +38621,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         {
             generate.cmake_arguments = string8_list_to_slice(arena, generate_cmake_arguments);
             BuildStep* generate_step = step_add(arena);
-            generate_add(arena, generate_step, generate);
+            if (!generate_add(arena, generate_step, generate))
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
         }
         break;
         case BUILD_COMMAND_BUILD:
@@ -38243,6 +38684,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST:
         {
             result = musl_directory_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_GENERATE_GUARD_SELF_TEST:
+        {
+            result = generate_guard_self_test(arena);
         }
         break;
         case BUILD_COMMAND_LUA_STAGING_SELF_TEST:
@@ -38318,7 +38764,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_X86_64_COMPLETION_CENSUS:
         {
-            x86_completion_census_add(arena, build_directory, false);
+            if (!x86_completion_census_add(arena, build_directory, false))
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
         }
         break;
         case BUILD_COMMAND_TEST_CJSON:
