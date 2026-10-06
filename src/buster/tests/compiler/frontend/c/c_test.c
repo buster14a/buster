@@ -294,7 +294,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_scratch_capacity(UnitTestArgu
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -433,7 +433,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_conditional_sizeof_mem
     {
         BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -476,7 +476,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(
         {
             BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -530,7 +530,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(
         {
             BUSTER_TEST(arguments, arena_destroy(lower_arena, 1));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -590,7 +590,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_flat_call_arguments(UnitTestA
             BUSTER_TEST(arguments, wide_call_count == 2);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -646,7 +646,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_call_arguments(UnitTes
             BUSTER_TEST(arguments, function->block_count > 1);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -731,7 +731,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_parenthesized_operand(Unit
             }
         }
         BUSTER_TEST(arguments, found_count);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         TemporalArena temporary = scratch_begin(0, 0);
@@ -763,7 +763,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_parenthesized_operand(Unit
             }
         }
         BUSTER_TEST(arguments, found_broken);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -860,7 +860,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression(UnitTestArgumen
                     {
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
                 for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(rejected); fixture += 1)
                 {
@@ -882,7 +882,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression(UnitTestArgumen
                     CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-sizeof-refusal.c"), tokens, parsed, target,
                         (CIRLowerOptions){.disable_direct_ssa = form != 0});
                     BUSTER_TEST(arguments, lowered.program == 0);
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -960,7 +960,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
                         }
                     }
                     BUSTER_TEST(arguments, os_file_delete(output));
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -1019,7 +1019,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
                         }
                     }
                     BUSTER_TEST(arguments, os_file_delete(output));
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -1121,7 +1121,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestA
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1406,7 +1406,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_row_streams(UnitTestArguments* argu
                     BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -1467,7 +1467,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_assignment_accesses(UnitTest
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -1523,7 +1523,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_bit_field_assignment_val
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -1562,7 +1562,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_bit_field_assignment_val
                                 modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -1696,7 +1696,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
                     BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -1732,7 +1732,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
                     }
                     BUSTER_TEST(arguments, os_file_delete(output));
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
         BUSTER_TEST(arguments, os_file_delete(source));
@@ -1834,7 +1834,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* argum
                         BUSTER_TEST(arguments, incomplete == 1);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -1919,7 +1919,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types(UnitTestArguments* ar
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -2052,7 +2052,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_msvc_enum_abi(UnitTestArguments* argum
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -2117,7 +2117,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_and_wide_enumerator_types(UnitTe
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -2211,7 +2211,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -2229,7 +2229,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
         CIRLowerResult lowered = c_analyze(temporary.arena, S8("enum-bool-invalid-static.c"), tokens, syntax, target_native);
         BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
         BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, invalid[index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 path = buster_test_temporary_path(arguments->arena, S8("enum-bool-conversion"), S8(".c"));
@@ -2265,7 +2265,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                             BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -2408,7 +2408,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successors(UnitTestArguments* arg
                             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
                 BUSTER_TEST(arguments, checked == BUSTER_ARRAY_LENGTH(expected));
             }
@@ -2479,7 +2479,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successor_limits(UnitTestArgument
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -2566,7 +2566,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_enum_ranges(UnitTestArguments* a
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -2680,7 +2680,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_enum_range_diagnostics(UnitTestA
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -2946,7 +2946,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArgu
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -3124,7 +3124,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -3175,7 +3175,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
                                         dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -3261,7 +3261,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unnamed_parameter_definitions(UnitTest
                                     dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -3340,7 +3340,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
                                                       target_index, dialect, form, (u32)validation.error));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -3388,7 +3388,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
                                                               execution.platform_status, (u32)execution.timed_out));
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -3432,7 +3432,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_spellings(UnitTestArgu
             CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("bit-field-width-spellings.c"), tokens, parse, target_native);
             BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 non_integer_sources[] = {S8("struct s { int a : 1.0; };\n"), S8("struct s { int : 1.0; };\n"), S8("struct s { int (a) : 2.0 + 1; };\n")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(non_integer_sources); index += 1)
@@ -3447,7 +3447,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_spellings(UnitTestArgu
             BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH);
             BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, S8("bit-field width is not an integer constant expression"));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("bit-field-width-spellings"), S8(".c"));
@@ -3473,7 +3473,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_spellings(UnitTestArgu
                                               execution.platform_status, (u32)execution.timed_out));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
     return result;
@@ -3570,7 +3570,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #else
@@ -3631,7 +3631,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* argu
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -3680,7 +3680,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration(UnitT
                     BUSTER_TEST_RAW(arguments, function->local_count <= object_locals[index] && local_count <= object_locals[index], sources[index]);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -3795,7 +3795,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations(UnitTestA
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
@@ -3813,7 +3813,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations(UnitTestA
                                           analysis.diagnostics[diagnostic].kind == C_DIAGNOSTIC_REDEFINITION;
             }
             BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && found && !incorrect_redefinition, rejected[index].source);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -3854,7 +3854,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations_runtime(U
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                                    string_format(temporary.arena, S8("local redeclarations {S8} {S8}: {S8}"), actions[action], frontends[form], compiled.diagnostic));
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
                 for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
                 {
@@ -3878,7 +3878,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations_runtime(U
                             BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -3919,7 +3919,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration_file_
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
                 BUSTER_TEST_RAW(arguments, c_test_find_ir_function(module, S8("test")) != 0, sources[index]);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -4337,7 +4337,7 @@ BUSTER_GLOBAL_LOCAL void c_test_auto_type_diagnostic(UnitTestArguments* argument
     }
     outer_result->test_count += result.test_count;
     outer_result->succeeded_test_count += result.succeeded_test_count;
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 }
 
 BUSTER_GLOBAL_LOCAL void c_test_cleanup_diagnostic(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
@@ -4362,7 +4362,7 @@ BUSTER_GLOBAL_LOCAL void c_test_cleanup_diagnostic(UnitTestArguments* arguments,
     }
     outer_result->test_count += result.test_count;
     outer_result->succeeded_test_count += result.succeeded_test_count;
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 }
 
 BUSTER_GLOBAL_LOCAL void c_test_case_range_lower_diagnostic(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source, String8 message)
@@ -4392,7 +4392,7 @@ BUSTER_GLOBAL_LOCAL void c_test_case_range_lower_diagnostic(UnitTestArguments* a
     }
     outer_result->test_count += result.test_count;
     outer_result->succeeded_test_count += result.succeeded_test_count;
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 }
 
 BUSTER_GLOBAL_LOCAL void c_test_result_add(UnitTestResult* result, UnitTestResult child)
@@ -4742,7 +4742,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_name_literals(UnitTestArgumen
         BUSTER_TEST(arguments, ir.canonical_ir_certified);
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -4878,7 +4878,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_index(UnitTestA
 #endif
         scratch_end(family_scratch);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -4958,7 +4958,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_lowering(UnitTe
         }
         BUSTER_TEST(arguments, checked == 3);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -5026,7 +5026,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
                 {
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -5058,7 +5058,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
                 String8 context = string_format(temporary.arena, S8("invalid unbraced switch source={u32} dialect={u32} form={u32}"),
                     index, dialect, form);
                 BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, context);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -5097,7 +5097,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
                             BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -5230,7 +5230,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_stack_capacity(UnitTestArg
                 BUSTER_TEST(arguments, checked == 5 && lowered.canonical_ir_certified);
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     if (work) BUSTER_TEST(arguments, arena_destroy(work, 1));
@@ -5503,7 +5503,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
         S8("int strict_initializer_range_c17(void) { static int values[2] = { [0 ... 1] = 1 }; return values[0]; }\n"),
         C_PREPROCESS_DIALECT_C17, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
         S8("in function 'strict_initializer_range_c17': GNU initializer ranges are only available in GNU dialects"));
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -5881,7 +5881,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArgu
         BUSTER_TEST(arguments, parse.binding_by_symbol[0].value == C_ID_UNDERLYING_INVALID);
         BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, replacement, capacity) == 0);
         BUSTER_TEST(arguments, temporary.arena->position == position);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     TemporalArena temporary = scratch_begin(0, 0);
@@ -5897,7 +5897,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArgu
     {
         BUSTER_TEST(arguments, parse.entities[fresh.value].kind == C_ENTITY_FUNCTION);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 
     temporary = scratch_begin(0, 0);
     source = S8("int f(void) {\nextern int fresh_a(void);\nint duplicate;\nextern int duplicate(void);\nreturn 0;\n}\n");
@@ -5916,7 +5916,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArgu
         }
     }
     BUSTER_TEST(arguments, redefinition);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6040,7 +6040,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_self_compatibility(UnitTestArgume
         BUSTER_TEST(arguments, !c_test_types_compatible(temporary.arena, &parse, preprocess, int_type, node_type));
         BUSTER_TEST(arguments, !c_test_types_compatible(temporary.arena, &parse, preprocess, chain, (CTypeId){.value = chain.value - 1}));
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6107,7 +6107,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_typedef_scopes(UnitTestArgume
         }
         BUSTER_TEST(arguments, function_count == function_counts[source_index]);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6212,7 +6212,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_group_nesting(UnitTestArgum
         }
     }
 #endif
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6305,7 +6305,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArgume
     BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[8192], (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
     CTypeId restored = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = tags[8192], .tag_scope = {0}});
     BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[8192], (CScopeId){0}).value == restored.value);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6378,7 +6378,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_definition_index(UnitTestArguments* ar
         BUSTER_TEST(arguments, parsed.definition_index->search_count == 64 && parsed.definition_index->scan_row_count == 0);
 #endif
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6457,7 +6457,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_identity(UnitTestArgu
     BUSTER_TEST(arguments, c_test_aggregate_unique(&no_room, C_TYPE_STRUCT, S8("Shared"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
     BUSTER_TEST(arguments, c_test_aggregate_unique(&no_room, C_TYPE_STRUCT, S8("Absent"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
     BUSTER_TEST(arguments, !failed_lookup.slots && !failed_lookup.slot_count && !failed_lookup.fill);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6591,7 +6591,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_unique_search(UnitTestArgume
         }
 #endif
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6637,7 +6637,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tag_scope_typedef_identity(UnitTestArg
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -6658,7 +6658,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_sources_accepted(UnitTestArgu
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -6712,7 +6712,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlling_expression_scope(UnitTestA
         {
             BUSTER_TEST_RAW(arguments, string_equal(parse.diagnostics[0].message, messages[index]), parse.diagnostics[0].message);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -6750,7 +6750,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_frontend(UnitTestArgu
     {
         BUSTER_TEST(arguments, parse.types[tag.value].is_complete && !parse.types[tag.value].has_unqualified_type);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6871,7 +6871,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_parse_snapshot_rows(UnitTestArgum
             BUSTER_TEST(arguments, resolved == 2);
             u32 table_counts[] = {parse.type_count, parse.member_count, parse.parameter_count, parse.array_bound_count, parse.alignment_count};
             memcpy(counts[broken], table_counts, sizeof(table_counts));
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         // Types, members, parameters, array bounds, alignment records.
         for (u32 table = 0; table < 5; table += 1)
@@ -6969,7 +6969,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_member_search(UnitTestArgumen
         tables -= tables_before;
         BUSTER_TEST_RAW(arguments, searches != 0 && (shape == 0 ? tables == 0 : tables != 0 && tables <= searches),
                         string_format(arguments->arena, S8("member={S8} searches={u64} tables={u64}"), member, searches, tables));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -7036,7 +7036,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_negative_array_bounds(UnitTestArgument
                         BUSTER_STRING_TEST(arguments, semantic.diagnostics[index].message, lowered.diagnostics[index].message);
                         BUSTER_TEST(arguments, semantic.diagnostics[index].location.offset == lowered.diagnostics[index].location.offset);
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -7072,7 +7072,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_negative_array_bounds(UnitTestArgument
                     BUSTER_TEST(arguments, lowered.canonical_ir_certified);
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -7157,7 +7157,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
                     BUSTER_TEST(arguments, semantic.diagnostics[index].location.line == lowered.diagnostics[index].location.line);
                     BUSTER_TEST(arguments, semantic.diagnostics[index].location.column == lowered.diagnostics[index].location.column);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
             for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(accepted) + 1; case_index += 1)
             {
@@ -7185,7 +7185,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
                 {
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -7403,7 +7403,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -7504,7 +7504,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_initializers(UnitTestArg
                     if (cases[case_index].valid && BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                     if (!cases[case_index].valid) BUSTER_TEST(arguments, lowered.program == 0);
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -7554,7 +7554,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_initializers(UnitTestArg
                     BUSTER_TEST_RAW(arguments, matches == 1, globals[expected].name);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -7599,7 +7599,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArgument
                                 modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
@@ -7638,7 +7638,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArgument
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
 #endif
     }
@@ -8354,7 +8354,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_attribute_queries(UnitTestArgument
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -8556,7 +8556,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_resolved_call_effects(UnitTestArgument
                         }
                         BUSTER_TEST(arguments, checked == expected_count);
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -8604,7 +8604,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_resolved_call_effects(UnitTestArgument
                                 }
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -8687,7 +8687,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestA
                     BUSTER_TEST(arguments, checked == 2);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -8768,7 +8768,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(Un
                     BUSTER_TEST(arguments, checked == 2);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -8843,7 +8843,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operands(UnitTestArg
                         string_format(temporary.arena, S8("cast/noreturn operand {u32} form {u32}: unreachable={u32}"), index, form, unreachable));
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -8911,7 +8911,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(Unit
                                 modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -9109,7 +9109,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_declares_nothing(UnitTes
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -9149,7 +9149,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_microsoft_anonymous(Unit
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -9366,7 +9366,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_diagnostic_ownership(U
                                            : S8("static assertion expression is not an integer constant expression"));
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -9453,7 +9453,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTe
             BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
             BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[case_index].message);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -9593,11 +9593,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_tls_dialect(UnitTestArguments* ar
                 }
                 if (tokens.recovery)
                 {
-                    arena_destroy(tokens.recovery->spelling_arena, 1);
-                    arena_destroy(tokens.recovery->token_arena, 1);
-                    arena_destroy(tokens.recovery->token_shape_arena, 1);
+                    c_preprocess_release(&tokens);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -9677,7 +9675,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_tls_dialect_runtime(UnitTestArgum
                                               dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -9870,7 +9868,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unnamed_initializer_places(UnitTestArg
             BUSTER_TEST(arguments, fields == 2 && volatile_fields == 1 && volatile_stores == 1);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -10186,7 +10184,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
             BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -11132,7 +11130,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
             }
         }
         BUSTER_TEST(arguments, accepted_ranges >= 20 && rejected_ranges >= 20);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // Reused, deliberately dirty storage exercises descriptor ownership and
@@ -11201,7 +11199,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     arena_set_position(arena, position);
@@ -11273,6 +11271,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArgum
                 // case also exercises the allocation-free descriptor path.
                 for (u32 concatenate = 0; concatenate < 2; concatenate += 1)
                 {
+                    u64 unit_start = arena->position;
                     String8 literal = string_format(arena, S8("{S8}\"{S8}\""), prefix, cases[case_index].body);
                     if (concatenate)
                     {
@@ -11372,6 +11371,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArgum
                         }
                     }
                     arena_set_position(arena, position);
+                    c_test_release_preprocess_arenas_from(arena, unit_start);
                 }
             }
         }
@@ -11412,7 +11412,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_stringify_backslashes(UnitTestAr
         }
         BUSTER_TEST(arguments, preprocess.tokens[BUSTER_ARRAY_LENGTH(expected)].kind == C_TOKEN_END_OF_FILE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -11711,7 +11711,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_trigraph_translation(UnitTestArguments
             BUSTER_STRING_TEST(arguments, dispatched.translated_source,
                                enabled ? ((String8){.pointer = expected, .length = sizeof(expected)}) : source);
             BUSTER_TEST(arguments, dispatched.diagnostic_count == 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     struct
@@ -11757,7 +11757,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_trigraph_translation(UnitTestArguments
             BUSTER_TEST_RAW(arguments, c_test_lex_results_agree(dispatched, reference), diagnostic);
             BUSTER_TEST_RAW(arguments, string_equal(dispatched.translated_source,
                 (String8){.pointer = expected_bytes, .length = expected_length}), diagnostic);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -11786,9 +11786,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_trigraph_translation(UnitTestArguments
     }
     if (preprocess.recovery)
     {
-        arena_destroy(preprocess.recovery->spelling_arena, 1);
-        arena_destroy(preprocess.recovery->token_arena, 1);
-        arena_destroy(preprocess.recovery->token_shape_arena, 1);
+        c_preprocess_release(&preprocess);
     }
 
     // Neither phase-three command replacement text nor already-preprocessed
@@ -11809,12 +11807,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_trigraph_translation(UnitTestArguments
         }
         if (unchanged.recovery)
         {
-            arena_destroy(unchanged.recovery->spelling_arena, 1);
-            arena_destroy(unchanged.recovery->token_arena, 1);
-            arena_destroy(unchanged.recovery->token_shape_arena, 1);
+            c_preprocess_release(&unchanged);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -11862,7 +11858,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_lex(UnitTestArguments* arguments)
                 BUSTER_STRING_TEST(arguments, actual.diagnostics[0].message,
                     S8("universal character name is not allowed in this identifier position"));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -11895,7 +11891,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_lex(UnitTestArguments* arguments)
             BUSTER_STRING_TEST(arguments, diagnostic.message, invalid[test].message);
             BUSTER_TEST(arguments, diagnostic.location.offset == 8 && diagnostic.location.line == 1 && diagnostic.location.column == 9);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 windows[] = {
@@ -11918,7 +11914,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_lex(UnitTestArguments* arguments)
             CLexResult reference = c_test_lex_dialect(temporary.arena, source, C_PREPROCESS_DIALECT_C17, true);
             BUSTER_TEST_RAW(arguments, c_test_lex_results_agree(actual, reference),
                 string_format(temporary.arena, S8("UCN chunk phase={u32} case={u32}"), phase, test));
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     CPreprocessDialect unchanged[] = {C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23, C_PREPROCESS_DIALECT_GNU89};
@@ -11938,7 +11934,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_lex(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, c_test_lex_results_agree(actual,
             c_test_lex_dialect(temporary.arena, S8("\\u03b1"), unchanged[mode], true)));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -11947,9 +11943,7 @@ BUSTER_GLOBAL_LOCAL void c_test_ucn_release(CPreprocessResult* preprocess)
 {
     if (preprocess->recovery)
     {
-        arena_destroy(preprocess->recovery->spelling_arena, 1);
-        arena_destroy(preprocess->recovery->token_arena, 1);
-        arena_destroy(preprocess->recovery->token_shape_arena, 1);
+        c_preprocess_release(preprocess);
     }
 }
 
@@ -11993,7 +11987,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_digraphs(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, actual.tokens[BUSTER_ARRAY_LENGTH(spellings)].kind == C_TOKEN_END_OF_FILE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     struct
@@ -12043,7 +12037,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_digraphs(UnitTestArguments* arguments)
                 }
             }
             c_test_ucn_release(&actual);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -12087,7 +12081,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_digraphs(UnitTestArguments* arguments)
                 }
             }
             c_test_ucn_release(&tokens);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -12115,7 +12109,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_digraphs(UnitTestArguments* arguments)
                     BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #endif
@@ -12170,7 +12164,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_preprocess(UnitTestArguments* argu
                 }
             }
             c_test_ucn_release(&actual);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -12259,7 +12253,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_preprocess(UnitTestArguments* argu
         }
         c_test_ucn_release(&included);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -12320,7 +12314,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_semantic(UnitTestArguments* argume
             }
         }
         c_test_ucn_release(&preprocess);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -12369,7 +12363,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
                                     dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -12411,7 +12405,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
 #endif
@@ -12479,7 +12473,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_size_limit(UnitTestArguments* a
                 BUSTER_STRING_TEST(arguments, preprocess.files[0], S8("oversized-root.c"));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // The standalone translation limit remains accepted by the plan, while
     // a shared include has to leave room for its pre-existing spellings.
@@ -12491,7 +12485,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_size_limit(UnitTestArguments* a
             BUSTER_TEST(arguments, lex.diagnostics[0].kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE);
             BUSTER_STRING_TEST(arguments, lex.diagnostics[0].message, S8("C source exceeds the remaining 32-bit spelling-offset space"));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 controls[] = {S8(""), S8("int value = 3;\n")};
     for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(controls); control += 1)
@@ -12508,7 +12502,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_size_limit(UnitTestArguments* a
             BUSTER_TEST(arguments, direct.tokens[token].kind == include.tokens[token].kind);
             BUSTER_STRING_TEST(arguments, c_token_spelling(direct.spelling_base, direct.tokens[token]), c_token_spelling(include.spelling_base, include.tokens[token]));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     BUSTER_TEST(arguments, sentinel == 'x');
     return result;
@@ -12628,7 +12622,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_order(UnitTestArguments* ar
                     arena_destroy(sort_arena, 1);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -12684,11 +12678,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_locations(UnitTestArguments
             BUSTER_TEST(arguments, map->regions[index - 1].start <= map->regions[index].start);
             BUSTER_TEST(arguments, map->keys[index].start == map->regions[index].start);
         }
-        arena_destroy(preprocess.recovery->spelling_arena, 1);
-        arena_destroy(preprocess.recovery->token_arena, 1);
-        arena_destroy(preprocess.recovery->token_shape_arena, 1);
+        c_preprocess_release(&preprocess);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -12890,16 +12882,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_lifetime(UnitTestArguments*
                     }
                     if (other.recovery)
                     {
-                        arena_destroy(other.recovery->spelling_arena, 1);
-                        arena_destroy(other.recovery->token_arena, 1);
-                        arena_destroy(other.recovery->token_shape_arena, 1);
+                        c_preprocess_release(&other);
                     }
                 }
                 if (preprocess.recovery)
                 {
-                    arena_destroy(preprocess.recovery->spelling_arena, 1);
-                    arena_destroy(preprocess.recovery->token_arena, 1);
-                    arena_destroy(preprocess.recovery->token_shape_arena, 1);
+                    c_preprocess_release(&preprocess);
                 }
                 memset((u8*)arena + arena_minimum_position, 0xa5, arena->position - arena_minimum_position);
                 arena_reset_to_start(arena);
@@ -12937,9 +12925,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_lifetime(UnitTestArguments*
             }
             if (preprocess.recovery)
             {
-                arena_destroy(preprocess.recovery->spelling_arena, 1);
-                arena_destroy(preprocess.recovery->token_arena, 1);
-                arena_destroy(preprocess.recovery->token_shape_arena, 1);
+                c_preprocess_release(&preprocess);
             }
             arena_reset_to_start(arena);
         }
@@ -12960,9 +12946,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_lifetime(UnitTestArguments*
             BUSTER_TEST(arguments, retried.recovery && retried.tokens && !retried.error_count);
             if (retried.recovery)
             {
-                arena_destroy(retried.recovery->spelling_arena, 1);
-                arena_destroy(retried.recovery->token_arena, 1);
-                arena_destroy(retried.recovery->token_shape_arena, 1);
+                c_preprocess_release(&retried);
             }
             arena_reset_to_start(arena);
         }
@@ -13005,7 +12989,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
                 c_test_preprocessed_token(arguments, &result, preprocess, index, C_TOKEN_PREPROCESSING_NUMBER, expected);
             }
             c_test_preprocessed_token(arguments, &result, preprocess, expected_count, C_TOKEN_IDENTIFIER, S8("tail"));
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -13064,7 +13048,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
             c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
                                       c_token_spelling(expected.spelling_base, expected.tokens[index]));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -13085,7 +13069,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
         }
         BUSTER_TEST(arguments, location.column == (index < 2 ? 1 : index == 2 ? 19 : 28));
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 
     String8 invalid[] = {S8("FN(1,2)"), S8("FN(1,2,3)"), S8("FN(1")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
@@ -13100,7 +13084,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
             diagnosed |= diagnostic.kind == C_DIAGNOSTIC_INVALID_MACRO_INVOCATION && diagnostic.location.line == 402 && diagnostic.location.column == 1;
         }
         BUSTER_TEST(arguments, diagnosed);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -13200,7 +13184,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_comma_omission(UnitTestArgume
                 c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
                                           c_token_spelling(expected.spelling_base, expected.tokens[index]));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         // With no fixed parameter, an empty invocation is ambiguous. GNU modes
         // elide the comma; standard modes retain it, matching both oracles.
@@ -13216,7 +13200,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_comma_omission(UnitTestArgume
             c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
                                       c_token_spelling(expected.spelling_base, expected.tokens[index]));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -13284,7 +13268,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_va_opt(UnitTestArguments* arg
                 c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
                                           c_token_spelling(expected.spelling_base, expected.tokens[index]));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     struct
@@ -13312,7 +13296,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_va_opt(UnitTestArguments* arg
             diagnosed |= preprocess.diagnostics[diagnostic_index].kind == invalid[index].kind;
         }
         BUSTER_TEST_RAW(arguments, diagnosed, invalid[index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -13394,7 +13378,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_header_operands(UnitTestArguments* arg
                     CParseResult parsed = c_parse(temporary.arena, preprocess);
                     BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -13492,7 +13476,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArgumen
                 c_test_preprocessed_token(arguments, &result, preprocess, index, C_TOKEN_PREPROCESSING_NUMBER, expected);
             }
             c_test_preprocessed_token(arguments, &result, preprocess, expected_count, C_TOKEN_IDENTIFIER, S8("tail"));
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -13582,7 +13566,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArgumen
             c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
                                       c_token_spelling(expected.spelling_base, expected.tokens[index]));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // Provenance: every token a plain batch produces, argument tokens
@@ -13604,7 +13588,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArgumen
         BUSTER_TEST(arguments, location.line == 555);
         BUSTER_TEST(arguments, location.column == (index == 4 ? 35 : 1));
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 
     String8 invalid[] = {S8("DUP(FN(1,2))"), S8("PAIR(1,FN(1,2,3))"), S8("DUP(FN(1)")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
@@ -13619,7 +13603,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArgumen
             diagnosed |= diagnostic.kind == C_DIAGNOSTIC_INVALID_MACRO_INVOCATION && diagnostic.location.line == 606;
         }
         BUSTER_TEST_RAW(arguments, diagnosed, invalid[index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -13669,7 +13653,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArgumen
                                               execution.platform_status, (u32)execution.timed_out));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
     return result;
@@ -13872,7 +13856,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_number_facts(UnitTestArguments* argume
                     artifacts[variant] = (LlvmBitcodeArtifact){.binary = {.pointer = copy, .length = artifact.binary.length}, .success = true};
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         BUSTER_TEST(arguments, diagnostics[0] == 0 && diagnostics[1] == 0);
         BUSTER_TEST(arguments, artifacts[0].success && artifacts[1].success);
@@ -14055,7 +14039,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_case(UnitTestArguments* ar
         }
         BUSTER_TEST(arguments, diagnosed);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -14191,7 +14175,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
                 CParseResult parse = c_parse(temporary.arena, preprocess);
                 BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, source);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // The ffs family converts to int/long/long long and returns int. Lower it
@@ -14237,7 +14221,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -14257,7 +14241,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count != 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // The nine fixed-signature bit-count spellings take unsigned
@@ -14322,7 +14306,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -14340,7 +14324,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count != 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // Calling a fence in a single-threaded executable cannot prove that it
@@ -14392,7 +14376,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -14465,7 +14449,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArg
             String8 expression = string_format(temporary.arena, contexts[context_index].format, faults[fault_index]);
             c_test_result_add(&result, c_test_conditional_case(arguments, expression, contexts[context_index].valid, contexts[context_index].value, false));
             c_test_result_add(&result, c_test_conditional_case(arguments, expression, contexts[context_index].valid, contexts[context_index].value, true));
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     struct
@@ -14624,7 +14608,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_target_abi_macros(UnitTestArguments* a
                     c_test_preprocessed_token(arguments, &result, raw, 9, C_TOKEN_PREPROCESSING_NUMBER, targets[index].intmax_long ? S8("1L") : S8("1LL"));
                     c_test_preprocessed_token(arguments, &result, raw, 10, C_TOKEN_PREPROCESSING_NUMBER, targets[index].intmax_long ? S8("1UL") : S8("1ULL"));
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -14737,7 +14721,7 @@ BUSTER_GLOBAL_LOCAL void c_test_gnu_common_predefined_macro_probe(UnitTestArgume
     }
     outer_result->test_count += result.test_count;
     outer_result->succeeded_test_count += result.succeeded_test_count;
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_common_predefined_macros(UnitTestArguments* arguments)
@@ -16273,7 +16257,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_common_predefined_macros(UnitTestA
             CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
             CIRLowerResult lowered = c_analyze_with_options(temporary.arena, options.source_path, preprocess, syntax, target, (CIRLowerOptions){0});
             BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     TargetParseResult x86_linux = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
@@ -16350,7 +16334,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_max_align_t_layout(UnitTestArguments* 
             CParseResult parse = c_parse(temporary.arena, preprocess);
             BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0,
                 string_format(temporary.arena, S8("max_align_t layout target={S8}"), cases[index].triple));
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
@@ -16371,7 +16355,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_max_align_t_layout(UnitTestArguments* 
             BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0,
                 string_format(temporary.arena, S8("max_align_t dialect={u32}"), dialect));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -16514,7 +16498,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
                     }
                 }
                 c_test_ucn_release(&tokens);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -16593,7 +16577,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
                 scratch_end(run_temporary);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
     return result;
@@ -16661,7 +16645,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         c_test_preprocessed_token(arguments, &result, maximum_tokens, 3, C_TOKEN_PREPROCESSING_NUMBER,
                                   target_data_layout(target).long_integer.size == 8 ? S8("9223372036854775807L") : S8("2147483647L"));
         c_test_preprocessed_token(arguments, &result, maximum_tokens, 4, C_TOKEN_PREPROCESSING_NUMBER, S8("9223372036854775807LL"));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     Target plain_char_targets[] = {
@@ -16708,7 +16692,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
             CIRLowerResult lowered = c_analyze(temporary.arena, S8("plain-char-policy.c"), tokens, syntax, target);
             BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
             BUSTER_TEST(arguments, lowered.program != 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -18115,7 +18099,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_multiline_comment_conditionals(UnitTes
                     }
                     BUSTER_TEST(arguments, constants == 1);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -19650,7 +19634,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typedef_fallback_lookup(UnitTestArgume
             saved_typedef_buckets[type_name_bucket] = saved_bucket_head;
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 
     TemporalArena malformed_temporary = scratch_begin(0, 0);
     CPreprocessResult malformed_tokens = c_preprocess(malformed_temporary.arena,
@@ -20933,7 +20917,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_array_sizeof_bound(UnitTestArgu
         BUSTER_TEST(arguments, whole_type && whole_type->layout.resolved && whole_type->layout.size == 112);
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -21059,7 +21043,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArg
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -21107,7 +21091,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_token_view_constant_range(UnitTestArgu
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -21180,7 +21164,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArgu
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -21225,7 +21209,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_type_name_attributes(UnitTestArg
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -21295,7 +21279,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_object(UnitTestArguments* argu
         }
         BUSTER_TEST(arguments, lowered_local);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     struct
     {
         String8 source;
@@ -21402,7 +21386,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArgument
         {
             BUSTER_TEST_RAW(arguments, ir.diagnostic_count == 0, cases[index].source);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -21603,7 +21587,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
                         BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, main_function, S8("pick")) == 0);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -21647,7 +21631,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
                 BUSTER_TEST(arguments, query.valid && query.alignment == 16 && query.model_unchanged);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 rejected[] = {
         S8("struct S { int x __attribute__((aligned(16))); } s; _Static_assert(__alignof__(s.x) == 4, \"wrong member value\"); int f(void) { return 0; }"),
@@ -21709,7 +21693,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST(arguments, !good.diagnostic_count && !good_syntax.diagnostic_count && !accepted.diagnostic_count &&
                 accepted.program && accepted.canonical_ir_certified);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -21746,7 +21730,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
                             BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -21965,7 +21949,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_ellipsis_depth(UnitTestArgu
             BUSTER_TEST(arguments, pointee != 0 && pointee->kind == C_TYPE_FUNCTION && pointee->is_variadic);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -22071,7 +22055,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_call_arguments(UnitTestAr
         BUSTER_TEST(arguments, pointer && pointer->is_variadic);
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -22172,7 +22156,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_identifier_list_function_definitions(U
             {
                 BUSTER_TEST_RAW(arguments, lowered.program == 0, label);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -22335,7 +22319,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
                             }
                             BUSTER_TEST_RAW(arguments, located, label);
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -22378,7 +22362,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
                                         modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -22420,7 +22404,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
                             }
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
             if (source_index == 0)
@@ -22449,7 +22433,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
                                         string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -22612,7 +22596,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
                     {
                         BUSTER_TEST_RAW(arguments, lowered.program == 0, label);
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -22675,7 +22659,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         }
                     }
                     BUSTER_TEST(arguments, os_file_delete(output));
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -22740,7 +22724,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         }
                     }
                     BUSTER_TEST(arguments, os_file_delete(output));
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -22803,7 +22787,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         }
                     }
                     BUSTER_TEST(arguments, os_file_delete(negative_source));
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -22974,7 +22958,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_list_prototypes(UnitTestArgu
                     {
                         BUSTER_TEST_RAW(arguments, lowered.program == 0, label);
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -23047,7 +23031,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_then_prototyped(UnitTestA
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     return result;
@@ -23160,7 +23144,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArgu
                     }
                     if (cases[case_index].semantic_only)
                     {
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                         continue;
                     }
                     CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("duplicate-parameter-names.c"), tokens, syntax,
@@ -23182,7 +23166,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArgu
                             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                     }
                     else BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -23296,7 +23280,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // The nested type attribute ends before the outer cleanup specifier:
@@ -23352,7 +23336,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // Both scratch arenas can be legitimate shared-query owners. Repeated
@@ -23446,7 +23430,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
                     BUSTER_TEST_RAW(arguments, lowered.diagnostics[0].kind == semantic.diagnostics[0].kind, context);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -23490,7 +23474,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
                                 context, execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -23544,7 +23528,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_arity_diagnostics(UnitTestArgumen
         {
             BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, expected[expected_index].message);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     return result;
@@ -23629,7 +23613,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unevaluated_call_arity_diagnostics(Uni
                 {
                     BUSTER_TEST(arguments, checked.program != 0 && checked.canonical_ir_certified);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -23693,7 +23677,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArg
             BUSTER_TEST_RAW(arguments, parsed.diagnostics[0].location.line == 1 && parsed.diagnostics[0].location.column == cases[case_index].column,
                             cases[case_index].source);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 valid[] = {
         S8("typedef int T; struct P { int x; }; enum { A = 4, B = sizeof(long) + 1, C = _Alignof(struct P), D = A ? 1 : 2 };"
@@ -23723,7 +23707,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArg
             BUSTER_TEST_RAW(arguments, false, string_format(temporary.arena, S8("unexpected diagnostic at {u32}:{u32}: {S8}"),
                 parsed.diagnostics[diagnostic].location.line, parsed.diagnostics[diagnostic].location.column,
                 parsed.diagnostics[diagnostic].message));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -23808,7 +23792,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
                         BUSTER_TEST_RAW(arguments, function->instructions[instruction_index].opcode != IR_OPCODE_CALL, source);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     struct
@@ -23836,7 +23820,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         if (!declarations[index].valid && analyzed.diagnostic_count)
             BUSTER_TEST_RAW(arguments, string_ends_with_sequence(analyzed.diagnostics[0].message,
                 S8("increment or decrement operand is not a modifiable place")), declarations[index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -23920,7 +23904,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_operand_trailer(UnitTestArgu
                 BUSTER_TEST_RAW(arguments, string_ends_with_sequence(lowered.diagnostics[0].message, S8("expected ')' after type name")), source);
                 BUSTER_TEST_RAW(arguments, lowered.diagnostics[0].location.offset == diagnosed, source);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -24023,7 +24007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(Un
                 }
                 BUSTER_TEST_RAW(arguments, folded, source);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     struct
@@ -24060,7 +24044,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(Un
             }
         }
         BUSTER_TEST_RAW(arguments, folded, outer[case_index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -24110,7 +24094,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestAr
             BUSTER_TEST(arguments, before.values[counter] == after.values[counter]);
         }
 #endif
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -24186,7 +24170,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_values_gate(UnitTestArguments* a
         {
             BUSTER_TEST_RAW(arguments, c_test_parse_label_values_needed(&analysis, tokens, function) == cases[index].needed, cases[index].source);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -24289,7 +24273,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_frame_bounds(UnitTestArgum
                 {
                     BUSTER_TEST_RAW(arguments, certified, cases[case_index].source);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -24342,7 +24326,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_call_arity_ownership(UnitTestAr
                 {
                     BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[case_index].message);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
             for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
             {
@@ -24373,7 +24357,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_call_arity_ownership(UnitTestAr
                 {
                     BUSTER_TEST(arguments, checked.program != 0 && checked.canonical_ir_certified);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -24527,7 +24511,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTe
                     BUSTER_TEST(arguments, ir_validate_canonical_module(unindexed.program, unindexed.program->modules).error == IR_VALIDATION_NONE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     String8 rejected[] = {
@@ -24553,7 +24537,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTe
             CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("expression-aggregate-invalid.c"), tokens, syntax,
                 target_native, (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
             BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.program && !lowered.canonical_ir_certified, rejected[row]);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -24588,7 +24572,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTe
                             allocators[allocator], frontends[frontend], execution.platform_status, (u32)execution.timed_out));
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #endif
@@ -24704,7 +24688,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_body_sizeof_expression(UnitTe
             BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -24844,7 +24828,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_control_preparation(UnitTestArg
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -24882,7 +24866,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_control_preparation(UnitTestArg
                                 modes[mode], frontends[frontend], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -25048,7 +25032,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
                             string_format(temporary.arena, S8("{S8} function={S8}: found={u32}"), context, expected[row].name, found));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -25072,7 +25056,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
                 BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,
                     string_format(temporary.arena, S8("falloff refusal row={u32} dialect={u32} form={u32}: diagnostics={u32}"),
                         row, dialect, form, lowered.diagnostic_count));
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -25154,7 +25138,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -26062,7 +26046,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
             {
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -26098,7 +26082,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
                                     modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -26140,7 +26124,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
 #endif
@@ -26223,7 +26207,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(deep_ir.program, &deep_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -26320,7 +26304,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_cast_prefix_operator(UnitTestAr
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -26461,7 +26445,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                     BUSTER_TEST(arguments, call_count == 1);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -26545,7 +26529,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                                               execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -26854,7 +26838,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
         }
     }
 #endif
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -27073,7 +27057,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
                 BUSTER_TEST(arguments, query.constant.valid && query.constant.magnitude == 8);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -27165,7 +27149,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     String8 invalid[] = {
@@ -27182,7 +27166,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
         CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
         BUSTER_TEST(arguments, checked.diagnostic_count != 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
@@ -27219,7 +27203,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
                             BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -27254,7 +27238,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_auto_local_declarations(UnitTestAr
         CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && checked.analysis_complete && !checked.diagnostic_count,
             checked.diagnostic_count ? checked.diagnostics[0].message : accepted[index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     struct { String8 source; String8 message; CDiagnosticKind kind; } rejected[] = {
         {S8("int f(void) { auto value; return 0; }\n"), S8("C23 auto requires an initialized data declaration"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS},
@@ -27294,7 +27278,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_declaration_order(UnitTestA
         CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && checked.analysis_complete && !checked.diagnostic_count,
             checked.diagnostic_count ? checked.diagnostics[0].message : accepted[index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     struct { String8 source; String8 message; CDiagnosticKind kind; u32 line; u32 column; } rejected[] = {
         {S8("int main(void) {\n    return later(3);\n}\nint later(int value) { return value; }\n"),
@@ -27330,7 +27314,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_declaration_order(UnitTestA
             }
         }
         BUSTER_TEST_RAW(arguments, diagnosed_use, checked.diagnostic_count ? checked.diagnostics[0].message : rejected[index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -27459,7 +27443,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_character_literal_query_types(UnitTest
                 }
                 c_test_set_literal_query_machine_only(false);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -27497,7 +27481,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_character_literal_query_types(UnitTest
                             BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -27565,7 +27549,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
             }
         }
         BUSTER_TEST(arguments, literal_count >= (source_index == 0 ? 30u : 7u));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
     {
@@ -27593,7 +27577,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
         BUSTER_STRING_TEST(arguments, diagnostics[0], diagnostics[1]);
         BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
                                    (!objects[0].length || memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -27693,7 +27677,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArgum
             BUSTER_TEST(arguments, invalid.value == 123456);
             BUSTER_TEST(arguments, probe->position == scratch_mark);
             BUSTER_TEST(arguments, arena_destroy(probe, 1));
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     struct
@@ -27727,7 +27711,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArgum
             BUSTER_TEST(arguments, parse.diagnostics[0].location.line == 1);
             BUSTER_TEST(arguments, parse.diagnostics[0].location.column == invalid_cases[index].column);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -27774,7 +27758,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(U
         bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected expression")) &&
                          parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == invalid[case_index].column;
         BUSTER_TEST_RAW(arguments, diagnosed, invalid[case_index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 valid[] = {
         S8("long object; typedef typeof(object + 1) t; t v;\n"),
@@ -27800,7 +27784,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(U
             syntax_error |= parse.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_EXPECTED_DECLARATION;
         }
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && !syntax_error, untyped[case_index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -27810,7 +27794,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(U
         bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected ')' after type name")) &&
                          parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == 20;
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && diagnosed, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
@@ -27818,7 +27802,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(U
         CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
         CParseResult parse = c_parse(temporary.arena, preprocess);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -27849,7 +27833,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_void_expression(UnitTestAr
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -27934,7 +27918,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_comma_assignment(UnitTestA
             BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -28010,7 +27994,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_width_integer_conversion(UnitT
                 BUSTER_TEST(arguments, conversion_count >= 1);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     return result;
@@ -28077,7 +28061,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_call(Unit
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -28237,7 +28221,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
                         }
                         BUSTER_TEST(arguments, checked == expected_count);
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -28274,7 +28258,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
                         string_format(temporary.arena, S8("scalar call result dialect={u32} form={u32}: {S8}"),
                             dialect, form, lowered.diagnostics[0].message));
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -28317,7 +28301,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
                                         context, execution.platform_status, (u32)execution.timed_out));
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -28373,7 +28357,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_nested_call(UnitT
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -28444,7 +28428,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_value(Uni
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -28579,7 +28563,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_identifier_updates(UnitTestArgu
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -28680,7 +28664,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -28719,7 +28703,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
                             BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -28752,7 +28736,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_address_assignment_expre
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -28809,7 +28793,7 @@ BUSTER_GLOBAL_LOCAL u64 c_test_nested_control_work(u32 family, u32 depth, u32 sl
     {
         work = c_test_parse_nesting_count(slot) - before;
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return work;
 }
 
@@ -28922,7 +28906,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_conditional_nesting_depth(UnitT
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -28960,7 +28944,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_long_shallow_operand(UnitTestAr
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("sizeof-shallow.c"), preprocess, parse, target_native);
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
         BUSTER_TEST(arguments, lowered.program != 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -29007,7 +28991,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_offsetof_pointer_prediction(Uni
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -29039,7 +29023,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_casted_dereference_update(UnitTestArgu
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -29075,7 +29059,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_function_declarations(Un
         BUSTER_TEST(arguments, pointer_type && pointer_type->kind == C_TYPE_POINTER);
         BUSTER_TEST(arguments, pointed_function && pointed_function->kind == C_TYPE_FUNCTION);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -29111,7 +29095,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_address_place_assignment
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -29257,7 +29241,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -29617,7 +29601,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_attributes(UnitTestArguments
     BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
     CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("type-name-attributes.c"), tokens, parsed, target_native);
     BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(c_test_type_name_attribute_cast_sources); index += 1)
     {
         TemporalArena cast_temporary = scratch_begin(0, 0);
@@ -30145,7 +30129,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             {
                 BUSTER_TEST(arguments, invalid_ir.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30167,7 +30151,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             {
                 BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30189,7 +30173,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             CParseResult aligned_parse = c_parse(temporary.arena, aligned_tokens);
             BUSTER_TEST(arguments, aligned_tokens.diagnostic_count == 0);
             BUSTER_TEST(arguments, aligned_parse.diagnostic_count == 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30225,7 +30209,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                                         type->layout.alignment == 4 && type->fields[1].offset == 4;
             }
             BUSTER_TEST(arguments, found_aligned_record);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30258,7 +30242,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                 }
             }
             BUSTER_TEST(arguments, found_object);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30286,7 +30270,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             {
                 BUSTER_TEST(arguments, below_ir.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30314,7 +30298,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             }
         }
         BUSTER_TEST(arguments, found_flexible_structure);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         String8 invalid_flexible_array_sources[] = {
@@ -30333,7 +30317,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             {
                 BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30367,7 +30351,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             }
         }
         BUSTER_TEST(arguments, clear_cache_count == 1);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         TemporalArena temporary = scratch_begin(0, 0);
@@ -30442,7 +30426,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         BUSTER_TEST(arguments, atomic_load_count == 2);
         BUSTER_TEST(arguments, atomic_store_count == 2);
         BUSTER_TEST(arguments, atomic_rmw_count == 3);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         // An atomic aggregate is accessed at the *promoted* width its type
@@ -30503,7 +30487,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         BUSTER_TEST(arguments, aggregate_load_count == 1);
         BUSTER_TEST(arguments, aggregate_store_count == 1);
         BUSTER_TEST(arguments, aggregate_widths_agree);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         // Baseline x86-64 does not promise CMPXCHG16B. Plain language-level
@@ -30599,7 +30583,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                                                                              (CodegenModuleOptions){0});
                 BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30697,7 +30681,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                                                                              (CodegenModuleOptions){0});
                 BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30725,7 +30709,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             BUSTER_STRING_TEST(arguments, wide_atomic_ir.diagnostics[0].message,
                                S8("in function 'atomic_aggregate_too_wide': C IR lowering does not support an atomic store of a 24-byte aggregate: this target has no lock-free access that wide"));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         // The same refusal in an argument position: what the conversion below
@@ -30752,7 +30736,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             BUSTER_STRING_TEST(arguments, wide_parameter_ir.diagnostics[0].message,
                                S8("in function 'atomic_aggregate_wide_parameter': C IR lowering does not support an atomic load of a 24-byte aggregate: this target has no lock-free access that wide"));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         // Passed and returned by value (#786).  An ABI position carries the
@@ -30818,7 +30802,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         }
         BUSTER_TEST(arguments, argument_carries_atomic);
         BUSTER_TEST(arguments, return_carries_atomic);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
     {
@@ -30862,7 +30846,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             }
         }
         BUSTER_TEST(arguments, compare_count == 1 && exchange_count == 1);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         TemporalArena temporary = scratch_begin(0, 0);
@@ -30922,7 +30906,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         BUSTER_TEST(arguments, thread_fence_count == 1);
         BUSTER_TEST(arguments, signal_fence_count == 1);
         BUSTER_TEST(arguments, compare_orders_valid);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         String8 invalid_atomic_sources[] = {
@@ -30942,7 +30926,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             {
                 BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ATOMIC_TYPE);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     {
@@ -30958,7 +30942,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         {
             BUSTER_TEST(arguments, conflict_parse.diagnostics[0].kind == C_DIAGNOSTIC_CONFLICTING_DECLARATION);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -31068,7 +31052,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pasted_keyword_body_walk(UnitTestArgum
             BUSTER_TEST(arguments, ir_validate_canonical_module(stripped_lowered.program, module).error == IR_VALIDATION_NONE);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -31231,7 +31215,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_word_class_token_kinds(UnitTestArgumen
     {
         BUSTER_TEST(arguments, c_test_parse_word_classes(real, lexed.tokens[index]) == C_TEST_WORD_CLASS_QUALIFIERS_AGREE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -31321,7 +31305,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_identifier_identity_once(UnitTestArgum
             BUSTER_TEST(arguments, calls_strlen);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -31384,7 +31368,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_find_collisions(UnitTestArgumen
         BUSTER_TEST(arguments, c_test_symbol_find(table, S8("short_name_")) == 0);
         BUSTER_TEST(arguments, c_test_symbol_count(table) == count + 1);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -31440,7 +31424,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     struct
     {
@@ -31476,7 +31460,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
         CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST_RAW(arguments, mirror.diagnostic_count == 1, invalid_sources[row].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     target.cpu_arch = CPU_ARCH_AARCH64;
     String8 wrong_target_sources[] = {
@@ -31494,7 +31478,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
         BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1 && mirror.diagnostic_count == 1, wrong_target_sources[row]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -31552,7 +31536,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_volatile_ir(UnitTestAr
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -32486,7 +32470,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
             }
             BUSTER_TEST(arguments, module->rejected_function_count == rejected_signature_count);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -32620,7 +32604,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
             BUSTER_TEST(arguments, module->rejected_function_count == rejected_call_count);
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -32701,7 +32685,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
             BUSTER_TEST(arguments, module->rejected_function_count == (unsupported_signature ? 1 : 0));
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -32770,7 +32754,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_local_transport(UnitTestArg
             BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, c_test_find_ir_function(module, S8("call_identity")), S8("identity")) == 1);
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     return result;
@@ -32907,7 +32891,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_constant_bytes(UnitTestArgum
                                        memory_compare(global->bytes.pointer, expected.pointer, expected.length));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -33043,7 +33027,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wasm_long_double_storage(UnitTestArgum
                     BUSTER_STRING_TEST(arguments, refused.diagnostics[0].message, refusal_messages[refused_index]);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -33126,7 +33110,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTes
         {
             BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
             BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
             continue;
         }
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
@@ -33195,7 +33179,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTes
                 BUSTER_TEST(arguments, negative_zero && negative_zero->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -33253,7 +33237,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_integer_global_initializers
                 IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, rows[row_index].name);
                 BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, rows[row_index].expected, 16));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -33328,7 +33312,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_deep_initializers(UnitTestA
                     IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, S8("deep"));
                     BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected, 16));
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -33406,7 +33390,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
                     BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         // The x87 vocabulary answers for these, so they must lower rather
         // than diagnose: negation, truth conversion, the conversions to and
@@ -33469,7 +33453,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
                 BUSTER_TEST(arguments, lowered.program->modules->rejected_function_count == 0);
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -33537,7 +33521,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_android_boundaries(UnitTest
         {
             BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -33609,7 +33593,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_boundaries(UnitTestA
         {
             BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
             BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
             continue;
         }
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
@@ -33622,7 +33606,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_boundaries(UnitTestA
                 BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -33666,7 +33650,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_braces(UnitTestArgum
             IrGlobal* brace = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("brace")) : 0;
             BUSTER_TEST(arguments, brace && brace->bytes.length == sizeof(expected_binary128) &&
                                    memcmp(brace->bytes.pointer, expected_binary128, sizeof(expected_binary128)) == 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
             continue;
         }
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
@@ -33678,7 +33662,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_braces(UnitTestArgum
             BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, brace, expected, sizeof(expected)));
             BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, brace_trailing, expected, sizeof(expected)));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -33832,7 +33816,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_initializers(UnitTes
                                         context, index, symbol ? symbol->name : S8("<missing>"), (u32)global->initializer_kind, global->bytes.length));
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -33923,7 +33907,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_runtime(UnitTestArgu
                             }
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -33968,7 +33952,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_runtime(UnitTestArgu
                                 }
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -34094,7 +34078,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_classifier_widths(UnitTestArgume
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -34186,7 +34170,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_classifier_runtime(UnitTestArgumen
                         }
                         BUSTER_TEST(arguments, os_file_delete(output));
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -34228,7 +34212,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_classifier_runtime(UnitTestArgumen
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
 #endif
@@ -34307,7 +34291,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_lowering(UnitTe
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // Integer operands are rejected by GCC and Clang, and a wrong argument
@@ -34331,7 +34315,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_lowering(UnitTe
         CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("generic-float-builtins-invalid.c"), tokens, syntax, target,
             (CIRLowerOptions){0});
         BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid_sources[index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -34477,7 +34461,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
                         }
                         BUSTER_TEST(arguments, os_file_delete(output));
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -34519,7 +34503,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
 #endif
@@ -34608,7 +34592,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArgu
                     }
                     BUSTER_TEST(arguments, os_file_delete(output));
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
 #if BUSTER_LINUX
@@ -34646,7 +34630,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArgu
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
 #endif
         BUSTER_TEST(arguments, os_file_delete(input));
@@ -34711,7 +34695,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aarch64_float_compare_quiet_signaling(
                 BUSTER_TEST_RAW(arguments, relational ? (quiet == 0 && signaling == 4) : (quiet == 2 && signaling == 0),
                     string_format(arena, S8("aarch64 float compare case={u32} mode={u32}: fcmp={u32} fcmpe={u32}"), index, mode, quiet, signaling));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -34805,7 +34789,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
         {
             BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
             BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
             continue;
         }
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
@@ -34822,7 +34806,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
             BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(table, expected_table, sizeof(expected_table)));
             BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(pair, expected_pair, sizeof(expected_pair)));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -34932,7 +34916,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_parameter_values(UnitTestArg
                     BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -34995,7 +34979,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_compound_values(UnitTestArgu
                     BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -35050,7 +35034,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parameter_local_alignment(UnitTestArgu
             }
         }
         BUSTER_TEST(arguments, aligned_parameters == 2);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -35123,7 +35107,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTest
         }
     }
     BUSTER_TEST(arguments, aligned_locals == 1);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -35232,7 +35216,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pragma_pack_explicit_alignment(UnitTes
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         String8 invalid_sources[] = {
             S8("#pragma pack(push, 1)\nstruct rejected { char c; _Alignas(2) int value; };\n#pragma pack(pop)\n"),
@@ -35253,7 +35237,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pragma_pack_explicit_alignment(UnitTes
                 BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
             }
             BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -35474,7 +35458,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         BUSTER_TEST(arguments, specifier_aligned != 0 && specifier_aligned->alignment == 128);
         BUSTER_TEST(arguments, plain_object_array != 0 && plain_object_array->alignment == 1);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 
     // The attribute is recorded against the aggregate it decorates and no
     // other, whichever side of the body it is written on.
@@ -36036,7 +36020,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_extension_constants(UnitTestArguments*
                     BUSTER_TEST(arguments, checked.canonical_ir_certified);
                     BUSTER_TEST(arguments, ir_validate_canonical_module(checked.program, module).error == IR_VALIDATION_NONE);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -36071,7 +36055,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_extension_constants(UnitTestArguments*
                                 modes[mode], form, execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -36126,7 +36110,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
             BUSTER_TEST(arguments, parse.diagnostic_count == 0);
             BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // The two reductions issue #631 records: the scalar parameter whose body
@@ -36149,7 +36133,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // Constants, in the encoding clang writes for the same spellings. The
@@ -36214,7 +36198,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         BUSTER_TEST(arguments, values && values->bytes.length == constants[case_index].bytes.length);
         if (values && values->bytes.pointer && values->bytes.length == constants[case_index].bytes.length)
             BUSTER_TEST(arguments, memcmp(values->bytes.pointer, constants[case_index].bytes.pointer, (size_t)values->bytes.length) == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // A scalar global takes the FLOAT initializer rather than the byte one,
@@ -36232,7 +36216,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         BUSTER_TEST(arguments, scalar && scalar->initializer_bits == 0x3c01);
         IrType* scalar_type = scalar && lowered.program ? ir_type_from_id(&lowered.program->types, scalar->type) : 0;
         BUSTER_TEST(arguments, scalar_type && scalar_type->kind == IR_TYPE_FLOAT && scalar_type->bit_width == 16 && scalar_type->layout.size == 2);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // The usual arithmetic conversions: `_Float16` ranks below every other
@@ -36264,7 +36248,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         IrGlobal* rank = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("rank")) : 0;
         IrType* rank_type = rank && lowered.program ? ir_type_from_id(&lowered.program->types, rank->type) : 0;
         BUSTER_TEST(arguments, rank_type && rank_type->kind == IR_TYPE_ARRAY && rank_type->layout.size == ranks[case_index].size);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // `_Float16` combines with nothing but `_Complex`. Each of these names no
@@ -36295,7 +36279,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
         CParseResult parse = c_parse(temporary.arena, preprocess);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count != 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     return result;
@@ -36489,7 +36473,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ext80_big_live_limbs(UnitTestArguments
     BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
     BUSTER_TEST(arguments, binary_exponent == -7);
 
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -36536,7 +36520,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 reductions[] = {
@@ -36574,7 +36558,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
             {
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -36636,7 +36620,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
                     BUSTER_TEST(arguments, values && values->bytes.length == constants[case_index].bytes.length);
                     if (values && values->bytes.pointer && values->bytes.length == constants[case_index].bytes.length)
                         BUSTER_TEST(arguments, memcmp(values->bytes.pointer, constants[case_index].bytes.pointer, (size_t)values->bytes.length) == 0);
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -36668,7 +36652,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
         BUSTER_TEST(arguments, brain_type && brain_type->kind == IR_TYPE_FLOAT && brain_type->bit_width == 16 &&
                                brain_type->layout.size == 2 && brain_type->float_format == IR_FLOAT_FORMAT_BFLOAT16);
         BUSTER_TEST(arguments, half && brain && half->type.value != brain->type.value);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     for (u32 form = 0; form < 2; form += 1)
@@ -36693,7 +36677,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
         BUSTER_TEST(arguments, sum && sum->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && sum->initializer_bits == 0x4000);
         BUSTER_TEST(arguments, widened && widened->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT &&
                                widened->initializer_bits == UINT64_C(0x3ff8000000000000));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     struct
@@ -36724,7 +36708,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
         IrGlobal* rank = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("rank")) : 0;
         IrType* rank_type = rank && lowered.program ? ir_type_from_id(&lowered.program->types, rank->type) : 0;
         BUSTER_TEST(arguments, rank_type && rank_type->kind == IR_TYPE_ARRAY && rank_type->layout.size == ranks[case_index].size);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 invalid[] = {
@@ -36766,7 +36750,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
         CParseResult parse = c_parse(temporary.arena, preprocess);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count != 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     for (u32 form = 0; form < 2; form += 1)
@@ -36807,7 +36791,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
         BUSTER_TEST(arguments, right && right->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && right->initializer_bits == 0x3c02);
         BUSTER_TEST(arguments, narrowed && narrowed->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && narrowed->initializer_bits == 0x3fc0);
         BUSTER_TEST(arguments, widened && widened->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && widened->initializer_bits == 0x3e00);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 wide_sources[] = {
@@ -36852,7 +36836,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
                     {
                         BUSTER_TEST(arguments, wide && wide->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && wide->initializer_bits == 0x3f81);
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -36890,7 +36874,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
                 BUSTER_TEST(arguments, lowered.program != 0);
                 IrGlobal* wide = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("wide")) : 0;
                 BUSTER_TEST(arguments, wide && wide->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && wide->initializer_bits == 0x3f80);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -37005,7 +36989,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_semantic_acceptance(UnitTestA
                     BUSTER_TEST(arguments, type && type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -37116,7 +37100,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_semantic_acceptance(UnitTestA
                         BUSTER_TEST(arguments, type && type->float_format == (index == 5 ? IR_FLOAT_FORMAT_IEEE : IR_FLOAT_FORMAT_BFLOAT16));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -37139,7 +37123,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_semantic_acceptance(UnitTestA
             BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
             BUSTER_TEST(arguments, negative ? lowered.diagnostic_count != 0 : lowered.diagnostic_count == 0);
             BUSTER_TEST(arguments, negative ? lowered.program == 0 : lowered.program != 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -37193,7 +37177,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_integer_constants(UnitTestArgume
         BUSTER_TEST(arguments, values && values->bytes.length == cases[case_index].bytes.length);
         if (values && values->bytes.pointer && values->bytes.length == cases[case_index].bytes.length)
             BUSTER_TEST(arguments, memcmp(values->bytes.pointer, cases[case_index].bytes.pointer, (size_t)values->bytes.length) == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // Unrepresentable conversions have undefined source semantics. Refuse the
@@ -37224,7 +37208,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_integer_constants(UnitTestArgume
         BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
         if (lowered.diagnostic_count == 1)
             BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -37347,7 +37331,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_rounding(Uni
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
             for (u32 index = 0; index <= BUSTER_ARRAY_LENGTH(invalid); index += 1)
             {
@@ -37361,7 +37345,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_rounding(Uni
                 BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
                 BUSTER_TEST_RAW(arguments, index ? lowered.diagnostic_count != 0 && !lowered.program
                                                : lowered.diagnostic_count == 0 && lowered.program, source);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -37424,7 +37408,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_runtime(Unit
                         BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -37535,7 +37519,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_initializer_elision_runtime(Un
                         BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -37723,7 +37707,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
     unordered_bucket_parse.entity_count = BUSTER_ARRAY_LENGTH(unordered_bucket_entities);
     unordered_bucket_parse.name_lookup_buckets = unordered_bucket_head;
     BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&unordered_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -37747,14 +37731,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_null_preprocessing_directives(UnitTest
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocessed = c_preprocess(temporary.arena, sources[i], (CPreprocessOptions){0});
         BUSTER_TEST(arguments, preprocessed.diagnostic_count == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     TemporalArena temporary = scratch_begin(0, 0);
     CPreprocessResult invalid = c_preprocess(temporary.arena, S8("#+\nint value;\n"), (CPreprocessOptions){0});
     BUSTER_TEST(arguments, invalid.diagnostic_count != 0);
     if (invalid.diagnostic_count)
         BUSTER_TEST(arguments, invalid.diagnostics[0].kind == C_DIAGNOSTIC_EXPECTED_DIRECTIVE);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -37779,7 +37763,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_malformed_initializer_progress_and_ide
             parse = c_parse(temporary.arena, preprocess);
         }
         BUSTER_TEST(arguments, preprocess.diagnostic_count || parse.diagnostic_count);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     {
@@ -37803,7 +37787,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_malformed_initializer_progress_and_ide
                 BUSTER_TEST(arguments, parse.identifier_uses[previous].token_index != parse.identifier_uses[use_index].token_index);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     return result;
@@ -37859,7 +37843,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_scope_interval_index(UnitTestArguments
         BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){0}, 0, siblings * 4 + 9) == 0);
         BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){siblings}, 2, 8) == 0);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -37939,7 +37923,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_scope_map(UnitTestArguments* argu
     BUSTER_TEST(arguments, bodies == 40);
     BUSTER_TEST(arguments, mismatches == 0);
     BUSTER_TEST(arguments, nested_tokens > bodies * 20);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -38006,7 +37990,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_orders(UnitTest
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -38066,7 +38050,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
             BUSTER_TEST(arguments, ir_validate_canonical_module(reference.program, reference.program->modules).error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, ir_prepare_canonical_module(reference.program, reference.program->modules, false).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -38147,7 +38131,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_value_compaction(UnitTestAr
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -38210,7 +38194,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(Uni
     BUSTER_TEST(arguments, large[0] == small[0] && large[2] == small[2]);
     BUSTER_TEST(arguments, large[2] == large[0]);
     BUSTER_TEST(arguments, large[3] > small[3] && large[3] > large[0]);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -38409,7 +38393,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* argument
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     String8 invalid[] = {
@@ -38436,7 +38420,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* argument
                                        current->location.column == old->location.column);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -38554,7 +38538,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_leaf_storage(UnitTestArgumen
             BUSTER_STRING_TEST(arguments, parse.diagnostics[before].message, S8("constexpr object has an invalid type"));
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -38618,7 +38602,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArgu
             declarations += 1;
         }
         BUSTER_TEST(arguments, declarations == function_count);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // Cross growth boundaries, then reuse the largest vector for shallow and
@@ -38680,7 +38664,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArgu
         BUSTER_TEST(arguments, analysis.diagnostics[0].location.line == BUSTER_ARRAY_LENGTH(depths) * 4 + 2);
         BUSTER_TEST(arguments, analysis.diagnostics[0].location.column == 27);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -38705,7 +38689,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_diagnostic_storage(UnitTestArgu
         BUSTER_TEST(arguments, empty.diagnostics == 0 && empty.diagnostic_count == 0 && empty.diagnostic_capacity == 0);
         CParserResult no_arena = c_parse_ast(0, tokens);
         BUSTER_TEST(arguments, no_arena.diagnostics == 0 && no_arena.diagnostic_count == 0 && no_arena.diagnostic_capacity == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // More than one row must keep the first allocation and retain every
@@ -38747,7 +38731,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_diagnostic_storage(UnitTestArgu
                                        diagnostic->location.map_offset == expected.map_offset);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 truncated[] = {S8("int unfinished"), S8("int broken(void) {\n")};
@@ -38773,7 +38757,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_diagnostic_storage(UnitTestArgu
                 BUSTER_TEST(arguments, syntax.diagnostics[0].location.line == 1 && syntax.diagnostics[0].location.column == 18);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -38824,7 +38808,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         u64 value = 0;
         BUSTER_TEST_RAW(arguments, c_conditional_number(spelling, &value), spelling);
         BUSTER_TEST(arguments, value == 42);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 invalid[] = {
         S8(""), S8("09"), S8("08u"), S8("0b2"), S8("0b102"), S8("0x"), S8("0Xg"), S8("0b"),
@@ -38890,7 +38874,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
                 }
                 CIRLowerResult lowered = c_analyze(temporary.arena, S8("integer-spelling.c"), tokens, syntax, target_native);
                 BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, source);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 directives[] = {S8("#if "), S8("#if 0 && "), S8("#if 0\n#elif ")};
@@ -38906,7 +38890,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
                     BUSTER_TEST(arguments, tokens.diagnostics[0].location.line == (directive == 2 ? 2u : 1u));
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         String8 source = S8("#define UNUSED 09\n"
@@ -38932,7 +38916,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         {
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -39082,7 +39066,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
         BUSTER_TEST_RAW(arguments, reported == 1 && located, invalid[case_index].source);
         BUSTER_TEST_RAW(arguments, parse.member_count == 0, invalid[case_index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 valid[] = {
@@ -39109,7 +39093,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-declaration.c"), preprocess, parse, target_native);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
         BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, valid[case_index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     struct
@@ -39143,7 +39127,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         }
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, trailing[case_index].source);
         BUSTER_TEST_RAW(arguments, reported == 1 && located, trailing[case_index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     struct
@@ -39184,7 +39168,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         }
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
         BUSTER_TEST_RAW(arguments, reported == 1 && located, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     {
@@ -39197,7 +39181,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert-c23.c"), preprocess, parse, target_native);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, source);
         BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // #1250 also lost the member following an assertion. Pin the reported
     // x86-64 Linux layout in both the typed fold and canonical IR; native
@@ -39258,7 +39242,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -39338,7 +39322,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         {
             BUSTER_TEST_RAW(arguments, following_declared, source);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 valid[] = {
@@ -39368,7 +39352,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         }
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, valid[case_index]);
         BUSTER_TEST_RAW(arguments, !unknown_type_diagnostic, valid[case_index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -39446,7 +39430,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unsupported_float_extension_diagnostic
         CParseResult parse = c_parse(temporary.arena, preprocess);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, glibc_pattern);
         BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, glibc_pattern);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
     {
@@ -39472,7 +39456,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unsupported_float_extension_diagnostic
             BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
             BUSTER_TEST_RAW(arguments, diagnosed, source);
             BUSTER_TEST_RAW(arguments, !unknown_type, source);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(accepted); case_index += 1)
         {
@@ -39485,7 +39469,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unsupported_float_extension_diagnostic
             CParseResult parse = c_parse(temporary.arena, preprocess);
             BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
             BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, source);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         // A typedef naming one of these types is accepted but unmodeled, so a
         // later use of the alias must fail rather than create a dropped object.
@@ -39502,7 +39486,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unsupported_float_extension_diagnostic
                 errored |= parse.diagnostics[diagnostic_index].severity == C_DIAGNOSTIC_ERROR;
             }
             BUSTER_TEST_RAW(arguments, errored, source);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // A member function-pointer parse that exhausts the type machine abandons
@@ -39547,7 +39531,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unsupported_float_extension_diagnostic
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, S8("machine failure then lenient declarations"));
         BUSTER_TEST_RAW(arguments, machine_failed, S8("machine failure then lenient declarations"));
         BUSTER_TEST_RAW(arguments, !leaked_report, S8("machine failure then lenient declarations"));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -39592,7 +39576,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_trailing_token_diagnostics(
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
         BUSTER_TEST_RAW(arguments, diagnosed, invalid[case_index].source);
         BUSTER_TEST_RAW(arguments, recovered, invalid[case_index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 valid[] = {
@@ -39608,7 +39592,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_trailing_token_diagnostics(
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
         CParseResult parse = c_parse(temporary.arena, preprocess);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -39664,7 +39648,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
         }
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
         BUSTER_TEST_RAW(arguments, reported == 1 && located, invalid[case_index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     String8 valid[] = {
@@ -39696,7 +39680,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
         CParseResult parse = c_parse(temporary.arena, preprocess);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -39752,7 +39736,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declarator_trailing_token_diagn
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
         BUSTER_TEST_RAW(arguments, reported == 1 && located, invalid[case_index].source);
         BUSTER_TEST_RAW(arguments, parse.member_count == 0, invalid[case_index].source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // Spellings the member path does not model yet read as a name with tokens
@@ -39772,7 +39756,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declarator_trailing_token_diagn
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
         CParseResult parse = c_parse(temporary.arena, preprocess);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -39835,7 +39819,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
             }
             BUSTER_TEST_RAW(arguments, attributed, source);
             BUSTER_TEST_RAW(arguments, !blamed_following, source);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     String8 recovered[] = {
@@ -39869,7 +39853,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
                                                S8("following"));
         }
         BUSTER_TEST_RAW(arguments, following_declared, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -39879,7 +39863,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
                                  .target = target_native, .data_layout = target_data_layout(target_native)});
         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
         BUSTER_TEST_RAW(arguments, tokens.diagnostic_count != 0 || syntax.diagnostic_count != 0, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -39895,7 +39879,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
             attributed |= syntax.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS;
         }
         BUSTER_TEST_RAW(arguments, attributed, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 control_specifiers[] = {S8("long long"), S8("long int long"), S8("int unsigned long long"),
         S8("long unsigned long int"), S8("signed char"), S8("unsigned short int"), S8("double long"),
@@ -39948,7 +39932,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
             }
         }
         BUSTER_TEST_RAW(arguments, parsed_v && lowered_v, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 qualified_controls[] = {
         S8("typedef unsigned long long U;\nconst U v = 7;\nint take(const unsigned long p) { volatile U local = p; return sizeof(local) == sizeof(U); }\n"),
@@ -39962,7 +39946,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
         CParseResult parse = {0};
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("qualified-specifiers.c"), target_native, &tokens, &parse);
         BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // A tag specifier names a type exactly the way a primitive word does, so
     // a set that spells both, or two tags, violates the same constraint the
@@ -40016,7 +40000,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
             }
             BUSTER_TEST_RAW(arguments, attributed, source);
             BUSTER_TEST_RAW(arguments, !blamed_following, source);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // The refusal recovers the way the primitive one does: the declaration
@@ -40053,7 +40037,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
                                                S8("following"));
         }
         BUSTER_TEST_RAW(arguments, following_declared, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 tag_control_specifiers[] = {S8("struct S"), S8("const struct S"), S8("struct S const"), S8("union U"),
         S8("enum E"), S8("struct S volatile"), S8("__extension__ struct S")};
@@ -40083,7 +40067,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
             }
         }
         BUSTER_TEST_RAW(arguments, lowered_v, source);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -40126,7 +40110,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_same_scope_tag_redefinition_diagnostic
                 blamed_following |= row.location.line > 2;
             }
             BUSTER_TEST_RAW(arguments, redefinition_count == 1 && attributed && !blamed_following, refused_sources[source_index]);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -40148,7 +40132,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_same_scope_tag_redefinition_diagnostic
             BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
                                        analyzed.diagnostic_count == 0 && analyzed.program != 0,
                             accepted_sources[source_index]);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -40230,7 +40214,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_abi(UnitTestArgument
                 {
                     BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -40297,7 +40281,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_qualifiers(UnitTestA
                     BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && !lowered.program);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -40352,7 +40336,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_qualifiers_runtime(U
                         BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -40428,7 +40412,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_post_tag_declaration_specifiers(UnitTe
             BUSTER_TEST_RAW(arguments, entity->is_definition == expected[expected_index].is_definition, expected[expected_index].name);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 // sizeof evaluates an operand of VLA type, even when its saved size is known.
@@ -40589,7 +40573,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_vla_evaluation(UnitTestArgument
                         target_index, form, lowered.diagnostic_count, lowered.program ? lowered.program->module_count : 0, diagnostic);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -40625,7 +40609,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_vla_evaluation(UnitTestArgument
                                           allocators[allocator], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -40827,7 +40811,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -40871,7 +40855,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
                                     allocators[allocator], frontends[form], optimizations[optimization], execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -40958,7 +40942,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArgumen
                                               execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -41058,7 +41042,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                                 string_format(temporary.arena, S8("{S8}: calls={u32}/{u32}"), context, calls, cases[row].call_count));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -41093,7 +41077,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                                               context, loads, volatile_loads, volatile_stores));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
                 for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
                 {
@@ -41111,7 +41095,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                     BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,
                         string_format(temporary.arena, S8("rejected place update row={u32} target={u32} dialect={u32} form={u32}: {S8}"),
                                       row, target_index, dialect, form, rejected[row]));
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -41168,7 +41152,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                     }
                     BUSTER_TEST(arguments, os_file_delete(output));
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -41251,7 +41235,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                             }
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -41482,7 +41466,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_bool_conversion(UnitTestArgume
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -41526,7 +41510,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_bool_conversion(UnitTestArgume
                                               execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -41631,7 +41615,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy(UnitTestArgumen
                         BUSTER_TEST(arguments, checked == 2);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -41673,7 +41657,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTes
                             BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -41788,7 +41772,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members(UnitTestArguments* ar
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
                 for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid); row += 1)
                 {
                     temporary = scratch_begin(&arguments->arena, 1);
@@ -41814,7 +41798,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members(UnitTestArguments* ar
                         string_format(temporary.arena, S8("offsetof refusal {S8} dialect={u32} form={u32}: {S8}"),
                             triples[target_index], dialect, form, invalid[row]));
                     BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -41936,7 +41920,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_types(UnitTestArgume
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -42097,7 +42081,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -42136,7 +42120,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_types_runtime(UnitTe
                                 mode, form, execution.platform_status));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -42250,7 +42234,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_indices(UnitTestArgumen
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -42348,7 +42332,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
                         BUSTER_TEST_RAW(arguments, parsed_errors + lowered_errors != 0 && !lowered.canonical_ir_certified, label);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -42388,7 +42372,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_indices_runtime(UnitTes
                                 mode, form, execution.platform_status));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -42432,7 +42416,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArgum
                                 mode, form, execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -42525,7 +42509,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitT
                                     dialects[dialect], modes[mode], form, execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -42715,7 +42699,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -42758,7 +42742,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     for (u32 form = 0; form < 2; form += 1)
     {
@@ -42782,7 +42766,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                                    boolean->initializer_bits == 0);
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 invalid[] = {
         S8("unsigned u = 5; static int bad = u + 1;"),
@@ -42820,7 +42804,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
             BUSTER_TEST(arguments, !tokens.diagnostic_count);
             BUSTER_TEST_RAW(arguments, parsed.diagnostic_count + lowered.diagnostic_count != 0, invalid[index]);
             BUSTER_TEST_RAW(arguments, !lowered.canonical_ir_certified, invalid[index]);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -42859,7 +42843,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                                     allocators[allocator], frontends[form], optimizations[optimization], execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -43004,7 +42988,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -43039,7 +43023,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
                                 modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -43342,7 +43326,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArg
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -43379,7 +43363,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArg
                                     modes[mode], frontends[form], optimizations[optimization], execution.platform_status, (u32)execution.timed_out));
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -43446,7 +43430,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments
             {
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -43480,7 +43464,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments
                                 modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -43520,7 +43504,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArgum
             CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("comma-constraint.c"), tokens, parsed, target_native,
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid_sources[index]);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -43607,7 +43591,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_void_function_pointer_policy(UnitTestA
                 BUSTER_TEST_RAW(arguments, (analysis.diagnostic_count == 0) == expected,
                     string_format(temporary.arena, S8("target={u32}/{u32} dialect={u32} source={S8}"),
                                   (u32)target.cpu_arch, (u32)target.os, (u32)dialects[dialect_index].dialect, cases[index].source));
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -43719,7 +43703,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
                         rejections[index].type));
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     c_test_case_range_lower_diagnostic(arguments, &result,
@@ -43754,7 +43738,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
                         BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -43828,7 +43812,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArgume
                     BUSTER_TEST(arguments, checked == BUSTER_ARRAY_LENGTH(names));
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -43913,7 +43897,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestAr
                         BUSTER_TEST_RAW(arguments, returns == 1 && effects == 0, cases[case_index].expression);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -43967,7 +43951,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestAr
                         BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -43981,323 +43965,323 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
 #if BUSTER_BENCH_ALLOCATIONS
-    BUSTER_TEST_FIXTURE(arguments, c_test_source_fact_census);
+    C_TEST_FIXTURE(arguments, c_test_source_fact_census);
 #endif
     // Fixtures run in byte order of their names. Register a new fixture at
     // its sorted position, not after the newest one, so independent
     // additions land at different anchors; see docs/agents/testing.md.
-    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
-    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
-    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
-    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
-    BUSTER_TEST_FIXTURE(arguments, c_test_alignof_member);
-    BUSTER_TEST_FIXTURE(arguments, c_test_alignof_object);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
-    BUSTER_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
-    BUSTER_TEST_FIXTURE(arguments, c_test_attribute_call_roles);
-    BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
-    BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_type);
-    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
-    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
-    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
-    BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
-    BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
-    BUSTER_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_body_scope_map);
-    BUSTER_TEST_FIXTURE(arguments, c_test_bool_bit_field_loads);
-    BUSTER_TEST_FIXTURE(arguments, c_test_brace_designators);
-    BUSTER_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
-    BUSTER_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
-    BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
-    BUSTER_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);
-    BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
-    BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_call_assignment_values);
-    BUSTER_TEST_FIXTURE(arguments, c_test_call_result_callees);
-    BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
-    BUSTER_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
-    BUSTER_TEST_FIXTURE(arguments, c_test_character_literal_query_types);
-    BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
-    BUSTER_TEST_FIXTURE(arguments, c_test_comma_condition_evaluation);
-    BUSTER_TEST_FIXTURE(arguments, c_test_comma_result_constraints);
-    BUSTER_TEST_FIXTURE(arguments, c_test_comma_value_operands);
-    BUSTER_TEST_FIXTURE(arguments, c_test_complex_bool_conversion);
-    BUSTER_TEST_FIXTURE(arguments, c_test_complex_initializer_elision_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
-    BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
-    BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
-    BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
-    BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
-    BUSTER_TEST_FIXTURE(arguments, c_test_constant_expression_syntax);
-    BUSTER_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_integer_range);
-    BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_integer_types);
-    BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_integer_types_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
-    BUSTER_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
-    BUSTER_TEST_FIXTURE(arguments, c_test_declaration_constraints);
-    BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_declarator_group_nesting);
-    BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
-    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_diagnostic_ownership);
-    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
-    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_positive);
-    BUSTER_TEST_FIXTURE(arguments, c_test_definition_index);
-    BUSTER_TEST_FIXTURE(arguments, c_test_digraphs);
-    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
-    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
-    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
-    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
-    BUSTER_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unnamed_parameter_definitions);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_successor_limits);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
-    BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
-    BUSTER_TEST_FIXTURE(arguments, c_test_error_attribute_calls);
-    BUSTER_TEST_FIXTURE(arguments, c_test_expression_aggregate_bit_fields);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
-    BUSTER_TEST_FIXTURE(arguments, c_test_extension_constants);
-    BUSTER_TEST_FIXTURE(arguments, c_test_file_scope_declaration_order);
-    BUSTER_TEST_FIXTURE(arguments, c_test_file_tls_dialect);
-    BUSTER_TEST_FIXTURE(arguments, c_test_file_tls_dialect_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
-    BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
-    BUSTER_TEST_FIXTURE(arguments, c_test_float16_type);
-    BUSTER_TEST_FIXTURE(arguments, c_test_float_classifier_widths);
-    BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
-    BUSTER_TEST_FIXTURE(arguments, c_test_float_literal_initializer_rounding);
-    BUSTER_TEST_FIXTURE(arguments, c_test_float_literal_initializer_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vectors);
-    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
-    BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
-    BUSTER_TEST_FIXTURE(arguments, c_test_function_name_literals);
-    BUSTER_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility);
-    BUSTER_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
-    BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
-    BUSTER_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
-    BUSTER_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
-    BUSTER_TEST_FIXTURE(arguments, c_test_has_builtin);
-    BUSTER_TEST_FIXTURE(arguments, c_test_header_operands);
-    BUSTER_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
-    BUSTER_TEST_FIXTURE(arguments, c_test_identifier_list_function_definitions);
-    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
-    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
-    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
-    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
-    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_separators);
-    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_stack_capacity);
-    BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_constraint_unions);
-    BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
-    BUSTER_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
-    BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
-    BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);
-    BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
-    BUSTER_TEST_FIXTURE(arguments, c_test_intern_scan_by_shape);
-    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
-    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_designators);
-    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_local_static_initializer);
-    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_root_designators);
-    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ir_row_streams);
-    BUSTER_TEST_FIXTURE(arguments, c_test_label_values_gate);
-    BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_reserve_failure);
-    BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
-    BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
-    BUSTER_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
-    BUSTER_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
-    BUSTER_TEST_FIXTURE(arguments, c_test_local_tls);
-    BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
-    BUSTER_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
-    BUSTER_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
-    BUSTER_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
-    BUSTER_TEST_FIXTURE(arguments, c_test_lowering_nested_conditional_sizeof_memo);
-    BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
-    BUSTER_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
-    BUSTER_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);
-    BUSTER_TEST_FIXTURE(arguments, c_test_max_align_t_layout);
-    BUSTER_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
-    BUSTER_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_member_search_scratch);
-    BUSTER_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
-    BUSTER_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
-    BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
-    BUSTER_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
-    BUSTER_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
-    BUSTER_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
-    BUSTER_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
-    BUSTER_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
-    BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
-    BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
-    BUSTER_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
-    BUSTER_TEST_FIXTURE(arguments, c_test_number_facts);
-    BUSTER_TEST_FIXTURE(arguments, c_test_offsetof_members);
-    BUSTER_TEST_FIXTURE(arguments, c_test_offsetof_members_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices);
-    BUSTER_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_offsetof_typed_refusals);
-    BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
-    BUSTER_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_address_assignment_expression);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_address_place_assignment);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_bit_field_assignment_values);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_function_declarations);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
-    BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
-    BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
-    BUSTER_TEST_FIXTURE(arguments, c_test_phase_arena_release);
-    BUSTER_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
-    BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
-    BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
-    BUSTER_TEST_FIXTURE(arguments, c_test_pp_class_masks);
-    BUSTER_TEST_FIXTURE(arguments, c_test_pragma_pack_explicit_alignment);
-    BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
-    BUSTER_TEST_FIXTURE(arguments, c_test_promoted_member_search);
-    BUSTER_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
-    BUSTER_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
-    BUSTER_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
-    BUSTER_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
-    BUSTER_TEST_FIXTURE(arguments, c_test_runtime_place_updates);
-    BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
-    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
-    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_control_preparation);
-    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
-    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
-    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
-    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
-    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_lifetime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_locations);
-    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_order);
-    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_publication);
-    BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
-    BUSTER_TEST_FIXTURE(arguments, c_test_source_size_limit);
-    BUSTER_TEST_FIXTURE(arguments, c_test_source_utf8);
-    BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
-    BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_control_value);
-    BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
-    BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);
-    BUSTER_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
-    BUSTER_TEST_FIXTURE(arguments, c_test_static_compound_literal);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
-    BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
-    BUSTER_TEST_FIXTURE(arguments, c_test_stddef_need_protocol);
-    BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
-    BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_memo);
-    BUSTER_TEST_FIXTURE(arguments, c_test_switch_integer_controls);
-    BUSTER_TEST_FIXTURE(arguments, c_test_symbol_find_collisions);
-    BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
-    BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
-    BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
-    BUSTER_TEST_FIXTURE(arguments, c_test_target_abi_macros);
-    BUSTER_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
-    BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
-    BUSTER_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
-    BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
-    BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers);
-    BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_trigraph_translation);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_identity_authority);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_name_attributes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_name_operand_trailer);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_snapshot_rows);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_self_compatibility);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
-    BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
-    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
-    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
-    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
-    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ucn_lex);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ucn_preprocess);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ucn_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_ucn_semantic);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unsupported_float_extension_diagnostics);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unnamed_initializer_places);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unneeded_prototyped_definitions);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
-    BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
-    BUSTER_TEST_FIXTURE(arguments, c_test_va_list_identity_and_places);
-    BUSTER_TEST_FIXTURE(arguments, c_test_validation_candidates);
-    BUSTER_TEST_FIXTURE(arguments, c_test_variable_member_types);
-    BUSTER_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
-    BUSTER_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
-    BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
-    BUSTER_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
-    BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
-    BUSTER_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wasm_long_double_storage);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_android_boundaries);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_deep_initializers);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
-    BUSTER_TEST_FIXTURE(arguments, c_test_x87_integer_unary_initializers);
-    BUSTER_TEST_FIXTURE(arguments, c_test_x87_integer_unary_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_initializers);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_integer_global_initializers);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
-    BUSTER_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
-    BUSTER_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
-    BUSTER_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
-    BUSTER_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);
+    C_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
+    C_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
+    C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
+    C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
+    C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
+    C_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
+    C_TEST_FIXTURE(arguments, c_test_alignof_member);
+    C_TEST_FIXTURE(arguments, c_test_alignof_object);
+    C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
+    C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
+    C_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
+    C_TEST_FIXTURE(arguments, c_test_attribute_call_roles);
+    C_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
+    C_TEST_FIXTURE(arguments, c_test_bfloat16_type);
+    C_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
+    C_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
+    C_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
+    C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
+    C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
+    C_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
+    C_TEST_FIXTURE(arguments, c_test_body_scope_map);
+    C_TEST_FIXTURE(arguments, c_test_bool_bit_field_loads);
+    C_TEST_FIXTURE(arguments, c_test_brace_designators);
+    C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
+    C_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
+    C_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
+    C_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
+    C_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);
+    C_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
+    C_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
+    C_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_call_assignment_values);
+    C_TEST_FIXTURE(arguments, c_test_call_result_callees);
+    C_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
+    C_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
+    C_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
+    C_TEST_FIXTURE(arguments, c_test_character_literal_query_types);
+    C_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
+    C_TEST_FIXTURE(arguments, c_test_comma_condition_evaluation);
+    C_TEST_FIXTURE(arguments, c_test_comma_result_constraints);
+    C_TEST_FIXTURE(arguments, c_test_comma_value_operands);
+    C_TEST_FIXTURE(arguments, c_test_complex_bool_conversion);
+    C_TEST_FIXTURE(arguments, c_test_complex_initializer_elision_runtime);
+    C_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
+    C_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
+    C_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
+    C_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
+    C_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
+    C_TEST_FIXTURE(arguments, c_test_constant_expression_syntax);
+    C_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
+    C_TEST_FIXTURE(arguments, c_test_constexpr_integer_range);
+    C_TEST_FIXTURE(arguments, c_test_constexpr_integer_types);
+    C_TEST_FIXTURE(arguments, c_test_constexpr_integer_types_runtime);
+    C_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
+    C_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
+    C_TEST_FIXTURE(arguments, c_test_declaration_constraints);
+    C_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
+    C_TEST_FIXTURE(arguments, c_test_declarator_group_nesting);
+    C_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
+    C_TEST_FIXTURE(arguments, c_test_deferred_assert_diagnostic_ownership);
+    C_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
+    C_TEST_FIXTURE(arguments, c_test_deferred_assert_positive);
+    C_TEST_FIXTURE(arguments, c_test_definition_index);
+    C_TEST_FIXTURE(arguments, c_test_digraphs);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
+    C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
+    C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
+    C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
+    C_TEST_FIXTURE(arguments, c_test_enum_lowering);
+    C_TEST_FIXTURE(arguments, c_test_enum_runtime);
+    C_TEST_FIXTURE(arguments, c_test_unnamed_parameter_definitions);
+    C_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
+    C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
+    C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);
+    C_TEST_FIXTURE(arguments, c_test_enum_successor_limits);
+    C_TEST_FIXTURE(arguments, c_test_enum_successors);
+    C_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
+    C_TEST_FIXTURE(arguments, c_test_enumerator_types);
+    C_TEST_FIXTURE(arguments, c_test_error_attribute_calls);
+    C_TEST_FIXTURE(arguments, c_test_expression_aggregate_bit_fields);
+    C_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
+    C_TEST_FIXTURE(arguments, c_test_extension_constants);
+    C_TEST_FIXTURE(arguments, c_test_file_scope_declaration_order);
+    C_TEST_FIXTURE(arguments, c_test_file_tls_dialect);
+    C_TEST_FIXTURE(arguments, c_test_file_tls_dialect_runtime);
+    C_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
+    C_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
+    C_TEST_FIXTURE(arguments, c_test_float16_type);
+    C_TEST_FIXTURE(arguments, c_test_float_classifier_widths);
+    C_TEST_FIXTURE(arguments, c_test_float_integer_constants);
+    C_TEST_FIXTURE(arguments, c_test_float_literal_initializer_rounding);
+    C_TEST_FIXTURE(arguments, c_test_float_literal_initializer_runtime);
+    C_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
+    C_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
+    C_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
+    C_TEST_FIXTURE(arguments, c_test_frontend_global_types);
+    C_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
+    C_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
+    C_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
+    C_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
+    C_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
+    C_TEST_FIXTURE(arguments, c_test_frontend_vectors);
+    C_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
+    C_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
+    C_TEST_FIXTURE(arguments, c_test_function_name_literals);
+    C_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility);
+    C_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility_runtime);
+    C_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
+    C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
+    C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
+    C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
+    C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
+    C_TEST_FIXTURE(arguments, c_test_has_builtin);
+    C_TEST_FIXTURE(arguments, c_test_header_operands);
+    C_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
+    C_TEST_FIXTURE(arguments, c_test_identifier_list_function_definitions);
+    C_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
+    C_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
+    C_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
+    C_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
+    C_TEST_FIXTURE(arguments, c_test_initializer_separators);
+    C_TEST_FIXTURE(arguments, c_test_initializer_stack_capacity);
+    C_TEST_FIXTURE(arguments, c_test_inline_assembly_constraint_unions);
+    C_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
+    C_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
+    C_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
+    C_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
+    C_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);
+    C_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
+    C_TEST_FIXTURE(arguments, c_test_intern_scan_by_shape);
+    C_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
+    C_TEST_FIXTURE(arguments, c_test_invalid_designators);
+    C_TEST_FIXTURE(arguments, c_test_invalid_local_static_initializer);
+    C_TEST_FIXTURE(arguments, c_test_invalid_root_designators);
+    C_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
+    C_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
+    C_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
+    C_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
+    C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
+    C_TEST_FIXTURE(arguments, c_test_label_values_gate);
+    C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
+    C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
+    C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_reserve_failure);
+    C_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
+    C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
+    C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
+    C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
+    C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
+    C_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
+    C_TEST_FIXTURE(arguments, c_test_local_tls);
+    C_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
+    C_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
+    C_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
+    C_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
+    C_TEST_FIXTURE(arguments, c_test_lowering_nested_conditional_sizeof_memo);
+    C_TEST_FIXTURE(arguments, c_test_macro_plain_production);
+    C_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
+    C_TEST_FIXTURE(arguments, c_test_macro_task_batches);
+    C_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);
+    C_TEST_FIXTURE(arguments, c_test_max_align_t_layout);
+    C_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
+    C_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_member_search_scratch);
+    C_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
+    C_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
+    C_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
+    C_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
+    C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
+    C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
+    C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
+    C_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
+    C_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
+    C_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
+    C_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
+    C_TEST_FIXTURE(arguments, c_test_number_facts);
+    C_TEST_FIXTURE(arguments, c_test_offsetof_members);
+    C_TEST_FIXTURE(arguments, c_test_offsetof_members_runtime);
+    C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices);
+    C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices_runtime);
+    C_TEST_FIXTURE(arguments, c_test_offsetof_typed_refusals);
+    C_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
+    C_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
+    C_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
+    C_TEST_FIXTURE(arguments, c_test_parenthesized_address_assignment_expression);
+    C_TEST_FIXTURE(arguments, c_test_parenthesized_address_place_assignment);
+    C_TEST_FIXTURE(arguments, c_test_parenthesized_bit_field_assignment_values);
+    C_TEST_FIXTURE(arguments, c_test_parenthesized_function_declarations);
+    C_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
+    C_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
+    C_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
+    C_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
+    C_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
+    C_TEST_FIXTURE(arguments, c_test_phase_arena_release);
+    C_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
+    C_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
+    C_TEST_FIXTURE(arguments, c_test_position_index_tiles);
+    C_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
+    C_TEST_FIXTURE(arguments, c_test_pp_class_masks);
+    C_TEST_FIXTURE(arguments, c_test_pragma_pack_explicit_alignment);
+    C_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
+    C_TEST_FIXTURE(arguments, c_test_promoted_member_search);
+    C_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
+    C_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
+    C_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
+    C_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
+    C_TEST_FIXTURE(arguments, c_test_runtime_place_updates);
+    C_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_scope_interval_index);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_control_preparation);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
+    C_TEST_FIXTURE(arguments, c_test_source_map_lifetime);
+    C_TEST_FIXTURE(arguments, c_test_source_map_locations);
+    C_TEST_FIXTURE(arguments, c_test_source_map_order);
+    C_TEST_FIXTURE(arguments, c_test_source_map_publication);
+    C_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
+    C_TEST_FIXTURE(arguments, c_test_source_size_limit);
+    C_TEST_FIXTURE(arguments, c_test_source_utf8);
+    C_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
+    C_TEST_FIXTURE(arguments, c_test_statement_expression_control_value);
+    C_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
+    C_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);
+    C_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
+    C_TEST_FIXTURE(arguments, c_test_static_compound_literal);
+    C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
+    C_TEST_FIXTURE(arguments, c_test_static_range_designators);
+    C_TEST_FIXTURE(arguments, c_test_stddef_need_protocol);
+    C_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
+    C_TEST_FIXTURE(arguments, c_test_string_literal_memo);
+    C_TEST_FIXTURE(arguments, c_test_switch_integer_controls);
+    C_TEST_FIXTURE(arguments, c_test_symbol_find_collisions);
+    C_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
+    C_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
+    C_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
+    C_TEST_FIXTURE(arguments, c_test_target_abi_macros);
+    C_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
+    C_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
+    C_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
+    C_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
+    C_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers);
+    C_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers_runtime);
+    C_TEST_FIXTURE(arguments, c_test_trigraph_translation);
+    C_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
+    C_TEST_FIXTURE(arguments, c_test_type_identity_authority);
+    C_TEST_FIXTURE(arguments, c_test_type_name_attributes);
+    C_TEST_FIXTURE(arguments, c_test_type_name_operand_trailer);
+    C_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
+    C_TEST_FIXTURE(arguments, c_test_type_parse_snapshot_rows);
+    C_TEST_FIXTURE(arguments, c_test_type_self_compatibility);
+    C_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
+    C_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
+    C_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
+    C_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
+    C_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
+    C_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
+    C_TEST_FIXTURE(arguments, c_test_ucn_lex);
+    C_TEST_FIXTURE(arguments, c_test_ucn_preprocess);
+    C_TEST_FIXTURE(arguments, c_test_ucn_runtime);
+    C_TEST_FIXTURE(arguments, c_test_ucn_semantic);
+    C_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_unsupported_float_extension_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_unnamed_initializer_places);
+    C_TEST_FIXTURE(arguments, c_test_unneeded_prototyped_definitions);
+    C_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    C_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
+    C_TEST_FIXTURE(arguments, c_test_va_list_identity_and_places);
+    C_TEST_FIXTURE(arguments, c_test_validation_candidates);
+    C_TEST_FIXTURE(arguments, c_test_variable_member_types);
+    C_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
+    C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
+    C_TEST_FIXTURE(arguments, c_test_vla_row_places);
+    C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
+    C_TEST_FIXTURE(arguments, c_test_void_object_refusals);
+    C_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
+    C_TEST_FIXTURE(arguments, c_test_wasm_long_double_storage);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_android_boundaries);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_deep_initializers);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
+    C_TEST_FIXTURE(arguments, c_test_x87_integer_unary_initializers);
+    C_TEST_FIXTURE(arguments, c_test_x87_integer_unary_runtime);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_global_initializers);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_integer_global_initializers);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
+    C_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
+    C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
+    C_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
+    C_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
+    C_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
+    C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
+    C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
+    C_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
+    C_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);
 
 
     {
@@ -47660,7 +47644,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, calls == 0);
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Fortified block-memory builtins have a real fourth size_t argument,
     // including when no libc declaration is present. Never lower these as
@@ -47702,7 +47686,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 S8("void* f(void* d, void* s) {{ return {S8}(d, {S8}, 1); }\n"), names[index], second);
             lowered = c_test_lower_source(temporary.arena, source, S8("checked-memory-arity.c"), target_native, &tokens, &parse);
             BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // A memory constraint is not a register class: the operand it carries is

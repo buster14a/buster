@@ -10505,6 +10505,10 @@ void c_phase_arena_retire(Arena* arena)
     arena_retire(arena, C_PHASE_ARENA_RETAINED_SIZE);
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position);
+#endif
+
 BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String8 source, CPreprocessOptions options)
 {
     if (options.dialect >= C_PREPROCESS_DIALECT_COUNT)
@@ -10526,6 +10530,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // The detail block outlives this call in the caller's arena: the result is
     // returned and then copied by value all the way down the frontend, and
     // every copy shares this one block.
+#if BUSTER_INCLUDE_TESTS
+    u64 result_arena_start = result_arena->position;
+#endif
     result.detail = arena_allocate(result_arena, CPreprocessDetail, 1);
     *result.detail = (CPreprocessDetail){
         .data_layout = options.data_layout,
@@ -10603,6 +10610,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         .phase_arena = options.phase_arena,
     };
     result.recovery = recovery;
+#if BUSTER_INCLUDE_TESTS
+    c_test_unit_register(spelling_arena, token_arena, token_shape_arena, result_arena, result_arena_start);
+#endif
     result.spelling_base = space->base;
     memcpy(c_space_allocate(space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
     CSourceMap map = {
@@ -12235,6 +12245,170 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         c_phase_arena_retire(phase_arena);
     }
     return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+#define C_TEST_UNIT_REGISTRY_RESERVED_SIZE BUSTER_MB(64)
+// One unit this thread preprocessed and has not yet released: its three
+// private arenas, the arena its result lives in, and that arena's position
+// when preprocessing began (rewinding below it kills the result).
+typedef struct CTestUnitEntry CTestUnitEntry;
+struct CTestUnitEntry
+{
+    Arena* arenas[3];
+    Arena* owner;
+    u64 owner_position;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL Arena* c_test_unit_registry_arena;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registry;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
+
+BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
+{
+    if (!c_test_unit_registry_arena)
+    {
+        c_test_unit_registry_arena = arena_create((ArenaCreation){.reserved_size = C_TEST_UNIT_REGISTRY_RESERVED_SIZE, .flags = {.no_pool = 1}});
+    }
+    if (c_test_unit_registry_arena)
+    {
+        CTestUnitEntry* entry = arena_allocate(c_test_unit_registry_arena, CTestUnitEntry, 1);
+        if (!c_test_unit_registry)
+        {
+            c_test_unit_registry = entry;
+        }
+        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position};
+        c_test_unit_registry_count += 1;
+    }
+}
+
+// The address ranges c_preprocess_release returned on this thread since the
+// last reset. A result that still points into one holds released memory. The
+// log is per thread so concurrent tests cannot reset it or inject ranges (a
+// range another thread released may be unmapped and later remapped under this
+// thread's result). It therefore covers the compiles that run on the calling
+// thread: single inputs and serial multi-input compiles. Units a multi-input
+// compile runs on lane workers (compile_jobs above one) release on those
+// threads and are not seen; that only loses detections, never invents any.
+#define C_TEST_RELEASED_LOG_CAPACITY 256
+typedef struct CTestReleasedRange CTestReleasedRange;
+struct CTestReleasedRange
+{
+    u8 const* begin;
+    u64 size;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestReleasedRange c_test_released_log[C_TEST_RELEASED_LOG_CAPACITY];
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_released_log_count;
+
+BUSTER_GLOBAL_LOCAL void c_test_released_log_record(Arena const* arena)
+{
+    if (c_test_released_log_count < C_TEST_RELEASED_LOG_CAPACITY)
+    {
+        c_test_released_log[c_test_released_log_count] = (CTestReleasedRange){.begin = (u8 const*)arena, .size = arena->reserved_size};
+    }
+    c_test_released_log_count += 1;
+}
+
+void c_test_released_log_reset(void)
+{
+    c_test_released_log_count = 0;
+}
+
+bool c_test_released_log_contains(void const* pointer, u64 length)
+{
+    bool result = false;
+    u64 count = BUSTER_MIN(c_test_released_log_count, (u64)C_TEST_RELEASED_LOG_CAPACITY);
+    for (u64 index = 0; length != 0 && index < count; index += 1)
+    {
+        u8 const* address = (u8 const*)pointer;
+        CTestReleasedRange range = c_test_released_log[index];
+        result = result || (address >= range.begin && address < range.begin + range.size);
+    }
+    return result;
+}
+
+// Removes entry `index`, moving the last entry into its slot.
+BUSTER_GLOBAL_LOCAL void c_test_unit_remove(u64 index)
+{
+    c_test_unit_registry[index] = c_test_unit_registry[c_test_unit_registry_count - 1];
+    c_test_unit_registry_count -= 1;
+    arena_set_position(c_test_unit_registry_arena, c_test_unit_registry_arena->position - sizeof(CTestUnitEntry));
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_unit_unregister(Arena* spelling)
+{
+    for (u64 index = c_test_unit_registry_count; index > 0; index -= 1)
+    {
+        if (c_test_unit_registry[index - 1].arenas[0] == spelling)
+        {
+            c_test_unit_remove(index - 1);
+            break;
+        }
+    }
+}
+
+void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+{
+    u64 index = c_test_unit_registry_count;
+    while (index > 0)
+    {
+        index -= 1;
+        CTestUnitEntry entry = c_test_unit_registry[index];
+        if (!owner || (entry.owner == owner && entry.owner_position >= position))
+        {
+            c_test_unit_remove(index);
+            for (u32 arena_index = 0; arena_index < BUSTER_ARRAY_LENGTH(entry.arenas); arena_index += 1)
+            {
+                arena_retire(entry.arenas[arena_index], C_PHASE_ARENA_RETAINED_SIZE);
+            }
+        }
+    }
+}
+
+void c_test_release_preprocess_arenas(void)
+{
+    c_test_release_preprocess_arenas_from(0, 0);
+}
+
+void c_test_scratch_end(TemporalArena temporary)
+{
+    c_test_release_preprocess_arenas_from(temporary.arena, temporary.position);
+    scratch_end(temporary);
+}
+#endif
+
+void c_preprocess_release(CPreprocessResult* result)
+{
+    CSourceMapRecovery* recovery = result->recovery;
+    if (recovery)
+    {
+        // The record lives in the caller's arena and every copy of the result
+        // shares it, so clearing the arena pointers here makes a second
+        // release, through any copy, a no-op.
+        Arena* arenas[] = {recovery->token_shape_arena, recovery->token_arena, recovery->spelling_arena};
+#if BUSTER_INCLUDE_TESTS
+        if (recovery->spelling_arena)
+        {
+            c_test_unit_unregister(recovery->spelling_arena);
+        }
+#endif
+        recovery->token_shape_arena = 0;
+        recovery->token_arena = 0;
+        recovery->spelling_arena = 0;
+        recovery->token_shapes = 0;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(arenas); index += 1)
+        {
+            if (arenas[index])
+            {
+#if BUSTER_INCLUDE_TESTS
+                c_test_released_log_record(arenas[index]);
+#endif
+                arena_retire(arenas[index], C_PHASE_ARENA_RETAINED_SIZE);
+            }
+        }
+        result->tokens = 0;
+        result->token_count = 0;
+        result->spelling_base = 0;
+    }
 }
 
 CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
