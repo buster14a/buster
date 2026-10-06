@@ -597,9 +597,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult investigation_test_fallback(UnitTestArguments
     String8 source_path = buster_test_temporary_path(arena, S8("buster-investigation-fallback"), S8(".c"));
     String8 output = buster_test_temporary_path(arena, S8("buster-investigation-fallback"), S8(".o"));
     String8 sidecar = buster_test_temporary_path(arena, S8("buster-investigation-fallback"), S8(".capture"));
-    // Existing first-party driver control at pinned 6fc08ec: seventeen asm
-    // operands exceed MIR's sixteen-operand cap; the canonical path supports
-    // these nine GPR and eight SSE inputs. No generated code is executed.
+    // Seventeen asm operands exceed MIR's sixteen-operand cap, which MIR-only
+    // codegen reports as an unsupported-instruction failure. No generated code
+    // is executed.
     String8 source = S8("int machine_fallback_inline_asm(int value, double floating)\n"
                         "{\n"
                         "    __asm__ __volatile__(\"\" : :\n"
@@ -620,26 +620,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult investigation_test_fallback(UnitTestArguments
         CompilerDriverInvocation plain = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         if (BUSTER_REQUIRE(arguments, plain.error == COMPILER_DRIVER_ERROR_NONE))
         {
-            CompilerDriverResult baseline = compiler_driver_execute_invocation(arena, plain);
-            if (BUSTER_REQUIRE(arguments, baseline.error == COMPILER_DRIVER_ERROR_NONE))
+            ByteSlice sentinel_output = {.pointer = (u8*)"existing-output", .length = 15};
+            if (BUSTER_REQUIRE(arguments, file_write(output, sentinel_output)))
             {
-                BUSTER_TEST(arguments, baseline.codegen_statistics.fallback_function_count == 1);
-                if (BUSTER_REQUIRE(arguments, baseline.fallback_records && baseline.fallback_record_count == 1))
-                {
-                    BUSTER_TEST(arguments, baseline.fallback_records[0].codegen.opcode == IR_OPCODE_INLINE_ASSEMBLY);
-                }
-                ByteSlice before = file_read(arena, output, (FileReadOptions){0});
+                // MIR-only codegen rejects the unsupported function outright, so
+                // capture has no canonical fallback to refuse: the ordinary
+                // diagnostic must surface and neither artifact may be touched.
+                CompilerDriverResult baseline = compiler_driver_execute_invocation(arena, plain);
+                BUSTER_TEST(arguments, baseline.error == COMPILER_DRIVER_ERROR_CODEGEN && !baseline.has_object);
+                BUSTER_TEST(arguments, baseline.codegen_statistics.fallback_function_count == 0 && baseline.fallback_record_count == 0);
                 CompilerDriverInvocation captured = plain;
                 captured.investigation_path = sidecar;
                 captured.investigation_function = S8("machine_fallback_inline_asm");
                 captured.investigation_configuration = S8("API native x86_64-linux baseline fast -c fallback-census -g0");
                 CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, captured);
-                BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_FILE_WRITE);
-                BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("canonical fallback")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_CODEGEN && !rejected.has_object);
+                BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("reason=opcode")) != BUSTER_STRING_NO_MATCH);
                 ByteSlice after = file_read(arena, output, (FileReadOptions){0});
-                if (BUSTER_REQUIRE(arguments, before.pointer && after.pointer && before.length == after.length))
+                if (BUSTER_REQUIRE(arguments, after.pointer && after.length == sentinel_output.length))
                 {
-                    BUSTER_TEST(arguments, memcmp(before.pointer, after.pointer, before.length) == 0);
+                    BUSTER_TEST(arguments, memcmp(after.pointer, sentinel_output.pointer, sentinel_output.length) == 0);
                 }
                 ByteSlice retained = file_read(arena, sidecar, (FileReadOptions){0});
                 if (BUSTER_REQUIRE(arguments, retained.pointer && retained.length == sentinel.length))

@@ -144,8 +144,8 @@ only on serializer round trips. Negative controls cover truncated data,
 malformed lengths/counts/intervals/marks/schema/trailer, missing manifest paths,
 artifact changes and revision mismatches. Real C tests independently inspect
 ELF section headers and compare complete capture-on/off object bytes for FAST
-and MIR_STACK. An existing inline-assembly operand-limit shape checks a real
-canonical fallback rejection. File-based driver/consumer tests are excluded on
+and MIR_STACK. An existing inline-assembly operand-limit shape checks that MIR-only codegen
+rejects the unsupported function, leaving the object and sidecar untouched. File-based driver/consumer tests are excluded on
 mobile; portable format/argument coverage remains registered.
 
 The focused fixture uses one warm pair and three alternating FAST timing pairs,
