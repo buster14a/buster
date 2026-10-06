@@ -125,6 +125,28 @@ indexed and unindexed lowering, both frontend forms and all native allocators.
 The tiled position-index regression compares the window and scalar populations
 with anonymous member colons shifted across window boundaries.
 
+GNU's obsolete field designator `member: value` never reaches the parser
+(GitHub #2855). After macro replacement,
+`c_preprocess_rewrite_obsolete_designators` respells an identifier-colon pair
+that directly follows `{` or `,` inside an initializer brace as `. member =`,
+so every designator scanner sees the ISO form. Label discovery therefore never
+sees the pair and cannot create a phantom label. The rewrite classifies a brace
+as an initializer when `=` precedes it, when it closes a parenthesis that can
+hold a compound-literal type, or when it nests at an element boundary inside
+another initializer brace. A parenthesis can hold that type unless a call,
+declarator, attribute or control keyword precedes it; `return`, `sizeof`, `case`
+and `__extension__` still allow one. Bit-field widths, ternaries, `_Generic`
+associations and labels keep their colons. A one-byte shape scan gates the
+delimiter walk, so a unit without a candidate pays one pass over its shapes. In
+strict ISO dialects every rewrite also records a
+`C_DIAGNOSTIC_OBSOLETE_DESIGNATOR` warning. `-E`
+(`CPreprocessOptions.preserve_spellings`) and assembly preprocessing keep the
+source spelling. `c_test_obsolete_field_designators` covers scalar, nested,
+array-element, compound-literal, returned and statement-expression initializers;
+a designator that shares a real label's name; and `goto` to a designator-only
+name, which is rejected. It runs both frontend forms, every native allocator,
+and GNU17, GNU23 and C17.
+
 A named label can re-enter a token range after control skipped an ordinary
 automatic declaration. Fixed-size objects in a labeled function therefore
 receive their canonical local/place rows before the entry block terminates;
