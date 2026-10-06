@@ -28399,6 +28399,130 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArg
     return result;
 }
 
+// `sizeof(c ? (c ? ( ... 1) : 2) : 2)` nested `depth` deep, spelled into one
+// constant-expression context (issue #2765). The strict operand type walk once
+// refused anything past 64 levels, which surfaced as a false "not a true
+// integer constant expression" or an unsupported-lowering diagnostic.
+enum
+{
+    C_TEST_SIZEOF_NESTING_ASSERT,
+    C_TEST_SIZEOF_NESTING_CASE,
+    C_TEST_SIZEOF_NESTING_ARRAY,
+    C_TEST_SIZEOF_NESTING_STATIC,
+    C_TEST_SIZEOF_NESTING_CONTEXT_COUNT,
+};
+
+BUSTER_GLOBAL_LOCAL String8 c_test_sizeof_nesting_source(Arena* arena, u32 context, u32 depth, String8 expected)
+{
+    String8 open = S8("c ? (");
+    String8 close = S8(") : 2");
+    String8 prefix = context == C_TEST_SIZEOF_NESTING_ASSERT  ? S8("int g(int c) { _Static_assert(sizeof(")
+                     : context == C_TEST_SIZEOF_NESTING_CASE  ? S8("int g(int c) { switch (c) { case sizeof(")
+                     : context == C_TEST_SIZEOF_NESTING_ARRAY ? S8("int c; char a[sizeof(")
+                                                              : S8("int g(int c) { static int v = sizeof(");
+    String8 suffix = context == C_TEST_SIZEOF_NESTING_ASSERT  ? S8(") == ")
+                     : context == C_TEST_SIZEOF_NESTING_CASE  ? S8("): return 1; } return 0; }\n")
+                     : context == C_TEST_SIZEOF_NESTING_ARRAY ? S8(")]; int g(void) { return (int)sizeof a; }\n")
+                                                              : S8("); return v; }\n");
+    String8 tail = context == C_TEST_SIZEOF_NESTING_ASSERT ? S8(", \"x\"); return 0; }\n") : S8("");
+    u64 capacity = prefix.length + (open.length + close.length) * depth + 1 + suffix.length + expected.length + tail.length;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, prefix);
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, open);
+    }
+    c_test_append_source(bytes, capacity, &length, S8("1"));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, close);
+    }
+    c_test_append_source(bytes, capacity, &length, suffix);
+    if (context == C_TEST_SIZEOF_NESTING_ASSERT)
+    {
+        c_test_append_source(bytes, capacity, &length, expected);
+    }
+    c_test_append_source(bytes, capacity, &length, tail);
+    return (String8){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_conditional_nesting_depth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {63, 64, 8192};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        for (u32 context = 0; context < C_TEST_SIZEOF_NESTING_CONTEXT_COUNT; context += 1)
+        {
+            // The assertion context also runs once with a deliberately wrong
+            // size, which must report an ordinary failed assertion.
+            for (u32 wrong = 0; wrong < (context == C_TEST_SIZEOF_NESTING_ASSERT ? 2u : 1u); wrong += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                String8 source = c_test_sizeof_nesting_source(temporary.arena, context, depths[depth_index], wrong ? S8("sizeof(char)") : S8("sizeof(int)"));
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+                CParseResult parse = c_parse(temporary.arena, preprocess);
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                if (wrong)
+                {
+                    BUSTER_TEST(arguments, parse.diagnostic_count == 1);
+                    BUSTER_TEST(arguments, parse.diagnostic_count && parse.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+                    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("sizeof-nesting.c"), preprocess, parse, target_native);
+                    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                    BUSTER_TEST(arguments, lowered.program != 0);
+                    if (lowered.program)
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+// A long but shallow sizeof operand needs only a few resolver frames, so its
+// token count must never be mistaken for nesting depth (#2765).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_long_shallow_operand(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 terms[] = {40, 200, 5000};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(terms); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u64 capacity = 128 + (u64)terms[index] * 9;
+        char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        c_test_append_source(bytes, capacity, &length, S8("int g(int c) { _Static_assert(sizeof(c"));
+        for (u32 term = 0; term < terms[index]; term += 1)
+        {
+            c_test_append_source(bytes, capacity, &length, S8(" + c"));
+        }
+        c_test_append_source(bytes, capacity, &length, S8(") == sizeof(int), \"x\"); char a[sizeof(c"));
+        for (u32 term = 0; term < terms[index]; term += 1)
+        {
+            c_test_append_source(bytes, capacity, &length, S8(" + 1L"));
+        }
+        c_test_append_source(bytes, capacity, &length, S8(")]; return (int)sizeof a; }\n"));
+        String8 source = {.pointer = bytes, .length = length};
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("sizeof-shallow.c"), preprocess, parse, target_native);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Lua's userdata accessor combines nested pointer-cast macros, a
 // builtin-offsetof ternary, and a switch whose other arm returns void *.  The
 // strict expression-type walk must preserve the pointer result instead of
@@ -43330,6 +43454,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
     BUSTER_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);

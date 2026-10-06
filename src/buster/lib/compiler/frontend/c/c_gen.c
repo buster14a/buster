@@ -2228,6 +2228,56 @@ struct CIrQueryResume
     u8 reserved[2];
 };
 
+// Explicit-stack frames of the sizeof operand type resolver
+// (c_ir_sizeof_operand_type_attempt_promoted). A frame is created unclassified;
+// classification either answers it or records the operator and its first
+// sub-operand range, and the combine step resumes it with each sub-operand's type.
+typedef enum CIrSizeofOp
+{
+    C_IR_SIZEOF_OP_CLASSIFY = 0,
+    C_IR_SIZEOF_OP_COMMA,
+    C_IR_SIZEOF_OP_ASSIGN,
+    C_IR_SIZEOF_OP_CONDITIONAL,
+    C_IR_SIZEOF_OP_BITWISE,
+    C_IR_SIZEOF_OP_SHIFT,
+    C_IR_SIZEOF_OP_ADDITIVE,
+    C_IR_SIZEOF_OP_MULTIPLICATIVE,
+    C_IR_SIZEOF_OP_DEREFERENCE,
+    C_IR_SIZEOF_OP_ADDRESS,
+    C_IR_SIZEOF_OP_UNARY,
+    C_IR_SIZEOF_OP_STATEMENT_EXPRESSION,
+    C_IR_SIZEOF_OP_PARENTHESIS,
+    C_IR_SIZEOF_OP_FINISHED,
+} CIrSizeofOp;
+
+typedef enum CIrSizeofStep
+{
+    C_IR_SIZEOF_STEP_FAIL,
+    C_IR_SIZEOF_STEP_DONE,
+    C_IR_SIZEOF_STEP_CHILD,
+} CIrSizeofStep;
+
+// Frames a resolve may use when the query machine holds none to lend.
+#define C_IR_SIZEOF_LOCAL_FRAME_CAPACITY 64u
+
+typedef struct CIrSizeofFrame CIrSizeofFrame;
+struct CIrSizeofFrame
+{
+    u32 start;
+    u32 end;
+    u32 child_start;
+    u32 child_end;
+    // The operator, colon or closing-parenthesis token the operation splits at.
+    u32 index;
+    u32 arm_start;
+    u32 arm_end;
+    IrTypeId first_type;
+    u8 op;
+    u8 stage;
+    bool promote;
+    bool child_promote;
+};
+
 typedef struct CIrQueryMachine CIrQueryMachine;
 struct CIrQueryMachine
 {
@@ -2254,6 +2304,11 @@ struct CIrQueryMachine
     u32 value_capacity;
     u32 operator_count;
     u32 operator_capacity;
+    // Explicit stack of the sizeof operand type resolver: frames lent to the
+    // live resolves, newest above the oldest.
+    CIrSizeofFrame* sizeof_frames;
+    u32 sizeof_frame_capacity;
+    u32 sizeof_frame_used;
     bool has_request;
     u8 reserved[3];
 };
@@ -28839,7 +28894,7 @@ BUSTER_C_INTERNAL bool c_ir_static_postfix_type(CIntegerIrBuilder* builder, IrTy
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
 BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields);
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields);
 BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
@@ -29172,19 +29227,37 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
    false defers to the older per-shape paths and ultimately the caller's fallback; a
    guessed type must never come out of this function, because the guessed size folds
    silently into the program (the 2026-08-08 array-bound incident, and the same
-   defect shape in function bodies). */
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields)
+   defect shape in function bodies).
+
+   The precedence walk is iterative. c_ir_sizeof_operand_type_classify scans one
+   operand range, answers it directly when it is a leaf, and otherwise records the
+   operator and its first sub-operand in the frame; c_ir_sizeof_operand_type_combine
+   resumes the frame with each sub-operand's type. The frames live in an explicit
+   stack, so nesting depth costs neither host stack nor a depth bound: every
+   sub-operand range is strictly shorter than its parent, which bounds the stack by
+   the range's token count (the machine's frame capacity covers any declaration). */
+BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_step_from_bool(bool resolved)
 {
-    // This resolver is a speculative type query: false lets the caller use
-    // the ordinary expression paths.  Bound its recursive precedence walk so
-    // adversarially deep, otherwise-valid expressions cannot exhaust the host
-    // stack in sanitizer/fuzz configurations, whose instrumented frames are
-    // substantially larger than Release frames.
-    if (!remaining_depth)
-    {
-        return false;
-    }
-    remaining_depth -= 1;
+    CIrSizeofStep step = resolved ? C_IR_SIZEOF_STEP_DONE : C_IR_SIZEOF_STEP_FAIL;
+    return step;
+}
+
+BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_step_child(CIrSizeofFrame* frame, CIrSizeofOp op, u32 index, u32 child_start, u32 child_end, bool child_promote)
+{
+    frame->op = (u8)op;
+    frame->stage = 0;
+    frame->index = index;
+    frame->child_start = child_start;
+    frame->child_end = child_end;
+    frame->child_promote = child_promote;
+    return C_IR_SIZEOF_STEP_CHILD;
+}
+
+BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBuilder* builder, CIrSizeofFrame* frame, IrTypeId* type_out)
+{
+    u32 start = frame->start;
+    u32 end = frame->end;
+    bool promote_bit_fields = frame->promote;
     // GNU __extension__ is a diagnostic-only marker on the expression that
     // follows it; it contributes no value and no type of its own, so strip it
     // the same way a redundant parenthesis is stripped, and keep stripping
@@ -29214,8 +29287,11 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     }
     if (start >= end)
     {
-        return false;
+        return C_IR_SIZEOF_STEP_FAIL;
     }
+    // The combine step and the postfix chain read the trimmed operand.
+    frame->start = start;
+    frame->end = end;
     // One top-level scan records the loosest-binding operator of every precedence tier.
     // Left-associative tiers split at their last top-level operator, the right-associative
     // assignment at its first; a `?` only counts at ternary depth zero so operators inside
@@ -29264,7 +29340,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         }
         if (scan == C_IR_GROUP_SCAN_UNCLOSED)
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         u32 punctuator = token.punctuator;
         if (punctuator == C_PUNCTUATOR_NONE)
@@ -29289,7 +29365,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         {
             if (!ternary_depth)
             {
-                return false;
+                return C_IR_SIZEOF_STEP_FAIL;
             }
             ternary_depth -= 1;
             if (!ternary_depth && first_colon == UINT32_MAX)
@@ -29334,7 +29410,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             if (!binary_allowed)
             {
                 // A leading `&&` is a label-address operand; leave it to the prediction paths.
-                return false;
+                return C_IR_SIZEOF_STEP_FAIL;
             }
             logical_index = index;
             break;
@@ -29373,40 +29449,26 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         case C_PUNCTUATOR_EXCLAMATION:
         case C_PUNCTUATOR_DOT:
         case C_PUNCTUATOR_ARROW: break;
-        default: return false;
+        default: return C_IR_SIZEOF_STEP_FAIL;
         }
     }
     if (ternary_depth)
     {
-        return false;
+        return C_IR_SIZEOF_STEP_FAIL;
     }
     if (last_comma != UINT32_MAX)
     {
-        IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, last_comma + 1, end, &right, remaining_depth, promote_bit_fields))
-        {
-            return false;
-        }
-        *type_out = c_ir_sizeof_operand_decay(builder, right);
-        return true;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_COMMA, 0, last_comma + 1, end, promote_bit_fields);
     }
     if (first_assign != UINT32_MAX)
     {
-        // Assignment to an atomic place yields its unpromoted non-atomic value
-        // type, not the access type carried by the destination place.
-        bool resolved = c_ir_sizeof_operand_type_attempt_depth(builder, start, first_assign, type_out, remaining_depth, promote_bit_fields);
-        IrType* assigned = resolved ? ir_type_from_id(&builder->program->types, *type_out) : 0;
-        if (assigned && assigned->is_atomic)
-        {
-            *type_out = assigned->unqualified_type;
-        }
-        return resolved;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ASSIGN, 0, start, first_assign, promote_bit_fields);
     }
     if (first_question != UINT32_MAX)
     {
         if (first_colon == UINT32_MAX)
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         u32 true_start = first_question + 1;
         u32 true_end = first_colon;
@@ -29416,213 +29478,82 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             true_start = start;
             true_end = first_question;
         }
-        IrTypeId true_type = IR_TYPE_ID_INVALID;
-        IrTypeId false_type = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, true_start, true_end, &true_type, remaining_depth, true) ||
-            !c_ir_sizeof_operand_type_attempt_depth(builder, first_colon + 1, end, &false_type, remaining_depth, true))
-        {
-            return false;
-        }
-        true_type = c_ir_sizeof_operand_decay(builder, true_type);
-        false_type = c_ir_sizeof_operand_decay(builder, false_type);
-        IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, true_type, false_type);
-        if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
-        {
-            *type_out = arithmetic;
-            return true;
-        }
-        IrTypeId merged = c_ir_conditional_result_type_attempt(builder, true_type, false_type, true_start, true_end, first_colon + 1, end);
-        if (builder->queries->has_request || merged.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return false;
-        }
-        *type_out = merged;
-        return true;
+        frame->arm_start = true_start;
+        frame->arm_end = true_end;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_CONDITIONAL, first_colon, true_start, true_end, true);
     }
     if (logical_index != UINT32_MAX)
     {
         *type_out = builder->s32_type;
-        return true;
+        return C_IR_SIZEOF_STEP_DONE;
     }
     u32 bitwise_index = bit_or_index != UINT32_MAX ? bit_or_index : bit_xor_index != UINT32_MAX ? bit_xor_index : bit_and_index;
     if (bitwise_index != UINT32_MAX)
     {
-        IrTypeId left = IR_TYPE_ID_INVALID;
-        IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, bitwise_index, &left, remaining_depth, true) ||
-            !c_ir_sizeof_operand_type_attempt_depth(builder, bitwise_index + 1, end, &right, remaining_depth, true))
-        {
-            return false;
-        }
-        IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
-        if (result.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return false;
-        }
-        *type_out = result;
-        return true;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_BITWISE, bitwise_index, start, bitwise_index, true);
     }
     if (comparison_index != UINT32_MAX)
     {
         *type_out = builder->s32_type;
-        return true;
+        return C_IR_SIZEOF_STEP_DONE;
     }
     if (shift_index != UINT32_MAX)
     {
         // A shift yields the promoted left operand; the right operand never widens it.
-        IrTypeId left = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, shift_index, &left, remaining_depth, true))
-        {
-            return false;
-        }
-        IrTypeId promoted = c_ir_usual_arithmetic_type(builder, left, left);
-        IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
-        if (!promoted_value || promoted_value->kind != IR_TYPE_INTEGER)
-        {
-            return false;
-        }
-        *type_out = promoted;
-        return true;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_SHIFT, shift_index, start, shift_index, true);
     }
     if (additive_index != UINT32_MAX)
     {
-        IrTypeId left = IR_TYPE_ID_INVALID;
-        IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, additive_index, &left, remaining_depth, true) ||
-            !c_ir_sizeof_operand_type_attempt_depth(builder, additive_index + 1, end, &right, remaining_depth, true))
-        {
-            return false;
-        }
-        left = c_ir_sizeof_operand_decay(builder, left);
-        right = c_ir_sizeof_operand_decay(builder, right);
-        IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, left, right);
-        if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
-        {
-            *type_out = arithmetic;
-            return true;
-        }
-        IrType* left_value = ir_type_from_id(&builder->program->types, left);
-        IrType* right_value = ir_type_from_id(&builder->program->types, right);
-        if (!left_value || !right_value)
-        {
-            return false;
-        }
-        bool minus = c_token_is_punctuator(&builder->preprocess.tokens[additive_index], C_PUNCTUATOR_MINUS);
-        bool left_integer = left_value->kind == IR_TYPE_BOOLEAN || left_value->kind == IR_TYPE_INTEGER || left_value->kind == IR_TYPE_ENUM;
-        bool right_integer = right_value->kind == IR_TYPE_BOOLEAN || right_value->kind == IR_TYPE_INTEGER || right_value->kind == IR_TYPE_ENUM;
-        if (left_value->kind == IR_TYPE_POINTER && right_value->kind == IR_TYPE_POINTER && minus)
-        {
-            *type_out = builder->ptrdiff_type;
-            return true;
-        }
-        if (left_value->kind == IR_TYPE_POINTER && right_integer)
-        {
-            *type_out = left;
-            return true;
-        }
-        if (!minus && left_integer && right_value->kind == IR_TYPE_POINTER)
-        {
-            *type_out = right;
-            return true;
-        }
-        return false;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ADDITIVE, additive_index, start, additive_index, true);
     }
     if (multiplicative_index != UINT32_MAX)
     {
-        IrTypeId left = IR_TYPE_ID_INVALID;
-        IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, multiplicative_index, &left, remaining_depth, true) ||
-            !c_ir_sizeof_operand_type_attempt_depth(builder, multiplicative_index + 1, end, &right, remaining_depth, true))
-        {
-            return false;
-        }
-        IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
-        if (result.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return false;
-        }
-        *type_out = result;
-        return true;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_MULTIPLICATIVE, multiplicative_index, start, multiplicative_index, true);
     }
     CToken first = builder->preprocess.tokens[start];
     if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, first))))
     {
         if (start + 1 >= end)
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         bool parenthesized = c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                              c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1;
         if (!parenthesized && c_ir_unary_expression_end(builder, start + 1, end) != end)
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         *type_out = builder->size_type;
-        return true;
+        return C_IR_SIZEOF_STEP_DONE;
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION))
     {
         *type_out = builder->s32_type;
-        return true;
+        return C_IR_SIZEOF_STEP_DONE;
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_STAR))
     {
-        IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, false))
-        {
-            return false;
-        }
-        IrType* value = ir_type_from_id(&builder->program->types, operand);
-        if (!value || (value->kind != IR_TYPE_POINTER && value->kind != IR_TYPE_ARRAY))
-        {
-            return false;
-        }
-        *type_out = value->element_type;
-        return true;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_DEREFERENCE, 0, start + 1, end, false);
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND))
     {
-        IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, false))
-        {
-            return false;
-        }
-        *type_out = c_ir_add_pointer_type(builder->program, builder->pointer_types, operand);
-        return true;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ADDRESS, 0, start + 1, end, false);
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ||
         c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE))
     {
-        IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, true))
-        {
-            return false;
-        }
-        IrTypeId promoted = c_ir_usual_arithmetic_type(builder, operand, operand);
-        IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
-        if (!promoted_value || (c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) && promoted_value->kind != IR_TYPE_INTEGER))
-        {
-            return false;
-        }
-        *type_out = promoted;
-        return true;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_UNARY, 0, start + 1, end, true);
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
     {
-        bool resolved = c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, type_out, remaining_depth, promote_bit_fields);
-        IrType* operand = resolved ? ir_type_from_id(&builder->program->types, *type_out) : 0;
-        if (operand && operand->is_atomic)
-        {
-            *type_out = operand->unqualified_type;
-        }
-        return resolved;
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ASSIGN, 0, start + 1, end, promote_bit_fields);
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         if (close >= end)
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         // A GNU statement expression `({ ...; tail; })` has the type of its
         // trailing expression statement after array decay, and void without one.
@@ -29631,26 +29562,22 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         {
             u32 tail_start = 0;
             u32 tail_end = 0;
-            IrTypeId tail_type = builder->void_type;
             if (c_ir_statement_expression_tail(builder, start + 1, close - 1, &tail_start, &tail_end))
             {
+                // The depth counter stays raised while the tail's frame is
+                // live; c_ir_sizeof_operand_type_combine and the driver's
+                // failure unwind lower it.
                 builder->sizeof_statement_expression_tail_depth += 1;
-                bool tail_resolved = c_ir_sizeof_operand_type_attempt_depth(builder, tail_start, tail_end, &tail_type, remaining_depth, true);
-                builder->sizeof_statement_expression_tail_depth -= 1;
-                if (!tail_resolved)
-                {
-                    return false;
-                }
-                tail_type = c_ir_sizeof_operand_decay(builder, tail_type);
+                return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_STATEMENT_EXPRESSION, close, tail_start, tail_end, true);
             }
-            *type_out = tail_type;
-            return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+            *type_out = builder->void_type;
+            return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields));
         }
         IrTypeId cast_type = IR_TYPE_ID_INVALID;
         bool named = c_ir_query_group_type_name(builder, start, close, &cast_type);
         if (builder->queries->has_request)
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         if (named && cast_type.value != IR_ID_UNDERLYING_INVALID)
         {
@@ -29659,32 +29586,26 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
                 u32 initializer_close = c_ir_matching_delimiter_cached(builder, close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
                 if (initializer_close >= end)
                 {
-                    return false;
+                    return C_IR_SIZEOF_STEP_FAIL;
                 }
                 IrTypeId literal_type = IR_TYPE_ID_INVALID;
                 if (!c_ir_query_compound_type(builder, start + 1, close, close + 1, initializer_close, &literal_type) ||
                     literal_type.value == IR_ID_UNDERLYING_INVALID)
                 {
-                    return false;
+                    return C_IR_SIZEOF_STEP_FAIL;
                 }
                 *type_out = literal_type;
-                return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, initializer_close + 1, end, promote_bit_fields);
+                return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, initializer_close + 1, end, promote_bit_fields));
             }
             if (close + 1 >= end)
             {
                 // A bare parenthesized type name is not an expression operand.
-                return false;
+                return C_IR_SIZEOF_STEP_FAIL;
             }
             *type_out = cast_type;
-            return true;
+            return C_IR_SIZEOF_STEP_DONE;
         }
-        IrTypeId inner = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, close, &inner, remaining_depth, promote_bit_fields))
-        {
-            return false;
-        }
-        *type_out = inner;
-        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_PARENTHESIS, close, start + 1, close, promote_bit_fields);
     }
     // A number is normally the whole operand. The one continuation it can
     // carry is a subscript written the other way round -- `sizeof 0[letters]`
@@ -29695,20 +29616,20 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         if (c_ir_number_is_float_at(builder, start))
         {
             *type_out = c_ir_float_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, first));
-            return start + 1 == end;
+            return c_ir_sizeof_step_from_bool(start + 1 == end);
         }
         u64 integer_value = 0;
         IrTypeId literal_type = IR_TYPE_ID_INVALID;
         if (!c_ir_integer_literal_at(builder, start, &integer_value, &literal_type))
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         if (literal_type.value == IR_ID_UNDERLYING_INVALID)
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         *type_out = literal_type;
-        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, start + 1, end, promote_bit_fields);
+        return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, start + 1, end, promote_bit_fields));
     }
     if (first.kind == C_TOKEN_CHARACTER_LITERAL && start + 1 == end)
     {
@@ -29731,7 +29652,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
                                                                : C_TYPE_INT;
         }
         *type_out = builder->scalar_types[kind];
-        return true;
+        return C_IR_SIZEOF_STEP_DONE;
     }
     if (first.kind == C_TOKEN_STRING_LITERAL)
     {
@@ -29743,12 +29664,12 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         CIrDecodedString decoded = {0};
         if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, start, literal_end, builder->parse.string_literals, &decoded))
         {
-            return false;
+            return C_IR_SIZEOF_STEP_FAIL;
         }
         // Sub-operand string literals only appear in decaying contexts here; the
         // whole-operand array case is handled before this resolver runs.
         *type_out = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->scalar_types[decoded.element_kind]);
-        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, literal_end, end, promote_bit_fields);
+        return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, literal_end, end, promote_bit_fields));
     }
     if (first.kind == C_TOKEN_IDENTIFIER)
     {
@@ -29765,14 +29686,252 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             if (close >= end)
             {
-                return false;
+                return C_IR_SIZEOF_STEP_FAIL;
             }
             *type_out = builder->size_type;
-            return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+            return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields));
         }
-        return c_ir_sizeof_operand_identifier_type_attempt(builder, start, end, type_out, promote_bit_fields);
+        return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_identifier_type_attempt(builder, start, end, type_out, promote_bit_fields));
     }
-    return false;
+    return C_IR_SIZEOF_STEP_FAIL;
+}
+
+// Resumes a frame whose sub-operand just resolved to `returned`: either asks
+// for the second sub-operand (CHILD), finishes with the combined type (DONE,
+// in *type_out), or fails.
+BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_combine(CIntegerIrBuilder* builder, CIrSizeofFrame* frame, IrTypeId returned, IrTypeId* type_out)
+{
+    CIrSizeofStep step = C_IR_SIZEOF_STEP_FAIL;
+    bool second_operand = false;
+    switch ((CIrSizeofOp)frame->op)
+    {
+    case C_IR_SIZEOF_OP_COMMA:
+        *type_out = c_ir_sizeof_operand_decay(builder, returned);
+        step = C_IR_SIZEOF_STEP_DONE;
+        break;
+    case C_IR_SIZEOF_OP_ASSIGN:
+    {
+        // Assignment to an atomic place yields its unpromoted non-atomic value
+        // type, not the access type carried by the destination place.
+        IrType* assigned = ir_type_from_id(&builder->program->types, returned);
+        *type_out = assigned && assigned->is_atomic ? assigned->unqualified_type : returned;
+        step = C_IR_SIZEOF_STEP_DONE;
+        break;
+    }
+    case C_IR_SIZEOF_OP_CONDITIONAL:
+    case C_IR_SIZEOF_OP_BITWISE:
+    case C_IR_SIZEOF_OP_ADDITIVE:
+    case C_IR_SIZEOF_OP_MULTIPLICATIVE:
+        second_operand = true;
+        break;
+    case C_IR_SIZEOF_OP_SHIFT:
+    {
+        // A shift yields the promoted left operand; the right operand never widens it.
+        IrTypeId promoted = c_ir_usual_arithmetic_type(builder, returned, returned);
+        IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+        if (promoted_value && promoted_value->kind == IR_TYPE_INTEGER)
+        {
+            *type_out = promoted;
+            step = C_IR_SIZEOF_STEP_DONE;
+        }
+        break;
+    }
+    case C_IR_SIZEOF_OP_DEREFERENCE:
+    {
+        IrType* value = ir_type_from_id(&builder->program->types, returned);
+        if (value && (value->kind == IR_TYPE_POINTER || value->kind == IR_TYPE_ARRAY))
+        {
+            *type_out = value->element_type;
+            step = C_IR_SIZEOF_STEP_DONE;
+        }
+        break;
+    }
+    case C_IR_SIZEOF_OP_ADDRESS:
+        *type_out = c_ir_add_pointer_type(builder->program, builder->pointer_types, returned);
+        step = C_IR_SIZEOF_STEP_DONE;
+        break;
+    case C_IR_SIZEOF_OP_UNARY:
+    {
+        IrTypeId promoted = c_ir_usual_arithmetic_type(builder, returned, returned);
+        IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+        bool tilde = c_token_is_punctuator(&builder->preprocess.tokens[frame->start], C_PUNCTUATOR_TILDE);
+        if (promoted_value && !(tilde && promoted_value->kind != IR_TYPE_INTEGER))
+        {
+            *type_out = promoted;
+            step = C_IR_SIZEOF_STEP_DONE;
+        }
+        break;
+    }
+    case C_IR_SIZEOF_OP_STATEMENT_EXPRESSION:
+        // A GNU statement expression has the type of its trailing expression
+        // statement after array decay; frame->index is its closing parenthesis.
+        builder->sizeof_statement_expression_tail_depth -= 1;
+        frame->op = C_IR_SIZEOF_OP_FINISHED;
+        *type_out = c_ir_sizeof_operand_decay(builder, returned);
+        step = c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, frame->index + 1, frame->end, frame->promote));
+        break;
+    case C_IR_SIZEOF_OP_PARENTHESIS:
+        *type_out = returned;
+        step = c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, frame->index + 1, frame->end, frame->promote));
+        break;
+    case C_IR_SIZEOF_OP_CLASSIFY:
+    case C_IR_SIZEOF_OP_FINISHED: break;
+    }
+    if (second_operand && frame->stage == 0)
+    {
+        // The first sub-operand is the true arm of a conditional or the left
+        // operand of a binary operator; the second ends at the frame's end.
+        frame->first_type = returned;
+        frame->stage = 1;
+        frame->child_start = frame->index + 1;
+        frame->child_end = frame->end;
+        frame->child_promote = true;
+        step = C_IR_SIZEOF_STEP_CHILD;
+    }
+    else if (second_operand)
+    {
+        IrTypeId left = frame->first_type;
+        IrTypeId right = returned;
+        if (frame->op == C_IR_SIZEOF_OP_CONDITIONAL)
+        {
+            IrTypeId true_type = c_ir_sizeof_operand_decay(builder, left);
+            IrTypeId false_type = c_ir_sizeof_operand_decay(builder, right);
+            IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, true_type, false_type);
+            if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
+            {
+                *type_out = arithmetic;
+                step = C_IR_SIZEOF_STEP_DONE;
+            }
+            else
+            {
+                IrTypeId merged = c_ir_conditional_result_type_attempt(builder, true_type, false_type, frame->arm_start, frame->arm_end, frame->index + 1, frame->end);
+                if (!builder->queries->has_request && merged.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    *type_out = merged;
+                    step = C_IR_SIZEOF_STEP_DONE;
+                }
+            }
+        }
+        else if (frame->op == C_IR_SIZEOF_OP_ADDITIVE)
+        {
+            left = c_ir_sizeof_operand_decay(builder, left);
+            right = c_ir_sizeof_operand_decay(builder, right);
+            IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, left, right);
+            if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
+            {
+                *type_out = arithmetic;
+                step = C_IR_SIZEOF_STEP_DONE;
+            }
+            else
+            {
+                IrType* left_value = ir_type_from_id(&builder->program->types, left);
+                IrType* right_value = ir_type_from_id(&builder->program->types, right);
+                if (left_value && right_value)
+                {
+                    bool minus = c_token_is_punctuator(&builder->preprocess.tokens[frame->index], C_PUNCTUATOR_MINUS);
+                    bool left_integer = left_value->kind == IR_TYPE_BOOLEAN || left_value->kind == IR_TYPE_INTEGER || left_value->kind == IR_TYPE_ENUM;
+                    bool right_integer = right_value->kind == IR_TYPE_BOOLEAN || right_value->kind == IR_TYPE_INTEGER || right_value->kind == IR_TYPE_ENUM;
+                    if (left_value->kind == IR_TYPE_POINTER && right_value->kind == IR_TYPE_POINTER && minus)
+                    {
+                        *type_out = builder->ptrdiff_type;
+                        step = C_IR_SIZEOF_STEP_DONE;
+                    }
+                    else if (left_value->kind == IR_TYPE_POINTER && right_integer)
+                    {
+                        *type_out = left;
+                        step = C_IR_SIZEOF_STEP_DONE;
+                    }
+                    else if (!minus && left_integer && right_value->kind == IR_TYPE_POINTER)
+                    {
+                        *type_out = right;
+                        step = C_IR_SIZEOF_STEP_DONE;
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Bitwise and multiplicative operators share the usual arithmetic conversions.
+            IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
+            if (result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                *type_out = result;
+                step = C_IR_SIZEOF_STEP_DONE;
+            }
+        }
+    }
+    return step;
+}
+
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields)
+{
+    CIrSizeofFrame local_frames[C_IR_SIZEOF_LOCAL_FRAME_CAPACITY];
+    CIrQueryMachine* machine = builder->queries;
+    // Every pushed range is strictly shorter than its parent, so the stack
+    // never holds more frames than the root range has tokens, plus one; the
+    // machine lends that worst case when it has it.
+    u32 needed = end > start ? end - start + 1 : 1;
+    CIrSizeofFrame* frames = local_frames;
+    u32 capacity = C_IR_SIZEOF_LOCAL_FRAME_CAPACITY;
+    u32 machine_claim = 0;
+    // A nested resolve (an array bound reached through a sub-query) claims its
+    // frames above the live ones; the claim is released on every exit.
+    if (machine && machine->sizeof_frames && machine->sizeof_frame_capacity - machine->sizeof_frame_used >= needed)
+    {
+        frames = machine->sizeof_frames + machine->sizeof_frame_used;
+        capacity = needed;
+        machine_claim = needed;
+        machine->sizeof_frame_used += needed;
+    }
+    // The token count only bounds the stack's worst case. Frames in use track
+    // nesting depth, so the local stack is never refused up front: a long but
+    // shallow operand fits, and only real depth past it reaches the loop's
+    // capacity diagnostic below.
+    bool ok = true;
+    u32 count = 1;
+    IrTypeId returned = IR_TYPE_ID_INVALID;
+    frames[0] = (CIrSizeofFrame){.start = start, .end = end, .promote = promote_bit_fields};
+    while (ok && count)
+    {
+        CIrSizeofFrame* frame = frames + count - 1;
+        CIrSizeofStep step = frame->op == C_IR_SIZEOF_OP_CLASSIFY ? c_ir_sizeof_operand_type_classify(builder, frame, &returned)
+                                                                   : c_ir_sizeof_operand_type_combine(builder, frame, returned, &returned);
+        if (step == C_IR_SIZEOF_STEP_DONE)
+        {
+            count -= 1;
+        }
+        else if (step == C_IR_SIZEOF_STEP_CHILD && count < capacity)
+        {
+            frames[count] = (CIrSizeofFrame){.start = frame->child_start, .end = frame->child_end, .promote = frame->child_promote};
+            count += 1;
+        }
+        else
+        {
+            if (step == C_IR_SIZEOF_STEP_CHILD)
+            {
+                builder->failure_message = S8("sizeof operand type query exceeds its explicit frame capacity");
+            }
+            ok = false;
+        }
+    }
+    // A failed query abandons frames still waiting on a statement-expression
+    // tail; lower the depth counter each of them raised.
+    for (u32 index = 0; !ok && index < count; index += 1)
+    {
+        if (frames[index].op == C_IR_SIZEOF_OP_STATEMENT_EXPRESSION)
+        {
+            builder->sizeof_statement_expression_tail_depth -= 1;
+        }
+    }
+    if (machine_claim)
+    {
+        machine->sizeof_frame_used -= machine_claim;
+    }
+    if (ok)
+    {
+        *type_out = returned;
+    }
+    return ok;
 }
 
 // `sizeof({ ...; tail; })` shares the operator's parentheses with the GNU
@@ -29794,7 +29953,7 @@ BUSTER_C_INTERNAL void c_ir_sizeof_statement_expression_operand(CIntegerIrBuilde
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
 {
     c_ir_sizeof_statement_expression_operand(builder, &start, &end);
-    return c_ir_sizeof_operand_type_attempt_depth(builder, start, end, type_out, 64, false);
+    return c_ir_sizeof_operand_type_attempt_promoted(builder, start, end, type_out, false);
 }
 
 // Walks the call, subscript, member and postfix-increment suffixes that may
@@ -35361,7 +35520,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilde
     if (promote_true)
     {
         IrTypeId promoted = IR_TYPE_ID_INVALID;
-        if (c_ir_sizeof_operand_type_attempt_depth(builder, true_start, true_end, &promoted, 64, true))
+        if (c_ir_sizeof_operand_type_attempt_promoted(builder, true_start, true_end, &promoted, true))
         {
             true_type = promoted;
         }
@@ -35369,7 +35528,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilde
     if (promote_false && !builder->queries->has_request)
     {
         IrTypeId promoted = IR_TYPE_ID_INVALID;
-        if (c_ir_sizeof_operand_type_attempt_depth(builder, false_start, false_end, &promoted, 64, true))
+        if (c_ir_sizeof_operand_type_attempt_promoted(builder, false_start, false_end, &promoted, true))
         {
             false_type = promoted;
         }
@@ -53010,6 +53169,7 @@ BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* po
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantValue), capacity, BUSTER_ALIGN_OF(CIrConstantValue)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantOperator), capacity, BUSTER_ALIGN_OF(CIrConstantOperator)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryResume), capacity, BUSTER_ALIGN_OF(CIrQueryResume)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrSizeofFrame), capacity, BUSTER_ALIGN_OF(CIrSizeofFrame)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(u32), (u64)capacity * 2, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, position, sizeof(u32), (u64)capacity * 2, BUSTER_ALIGN_OF(u32));
     return fits;
@@ -53096,6 +53256,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     queries.values = arena_allocate(temporary_arena, CIrConstantValue, query_frame_capacity);
     queries.operators = arena_allocate(temporary_arena, CIrConstantOperator, query_frame_capacity);
     queries.resumes = arena_allocate(temporary_arena, CIrQueryResume, query_frame_capacity);
+    queries.sizeof_frames = arena_allocate(temporary_arena, CIrSizeofFrame, query_frame_capacity);
+    queries.sizeof_frame_capacity = (u32)query_frame_capacity;
     u64 chain_bucket_count = 16;
     while (chain_bucket_count < query_frame_capacity)
     {
