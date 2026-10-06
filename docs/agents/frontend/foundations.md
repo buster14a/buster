@@ -168,6 +168,22 @@ uninitialized owner; disconnected reads keep the ordinary predecessor path.
 The dependency walk is unnecessary when every retained owner already has entry
 initialization; restored loads still become independent definitions first.
 
+A named, non-temporary owner can also take this shortcut outside the entry
+block when its only write is its declaration's initializer. That store must
+directly follow the owner's `LOCAL` event, with no read between them. It may
+sit in the same block or, through `c_ir_emit_initializer_store`, in the join
+block of a branching initializer (`?:`, `&&`, `||`). The store dominates every
+reachable read unless a jump enters the scope past it.
+`c_ir_ssa_record_jump_targets` records each named label with the extent of its
+`goto`s, and each `case`/`default` with its enclosing `switch`.
+`c_ir_ssa_finish_jump_scopes` revokes the shortcut for an owner when a
+recorded target lies in its scope after the declarator starts and a jump to it
+starts before the declarator ends or outside the scope. A switch without a
+braced body disables the shortcut for the whole function, and so does a
+refused scratch carve. `CIRLowerOptions.disable_declaration_shortcut` is the
+differential reference: with and without it, the published IR must be
+identical.
+
 After predecessor propagation finishes, parameter simplification reuses its
 block cursor for a stable list of blocks that still own parameters.
 `c_ir_ssa_simplify_parameters` reproduces the repeated block-order sweep
@@ -1571,6 +1587,23 @@ over the enum's body; it still walks a struct or union body so the names in its
 member bounds keep their bindings. A header that defines no tag opens no scope.
 `c_test_controlling_expression_scope` and
 `compiler_driver_test_scoped_constant_execution` cover this (#1304).
+
+A direct, unqualified enum definition immediately following `(` in a
+function-body expression is published by that same lexical walk, including
+expression statements, return operands, casts and block static assertions.
+Its constants belong to the current block and become visible at their own
+declaration points; the enum braces do not create a child block. Ordinary
+enum declarations still take the local-declaration path so their declarators
+are retained. Publication skips an already published member and diagnoses a
+same-scope ordinary-name collision instead of appending a second entity.
+`c_test_expression_enum_scope` checks scope restoration, declaration order,
+one publication per member, refusal neighbors and both canonical frontend
+forms on Linux x86-64/AArch64 and Windows x86-64. The registered
+`c_test_expression_enum_runtime` executes the same scope/order family on
+supported desktop native targets in all four allocator modes and both forms.
+Expression enums inside
+initializers, qualified type names and expression-defined record members
+remain separate pending cases under #1615.
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,
