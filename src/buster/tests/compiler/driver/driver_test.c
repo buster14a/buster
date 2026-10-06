@@ -8217,11 +8217,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_variadic_workspace(UnitT
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8(
+    String8 source_part0 = S8(
         "#include <stdarg.h>\n"
         "typedef struct __attribute__((aligned(16))) { float x, y; } PadVec2;\n"
         "typedef struct __attribute__((aligned(16))) { long long a; } PadLong;\n"
         "typedef struct { _Alignas(16) int v; } PadInt;\n"
+        "typedef struct { char c[17]; } PadC17;\n"
+        "typedef struct __attribute__((packed)) { char c; long long x; } PadP9;\n"
+        "typedef struct __attribute__((aligned(16))) { char c[17]; } PadA16;\n"
+        "typedef struct { unsigned gp, fp; void *overflow, *save; } PadVaState;\n"
         "#ifdef SYSV_PADDING_HOST\n"
         "#define PAD(name) host_##name\n"
         "#define OTHER(name) name\n"
@@ -8245,19 +8249,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
         "PadVec2 PAD(pad_return)(PadVec2 v) { PadVec2 out = {v.y, v.x}; return out; }\n"
         "int PAD(pad_variadic)(int marker, ...)\n"
         "{\n"
-        "    va_list ap;\n"
+        "    va_list ap, copy;\n"
         "    va_start(ap, marker);\n"
         "    PadVec2 v = va_arg(ap, PadVec2);\n"
+        "    PadVaState before, after, mirrored;\n"
+        "    __builtin_memcpy(&before, &ap, sizeof(before));\n"
+        "    unsigned long long cursor = (unsigned long long)before.overflow;\n"
+        "    va_copy(copy, ap);\n"
+        "    PadC17 c17 = va_arg(ap, PadC17);\n"
+        "    PadC17 mirror = va_arg(copy, PadC17);\n"
+        "    __builtin_memcpy(&after, &ap, sizeof(after));\n"
+        "    __builtin_memcpy(&mirrored, &copy, sizeof(mirrored));\n"
+        "    int memory_bad = sizeof(before) != 24 || sizeof(PadC17) != 17 || sizeof(PadP9) != 9 || sizeof(PadA16) != 32;\n"
+        "    memory_bad |= before.gp != 8 || before.fp != 64;\n"
+        "    memory_bad |= after.gp != before.gp || after.fp != before.fp || after.save != before.save || (unsigned long long)after.overflow != cursor + 24;\n"
+        "    memory_bad |= mirrored.gp != after.gp || mirrored.fp != after.fp || mirrored.overflow != after.overflow || mirrored.save != after.save;\n"
+        "    va_end(copy);\n"
+        "    cursor = (unsigned long long)after.overflow;\n"
+        "    PadP9 p9 = va_arg(ap, PadP9);\n"
+        "    __builtin_memcpy(&after, &ap, sizeof(after));\n"
+        "    memory_bad |= after.gp != before.gp || after.fp != before.fp || after.save != before.save || (unsigned long long)after.overflow != cursor + 16;\n"
+        "    cursor = (unsigned long long)after.overflow;\n"
+        "    PadA16 a16 = va_arg(ap, PadA16);\n"
+        "    __builtin_memcpy(&after, &ap, sizeof(after));\n"
+        "    memory_bad |= after.gp != before.gp || after.fp != before.fp || after.save != before.save || (unsigned long long)after.overflow != ((cursor + 15ull) & ~15ull) + 32;\n"
         "    long long a = va_arg(ap, long long);\n"
         "    PadLong s = va_arg(ap, PadLong);\n"
         "    PadInt t = va_arg(ap, PadInt);\n"
         "    long long tail = va_arg(ap, long long);\n"
         "    PadLong last = va_arg(ap, PadLong);\n"
-        "    PadLong overflow = va_arg(ap, PadLong);\n"
-        "    long long after = va_arg(ap, long long);\n"
+        "    PadLong overflow = va_arg(ap, PadLong);\n");
+    String8 source_part1 = S8(
+        "    long long after_value = va_arg(ap, long long);\n"
+        "    __builtin_memcpy(&before, &ap, sizeof(before));\n"
+        "    cursor = (unsigned long long)before.overflow;\n"
+        "    PadC17 final_c17 = va_arg(ap, PadC17);\n"
+        "    __builtin_memcpy(&after, &ap, sizeof(after));\n"
+        "    memory_bad |= before.gp != 48 || after.gp != before.gp || after.fp != before.fp || after.save != before.save || (unsigned long long)after.overflow != cursor + 24;\n"
+        "    long long final_scalar = va_arg(ap, long long);\n"
         "    va_end(ap);\n"
+        "    for (int i = 0; i < 17; i += 1) { memory_bad |= c17.c[i] != 11 + i || mirror.c[i] != 11 + i || a16.c[i] != 41 + i || final_c17.c[i] != 71 + i; }\n"
+        "    memory_bad |= p9.c != 3 || p9.x != 0x1122334455667788ll || final_scalar != 91ll;\n"
         "    return marker != 17 || v.x != 1.5f || v.y != 2.5f || a != 100ll || s.a != 7ll || t.v != 9 || tail != 42ll ||\n"
-        "           last.a != 11ll || overflow.a != 13ll || after != 77ll;\n"
+        "           last.a != 11ll || overflow.a != 13ll || after_value != 77ll || memory_bad;\n"
         "}\n"
         "int OTHER(pad_variadic)(int, ...);\n"
         "int PAD(pad_calls)(PadFloat* floating, PadInteger* integer, PadAligned* aligned,\n"
@@ -8268,6 +8302,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
         "    PadInt t = {9};\n"
         "    PadLong last = {11};\n"
         "    PadLong overflow = {13};\n"
+        "    PadC17 c17 = {{0}}, final_c17 = {{0}};\n"
+        "    PadA16 a16 = {{0}};\n"
+        "    PadP9 p9 = {3, 0x1122334455667788ll};\n"
+        "    for (int i = 0; i < 17; i += 1) { c17.c[i] = (char)(11 + i); a16.c[i] = (char)(41 + i); final_c17.c[i] = (char)(71 + i); }\n"
         "    PadVec2 r = returning(v);\n"
         "    int bad = floating(v, 100ll) != 104.0f;\n"
         "    bad |= (integer(s, 42ll) != 7042ll) << 1;\n"
@@ -8275,7 +8313,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
         "    bad |= (boundary(1ll, 2ll, 3ll, 4ll, 5ll, s, 42ll) != 7057ll) << 3;\n"
         "    bad |= (exhausted(1ll, 2ll, 3ll, 4ll, 5ll, 6ll, s, 42ll) != 7063ll) << 4;\n"
         "    bad |= (r.x != 2.5f || r.y != 1.5f) << 5;\n"
-        "    bad |= OTHER(pad_variadic)(17, v, 100ll, s, t, 42ll, last, overflow, 77ll) << 6;\n"
+        "    bad |= OTHER(pad_variadic)(17, v, c17, p9, a16, 100ll, s, t, 42ll, last, overflow, 77ll, final_c17, 91ll) << 6;\n"
         "    return bad;\n"
         "}\n"
         "#ifdef SYSV_PADDING_HOST\n"
@@ -8293,6 +8331,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
         "    return bad ? bad : (other ? 128 | other : 0);\n"
         "}\n"
         "#endif\n");
+    String8 source = string_format(arguments->arena, S8("{S8}{S8}"), source_part0, source_part1);
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-sysv-padding-eightbytes"), S8(".c"));
     bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
     BUSTER_TEST(arguments, source_written);
@@ -12548,6 +12587,8 @@ struct CompilerDriverWasmNodeRun
     u64 wait_microseconds;
     u64 done_uptime_microseconds;
     u64 exit_uptime_microseconds;
+    u64 phase_uptime_microseconds;
+    String8 last_phase;
     u32 attempts;
     bool spawned;
     bool startup_ready;
@@ -12571,6 +12612,53 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_startup_marker(String8 o
             index += 1;
         }
         result = index > prefix.length && index < output.length && output.pointer[index] == '\n';
+    }
+    return result;
+}
+
+// Instrumented oracles write `WASM_NODE_PHASE <name> uptime_us=<digits> ...`
+// after each bounded step (#2194). The last complete phase line names the
+// step a timeout interrupted; phases are evidence only, never success.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_wasm_node_last_phase(String8 output, u64* uptime_microseconds)
+{
+    String8 prefix = S8("WASM_NODE_PHASE ");
+    String8 uptime = S8(" uptime_us=");
+    String8 result = S8("none");
+    u64 line_start = 0;
+    while (line_start < output.length)
+    {
+        u64 line_end = line_start;
+        while (line_end < output.length && output.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        if (line_end < output.length && line_end - line_start > prefix.length &&
+            memcmp(output.pointer + line_start, prefix.pointer, prefix.length) == 0)
+        {
+            u64 name_start = line_start + prefix.length;
+            u64 name_end = name_start;
+            while (name_end < line_end && output.pointer[name_end] != ' ')
+            {
+                name_end += 1;
+            }
+            u64 digits = name_end + uptime.length;
+            u64 value = 0;
+            u64 index = digits;
+            if (name_end > name_start && digits <= line_end && memcmp(output.pointer + name_end, uptime.pointer, uptime.length) == 0)
+            {
+                while (index < line_end && output.pointer[index] >= '0' && output.pointer[index] <= '9' && value <= (UINT64_MAX - 9) / 10)
+                {
+                    value = value * 10 + (u64)(output.pointer[index] - '0');
+                    index += 1;
+                }
+            }
+            if (index > digits && (index == line_end || output.pointer[index] == ' '))
+            {
+                result = (String8){.pointer = output.pointer + name_start, .length = name_end - name_start};
+                *uptime_microseconds = value;
+            }
+        }
+        line_start = line_end + 1;
     }
     return result;
 }
@@ -12804,6 +12892,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
                                                                          &result.done_uptime_microseconds);
     }
     result.terminal_marker = compiler_driver_test_wasm_node_terminal_marker(oracle_output, expected_marker);
+    result.last_phase = compiler_driver_test_wasm_node_last_phase(standard_output, &result.phase_uptime_microseconds);
     // Node uptime starts after spawn, so this bounds the time between the
     // oracle returning and the harness reaping (or killing) the process.
     u64 post_done_microseconds = result.node_done && result.elapsed_microseconds > result.done_uptime_microseconds
@@ -12814,14 +12903,16 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
                     S8("WASM_NODE_PROCESS oracle={S8} mode={S8} status={S8} spawned={u32} result={u32} "
                        "platform_status={u32:x} timed_out={u32} marker={u32} elapsed_us={u64} deadline_us={u64} "
                        "ready={u32} readiness_files_ok={u32} node_ready={u32} startup_us={u64} wait_us={u64} "
-                       "node_done={u32} done_uptime_us={u64} node_exit={u32} exit_uptime_us={u64} post_done_us={u64}\n"
+                       "node_done={u32} done_uptime_us={u64} node_exit={u32} exit_uptime_us={u64} post_done_us={u64} "
+                       "last_phase={S8} phase_uptime_us={u64}\n"
                        "stdout:\n{S8}stderr:\n{S8}\n"),
                     oracle, mode, status, (u32)result.spawned, (u32)result.wait.result, result.wait.platform_status,
                     (u32)result.wait.timed_out, (u32)result.terminal_marker, result.elapsed_microseconds,
                     result.deadline_microseconds, (u32)result.startup_ready, (u32)result.readiness_files_ok,
                     (u32)result.node_ready, result.startup_microseconds,
                     result.wait_microseconds, (u32)result.node_done, result.done_uptime_microseconds, (u32)result.node_exit,
-                    result.exit_uptime_microseconds, post_done_microseconds, standard_output,
+                    result.exit_uptime_microseconds, post_done_microseconds, result.last_phase,
+                    result.phase_uptime_microseconds, standard_output,
                     BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
     return result;
 }
@@ -13024,6 +13115,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
 #if BUSTER_WINDOWS
             BUSTER_TEST(arguments, !run.spawned);
 #endif
+        }
+        {
+            // #2194: the last complete phase line classifies where a timeout
+            // stopped; a torn or malformed trailing line does not count.
+            u64 uptime = 0;
+            String8 phases = S8("WASM_NODE_READY startup_ms=1\nWASM_NODE_PHASE ready uptime_us=40 node=v1\n"
+                                "WASM_NODE_PHASE read uptime_us=95 bytes=8\nWASM_NODE_PHASE module uptime_us=\n"
+                                "WASM_NODE_PHASE instance uptime_us=120");
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_wasm_node_last_phase(phases, &uptime), S8("read")) && uptime == 95);
+            uptime = 7;
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_wasm_node_last_phase(S8("WASM_NODE_READY startup_ms=1\n"), &uptime), S8("none")) &&
+                                       uptime == 7);
         }
         // The retry owns its deadline: a completing retry gets the completion
         // budget so slow hosts cannot misclassify it, while hanging retries
@@ -21540,6 +21643,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_defi
     return result;
 }
 
+// A failed bit-field Wasm oracle logs at most this many module bytes (#2194).
+#define BIT_FIELD_WASM_MODULE_RETAINED_BYTES 65536
+
 // #1612: LLVM, Wasm64 and eBPF each build brace-initialized bit-field structs
 // from the canonical aggregate value. Independent consumers (Clang, Node, the
 // eBPF test VM) prove every member reads back from its packed storage bits.
@@ -21575,15 +21681,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targ
         "\"use strict\";\n"
         "const fs = require(\"fs\");\n"
         "fs.writeSync(process.stdout.fd, `WASM_NODE_READY startup_ms=${Date.now()}\\n`);\n"
+        "const uptime_us = () => Math.round(process.uptime() * 1e6);\n"
+        "const phase = (name, details) => fs.writeSync(process.stdout.fd, `WASM_NODE_PHASE ${name} uptime_us=${uptime_us()} ${details}\\n`);\n"
+        "process.on(\"exit\", () => fs.writeSync(process.stdout.fd, `WASM_NODE_EXIT uptime_us=${uptime_us()}\\n`));\n"
+        "phase(\"ready\", `node=${process.version} v8=${process.versions.v8} arch=${process.arch} exec=${process.execPath}`);\n"
         "const bytes = fs.readFileSync(process.argv[2]);\n"
-        "const probe = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.probe;\n"
+        "phase(\"read\", `bytes=${bytes.length}`);\n"
+        "const wasm_module = new WebAssembly.Module(bytes);\n"
+        "phase(\"module\", \"\");\n"
+        "const probe = new WebAssembly.Instance(wasm_module).exports.probe;\n"
+        "phase(\"instance\", \"\");\n"
         "const values = [0n, 1n, 127n, 128n, -1n, -9223372036854775808n, 9223372036854775807n, 0x0123456789abcdefn];\n"
         "let checks = 0;\n"
         "for (const x of values) for (const y of values) {\n"
         "    if (probe(x, y) !== BigInt.asIntN(64, BigInt.asUintN(56, x))) throw new Error(`probe(${x}, ${y})`);\n"
         "    checks++;\n"
         "}\n"
-        "console.log(checks + \" independent Wasm bit-field aggregate executions passed\");\n");
+        "fs.writeSync(process.stdout.fd, checks + \" independent Wasm bit-field aggregate executions passed\\n\");\n"
+        "fs.writeSync(process.stdout.fd, `WASM_NODE_DONE uptime_us=${uptime_us()} resources=${process.getActiveResourcesInfo().join(\",\")}\\n`);\n");
     u64 values[] = {0, 1, 127, 128, UINT64_MAX, UINT64_C(1) << 63, (UINT64_C(1) << 63) - 1, UINT64_C(0x0123456789abcdef)};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
@@ -21644,12 +21759,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targ
                 String8 script_path = buster_test_temporary_path(arena, S8("buster-bit-field-aggregate"), S8(".js"));
                 if (node.length && BUSTER_REQUIRE(arguments, file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script))))
                 {
+                    // #2194: identify the exact module Node received, and keep
+                    // its bytes in the log if the oracle fails, before the
+                    // temporary path is reused by the next form.
+                    ByteSlice module_bytes = compiled.wasm64.bytes;
+                    char8 module_hash[SHA256_HEX_CAPACITY];
+                    Sha256 hash;
+                    sha256_init(&hash);
+                    sha256_add(&hash, module_bytes.pointer, module_bytes.length);
+                    sha256_finish_hex(&hash, module_hash);
+                    arguments->show(arguments, S8("WASM_NODE_MODULE oracle=bit-field-aggregate form={S8} bytes={u64} sha256={S8}\n"),
+                                    forms[form], module_bytes.length, (String8){module_hash, 64});
                     String8 node_arguments[] = {node, script_path, output};
                     u64 deadline = compiler_driver_test_wasm_node_deadline_microseconds();
                     CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
                         arguments, arena, S8("bit-field-aggregate"), forms[form], forms[form], (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
                         S8("64 independent Wasm bit-field aggregate executions passed"), deadline, deadline);
-                    BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+                    bool node_succeeded = compiler_driver_test_wasm_node_succeeded(node_run);
+                    if (!node_succeeded)
+                    {
+                        u64 retained = module_bytes.length < BIT_FIELD_WASM_MODULE_RETAINED_BYTES ? module_bytes.length : BIT_FIELD_WASM_MODULE_RETAINED_BYTES;
+                        char8* hex = arena_allocate(arena, char8, retained * 2);
+                        String8 digits = S8("0123456789abcdef");
+                        for (u64 index = 0; index < retained; index += 1)
+                        {
+                            hex[index * 2] = digits.pointer[module_bytes.pointer[index] >> 4];
+                            hex[index * 2 + 1] = digits.pointer[module_bytes.pointer[index] & 15];
+                        }
+                        arguments->show(arguments, S8("WASM_NODE_MODULE_BYTES form={S8} retained={u64}/{u64} hex={S8}\n"), forms[form], retained,
+                                        module_bytes.length, (String8){hex, retained * 2});
+                    }
+                    BUSTER_TEST(arguments, node_succeeded);
                 }
                 else if (!node.length)
                 {

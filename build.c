@@ -47,6 +47,11 @@
 // BUSTER_BENCH_ALLOCATIONS=1, but the work ledger's storage lives in the
 // compiler's ir.c, which the driver does not include (work_ledger.h).
 #define BUSTER_WORK_LEDGER 0
+// Distribution TinyCC 0.9.27 (__TINYC__ 927) rejects the inferred-size
+// compound-literal arrays in string.c/os.c; name that before it fails there.
+#if defined(__TINYC__) && __TINYC__ < 928
+#error "TinyCC 0.9.28rc or newer is required to bootstrap build.c; see docs/agents/build.md"
+#endif
 // TCC's bootstrap headers/atomics retain the serial fallback. Hosted Clang
 // drivers can opt into the existing lane gang with test_differential --jobs.
 #if defined(__TINYC__) && !defined(BUSTER_SINGLE_THREADED)

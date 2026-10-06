@@ -3413,6 +3413,152 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
     return result;
 }
 
+// Exercise append-writer format boundaries without allocating huge payloads.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_32_writer_limits(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u8 byte = 0;
+    ObjectSection text = {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 1, .data = {.pointer = &byte, .length = 1}};
+    ObjectSymbol symbol = {.name = S8("symbol"), .section = 0, .kind = OBJECT_SYMBOL_FUNCTION};
+    ObjectFile object = {.sections = &text, .section_count = 1, .symbols = &symbol, .symbol_count = 1,
+                         .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}};
+    u64 capacity = 0;
+    ObjectFormat formats[] = {OBJECT_FORMAT_COFF, OBJECT_FORMAT_MACH_O64};
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(formats); format_index += 1)
+    {
+        ObjectFormat format = formats[format_index];
+        object.target.os = format == OBJECT_FORMAT_COFF ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        BUSTER_TEST(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_NONE && capacity);
+        u64 overhead = capacity - text.data.length;
+        // These fictitious lengths are inspected only, never allocated/read.
+        text.data.length = (u64)UINT32_MAX - overhead;
+        BUSTER_TEST(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_NONE && capacity == UINT32_MAX);
+        text.data.length += 1;
+        BUSTER_TEST(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+        u64 position = temporary.arena->position;
+        ObjectArtifact refused = object_write(temporary.arena, &object, format);
+        BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.bytes.length &&
+                                   !refused.statistics.image_bytes_reserved && !refused.statistics.retained_bytes && temporary.arena->position == position);
+        text.data.length = UINT64_MAX;
+        BUSTER_TEST(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+        text.data.length = 1;
+        symbol.name.length = UINT64_MAX;
+        BUSTER_TEST(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+        symbol.name = S8("symbol");
+        object.symbol_count = UINT32_MAX;
+        BUSTER_TEST(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+        object.symbol_count = 1;
+        object.relocation_count = UINT32_MAX;
+        BUSTER_TEST(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+        object.relocation_count = 0;
+        // Arena refusal also precedes a payload read, with a real small object.
+        BUSTER_TEST(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_NONE);
+        u64 reserved_size = temporary.arena->reserved_size;
+        temporary.arena->reserved_size = position + capacity - 1;
+        refused = object_write(temporary.arena, &object, format);
+        temporary.arena->reserved_size = reserved_size;
+        BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.bytes.length &&
+                                   !refused.statistics.retained_bytes && temporary.arena->position == position);
+    }
+    object.target.os = OPERATING_SYSTEM_WINDOWS;
+    symbol.value = (u64)UINT32_MAX + 1;
+    BUSTER_TEST(arguments, object_test_32_capacity(&object, OBJECT_FORMAT_COFF, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+    symbol.value = 0;
+    text.kind = OBJECT_SECTION_ZERO;
+    text.data.length = 0;
+    text.virtual_size = UINT32_MAX;
+    BUSTER_TEST(arguments, object_test_32_capacity(&object, OBJECT_FORMAT_COFF, &capacity) == OBJECT_ERROR_NONE);
+    text.virtual_size += 1;
+    BUSTER_TEST(arguments, object_test_32_capacity(&object, OBJECT_FORMAT_COFF, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+
+    ObjectSection virtual_sections[] = {
+        {.name = S8(".bss"), .kind = OBJECT_SECTION_ZERO, .virtual_size = UINT64_MAX, .alignment = 1},
+        {.name = S8(".data"), .kind = OBJECT_SECTION_DATA, .data = {.pointer = &byte, .length = 1}, .alignment = 1},
+    };
+    object.sections = virtual_sections;
+    object.section_count = BUSTER_ARRAY_LENGTH(virtual_sections);
+    object.target.os = OPERATING_SYSTEM_MACOS;
+    BUSTER_TEST(arguments, object_test_32_capacity(&object, OBJECT_FORMAT_MACH_O64, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+    virtual_sections[1].data.length = 0;
+    virtual_sections[1].alignment = 2;
+    BUSTER_TEST(arguments, object_test_32_capacity(&object, OBJECT_FORMAT_MACH_O64, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+    virtual_sections[0].virtual_size -= 1;
+    BUSTER_TEST(arguments, object_test_32_capacity(&object, OBJECT_FORMAT_MACH_O64, &capacity) == OBJECT_ERROR_NONE);
+
+    // A real, small Mach-O reaches an emission-time n_value overflow. It
+    // must release the partially filled image and publish no byte slice.
+    virtual_sections[0].virtual_size = 8;
+    virtual_sections[1].data = (ByteSlice){.pointer = &byte, .length = 1};
+    virtual_sections[1].alignment = 1;
+    symbol.section = 1;
+    symbol.value = UINT64_MAX;
+    u64 failed_position = temporary.arena->position;
+    ObjectArtifact failed = object_write(temporary.arena, &object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, failed.error == OBJECT_ERROR_CAPACITY && !failed.bytes.pointer && !failed.bytes.length &&
+                               !failed.statistics.retained_bytes && !failed.statistics.output_bytes && temporary.arena->position == failed_position);
+    symbol.section = 0;
+    symbol.value = 0;
+
+    // The section Name field can encode /9999999 but not /10000000.
+    text = (ObjectSection){.name = S8(".long-section"), .kind = OBJECT_SECTION_TEXT, .alignment = 1};
+    object.sections = &text;
+    object.section_count = 1;
+    object.target.os = OPERATING_SYSTEM_WINDOWS;
+    symbol.name = (String8){.pointer = (char8*)&byte, .length = 9999994};
+    BUSTER_TEST(arguments, object_test_32_capacity(&object, OBJECT_FORMAT_COFF, &capacity) == OBJECT_ERROR_NONE);
+    symbol.name.length += 1;
+    BUSTER_TEST(arguments, object_test_32_capacity(&object, OBJECT_FORMAT_COFF, &capacity) == OBJECT_ERROR_CAPACITY && !capacity);
+    u64 position = temporary.arena->position;
+    ObjectArtifact refused = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
+    BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.bytes.length && temporary.arena->position == position);
+
+    // Real bounded priority arrays hit the regular-COFF section limit on
+    // x86-64 and AArch64, including the first refused number 0xff00.
+    u32 group_limit = 65279 - OBJECT_SECTION_COUNT;
+    ObjectSection* sections = arena_allocate(temporary.arena, ObjectSection, OBJECT_SECTION_COUNT);
+    u64 array_size = ((u64)group_limit + 1) * OBJECT_INITIALIZER_ENTRY_SIZE;
+    u8* array = arena_allocate(temporary.arena, u8, array_size);
+    memset(array, 0, array_size);
+    u32* priorities = arena_allocate(temporary.arena, u32, group_limit + 1);
+    for (u32 entry = 0; entry <= group_limit; entry += 1)
+    {
+        priorities[entry] = 101 + (entry & 1);
+    }
+    for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+    {
+        sections[section] = (ObjectSection){.name = S8(".s"), .kind = (ObjectSectionKind)section, .alignment = 8};
+    }
+    ObjectFile grouped = {.sections = sections, .section_count = OBJECT_SECTION_COUNT,
+                          .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}};
+    grouped.initializer_priorities[0] = priorities;
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(temporary.arena);
+        grouped.target.cpu_arch = architectures[architecture];
+        sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){.pointer = array, .length = array_size - OBJECT_INITIALIZER_ENTRY_SIZE};
+        ObjectArtifact written = object_write(temporary.arena, &grouped, OBJECT_FORMAT_COFF);
+        if (BUSTER_REQUIRE(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length >= 20))
+        {
+            u16 count = 0;
+            memcpy(&count, written.bytes.pointer + 2, sizeof(count));
+            BUSTER_TEST(arguments, count == 65279);
+        }
+        arena_set_position(temporary.arena, scope.position);
+        sections[OBJECT_SECTION_INIT_ARRAY].data.length = array_size;
+        refused = object_write(temporary.arena, &grouped, OBJECT_FORMAT_COFF);
+        BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.bytes.length &&
+                                   !refused.statistics.image_bytes_reserved && !refused.statistics.retained_bytes && temporary.arena->position == scope.position);
+        // Original size refusal must happen before the u32 entry census.
+        sections[OBJECT_SECTION_INIT_ARRAY].data.length = (u64)UINT32_MAX * OBJECT_INITIALIZER_ENTRY_SIZE + OBJECT_INITIALIZER_ENTRY_SIZE;
+        refused = object_write(temporary.arena, &grouped, OBJECT_FORMAT_COFF);
+        BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.bytes.length && temporary.arena->position == scope.position);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // What ELF cannot state is refused by the plan, before an image exists: a
 // section index at SHN_LORESERVE, a 32-bit string offset that would wrap, a
 // file size that overflows, and a file the arena cannot hold.
@@ -3972,6 +4118,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult planned_writer = object_test_elf_planned_writer(arguments);
     result.test_count += planned_writer.test_count;
     result.succeeded_test_count += planned_writer.succeeded_test_count;
+    UnitTestResult writer_32_limits = object_test_32_writer_limits(arguments);
+    result.test_count += writer_32_limits.test_count;
+    result.succeeded_test_count += writer_32_limits.succeeded_test_count;
     UnitTestResult planned_writer_limits = object_test_elf_planned_writer_limits(arguments);
     result.test_count += planned_writer_limits.test_count;
     result.succeeded_test_count += planned_writer_limits.succeeded_test_count;

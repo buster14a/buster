@@ -38,6 +38,23 @@ def summary(outcome: str = "slower") -> dict:
 
 
 BINARIES = {"baseline": {"sha256": A256}, "candidate": {"sha256": B256}}
+MODES_ALL = ("none", "mir-stack", "fast", "quality")
+
+
+def corpus(decision: str = "no substantial regression detected", **summary_change) -> dict:
+    """A complete throughput-corpus-v1 run on BINARIES, as {summary, metadata}."""
+    profile = compiler_receipt.THROUGHPUT_PROFILE
+    cases = [{"name": f"{name}/{mode}", "medians": {}, "tests": [], "decision": decision}
+             for name in profile["workloads"] for mode in MODES_ALL]
+    regressions = len(cases) if decision == "regression" else 0
+    result = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": regressions,
+              "inconclusive_cases": 0, "valid": True}
+    result.update(summary_change)
+    metadata = {"schema": 2, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
+                "rounds": profile["rounds"], "warmups": profile["warmups"], "cpu": profile["cpu"],
+                "workloads": list(profile["workloads"]),
+                "compiler_provenance": [{"sha256": A256}, {"sha256": B256}]}
+    return {"summary": result, "metadata": metadata}
 HOST = {"hostname": "benchpress", "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor"}
 EXPECTED = {"mode": "main", "repository": "buster14a/buster", "ref": "refs/heads/main",
             "pull": "7", "pull_head": "c" * 40, "base": "b" * 40, "base_tree": "e" * 40, "head": "a" * 40,
@@ -48,6 +65,7 @@ EXPECTED = {"mode": "main", "repository": "buster14a/buster", "ref": "refs/heads
 def receipt(state: str = "measured") -> dict:
     return {"schema": compiler_receipt.RECEIPT_SCHEMA, "mode": "main", "state": state, "reasons": [],
             "host": dict(HOST), "identity": dict(EXPECTED), "profile": copy.deepcopy(compiler_receipt.PROFILE),
+            "throughput_profile": copy.deepcopy(compiler_receipt.THROUGHPUT_PROFILE),
             "binaries": copy.deepcopy(BINARIES), "timings": {"build_seconds": {"baseline": 60.0}}}
 
 
@@ -107,7 +125,7 @@ class ReceiptTest(unittest.TestCase):
 class DecideTest(unittest.TestCase):
     def decide(self, **change) -> tuple[str, str, list[str]]:
         values = {"expected": dict(EXPECTED), "authorized": True, "compare_result": "success",
-                  "receipt": receipt(), "summary": summary(), "policy_value": ""}
+                  "receipt": receipt(), "summary": summary(), "policy_value": "", "throughput": corpus()}
         values.update(change)
         return compiler_publish.decide(**values)
 
@@ -143,6 +161,46 @@ class DecideTest(unittest.TestCase):
                 self.assertEqual(conclusion, "failure")
                 self.assertTrue(reasons)
 
+    def test_corpus_regressions_are_reported_not_decided(self) -> None:
+        conclusion, _, reasons = self.decide(throughput=corpus("regression"))
+        self.assertEqual((conclusion, reasons), ("success", []))
+
+    def test_incomplete_or_unbound_corpus_is_never_success(self) -> None:
+        other_binary = corpus()
+        other_binary["metadata"]["compiler_provenance"][1]["sha256"] = "3" * 64
+        fewer_pairs = corpus()
+        fewer_pairs["metadata"]["pairs_per_round"] = 5
+        partial = corpus()
+        partial["summary"]["comparisons"] = partial["summary"]["comparisons"][:4]
+        no_profile = receipt()
+        del no_profile["throughput_profile"]
+        changed_profile = receipt()
+        changed_profile["throughput_profile"] = dict(changed_profile["throughput_profile"], pairs_per_round=5)
+        cases = {
+            "no corpus evidence": {"throughput": None},
+            "no metadata": {"throughput": {"summary": corpus()["summary"]}},
+            "invalid comparison": {"throughput": corpus(valid=False)},
+            "guard disabled": {"throughput": corpus(guard_enabled=False)},
+            "other schema": {"throughput": corpus(schema=1)},
+            "another compiler": {"throughput": other_binary},
+            "fewer pairs than the profile": {"throughput": fewer_pairs},
+            "missing workloads": {"throughput": partial},
+            "receipt without the corpus profile": {"receipt": no_profile},
+            "changed corpus profile": {"receipt": changed_profile},
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                conclusion, _, reasons = self.decide(**change)
+                self.assertEqual(conclusion, "failure")
+                self.assertTrue(reasons)
+
+    def test_only_recovery_of_a_legacy_receipt_skips_the_corpus(self) -> None:
+        legacy = receipt()
+        del legacy["throughput_profile"]
+        self.assertEqual(self.decide(receipt=legacy, throughput=None, require_throughput=False)[0], "success")
+        # A receipt that names the profile is always checked.
+        self.assertEqual(self.decide(throughput=None, require_throughput=False)[0], "failure")
+
     def test_superseded_group_is_neutral_and_transfers_nothing(self) -> None:
         conclusion, title, _ = self.decide(receipt=receipt("superseded"), summary=None)
         self.assertEqual((conclusion, title), ("neutral", "Superseded before measurement"))
@@ -172,10 +230,13 @@ def archive(members: dict) -> bytes:
 
 class EvidenceTest(unittest.TestCase):
     def test_reads_receipt_and_summary_as_data(self) -> None:
-        payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary())})
+        payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
+                           "throughput/summary.json": json.dumps(corpus()["summary"]),
+                           "throughput/metadata.json": json.dumps(corpus()["metadata"])})
         got = compiler_publish.read_evidence(FakeApi(payload), "92", "buster-9700x-compiler-x-1")
         self.assertEqual(got[:3], (receipt(), summary(), ""))
         self.assertEqual(got[3]["name"], "buster-9700x-compiler-x-1")
+        self.assertEqual(got[4], corpus())
 
     def test_missing_ambiguous_or_malformed_evidence(self) -> None:
         payload = archive({"receipt.json": "{not json"})
@@ -191,7 +252,9 @@ class EvidenceTest(unittest.TestCase):
 
 FAKE_BUILD = """#!/usr/bin/env bash
 set -euo pipefail
-if [[ $1 == generate ]]; then
+if [[ $1 == bench_throughput ]]; then
+    exec python3 throughput_fake.py "$@"
+elif [[ $1 == generate ]]; then
     mkdir -p build/Release
     printf 'BUSTER_INCLUDE_TESTS:BOOL=OFF\\n' > build/CMakeCache.txt
 else
@@ -214,6 +277,36 @@ open(os.path.join(value("--output"), "reference.exe"), "w").write("excluded")
 """
 
 
+# Stands in for `./build.sh bench_throughput run`; FAKE_THROUGHPUT=fail|partial
+# makes it exit nonzero or cover only one workload.
+FAKE_THROUGHPUT = """import hashlib, json, os, sys
+argv = sys.argv
+value = lambda flag: argv[argv.index(flag) + 1]
+digest = lambda path: hashlib.sha256(open(path, "rb").read()).hexdigest()
+behavior = os.environ.get("FAKE_THROUGHPUT", "")
+workloads = ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure"]
+output = value("--output")
+os.makedirs(output)
+covered = workloads[:1] if behavior == "partial" else workloads
+cases = [{"name": name + "/" + mode, "decision": "no substantial regression detected"}
+         for name in covered for mode in ("none", "mir-stack", "fast", "quality")]
+summary = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": 0,
+           "inconclusive_cases": 0, "valid": True}
+metadata = {"schema": 2, "profile": value("--profile"), "pairs_per_round": int(value("--pairs")), "rounds": 2,
+            "warmups": int(value("--warmups")), "cpu": int(value("--cpu")), "workloads": workloads,
+            "compiler_provenance": [{"sha256": digest(value("--baseline"))}, {"sha256": digest(value("--candidate"))}]}
+open(os.path.join(output, "summary.json"), "w").write(json.dumps(summary))
+open(os.path.join(output, "metadata.json"), "w").write(json.dumps(metadata))
+sys.exit(3 if behavior == "fail" else 0)
+"""
+
+
+def retained(evidence: Path) -> dict:
+    """The corpus documents as the publisher reads them from the artifact."""
+    return {name.split(".")[0]: json.loads((evidence / "throughput" / name).read_text())
+            for name in ("summary.json", "metadata.json")}
+
+
 class HarnessTest(unittest.TestCase):
     """The host harness against a real two-parent group with stand-in builds and lab."""
 
@@ -230,6 +323,7 @@ class HarnessTest(unittest.TestCase):
         (self.repo / "build.sh").write_text(FAKE_BUILD)
         (self.repo / "build.sh").chmod(0o755)
         (self.repo / "compiler.txt").write_text("base compiler\n")
+        (self.repo / "throughput_fake.py").write_text(FAKE_THROUGHPUT)
         git("add", ".")
         git("commit", "-qm", "base")
         self.base = git("rev-parse", "HEAD")
@@ -248,7 +342,8 @@ class HarnessTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.directory.cleanup()
 
-    def run_harness(self, live: object, cpu: str = HOST["cpu_model"], **change) -> tuple[int, dict, Path]:
+    def run_harness(self, live: object, cpu: str = HOST["cpu_model"], corpus_behavior: str = "",
+                    **change) -> tuple[int, dict, Path]:
         values = {"mode": "main", "candidate": str(self.repo), "lab": str(self.lab), "work": str(self.root / "work"),
                   "evidence": str(self.root / "evidence"), "summary": str(self.root / "step.md"),
                   "repository": "buster14a/buster", "ref": "refs/heads/main",
@@ -259,7 +354,7 @@ class HarnessTest(unittest.TestCase):
         argv = [item for key, value in values.items() for item in ("--" + key, value)]
         with mock.patch.object(compiler_compare, "queue_head", return_value=live), \
                 mock.patch.object(compiler_compare, "cpu_model", return_value=cpu), \
-                mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", "")}):
+                mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", ""), "FAKE_THROUGHPUT": corpus_behavior}):
             code = compiler_compare.main(argv)
         evidence = self.root / "evidence"
         return code, json.loads((evidence / "receipt.json").read_text()), evidence
@@ -279,9 +374,9 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(result["coverage"], {"first_parent": self.base, "range": "1"})
         expected = dict(result["identity"], first_parent=self.base, range="1")
         summary = json.loads((evidence / "lab" / "summary.json").read_text())
-        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "")[0], "success")
+        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence))[0], "success")
         # The host's range must equal the authorized one.
-        self.assertEqual(compiler_publish.decide(dict(expected, range="2"), True, "success", result, summary, "")[0],
+        self.assertEqual(compiler_publish.decide(dict(expected, range="2"), True, "success", result, summary, "", retained(evidence))[0],
                          "failure")
 
     def test_range_baseline_on_the_first_parent_chain(self) -> None:
@@ -314,10 +409,29 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual((code, result["state"], result["mode"]), (0, "measured", "pull"), result["reasons"])
         expected = dict(result["identity"])
         summary = json.loads((evidence / "lab" / "summary.json").read_text())
-        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "")[0], "success")
+        self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence))[0], "success")
         # A main-mode publisher never accepts a pull-mode receipt.
-        self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "")[0],
+        self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "", retained(evidence))[0],
                          "failure")
+
+    def test_corpus_runs_on_the_measured_binaries(self) -> None:
+        code, result, evidence = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["throughput_profile"], compiler_receipt.THROUGHPUT_PROFILE)
+        self.assertEqual((result["throughput"]["exit"], len(result["throughput"]["cases"])), (0, 24))
+        metadata = retained(evidence)["metadata"]
+        self.assertEqual([row["sha256"] for row in metadata["compiler_provenance"]],
+                         [result["binaries"][role]["sha256"] for role in ("baseline", "candidate")])
+        self.assertIn("throughput_seconds", result["timings"])
+
+    def test_failed_or_partial_corpus_fails_the_receipt(self) -> None:
+        for behavior, expected in (("fail", "bench_throughput run exited 3"), ("partial", "not every profile workload")):
+            with self.subTest(behavior=behavior):
+                # Each run leaves the frozen base checked out.
+                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                code, result, _ = self.run_harness(self.head, corpus_behavior=behavior)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertIn(expected, " ".join(result["reasons"]))
 
     def test_other_hardware_is_never_measured_as_zen5(self) -> None:
         code, result, _ = self.run_harness(self.head, cpu="AMD EPYC 9B14")

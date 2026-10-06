@@ -386,6 +386,7 @@ int main(int argc, char* argv[], char* envp[])
     }
 #elif BUSTER_IOS
     buster_ios_launch_trace(S8("main"));
+    buster_ios_launch_process_trace();
     // UIApplicationMain owns the main thread/run loop and never returns; the
     // compiler/test runner runs on a worker started from the app delegate.
     buster_ios_argv = argv;

@@ -447,7 +447,10 @@ captures (#2741).
   a substitute: hosted timing, static instruction counts, a `znver5` target, a
   request or policy check, or an unrelated self-host benchmark. Correctness and
   native-platform CI stay on their current infrastructure. The comparison
-  routes below cover only the stage-1 self-host compile. Every entry point
+  routes below cover the stage-1 self-host compile and, as profile
+  `throughput-corpus-v1`, the default `bench_throughput` corpus on the same
+  two binaries; the publisher re-checks the corpus's own summary and metadata
+  and binds its compiler hashes to the measured binaries. Every entry point
   that can claim performance validation has a row in
   [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
   either a 9700X route with the consumer that checks its evidence, or an

@@ -133,7 +133,9 @@ the validated merge revision against its first parent.
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
 `0fb54300b56512754221d80adda85ddb9815bceb` (0.9.28rc) bootstraps this tree
-without changing those initializers. Keep the chosen TCC source/binary identity
+without changing those initializers, so 0.9.28rc is the minimum supported
+TinyCC. `build.c` checks `__TINYC__` and stops an older TCC with an `#error`
+naming that minimum, before the first shared source it would reject. Keep the chosen TCC source/binary identity
 with local validation evidence; the older compiler's failure is not a reason
 to report a Clang-built driver as the canonical TCC bootstrap.
 
