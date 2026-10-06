@@ -98,6 +98,26 @@ gate applies, and these jobs follow `authorize`:
   missing, partial or invalid corpus run, or one whose compiler hashes are
   not the measured binaries, fails the check like a failed self-host run.
 
+### Multi-TU scaling of a pull request
+
+To measure how the pull request's compiler scales across cores (#424), add
+or change any line of [`scaling.request`](scaling.request) in an owner pull
+request. This also requests the comparison above, and `compare-pull` then
+adds the `scaling-v1` profile after the corpus:
+- `./build.sh bench_throughput scale` from the merge base, on the head's
+  compiler only;
+- two series, `cores` (CPU 0's physical core excluded, 1/2/4/7 whole cores,
+  then 7C/14T) and `machine` (8 cores, then 8C/16T);
+- generated multi-TU compile-and-link, with each worker count checked against
+  the compiler's own `compilation_workers` report.
+
+The artifact's `scaling/<series>/` directories hold each bundle's
+`scaling.json`, `scaling.md`, raw `scaling.csv` and logs. `publish-pull`
+re-checks that each bundle is valid and was produced by the measured
+candidate, and the check's report shows every point's speedup, bounds,
+efficiency, CPU-work and RSS inflation. The leg adds about ten minutes and is
+report-only. See the [harness contract](../../tools/throughput/README.md#multi-tu-scaling-scale).
+
 The verdict is report-only and blocks nothing; the comparison of each commit
 after it lands on main publishes under a different name. A comparison takes a pilot
 plus about ten minutes of pairs after three builds, so request it once per
