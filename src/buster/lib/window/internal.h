@@ -109,6 +109,8 @@ struct WmHandle
     u32 xdnd_type_test_reply_count;
     u32 xdnd_type_test_max_reply_atoms;
     u32 xdnd_type_test_scanned_atoms;
+    u32 native_error_count;
+    u32 native_event_mask_sequence;
 #endif
     Arena* poll_arena;
     WmEventList* poll_event_list;

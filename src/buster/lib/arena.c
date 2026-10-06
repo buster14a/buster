@@ -112,6 +112,13 @@ void arena_test_fail_next_reserve(void)
     arena_fail_next_reserve = true;
 }
 
+bool arena_test_cancel_reserve_failure(void)
+{
+    bool result = arena_fail_next_reserve;
+    arena_fail_next_reserve = false;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool arena_test_release_fill;
 
 void arena_test_fill_releases(bool enabled)

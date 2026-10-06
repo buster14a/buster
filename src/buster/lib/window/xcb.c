@@ -130,8 +130,7 @@ BUSTER_GLOBAL_LOCAL void wm_x11_window_update_event_mask(WmWindowHandle* window)
         u32 event_mask = wm_x11_window_event_mask(window->owner);
         xcb_void_cookie_t cookie = xcb_change_window_attributes(window->owner->connection, window->handle, XCB_CW_EVENT_MASK, &event_mask);
 #if BUSTER_INCLUDE_TESTS
-        string_print_error(S8("XIM_SUBSCRIPTION_V1 sequence={u32} mask={u32:x} forward={u32:x} synchronous={u32:x}\n"),
-                           cookie.sequence, event_mask, window->owner->xim_forward_event_mask, window->owner->xim_synchronous_event_mask);
+        window->owner->native_event_mask_sequence = cookie.sequence;
 #else
         BUSTER_UNUSED(cookie);
 #endif
@@ -1920,6 +1919,9 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
         if (event_type == 0)
         {
             xcb_generic_error_t* error = (xcb_generic_error_t*)event;
+#if BUSTER_INCLUDE_TESTS
+            windowing->native_error_count += 1;
+#endif
             string_print_error(S8("XCB error: code {u8}, major {u8}, minor {u16}, sequence {u32}, value {u32:x}\n"), error->error_code, error->major_code, error->minor_code, error->full_sequence, error->resource_id);
             free(event);
             continue;

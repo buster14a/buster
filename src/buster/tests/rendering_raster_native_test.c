@@ -5,6 +5,7 @@
 #include <buster/lib/system_headers.h>
 #include <buster/lib/os.h>
 #include <buster/lib/arena.h>
+#include <buster/lib/arena_internal.h>
 #include <buster/lib/window.h>
 #include <buster/lib/rendering/raster_internal.h>
 #include <xcb-imdkit/imdkit.h>
@@ -19,6 +20,8 @@ BUSTER_GLOBAL_LOCAL u32 raster_native_campaign;
 BUSTER_GLOBAL_LOCAL u32 raster_native_cycles;
 BUSTER_GLOBAL_LOCAL u32 raster_native_encodings;
 BUSTER_GLOBAL_LOCAL u32 raster_native_server_resets;
+BUSTER_GLOBAL_LOCAL xcb_atom_t raster_native_generation_atom;
+BUSTER_GLOBAL_LOCAL xcb_connection_t* raster_native_fixture_connection;
 
 #if BUSTER_UNITY_BUILD
 #include <buster/lib/arena.c>
@@ -218,7 +221,9 @@ BUSTER_GLOBAL_LOCAL void raster_native_window_arena_failure(void)
     BUSTER_UNUSED(arena_pool_release_thread());
     arena_test_fail_next_reserve();
     WmHandle* windowing = wm_initialize();
-    raster_native_check(windowing == 0, "required window arena failure rejects native initialization");
+    bool unconsumed = arena_test_cancel_reserve_failure();
+    raster_native_check(windowing == 0 && !unconsumed, "required window arena failure reaches and consumes its owned reserve");
+    printf("WINDOW_ARENA_REFUSAL_V1 campaign=%u unconsumed=%u\n", (unsigned)raster_native_campaign, (unsigned)unconsumed);
     if (windowing)
     {
         wm_deinitialize(windowing);
@@ -819,6 +824,11 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
             ready = raster_native_xim_pump(arena, windowing, &provider, &events);
         }
     }
+    if (ready && !(provider.input_context && window->ic && windowing->xim_open) && passes == 2048)
+    {
+        ready = false;
+        stage = "handshake-pass-limit";
+    }
     printf("XIM_HANDSHAKE_V1 campaign=%u encoding=%s stage=%s passes=%u elapsed_ms=%llu provider_error=%d client_error=%d client_open=%u client_ic=%u created=%u\n",
            (unsigned)raster_native_campaign, mode == 0 ? "utf8" : "compound", ready ? "final-context-encoding" : stage,
            (unsigned)passes, (unsigned long long)(raster_native_xim_now_ms() - start),
@@ -831,6 +841,21 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     raster_native_check(ready, "real XIM provider handshakes and both nonzero input contexts negotiate the intended encoding");
     if (ready)
     {
+        xcb_get_window_attributes_reply_t* attributes = xcb_get_window_attributes_reply(windowing->connection,
+            xcb_get_window_attributes(windowing->connection, window->handle), 0);
+        // Independent literal: key/button input, pointer/button motion, expose,
+        // structure, focus and property notifications. A sync complement must
+        // not add unrelated subscriptions such as either redirect class.
+        raster_native_check(attributes && attributes->your_event_mask == 0x0062a04fu,
+                            "real XIM native subscription contains intended forward events without sync-mask pollution");
+        free(attributes);
+        raster_native_check(windowing->xim_forward_event_mask == 1u && windowing->xim_synchronous_event_mask == 0xfffffffeu,
+                            "real provider protocol masks retain their distinct forward and synchronization meanings");
+        printf("XIM_SUBSCRIPTION_V1 encoding=%s sequence=%u forward=%x synchronous=%x errors=%u\n",
+               mode == 0 ? "utf8" : "compound", (unsigned)windowing->native_event_mask_sequence,
+               (unsigned)windowing->xim_forward_event_mask, (unsigned)windowing->xim_synchronous_event_mask,
+               (unsigned)windowing->native_error_count);
+        raster_native_check(windowing->native_error_count == 0, "real XIM handshake issues no unexpected asynchronous XCB request errors");
         raster_native_check(raster_native_xim_commit(arena, windowing, window, &provider, wire, expected, &final_text),
                             "real XIM callback yields independent Unicode in caller-owned event storage after native payload release");
         if (mode == 0)
@@ -850,6 +875,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     }
     if (windowing)
     {
+        raster_native_check(windowing->native_error_count == 0, "real XIM commits preserve an error-free native connection");
         wm_deinitialize(windowing);
         wm_deinitialize(windowing);
     }
@@ -883,9 +909,41 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider(Arena* arena, u32 mode)
     {
         xcb_im_destroy(provider.server);
     }
+    if (server_window && provider.connection)
+    {
+        xcb_generic_error_t* error = xcb_request_check(provider.connection,
+            xcb_destroy_window_checked(provider.connection, server_window));
+        raster_native_check(!error && !xcb_connection_has_error(provider.connection), "fixture releases its provider window before independent cleanup readback");
+        free(error);
+    }
     if (provider.connection)
     {
         xcb_disconnect(provider.connection);
+    }
+    if (opened && raster_native_fixture_connection && !xcb_connection_has_error(raster_native_fixture_connection))
+    {
+        xcb_screen_iterator_t screens = xcb_setup_roots_iterator(xcb_get_setup(raster_native_fixture_connection));
+        xcb_atom_t advertisements = raster_native_atom(raster_native_fixture_connection, "XIM_SERVERS");
+        xcb_get_property_reply_t* advertised = xcb_get_property_reply(raster_native_fixture_connection,
+            xcb_get_property(raster_native_fixture_connection, 0, screens.data->root, advertisements, XCB_ATOM_ATOM, 0, 1024), 0);
+        bool removed = advertised && !advertised->bytes_after &&
+                       (advertised->type == XCB_ATOM_NONE || (advertised->type == XCB_ATOM_ATOM && advertised->format == 32));
+        char selection_name[96];
+        int selection_length = snprintf(selection_name, sizeof(selection_name), "@server=%s", name);
+        xcb_atom_t selection = selection_length > 0 && selection_length < (int)sizeof(selection_name) ?
+                               raster_native_atom(raster_native_fixture_connection, selection_name) : XCB_ATOM_NONE;
+        u32* atoms = advertised ? (u32*)xcb_get_property_value(advertised) : 0;
+        u32 atom_count = advertised ? (u32)xcb_get_property_value_length(advertised) / 4 : 0;
+        for (u32 index = 0; removed && index < atom_count; index += 1)
+        {
+            removed = atoms[index] != selection;
+        }
+        xcb_get_selection_owner_reply_t* owner = xcb_get_selection_owner_reply(raster_native_fixture_connection,
+            xcb_get_selection_owner(raster_native_fixture_connection, selection), 0);
+        raster_native_check(removed && selection && owner && owner->owner == XCB_WINDOW_NONE,
+                            "independent fixture observes provider advertisement and selection-owner removal");
+        free(owner);
+        free(advertised);
     }
     if (environment_changed)
     {
@@ -913,14 +971,11 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
     {
         xcb_intern_atom_reply_t* generation = xcb_intern_atom_reply(windowing->connection,
             xcb_intern_atom(windowing->connection, 1, 28, "BusterNativeServerGeneration"), 0);
-        bool retained = generation && generation->atom != XCB_ATOM_NONE;
+        bool retained = generation && generation->atom == raster_native_generation_atom;
         raster_native_server_resets += !retained;
         free(generation);
-        generation = xcb_intern_atom_reply(windowing->connection,
-            xcb_intern_atom(windowing->connection, 0, 28, "BusterNativeServerGeneration"), 0);
-        raster_native_check(generation && generation->atom != XCB_ATOM_NONE, "server generation marker installed");
-        free(generation);
-        printf("XSERVER_GENERATION_V1 campaign=%u cycle=%u retained=%u generations=%u\n",
+        raster_native_check(retained, "owned fixture keeps the same X server generation through native reinitialization");
+        printf("XSERVER_GENERATION_V1 campaign=%u cycle=%u retained=%u losses=%u\n",
                (unsigned)raster_native_campaign, (unsigned)cycle, (unsigned)retained, (unsigned)raster_native_server_resets);
         WmWindowHandle* window = wm_window_create(windowing, (WmWindowCreate){
             .name = S8("Buster raster native validation"),
@@ -1040,17 +1095,45 @@ int main(int argc, char* argv[])
         wm_deinitialize(0);
         if (argc == 3 && strcmp(argv[2], "--allocation-isolation-probe") == 0)
         {
-            raster_native_window_arena_failure();
+            BUSTER_UNUSED(arena_pool_release_thread());
+            arena_test_fail_next_reserve();
+            WmHandle* refused = wm_initialize();
+            bool unconsumed = arena_test_cancel_reserve_failure();
+            raster_native_check(!refused && unconsumed, "native admission refusal is distinct from an injected allocation refusal");
+            if (refused)
+            {
+                wm_deinitialize(refused);
+            }
             Arena* first = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64), .flags = {.no_pool = true}});
             Arena* second = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64), .flags = {.no_pool = true}});
             printf("ALLOCATION_ISOLATION_V1 first=%u second=%u\n", (unsigned)(first != 0), (unsigned)(second != 0));
             raster_native_check(first != 0 && second != 0, "native admission refusal cannot contaminate later allocation");
-            if (first) { arena_destroy(first, 1); }
-            if (second) { arena_destroy(second, 1); }
+            if (first)
+            {
+                arena_destroy(first, 1);
+            }
+            if (second)
+            {
+                arena_destroy(second, 1);
+            }
         }
     }
     else
     {
+        // The fixture owns one admitted client for its complete lifetime.
+        // Default X servers reset when their last Running client disconnects;
+        // an accepted next connection can be killed before setup completes.
+        // Keep this independent owner through injected failures, WM cycles and
+        // sequential providers; production connection semantics stay explicit.
+        int fixture_screen = 0;
+        raster_native_fixture_connection = xcb_connect(0, &fixture_screen);
+        bool fixture_ready = raster_native_fixture_connection && !xcb_connection_has_error(raster_native_fixture_connection);
+        if (fixture_ready)
+        {
+            raster_native_generation_atom = raster_native_atom(raster_native_fixture_connection, "BusterNativeServerGeneration");
+            fixture_ready = raster_native_generation_atom != XCB_ATOM_NONE;
+        }
+        raster_native_check(fixture_ready, "independent admitted X server fixture owner established");
         char const* repetition_text = getenv("BUSTER_NATIVE_CAMPAIGN_REPETITIONS");
         u32 repetitions = 1;
         if (repetition_text)
@@ -1061,8 +1144,9 @@ int main(int argc, char* argv[])
             raster_native_check(valid, "native campaign repetition bound");
             repetitions = valid ? (u32)parsed : 1;
         }
-        for (raster_native_campaign = 0; raster_native_campaign < repetitions; raster_native_campaign += 1)
+        for (raster_native_campaign = 0; fixture_ready && raster_native_campaign < repetitions; raster_native_campaign += 1)
         {
+            raster_native_check(fixture_ready && !xcb_connection_has_error(raster_native_fixture_connection), "X server fixture owner remains admitted");
             raster_native_window_arena_failure();
             for (u32 cycle = 0; cycle < 3; cycle += 1)
             {
@@ -1075,6 +1159,11 @@ int main(int argc, char* argv[])
                (unsigned)(3 * repetitions), (unsigned)raster_native_encodings, (unsigned)(2 * repetitions));
         raster_native_check(raster_native_cycles == 3 * repetitions && raster_native_encodings == 2 * repetitions,
                             "all declared lifecycle and real encoding cases executed");
+        if (raster_native_fixture_connection)
+        {
+            xcb_disconnect(raster_native_fixture_connection);
+            raster_native_fixture_connection = 0;
+        }
     }
     printf("rendering_raster_native_tests: %u/%u assertions passed; mode=%s\n",
            (unsigned)(raster_native_assertions - raster_native_failures), (unsigned)raster_native_assertions,
