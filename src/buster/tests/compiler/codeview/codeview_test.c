@@ -159,6 +159,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_large_types(UnitTestArguments* 
     return result;
 }
 
+// Floating-point base types are classified by DebugType::is_float, not by
+// spelling (#2737).  Expected values are the CodeView simple types from
+// cvinfo.h: T_REAL32 0x40, T_REAL64 0x41, T_REAL80 0x42, T_REAL128 0x43,
+// T_REAL16 0x46, T_INT4 0x74.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_float_base_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = S8("float.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("float"), .size = 4, .bit_width = 32, .is_float = true},
+        {.kind = DEBUG_TYPE_BASE, .name = S8("double"), .size = 8, .bit_width = 64, .is_float = true},
+        {.kind = DEBUG_TYPE_BASE, .name = S8("long double"), .size = 16, .bit_width = 80, .is_float = true},
+        {.kind = DEBUG_TYPE_BASE, .name = S8("_Float128"), .size = 16, .bit_width = 128, .is_float = true},
+        {.kind = DEBUG_TYPE_BASE, .name = S8("_Float16"), .size = 2, .bit_width = 16, .is_float = true},
+        {.kind = DEBUG_TYPE_BASE, .name = S8("fixed_int"), .size = 4, .bit_width = 32, .is_signed = true},
+    };
+    u32 expected[] = {0x0040, 0x0041, 0x0042, 0x0043, 0x0046, 0x0074};
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .machine = CODEVIEW_MACHINE_X64});
+    BUSTER_TEST(arguments, built.valid);
+    u64 cursor = 4;
+    for (u32 index = 0; built.valid && index < BUSTER_ARRAY_LENGTH(types); index += 1)
+    {
+        bool in_range = cursor + 12 <= built.types.length;
+        BUSTER_TEST(arguments, in_range);
+        if (!in_range)
+        {
+            break;
+        }
+        u8* record = built.types.pointer + cursor;
+        BUSTER_TEST(arguments, codeview_test_u16(record + 2) == 0x1001 && codeview_test_u32(record + 4) == expected[index]);
+        cursor += (u64)codeview_test_u16(record) + 2;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_scope_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -366,6 +403,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     UnitTestResult geometry = codeview_test_bit_fields_and_arrays(arguments);
     result.test_count += geometry.test_count;
     result.succeeded_test_count += geometry.succeeded_test_count;
+    UnitTestResult floats = codeview_test_float_base_types(arguments);
+    result.test_count += floats.test_count;
+    result.succeeded_test_count += floats.succeeded_test_count;
     UnitTestResult growth = codeview_test_scope_growth(arguments);
     result.test_count += growth.test_count;
     result.succeeded_test_count += growth.succeeded_test_count;
@@ -616,6 +656,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                                                                  });
     BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);
     BUSTER_TEST(arguments, model_built.relocation_count == 16);
+    u32 nonzero_addends = 0;
     for (u32 relocation_index = 0; relocation_index + 1 < model_built.relocation_count; relocation_index += 2)
     {
         CodeviewRelocation address = model_built.relocations[relocation_index];
@@ -626,9 +667,14 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         if (address.offset + 6 <= model_built.symbols.length)
         {
             BUSTER_TEST(arguments, codeview_test_u32(model_built.symbols.pointer + address.offset) <= 24);
+            // The relocation carries the in-place COFF addend explicitly, so
+            // a linker that overwrites the field keeps the range start (#2736).
+            BUSTER_TEST(arguments, address.addend == codeview_test_u32(model_built.symbols.pointer + address.offset));
+            nonzero_addends += address.addend != 0;
             BUSTER_TEST(arguments, codeview_test_u16(model_built.symbols.pointer + section.offset) == 0);
         }
     }
+    BUSTER_TEST(arguments, nonzero_addends != 0);
     // A model containing only locals must not create a zero-length
     // DEBUG_S_SYMBOLS subsection: MSVC link.exe rejects that stream.
     UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 2, 1, 2, 1);

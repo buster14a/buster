@@ -1,9 +1,9 @@
 #pragma once
 
 // Private implementation of `ide bench-select <source.c>`. It measures the
-// production validated selector, not the diagnostic rule matcher. The input
-// IR is retained; each sample rebuilds module plans and rewinds function
-// scratch after every attempt, just as module code generation does. This is
+// production validated selector using retained canonical IR. Each sample
+// rebuilds module plans and rewinds function scratch after every attempt,
+// just as module code generation does. This is
 // a warm-IR replay measurement, not a substitute for time to an object file.
 // Entry: compiler_run_selection_benchmark. Sampling: compiler_selection_sample.
 // No counters or timers are installed in ordinary compiler execution.

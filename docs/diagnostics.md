@@ -4,6 +4,7 @@
 renderer. The driver exposes an ordered `CompilerDriverResult.diagnostics` array;
 `diagnostic` (first error) and `warning` remain the compatible text outputs. Stable
 codes are explicit names such as `c.undeclared-identifier`,
+`c.extra-directive-tokens`,
 `assembly.unknown-instruction`, `codegen.unsupported-instruction`,
 `codegen.machine-fallback` and `link.unresolved-symbol`. Producer enum values are
 not the public spelling. Grammar-specific construction remains in the C and

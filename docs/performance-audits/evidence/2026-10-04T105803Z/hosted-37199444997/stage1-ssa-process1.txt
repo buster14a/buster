@@ -1,0 +1,46 @@
+IR_LAYOUT_LAB_FRONTEND source=src/buster/apps/ide/ide.c bytes=79691 tokens=3760570 frontend_ns=2362950609 certified=1 functions=6519
+IR_LAYOUT_LAB_PREPARE prepare_ns=280321595 promoted_locals=208 instructions_before=1627136 instructions_after=1424721 fast_fold_ns=21182288 fast_address_ns=6409839 fast_dce_ns=17318873 fast_parameters_ns=948951 fast_compact_ns=41759808 fast_changes=338170
+IR_LAYOUT_LAB_CENSUS functions=5659 rows=1424721 values=1198183 blocks=181122 operands=1384640 targets=252709 immediates=599186 result_rows=1164352 rows_with_targets=166098 rows_with_immediates=512450 rows_with_symbol=99391 rows_with_local=62479 extension_rows=839634 moved_rows=1202075 def_distance_le64=1180997 types=54566
+IR_LAYOUT_LAB_OPERANDS zero=534924 one=548089 two=289432 three_to_eight=49591 more=2685
+IR_LAYOUT_LAB_BYTES layout=A rows=1424721 row_bytes=91182144 pool_bytes=11342884 shared_bytes=36267580
+IR_LAYOUT_LAB_BYTES layout=B rows=1424721 row_bytes=74085492 pool_bytes=11342884 shared_bytes=36267580
+IR_LAYOUT_LAB_BYTES layout=C rows=1424721 row_bytes=65742288 pool_bytes=6835072 shared_bytes=36267580
+IR_LAYOUT_LAB_BYTES layout=D rows=1424721 row_bytes=103708080 pool_bytes=11342884 shared_bytes=36267580
+IR_LAYOUT_LAB_KERNEL kernel=validate_production_pre layout=A_con rows=1424721 repeats=15 min_ns=75073734 median_ns=76049597 max_ns=77085210 ps_per_unit=53378 checksum=0
+IR_LAYOUT_LAB_KERNEL kernel=validate_production_post layout=A_pub rows=1424721 repeats=15 min_ns=72231612 median_ns=73507736 max_ns=75022016 ps_per_unit=51594 checksum=0
+IR_LAYOUT_LAB_KERNEL kernel=census layout=A_pub rows=1424721 repeats=15 min_ns=5661247 median_ns=5787697 max_ns=6218412 ps_per_unit=4062 checksum=1221297074515
+IR_LAYOUT_LAB_KERNEL kernel=census layout=A_con rows=1424721 repeats=15 min_ns=6003423 median_ns=6081287 max_ns=6296820 ps_per_unit=4268 checksum=1221297074515
+IR_LAYOUT_LAB_KERNEL kernel=census layout=B rows=1424721 repeats=15 min_ns=2754770 median_ns=2797485 max_ns=2874310 ps_per_unit=1963 checksum=1221297074515
+IR_LAYOUT_LAB_KERNEL kernel=census layout=C rows=1424721 repeats=15 min_ns=3658897 median_ns=3708219 max_ns=3961770 ps_per_unit=2602 checksum=1221297074515
+IR_LAYOUT_LAB_KERNEL kernel=census layout=D rows=1424721 repeats=15 min_ns=6387788 median_ns=6494668 max_ns=6830723 ps_per_unit=4558 checksum=1221297074515
+IR_LAYOUT_LAB_KERNEL kernel=uses layout=A_pub operands=1384640 repeats=15 min_ns=9063250 median_ns=9126926 max_ns=9332364 ps_per_unit=6591 checksum=3571883482
+IR_LAYOUT_LAB_KERNEL kernel=uses layout=B operands=1384640 repeats=15 min_ns=8328870 median_ns=8412004 max_ns=8564242 ps_per_unit=6075 checksum=3571883482
+IR_LAYOUT_LAB_KERNEL kernel=uses layout=C operands=1384640 repeats=15 min_ns=8694037 median_ns=8882847 max_ns=9036220 ps_per_unit=6415 checksum=3571883482
+IR_LAYOUT_LAB_KERNEL kernel=uses layout=D operands=1384640 repeats=15 min_ns=10645543 median_ns=10773901 max_ns=10863279 ps_per_unit=7781 checksum=3571883482
+IR_LAYOUT_LAB_KERNEL kernel=defs_hot layout=A_pub operands=1384640 repeats=15 min_ns=10577561 median_ns=10797087 max_ns=10995003 ps_per_unit=7797 checksum=23344676
+IR_LAYOUT_LAB_KERNEL kernel=defs_hot layout=B operands=1384640 repeats=15 min_ns=10924852 median_ns=11050310 max_ns=11177527 ps_per_unit=7980 checksum=23344676
+IR_LAYOUT_LAB_KERNEL kernel=defs_hot layout=C operands=1384640 repeats=15 min_ns=11463389 median_ns=11606624 max_ns=11818698 ps_per_unit=8382 checksum=23344676
+IR_LAYOUT_LAB_KERNEL kernel=defs_hot layout=D operands=1384640 repeats=15 min_ns=12102497 median_ns=12227686 max_ns=12472198 ps_per_unit=8830 checksum=23344676
+IR_LAYOUT_LAB_KERNEL kernel=defs_cold layout=A_pub operands=1384640 repeats=15 min_ns=10587225 median_ns=10790517 max_ns=11038018 ps_per_unit=7793 checksum=22813643
+IR_LAYOUT_LAB_KERNEL kernel=defs_cold layout=B operands=1384640 repeats=15 min_ns=12023360 median_ns=12262734 max_ns=12514141 ps_per_unit=8856 checksum=22813643
+IR_LAYOUT_LAB_KERNEL kernel=defs_cold layout=C operands=1384640 repeats=15 min_ns=13574725 median_ns=13821291 max_ns=14071380 ps_per_unit=9981 checksum=22813643
+IR_LAYOUT_LAB_KERNEL kernel=defs_cold layout=D operands=1384640 repeats=15 min_ns=12091381 median_ns=12254886 max_ns=12673193 ps_per_unit=8850 checksum=22813643
+IR_LAYOUT_LAB_KERNEL kernel=chain layout=A_con rows=1424721 repeats=15 min_ns=18956215 median_ns=19571431 max_ns=20192442 ps_per_unit=13737 checksum=4582030062
+IR_LAYOUT_LAB_KERNEL kernel=chain layout=B_next_array rows=1424721 repeats=15 min_ns=6420237 median_ns=6538966 max_ns=6760375 ps_per_unit=4589 checksum=4582030062
+IR_LAYOUT_LAB_KERNEL kernel=chain layout=C_con rows=1424721 repeats=15 min_ns=12951651 median_ns=13263539 max_ns=13719643 ps_per_unit=9309 checksum=4582030062
+IR_LAYOUT_LAB_KERNEL kernel=chain layout=D_con rows=1424721 repeats=15 min_ns=21314014 median_ns=21572298 max_ns=22605329 ps_per_unit=15141 checksum=4582030062
+IR_LAYOUT_LAB_KERNEL kernel=chain layout=span_published rows=1424721 repeats=15 min_ns=5337664 median_ns=5465897 max_ns=5702759 ps_per_unit=3836 checksum=4582030062
+IR_LAYOUT_LAB_KERNEL kernel=validate layout=A_con rows=1424721 repeats=15 min_ns=25377113 median_ns=26108871 max_ns=26833707 ps_per_unit=18325 checksum=1424721
+IR_LAYOUT_LAB_KERNEL kernel=validate layout=B_con rows=1424721 repeats=15 min_ns=19179439 median_ns=19738282 max_ns=20185809 ps_per_unit=13854 checksum=1424721
+IR_LAYOUT_LAB_KERNEL kernel=validate layout=C_con rows=1424721 repeats=15 min_ns=20943165 median_ns=21574511 max_ns=21903444 ps_per_unit=15142 checksum=1424721
+IR_LAYOUT_LAB_KERNEL kernel=validate layout=D_con rows=1424721 repeats=15 min_ns=27729761 median_ns=28530372 max_ns=30234667 ps_per_unit=20025 checksum=1424721
+IR_LAYOUT_LAB_KERNEL kernel=compact layout=A_con rows=1424721 repeats=15 min_ns=35538610 median_ns=35648423 max_ns=39226391 ps_per_unit=25021 checksum=1118280946892244
+IR_LAYOUT_LAB_KERNEL kernel=compact layout=B_con rows=1424721 repeats=15 min_ns=35759792 median_ns=36118778 max_ns=38257628 ps_per_unit=25351 checksum=1118280946892244
+IR_LAYOUT_LAB_KERNEL kernel=compact layout=C_con rows=1424721 repeats=15 min_ns=38845346 median_ns=39371114 max_ns=41333020 ps_per_unit=27634 checksum=1118280946892244
+IR_LAYOUT_LAB_KERNEL kernel=compact layout=D_con rows=1424721 repeats=15 min_ns=39713361 median_ns=40143523 max_ns=40789320 ps_per_unit=28176 checksum=1118280946892244
+IR_LAYOUT_LAB_KERNEL kernel=append layout=A_reserved rows=1424721 repeats=15 min_ns=19089885 median_ns=19400245 max_ns=67288490 ps_per_unit=13616 checksum=4583454783
+IR_LAYOUT_LAB_KERNEL kernel=append layout=A_doubling rows=1424721 repeats=15 min_ns=42279459 median_ns=43002803 max_ns=118880512 ps_per_unit=30183 checksum=4583454783
+IR_LAYOUT_LAB_KERNEL kernel=append layout=B_reserved rows=1424721 repeats=15 min_ns=15826401 median_ns=16205775 max_ns=16482426 ps_per_unit=11374 checksum=4583454783
+IR_LAYOUT_LAB_KERNEL kernel=append layout=C_reserved rows=1424721 repeats=15 min_ns=16161434 median_ns=16536897 max_ns=16772244 ps_per_unit=11607 checksum=4583454783
+IR_LAYOUT_LAB_KERNEL kernel=append layout=D_chunked rows=1424721 repeats=15 min_ns=23179848 median_ns=24182935 max_ns=25300269 ps_per_unit=16973 checksum=4583454783
+IR_LAYOUT_LAB_RESULT valid=1 lab_arena_bytes=497373448 work_arena_bytes=2519230140

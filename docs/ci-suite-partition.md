@@ -1,7 +1,7 @@
 # Independent Unix CI suites
 
 > Historical suite-level design/evidence. The subsequent internal desktop
-> partition and current 21-job completion contract are documented in
+> partition and current 25-job completion contract are documented in
 > [Desktop combination shards](ci-combination-shards.md). Historical timings
 > below are not matched before/after evidence for #333.
 
@@ -132,7 +132,7 @@ and replace `--jobs 4` with explicit `--jobs 1`.
 
 ## Validation and acceptance
 
-`python3 tests/ci_tools_test.py -v` checks suite ownership, exact runner sets,
+`python3 tools/ci_workflow_policy_test.py -v` checks suite ownership, exact runner sets,
 independence, command retention, summaries and timing layouts. It executes the
 actual aggregate Bash body for all 625 combinations of four dependency groups
 across success, failure, cancellation, skipped and missing results. Timing tests
