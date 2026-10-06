@@ -2680,7 +2680,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_constraints(UnitTestAr
         {S8("typedef int T; struct S { const T x : 32; } g;\n"), S8(""), 0, 0, true, false, false},
         {S8("struct S { typeof(int) x : sizeof(int) * 8; } g;\n"), S8(""), 0, 0, true, false, false},
         {S8("enum E : unsigned char { A = 0 }; struct S { const enum E x : 8; } g;\n"), S8(""), 0, 0, true, false, false},
-        {S8("enum E { A = 1ULL << 40 }; struct S { enum E x : 40; } g;\n"), S8(""), 0, 0, true, false, false},
+        {S8("enum E { A = 1ULL << 40 }; struct S { enum E x : 40; } g;\n"), S8("width of bit-field 'x' (40 bits) exceeds the width of its type (32 bits)"), 1, 46, true, true, false},
         {S8("enum { W = 40 };\nint f(void) { enum { W = 20 }; struct S { unsigned x : W; }; struct S s = {0}; return s.x; }\n"), S8(""), 0, 0, true, false, false},
         {S8("struct S { unsigned x : (unsigned char)261; } g;\n"), S8(""), 0, 0, true, false, false},
         {S8("struct S { long x : 33; } g;\n"), S8("width of bit-field 'x' (33 bits) exceeds the width of its type (32 bits)"), 1, 17, true, true, false},
