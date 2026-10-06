@@ -6541,6 +6541,136 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
     return result;
 }
 
+// #1313: naming a member of a wide record costs work proportional to the
+// matches, not to the record's width. One translation unit per size holds a
+// struct of `count` members read `count` times (`p->mI`), initialized by
+// `count` designators and probed by `count` offsetof calls; the lowering's
+// field visits are counted, not timed, and quadrupling the width must
+// roughly quadruple them (a scan per lookup multiplies them by sixteen).
+BUSTER_GLOBAL_LOCAL void c_test_member_lookup_visits(UnitTestArguments* arguments, u32 count, bool* compiled, u64* visits_out)
+{
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 capacity = BUSTER_MB(2);
+    char8* source = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(source, capacity, &length, S8("struct S {"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" int m{u32};"), index));
+    }
+    c_test_append_source(source, capacity, &length, S8(" };\nstatic struct S s = {"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(".m{u32} = {u32},"), index, index));
+    }
+    c_test_append_source(source, capacity, &length, S8("};\nunsigned long offsets[] = {"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8("__builtin_offsetof(struct S, m{u32}),"), index));
+    }
+    c_test_append_source(source, capacity, &length, S8("};\nint read(struct S* p) { int t = 0;\n"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(source, capacity, &length, string_format(temporary.arena, S8(" t += p->m{u32};\n"), index));
+    }
+    c_test_append_source(source, capacity, &length, S8(" return t; }\n"));
+    u64 visits_before = 0;
+    u64 builds_before = 0;
+    c_test_ir_member_lookup_counts(&visits_before, &builds_before);
+    u64 parse_visits_before = 0;
+    u64 parse_builds_before = 0;
+    c_test_member_lookup_counts(&parse_visits_before, &parse_builds_before);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){source, length}, (CPreprocessOptions){
+        .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23,
+    });
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_analyze(temporary.arena, S8("member-lookup-linear.c"), preprocess, syntax, target_native);
+    *compiled = !preprocess.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count && lowered.canonical_ir_certified;
+    u64 visits = 0;
+    u64 builds = 0;
+    c_test_ir_member_lookup_counts(&visits, &builds);
+    u64 parse_visits = 0;
+    u64 parse_builds = 0;
+    c_test_member_lookup_counts(&parse_visits, &parse_builds);
+    c_test_scratch_end(temporary);
+    visits_out[0] = visits - visits_before;
+    visits_out[1] = parse_visits - parse_visits_before;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_lookup_linear_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SMALL = 1024, LARGE = 4096 };
+    bool compiled_small = false;
+    bool compiled_large = false;
+    u64 small[2] = {0, 0};
+    u64 large[2] = {0, 0};
+    c_test_member_lookup_visits(arguments, SMALL, &compiled_small, small);
+    c_test_member_lookup_visits(arguments, LARGE, &compiled_large, large);
+    BUSTER_TEST(arguments, compiled_small && compiled_large);
+    // Slot 0 counts the lowering's field visits, slot 1 the parser's member
+    // rows. Each shape names a member a few times per occurrence; a scan
+    // would visit about count / 2 per lookup, far above the bound.
+    for (u32 phase = 0; phase < 2; phase += 1)
+    {
+        String8 detail = string_format(arguments->arena, S8("phase={u32} small={u64} large={u64}"), phase, small[phase], large[phase]);
+        BUSTER_TEST_RAW(arguments, small[phase] != 0 && small[phase] < 24 * SMALL && large[phase] < 24 * LARGE, detail);
+        BUSTER_TEST_RAW(arguments, large[phase] < small[phase] * 6, detail);
+    }
+    return result;
+}
+
+// Anonymous members and ambiguity on records wide enough to be indexed. The
+// static assertions fix the offsets the promoted-member paths must produce;
+// the ambiguous variants must be rejected exactly as for a narrow record.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_member_lookup_semantics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 prefix = S8("#include <stddef.h>\nstruct W {"
+                        " int n0; int n1; int n2; int n3; int n4; int n5; int n6; int n7;"
+                        " struct { int a0; union { int u0; float f0; }; };"
+                        " int n8; int n9; int n10; int n11; int n12; int n13; int n14; int n15;"
+                        " struct { struct { int deep; }; long long l0; };"
+                        " int last;");
+    String8 good = S8(" };\n"
+                      "_Static_assert(offsetof(struct W, a0) == 32, \"a0\");\n"
+                      "_Static_assert(offsetof(struct W, u0) == 36 && offsetof(struct W, f0) == 36, \"union\");\n"
+                      "_Static_assert(offsetof(struct W, n8) == 40, \"n8\");\n"
+                      "_Static_assert(offsetof(struct W, deep) == 72, \"deep\");\n"
+                      "_Static_assert(offsetof(struct W, l0) == 80, \"l0\");\n"
+                      "_Static_assert(offsetof(struct W, last) == 88, \"last\");\n"
+                      "static struct W w = {.n3 = 3, .a0 = 1, .f0 = 2.0f, .n15 = 4, .deep = 5, .l0 = 6, .last = 7};\n"
+                      "int read(struct W* p) { return p->n0 + p->a0 + p->u0 + p->n9 + p->deep + (int)p->l0 + p->last; }\n"
+                      "int mix(struct W* p) { return (int)sizeof(p->deep) + (int)offsetof(struct W, f0); }\n");
+    String8 ambiguous_tail[] = {
+        S8(" struct { int dup; }; struct { int dup; }; };\nint read(struct W* p) { return p->dup; }\n"),
+        S8(" struct { int dup; }; struct { int dup; }; };\nstatic struct W w = {.dup = 1};\n"),
+        S8(" struct { int dup; }; struct { int dup; }; };\nunsigned long o = __builtin_offsetof(struct W, dup);\n"),
+        S8(" struct { int dup; }; union { long dup; }; };\nint read(struct W* p) { return p->dup; }\n"),
+    };
+    String8 missing_tail[] = {
+        S8(" };\nint read(struct W* p) { return p->absent; }\n"),
+        S8(" };\nstatic struct W w = {.absent = 1};\n"),
+    };
+    for (u32 variant = 0; variant < 1 + BUSTER_ARRAY_LENGTH(ambiguous_tail) + BUSTER_ARRAY_LENGTH(missing_tail); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 tail = variant == 0 ? good
+                       : variant <= BUSTER_ARRAY_LENGTH(ambiguous_tail) ? ambiguous_tail[variant - 1]
+                                                                          : missing_tail[variant - 1 - BUSTER_ARRAY_LENGTH(ambiguous_tail)];
+        String8 text = string_format(temporary.arena, S8("{S8}{S8}"), prefix, tail);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, text, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("wide-member-lookup.c"), preprocess, syntax, target_native);
+        bool clean = !preprocess.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count && lowered.canonical_ir_certified;
+        BUSTER_TEST_RAW(arguments, clean == (variant == 0), string_format(arguments->arena, S8("variant={u32} clean={u32}"), variant, (u32)clean));
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Exercise the production search directly with unrelated types already in the
 // program. A fresh, separate arena makes its dirty high-water mark observable
 // even after the helper correctly rewinds every success and failure path.
@@ -31197,15 +31327,26 @@ enum
     C_TEST_NESTED_CONTROL_IF,
     C_TEST_NESTED_CONTROL_FOR,
     C_TEST_NESTED_CONTROL_FAMILIES,
+    // Braceless nests: every statement is the body of the one above it, so
+    // there is no block to skip and each statement's end is the same token.
+    C_TEST_NESTED_CONTROL_BRACELESS_WHILE = C_TEST_NESTED_CONTROL_FAMILIES,
+    C_TEST_NESTED_CONTROL_BRACELESS_FOR,
+    C_TEST_NESTED_CONTROL_BRACELESS_IF_WHILE,
+    C_TEST_NESTED_CONTROL_ALL_FAMILIES,
 };
 
 BUSTER_GLOBAL_LOCAL String8 c_test_nested_control_source(Arena* arena, u32 family, u32 depth)
 {
+    bool braceless = family >= C_TEST_NESTED_CONTROL_FAMILIES;
     String8 prefix = S8("int f(int x) { ");
-    String8 header = family == C_TEST_NESTED_CONTROL_WHILE ? S8("while (x > 1) { ")
-                     : family == C_TEST_NESTED_CONTROL_IF  ? S8("if (x > 1) { ")
-                                                           : S8("for (int i = 0; i < x; i += 1) { ");
-    String8 core = S8("x -= 1; ");
+    String8 header = family == C_TEST_NESTED_CONTROL_WHILE                ? S8("while (x > 1) { ")
+                     : family == C_TEST_NESTED_CONTROL_IF                 ? S8("if (x > 1) { ")
+                     : family == C_TEST_NESTED_CONTROL_FOR                ? S8("for (int i = 0; i < x; i += 1) { ")
+                     : family == C_TEST_NESTED_CONTROL_BRACELESS_WHILE    ? S8("while (x > 1) ")
+                     : family == C_TEST_NESTED_CONTROL_BRACELESS_FOR      ? S8("for (int i = 0; i < x; i += 1) ")
+                                                                           : S8("if (x > 1) while (x > 1) ");
+    // The innermost if of the last family takes the else, as the grammar says.
+    String8 core = family == C_TEST_NESTED_CONTROL_BRACELESS_IF_WHILE ? S8("x -= 1; else x += 1; ") : S8("x -= 1; ");
     String8 suffix = S8("return x; }\n");
     u64 capacity = prefix.length + (header.length + core.length + 2) * depth + core.length + suffix.length;
     char8* bytes = arena_allocate(arena, char8, capacity);
@@ -31216,7 +31357,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_nested_control_source(Arena* arena, u32 famil
         c_test_append_source(bytes, capacity, &length, header);
     }
     c_test_append_source(bytes, capacity, &length, core);
-    for (u32 level = 0; level < depth; level += 1)
+    for (u32 level = 0; level < depth && !braceless; level += 1)
     {
         c_test_append_source(bytes, capacity, &length, S8("} "));
         c_test_append_source(bytes, capacity, &length, core);
@@ -31268,6 +31409,129 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArg
         BUSTER_TEST_RAW(arguments, stores_shallow != UINT64_MAX && stores_deep != UINT64_MAX && stores_shallow >= SHALLOW &&
                             stores_deep <= stores_shallow * 5 && stores_deep <= DEEP * 24,
                         string_format(arguments->arena, S8("body scope stores family={u32} shallow={u64} deep={u64}"), family, stores_shallow, stores_deep));
+    }
+    return result;
+}
+
+// One function with `count` labels and `count` gotos, the gotos spread over
+// the labels with a stride coprime to every tested count, so no lookup is
+// answered by the first or last array row (issue #1313).
+BUSTER_GLOBAL_LOCAL String8 c_test_label_lookup_source(Arena* arena, u32 count)
+{
+    u64 capacity = (u64)count * 48 + 64;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int f(int x) { "));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("L"));
+        c_test_append_u32(bytes, capacity, &length, index);
+        c_test_append_source(bytes, capacity, &length, S8(": x += 1; if (x < 0) goto L"));
+        c_test_append_u32(bytes, capacity, &length, (u32)(((u64)index * 7 + 3) % count));
+        c_test_append_source(bytes, capacity, &length, S8("; "));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("return x; }\n"));
+    return (String8){.pointer = bytes, .length = length};
+}
+
+// Label-find probes for one lowering of the family at this size; UINT64_MAX
+// when the source did not lower cleanly.
+BUSTER_GLOBAL_LOCAL u64 c_test_label_lookup_work(u32 count)
+{
+    u64 work = UINT64_MAX;
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1), .flags = {.no_pool = true}});
+    if (arena)
+    {
+        String8 source = c_test_label_lookup_source(arena, count);
+        CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParseResult parse = c_parse(arena, preprocess);
+        if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+        {
+            u64 before = c_test_ir_label_find_probes();
+            CIRLowerResult lowered = c_lower_to_ir(arena, S8("label-lookup.c"), preprocess, parse, target_native);
+            if (!lowered.diagnostic_count && lowered.canonical_ir_certified)
+            {
+                work = c_test_ir_label_find_probes() - before;
+            }
+        }
+        arena_destroy(arena, 1);
+    }
+    return work;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_lookup_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SMALL = 500, LARGE = 2000 };
+    u64 small = c_test_label_lookup_work(SMALL);
+    u64 large = c_test_label_lookup_work(LARGE);
+    // Every label statement, goto and duplicate check is one lookup, and a
+    // lookup is answered in a bounded number of probes, so 4x the labels is
+    // about 4x the probes. A linear scan grows 16x.
+    BUSTER_TEST_RAW(arguments, small != UINT64_MAX && large != UINT64_MAX && small >= SMALL && large <= small * 6 && large <= LARGE * 16,
+                    string_format(arguments->arena, S8("label find probes small={u64} large={u64}"), small, large));
+    return result;
+}
+
+// Braceless nests (#2676): `while (c) while (c) ... x;` has no block for a
+// delimiter table to skip, so each statement's end used to be found by walking
+// the prefix of every statement inside it. The walk's steps must grow with the
+// depth, not its square.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braceless_control_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 200, DEEP = 800 };
+    for (u32 family = C_TEST_NESTED_CONTROL_FAMILIES; family < C_TEST_NESTED_CONTROL_ALL_FAMILIES; family += 1)
+    {
+        u64 shallow = c_test_nested_control_work(family, SHALLOW, C_TEST_PARSE_NESTING_STATEMENT_END_STEPS);
+        u64 deep = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_STATEMENT_END_STEPS);
+        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && shallow >= SHALLOW && deep <= shallow * 5 && deep <= DEEP * 16,
+                        string_format(arguments->arena, S8("statement-end steps family={u32} shallow={u64} deep={u64}"), family, shallow, deep));
+        u64 tokens_shallow = c_test_nested_control_work(family, SHALLOW, C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS);
+        u64 tokens_deep = c_test_nested_control_work(family, DEEP, C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS);
+        BUSTER_TEST_RAW(arguments, tokens_shallow != UINT64_MAX && tokens_deep != UINT64_MAX && tokens_deep <= tokens_shallow * 5 + DEEP,
+                        string_format(arguments->arena, S8("statement-end tokens family={u32} shallow={u64} deep={u64}"), family, tokens_shallow, tokens_deep));
+    }
+    return result;
+}
+
+// The scope levels one lowering of the family at this depth walks; UINT64_MAX
+// when it did not lower cleanly.
+BUSTER_GLOBAL_LOCAL u64 c_test_nested_control_lowering_levels(u32 family, u32 depth)
+{
+    u64 work = UINT64_MAX;
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = c_test_nested_control_source(temporary.arena, family, depth);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    u64 before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("nested-control-lowering.c"), preprocess, parse, target_native);
+    if (preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0 && ir.diagnostic_count == 0 && ir.program)
+    {
+        work = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) - before;
+    }
+    c_test_scratch_end(temporary);
+    return work;
+}
+
+// Lowering finds the scope of every loop's `break` and `continue` target, and
+// each answer used to descend from the function's scope: one level per
+// enclosing scope, so a D-deep nest cost D squared levels (#2676). The levels
+// walked must grow with the depth.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_lowering_scope_levels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 200, DEEP = 800 };
+    u32 families[] = {C_TEST_NESTED_CONTROL_WHILE, C_TEST_NESTED_CONTROL_FOR};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(families); index += 1)
+    {
+        u32 family = families[index];
+        u64 shallow = c_test_nested_control_lowering_levels(family, SHALLOW);
+        u64 deep = c_test_nested_control_lowering_levels(family, DEEP);
+        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && shallow >= SHALLOW && deep <= shallow * 5 && deep <= DEEP * 16,
+                        string_format(arguments->arena, S8("lowering scope levels family={u32} shallow={u64} deep={u64}"), family, shallow, deep));
     }
     return result;
 }
@@ -40834,6 +41098,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_scope_interval_index(UnitTestArguments
         BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, (CScopeId){0}, siblings * 4 + 8).value == 0);
         BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){0}, 0, siblings * 4 + 9) == 0);
         BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){siblings}, 2, 8) == 0);
+        // Starting from any earlier answer gives the answer a descent from the root does.
+        u32 hint_step = size_index == 0 ? 1 : parse.scope_count / 5 + 1;
+        for (u32 hint = 0; hint < parse.scope_count; hint += hint_step)
+        {
+            for (u32 token = 0; token < siblings * 4 + 10; token += size_index == 0 ? 1 : 3)
+            {
+                BUSTER_TEST(arguments, c_parse_scope_for_token_near(&parse, (CScopeId){0}, (CScopeId){hint}, token).value ==
+                                           c_parse_scope_for_token(&parse, (CScopeId){0}, token).value);
+            }
+        }
     }
     c_test_scratch_end(temporary);
     return result;
@@ -48112,13 +48386,17 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
     C_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_member_lookup_linear_work);
     C_TEST_FIXTURE(arguments, c_test_member_search_scratch);
     C_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
     C_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
     C_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     C_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
+    C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_braceless_control_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_nested_control_lowering_scope_levels);
     C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
@@ -48260,6 +48538,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
     C_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
     C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
+    C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
     C_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
     C_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
     C_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);

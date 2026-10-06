@@ -85,8 +85,9 @@
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
 //                                                 and derived-type interning
 //   c_ir_function_signature                       signatures and ABI limits
-//   c_ir_field_symbols, c_ir_field_named          member names compared by
-//                                                 interned symbol
+//   c_ir_field_symbols, c_ir_field_named,         member names compared by
+//   c_ir_field_index                              interned symbol; wide
+//                                                 records by a name index
 //   CIntegerIrBuilder                             per-module lowering state
 //   c_ir_label_metadata_*                         label provenance needed by
 //                                                 computed goto
@@ -2164,6 +2165,22 @@ struct CIrLabel
     IrBlockId block;
 };
 
+// Open-addressed index over one CIrLabel array, keyed on the label spelling.
+// slots holds label indices (C_IR_LABEL_SLOT_EMPTY when free) and its length
+// slot_mask + 1 is a power of two of at least twice the array capacity, so a
+// probe chain always ends. A null slots table means "no index": lookups then
+// scan the array.
+#define C_IR_LABEL_SLOT_EMPTY UINT32_MAX
+#define C_IR_LABEL_HASH_OFFSET 2166136261u
+#define C_IR_LABEL_HASH_PRIME 16777619u
+#define C_IR_LABEL_SLOT_MINIMUM 16u
+typedef struct CIrLabelIndex CIrLabelIndex;
+struct CIrLabelIndex
+{
+    u32* slots;
+    u32 slot_mask;
+};
+
 // The label differences of one static object's byte image, `bytes` through
 // `bytes + byte_count`, with object-relative offsets.
 typedef struct CIrLabelDifferenceSink CIrLabelDifferenceSink;
@@ -3178,6 +3195,7 @@ struct CIntegerIrBuilder
     u32 vla_value_count;
     IrBlockId current_block;
     CIrLabel* labels;
+    CIrLabelIndex label_index;
     u32 label_count;
     CPreprocessResult preprocess;
     CParseResult parse;
@@ -3351,6 +3369,10 @@ struct CIntegerIrBuilder
     // once more with this clear, which lets what never maps decay.
     bool sizeof_defers_unmapped_local_arrays;
     u32 declaration_index;
+    // The scope the last lowering scope query under `scope_finger_root` answered
+    // (c_ir_scope_for_token): the next query starts its search there.
+    CScopeId scope_finger;
+    CScopeId scope_finger_root;
     CIntegerIrLocal* locals;
     // The entity of `locals[i]`, kept beside the table rather than read out of
     // it: c_ir_find_local_by_entity scans the whole table backwards on every
@@ -9844,13 +9866,47 @@ BUSTER_C_INTERNAL bool c_ir_type_queued(const IrTypeId* queued, u32 count, IrTyp
 // stage-1 self-host compile, 18% of lowering's (#1594).
 #define C_IR_FIELD_SYMBOL_NONE UINT32_MAX
 
+// A wide aggregate also gets a name index on its first member lookup once its
+// layout has resolved (the fields are then settled): a hash table from field
+// symbol to the fields carrying it, chained in field order, plus the list of
+// unnamed fields, the only ones a promoted-member search descends into. A
+// lookup then visits the fields that carry the queried name and the unnamed
+// ones instead of every field, so N member accesses on an N-member record cost
+// O(N) rather than O(N^2) (#1313). Records under C_IR_FIELD_INDEX_MIN_FIELDS
+// keep the plain scan, which is cheaper than building a table for them.
+#define C_IR_FIELD_INDEX_MIN_FIELDS 16u
+
 typedef struct CIrFieldSymbolRow CIrFieldSymbolRow;
 struct CIrFieldSymbolRow
 {
     const IrField* fields;
     u32* symbols;
+    // Bucket heads and per-field chain links, both holding field index + 1
+    // with 0 as the end. A chain lists the fields of one bucket in field
+    // order; a lookup keeps the ones whose symbol equals the query's.
+    u32* index_heads;
+    u32* index_next;
+    // Indices of the fields with an empty name, in field order.
+    u32* index_unnamed;
     u32 field_count;
+    u32 index_shift;
+    u32 index_unnamed_count;
+    bool indexed;
 };
+
+#if BUSTER_INCLUDE_TESTS
+// Fields a member lookup visited, and name indexes built, on this thread.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_member_lookup_counts[2];
+
+void c_test_ir_member_lookup_counts(u64* visits, u64* builds)
+{
+    *visits = c_ir_member_lookup_counts[0];
+    *builds = c_ir_member_lookup_counts[1];
+}
+#define C_IR_MEMBER_LOOKUP_VISIT() (c_ir_member_lookup_counts[0] += 1)
+#else
+#define C_IR_MEMBER_LOOKUP_VISIT() ((void)0)
+#endif
 
 // Indexed by IrTypeId and sized, as CIrInitializerSlotCache is, to the
 // program's type capacity, which ir_program_add_type never grows.
@@ -9865,9 +9921,9 @@ struct CIrFieldSymbolCache
 // The symbol row of `type`, or null when the search must compare spellings:
 // a builder without a cache (the test hooks), a type that is not a row of the
 // program's table, or one without fields.
-BUSTER_C_INTERNAL u32* c_ir_field_symbols(CIntegerIrBuilder* builder, const IrType* type)
+BUSTER_C_INTERNAL CIrFieldSymbolRow* c_ir_field_symbol_row(CIntegerIrBuilder* builder, const IrType* type)
 {
-    u32* result = 0;
+    CIrFieldSymbolRow* result = 0;
     CIrFieldSymbolCache* cache = builder->field_symbols;
     if (cache && cache->symbols && type->field_count)
     {
@@ -9889,12 +9945,157 @@ BUSTER_C_INTERNAL u32* c_ir_field_symbols(CIntegerIrBuilder* builder, const IrTy
                 row->field_count = type->field_count;
                 row->symbols = arena_allocate(cache->arena, u32, type->field_count);
                 memset(row->symbols, 0, sizeof(*row->symbols) * type->field_count);
+                row->index_heads = 0;
+                row->index_next = 0;
+                row->index_unnamed = 0;
+                row->index_shift = 0;
+                row->index_unnamed_count = 0;
+                row->indexed = false;
                 cache->rows[index] = row;
             }
-            result = row->symbols;
+            result = row;
         }
     }
     return result;
+}
+
+BUSTER_C_INTERNAL u32* c_ir_field_symbols(CIntegerIrBuilder* builder, const IrType* type)
+{
+    CIrFieldSymbolRow* row = c_ir_field_symbol_row(builder, type);
+    return row ? row->symbols : 0;
+}
+
+// The symbol of field `field_index` of `row`, probing the table on first use
+// (see CIrFieldSymbolRow's comment above for the encoding).
+BUSTER_C_INTERNAL u32 c_ir_field_row_symbol(CIntegerIrBuilder* builder, CIrFieldSymbolRow* row, u32 field_index)
+{
+    u32 field_symbol = row->symbols[field_index];
+    const IrField* field = row->fields + field_index;
+    if (!field_symbol && field->name.length)
+    {
+        field_symbol = c_symbol_find(builder->field_symbols->symbols, field->name);
+        field_symbol = field_symbol ? field_symbol : C_IR_FIELD_SYMBOL_NONE;
+        row->symbols[field_index] = field_symbol;
+    }
+    return field_symbol;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_field_index_bucket(const CIrFieldSymbolRow* row, u32 symbol)
+{
+    return (symbol * 0x9E3779B1u) >> row->index_shift;
+}
+
+// The name-indexed row of `type`, built on first use, or null when the caller
+// must scan: a type below the size threshold, one whose layout is not resolved
+// (its field rows may still be written), or one without a symbol row.
+BUSTER_C_INTERNAL CIrFieldSymbolRow* c_ir_field_index(CIntegerIrBuilder* builder, const IrType* type)
+{
+    CIrFieldSymbolRow* result = 0;
+    if (type->field_count >= C_IR_FIELD_INDEX_MIN_FIELDS && type->layout.resolved)
+    {
+        CIrFieldSymbolRow* row = c_ir_field_symbol_row(builder, type);
+        if (row)
+        {
+            if (!row->indexed)
+            {
+                Arena* arena = builder->field_symbols->arena;
+                u32 bits = 1;
+                while (bits < 31 && ((u32)1 << bits) < row->field_count * 2u)
+                {
+                    bits += 1;
+                }
+                row->index_shift = 32 - bits;
+                row->index_heads = arena_allocate(arena, u32, (u64)1 << bits);
+                memset(row->index_heads, 0, sizeof(*row->index_heads) * ((u64)1 << bits));
+                row->index_next = arena_allocate(arena, u32, row->field_count);
+                row->index_unnamed = arena_allocate(arena, u32, row->field_count);
+                row->index_unnamed_count = 0;
+                for (u32 field_index = 0; field_index < row->field_count; field_index += 1)
+                {
+                    row->index_next[field_index] = 0;
+                    c_ir_field_row_symbol(builder, row, field_index);
+                }
+                for (u32 position = row->field_count; position > 0; position -= 1)
+                {
+                    u32 field_index = position - 1;
+                    if (!row->fields[field_index].name.length)
+                    {
+                        row->index_unnamed[row->index_unnamed_count++] = field_index;
+                    }
+                    else if (row->symbols[field_index] != C_IR_FIELD_SYMBOL_NONE)
+                    {
+                        u32 bucket = c_ir_field_index_bucket(row, row->symbols[field_index]);
+                        row->index_next[field_index] = row->index_heads[bucket];
+                        row->index_heads[bucket] = field_index + 1;
+                    }
+                }
+                // Built back to front so the chains run in field order; the
+                // unnamed list was filled the same way and is reversed here.
+                for (u32 low = 0, high = row->index_unnamed_count; low + 1 < high; low += 1, high -= 1)
+                {
+                    u32 swap = row->index_unnamed[low];
+                    row->index_unnamed[low] = row->index_unnamed[high - 1];
+                    row->index_unnamed[high - 1] = swap;
+                }
+                row->indexed = true;
+#if BUSTER_INCLUDE_TESTS
+                c_ir_member_lookup_counts[1] += 1;
+#endif
+            }
+            result = row;
+        }
+    }
+    return result;
+}
+
+// The first chain entry at or after `chain` (field index + 1, 0 for none)
+// whose field carries `symbol`.
+BUSTER_C_INTERNAL u32 c_ir_field_index_match(const CIrFieldSymbolRow* row, u32 chain, u32 symbol)
+{
+    while (chain && row->symbols[chain - 1] != symbol)
+    {
+        chain = row->index_next[chain - 1];
+    }
+    return chain;
+}
+
+// The fields of an indexed row a lookup of `symbol` visits, in order: first
+// those carrying the symbol, then the unnamed ones. Returns false when done.
+typedef struct CIrFieldIndexCursor CIrFieldIndexCursor;
+struct CIrFieldIndexCursor
+{
+    const CIrFieldSymbolRow* row;
+    u32 symbol;
+    u32 chain;
+    u32 unnamed;
+};
+
+BUSTER_C_INTERNAL CIrFieldIndexCursor c_ir_field_index_cursor(const CIrFieldSymbolRow* row, u32 symbol)
+{
+    CIrFieldIndexCursor cursor = {.row = row, .symbol = symbol};
+    cursor.chain = c_ir_field_index_match(row, row->index_heads[c_ir_field_index_bucket(row, symbol)], symbol);
+    return cursor;
+}
+
+BUSTER_C_INTERNAL bool c_ir_field_index_next(CIrFieldIndexCursor* cursor, u32* field_index, bool* named)
+{
+    bool more = true;
+    if (cursor->chain)
+    {
+        *field_index = cursor->chain - 1;
+        *named = true;
+        cursor->chain = c_ir_field_index_match(cursor->row, cursor->row->index_next[*field_index], cursor->symbol);
+    }
+    else if (cursor->unnamed < cursor->row->index_unnamed_count)
+    {
+        *field_index = cursor->row->index_unnamed[cursor->unnamed++];
+        *named = false;
+    }
+    else
+    {
+        more = false;
+    }
+    return more;
 }
 
 // Whether `field` is the member a token names. An interned token compares its
@@ -10054,10 +10255,35 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
             break;
         }
         u32* candidate_symbols = member.symbol ? c_ir_field_symbols(builder, candidate) : 0;
-        for (u32 index = 0; index < candidate->field_count; index += 1)
+        // A wide, resolved candidate visits only the fields named like the
+        // token and its unnamed ones (c_ir_field_index); the rest cannot
+        // match or descend, so skipping them leaves the outcome unchanged.
+        CIrFieldSymbolRow* candidate_row = member.symbol ? c_ir_field_index(builder, candidate) : 0;
+        CIrFieldIndexCursor candidate_cursor = {0};
+        if (candidate_row)
         {
+            candidate_cursor = c_ir_field_index_cursor(candidate_row, member.symbol);
+        }
+        u32 scan_index = 0;
+        for (;;)
+        {
+            u32 index = scan_index;
+            bool indexed_named = false;
+            if (candidate_row)
+            {
+                if (!c_ir_field_index_next(&candidate_cursor, &index, &indexed_named))
+                {
+                    break;
+                }
+            }
+            else if (scan_index >= candidate->field_count)
+            {
+                break;
+            }
+            scan_index += 1;
+            C_IR_MEMBER_LOOKUP_VISIT();
             IrField* candidate_field = &candidate->fields[index];
-            if (c_ir_field_named(builder, candidate_symbols, candidate_field, index, member.symbol, member_spelling))
+            if (candidate_row ? indexed_named : c_ir_field_named(builder, candidate_symbols, candidate_field, index, member.symbol, member_spelling))
             {
                 if (found_node == UINT32_MAX)
                 {
@@ -15767,7 +15993,7 @@ struct CIrLowerTypedefState
 };
 
 typedef struct CIrLowerBodyState CIrLowerBodyState;
-BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, String8 name);
+BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, CIrLabelIndex const* index, String8 name);
 BUSTER_C_INTERNAL void c_ir_lower_body_step(CIntegerIrBuilder* builder);
 
 BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder);
@@ -16084,6 +16310,7 @@ struct CIrLowerBodyState
     CIrSwitchCase* switch_cases;
     CIrSubstatementCase* substatement_cases;
     CIrLabel* labels;
+    CIrLabelIndex label_index;
     IrSourceRange declaration_source;
     IrSourceRange child_source;
     IrSourceRange statement_unreachable_source;
@@ -29917,110 +30144,166 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_queued(const CIrPromotedMemberWork* 
     return found;
 }
 
+// The search queue starts on the C stack and grows into scratch only for a
+// record whose anonymous aggregates outnumber it. It used to be sized by the
+// whole type table on every call, which a lookup on a wide record paid once
+// per designator (#1313).
+#define C_IR_PROMOTED_MEMBER_LOCAL_CAPACITY 8u
+
 BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrTypeId root, String8 member, CIrPromotedMemberPath* result)
 {
     u32 capacity = builder->program->types.count;
-    if (!capacity || root.value >= capacity)
+    bool status = false;
+    if (capacity && root.value < capacity)
     {
-        return false;
-    }
-    result->ambiguous = false;
-    TemporalArena promoted_member_scratch = scratch_begin(&builder->temporary_arena, 1);
-    Arena* arena = promoted_member_scratch.arena;
-    CIrPromotedMemberWork* work = arena_allocate(arena, CIrPromotedMemberWork, capacity);
-    u32 work_index = 0;
-    u32 work_count = 1;
-    bool found = false;
-    bool ambiguous = false;
-    u32 found_depth = UINT32_MAX;
-    IrType* root_type = ir_type_from_id(&builder->program->types, root);
-    work[0] = (CIrPromotedMemberWork){
-        .type = root,
-        .union_type = root,
-        .root_field = UINT32_MAX,
-        .union_field = UINT32_MAX,
-        .depth = 0,
-        .has_union = root_type && root_type->kind == IR_TYPE_UNION,
-        .union_size = root_type && root_type->kind == IR_TYPE_UNION ? root_type->layout.size : 0,
-    };
-    if (work[0].has_union && !root_type->layout.resolved)
-    {
-        work[0].has_union = false;
-    }
-    while (work_index < work_count && !ambiguous)
-    {
-        CIrPromotedMemberWork current = work[work_index++];
-        IrType* type = ir_type_from_id(&builder->program->types, current.type);
-        if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
+        result->ambiguous = false;
+        CIrPromotedMemberWork local_work[C_IR_PROMOTED_MEMBER_LOCAL_CAPACITY];
+        CIrPromotedMemberWork* work = local_work;
+        u32 work_capacity = BUSTER_MIN(capacity, C_IR_PROMOTED_MEMBER_LOCAL_CAPACITY);
+        TemporalArena promoted_member_scratch = {0};
+        bool scratch_open = false;
+        // The member's interned symbol, when the table has one; a name the
+        // table never interned is compared by spelling.
+        u32 member_symbol = builder->field_symbols && builder->field_symbols->symbols && member.length
+                                ? c_symbol_find(builder->field_symbols->symbols, member)
+                                : 0;
+        u32 work_index = 0;
+        u32 work_count = 1;
+        bool found = false;
+        bool ambiguous = false;
+        bool overflow = false;
+        u32 found_depth = UINT32_MAX;
+        IrType* root_type = ir_type_from_id(&builder->program->types, root);
+        work[0] = (CIrPromotedMemberWork){
+            .type = root,
+            .union_type = root,
+            .root_field = UINT32_MAX,
+            .union_field = UINT32_MAX,
+            .depth = 0,
+            .has_union = root_type && root_type->kind == IR_TYPE_UNION,
+            .union_size = root_type && root_type->kind == IR_TYPE_UNION ? root_type->layout.size : 0,
+        };
+        if (work[0].has_union && !root_type->layout.resolved)
         {
-            continue;
+            work[0].has_union = false;
         }
-        if (found && current.depth > found_depth)
+        while (work_index < work_count && !ambiguous && !overflow)
         {
-            break;
-        }
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-        {
-            IrField* field = type->fields + field_index;
-            if (string_equal(field->name, member))
+            CIrPromotedMemberWork current = work[work_index++];
+            IrType* type = ir_type_from_id(&builder->program->types, current.type);
+            if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
             {
-                if (current.offset > UINT64_MAX - field->offset)
+                continue;
+            }
+            if (found && current.depth > found_depth)
+            {
+                break;
+            }
+            // As in c_ir_emit_field_place_from_value, a wide resolved record
+            // visits only the fields named like the member and its unnamed
+            // fields.
+            CIrFieldSymbolRow* row = member_symbol ? c_ir_field_index(builder, type) : 0;
+            CIrFieldIndexCursor cursor = {0};
+            if (row)
+            {
+                cursor = c_ir_field_index_cursor(row, member_symbol);
+            }
+            u32 scan_index = 0;
+            while (!overflow)
+            {
+                u32 field_index = scan_index;
+                bool indexed_named = false;
+                if (row)
                 {
-                    scratch_end(promoted_member_scratch);
-                    return false;
+                    if (!c_ir_field_index_next(&cursor, &field_index, &indexed_named))
+                    {
+                        break;
+                    }
                 }
-                if (!found)
+                else if (scan_index >= type->field_count)
                 {
-                    *result = (CIrPromotedMemberPath){
-                        .type = field->type,
-                        .union_type = type->kind == IR_TYPE_UNION ? current.type : current.union_type,
-                        .field = field,
+                    break;
+                }
+                scan_index += 1;
+                C_IR_MEMBER_LOOKUP_VISIT();
+                IrField* field = type->fields + field_index;
+                if (row ? indexed_named : string_equal(field->name, member))
+                {
+                    if (current.offset > UINT64_MAX - field->offset)
+                    {
+                        overflow = true;
+                        continue;
+                    }
+                    if (!found)
+                    {
+                        *result = (CIrPromotedMemberPath){
+                            .type = field->type,
+                            .union_type = type->kind == IR_TYPE_UNION ? current.type : current.union_type,
+                            .field = field,
+                            .offset = current.offset + field->offset,
+                            .union_offset = current.union_offset,
+                            .union_size = current.union_size,
+                            .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
+                            .union_field = type->kind == IR_TYPE_UNION ? field_index : current.union_field,
+                            .has_union = current.has_union,
+                        };
+                        found = true;
+                        found_depth = current.depth;
+                    }
+                    else if (current.depth == found_depth)
+                    {
+                        ambiguous = true;
+                    }
+                    continue;
+                }
+                if (found && current.depth >= found_depth)
+                {
+                    continue;
+                }
+                IrType* child = ir_type_from_id(&builder->program->types, field->type);
+                if (!field->name.length && child && (child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && field->type.value < capacity &&
+                    work_count < capacity && current.offset <= UINT64_MAX - field->offset && !c_ir_promoted_member_queued(work, work_count, field->type))
+                {
+                    if (work_count == work_capacity)
+                    {
+                        u32 grown = (u32)BUSTER_MIN((u64)capacity, (u64)work_capacity * 2);
+                        if (!scratch_open)
+                        {
+                            promoted_member_scratch = scratch_begin(&builder->temporary_arena, 1);
+                            scratch_open = true;
+                        }
+                        CIrPromotedMemberWork* grown_work = arena_allocate(promoted_member_scratch.arena, CIrPromotedMemberWork, grown);
+                        memcpy(grown_work, work, sizeof(*work) * work_count);
+                        work = grown_work;
+                        work_capacity = grown;
+                    }
+                    IrTypeId child_id = field->type;
+                    bool child_is_union = child->kind == IR_TYPE_UNION && child->layout.resolved;
+                    work[work_count++] = (CIrPromotedMemberWork){
+                        .type = child_id,
+                        .union_type = child_is_union ? child_id : current.union_type,
                         .offset = current.offset + field->offset,
-                        .union_offset = current.union_offset,
-                        .union_size = current.union_size,
+                        .union_offset = child_is_union ? current.offset + field->offset : current.union_offset,
+                        .union_size = child_is_union ? child->layout.size : current.union_size,
                         .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
-                        .union_field = type->kind == IR_TYPE_UNION ? field_index : current.union_field,
-                        .has_union = current.has_union,
+                        .depth = current.depth + 1,
+                        .union_field = child_is_union ? UINT32_MAX : type->kind == IR_TYPE_UNION ? field_index : current.union_field,
+                        .has_union = child_is_union || current.has_union,
                     };
-                    found = true;
-                    found_depth = current.depth;
                 }
-                else if (current.depth == found_depth)
-                {
-                    ambiguous = true;
-                }
-                continue;
-            }
-            if (found && current.depth >= found_depth)
-            {
-                continue;
-            }
-            IrType* child = ir_type_from_id(&builder->program->types, field->type);
-            if (!field->name.length && child && (child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && field->type.value < capacity &&
-                work_count < capacity && current.offset <= UINT64_MAX - field->offset && !c_ir_promoted_member_queued(work, work_count, field->type))
-            {
-                IrTypeId child_id = field->type;
-                bool child_is_union = child->kind == IR_TYPE_UNION && child->layout.resolved;
-                work[work_count++] = (CIrPromotedMemberWork){
-                    .type = child_id,
-                    .union_type = child_is_union ? child_id : current.union_type,
-                    .offset = current.offset + field->offset,
-                    .union_offset = child_is_union ? current.offset + field->offset : current.union_offset,
-                    .union_size = child_is_union ? child->layout.size : current.union_size,
-                    .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
-                    .depth = current.depth + 1,
-                    .union_field = child_is_union ? UINT32_MAX : type->kind == IR_TYPE_UNION ? field_index : current.union_field,
-                    .has_union = child_is_union || current.has_union,
-                };
             }
         }
+        if (ambiguous && !overflow)
+        {
+            result->ambiguous = true;
+        }
+        if (scratch_open)
+        {
+            scratch_end(promoted_member_scratch);
+        }
+        status = found && !ambiguous && !overflow;
     }
-    if (ambiguous)
-    {
-        result->ambiguous = true;
-    }
-    scratch_end(promoted_member_scratch);
-    return found && !ambiguous;
+    return status;
 }
 
 BUSTER_C_INTERNAL bool c_ir_promoted_member_type(CIntegerIrBuilder* builder, IrTypeId root, String8 member, IrTypeId* result)
@@ -32557,7 +32840,7 @@ c_ir_expression_core_loop:
                 return;
             }
             CToken label_token = builder->preprocess.tokens[index + 1];
-            CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, label_token));
+            CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, label_token));
             if (!label)
             {
                 builder->failure_message = string_format(builder->arena, S8("label '{S8}' is not defined in this function"), c_token_spelling(builder->preprocess.spelling_base, label_token));
@@ -36164,7 +36447,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
     if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
         builder->preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
     {
-        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start + 1]));
+        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start + 1]));
         if (label && start + 2 == end)
         {
             return c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
@@ -38326,18 +38609,34 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_is_outside_target(CParseResult* parse, CEnti
     return true;
 }
 
+// c_parse_scope_for_token under the lowered function's own scope, started from the
+// previous answer. Lowering asks about loop keywords and loop headers in source
+// order, so consecutive answers are a scope or two apart and a D-deep nest costs
+// O(D) levels in all, where a descent from the root costs D per query (#2676).
+BUSTER_C_INTERNAL CScopeId c_ir_scope_for_token(CIntegerIrBuilder* builder, u32 token_index)
+{
+    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                     : C_SCOPE_ID_INVALID;
+    CScopeId hint = builder->scope_finger_root.value == root.value ? builder->scope_finger : root;
+    CScopeId scope = c_parse_scope_for_token_near(&builder->parse, root, hint, token_index);
+    if (scope.value < builder->parse.scope_count)
+    {
+        builder->scope_finger = scope;
+        builder->scope_finger_root = root;
+    }
+    return scope;
+}
+
 BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_block(CIntegerIrBuilder* builder, CIrBodyTask* tasks, u32 task_count, IrBlockId block,
                                                         CScopeId* scope_out, u32* token_out)
 {
-    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                      : C_SCOPE_ID_INVALID;
     for (u32 task_index = 0; task_index < task_count; task_index += 1)
     {
         CIrBodyTask task = tasks[task_index];
         if (task.break_block.value == block.value || task.continue_block.value == block.value)
         {
             *token_out = task.start;
-            *scope_out = c_parse_scope_for_token(&builder->parse, root, task.start);
+            *scope_out = c_ir_scope_for_token(builder, task.start);
             return true;
         }
         if (task.continuation.value != block.value && task.block.value != block.value)
@@ -38345,7 +38644,7 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_block(CIntegerIrBuilder* builder,
             continue;
         }
         *token_out = task.end;
-        *scope_out = c_parse_scope_for_token(&builder->parse, root, task.end);
+        *scope_out = c_ir_scope_for_token(builder, task.end);
         return true;
     }
     *scope_out = C_SCOPE_ID_INVALID;
@@ -38355,10 +38654,8 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_block(CIntegerIrBuilder* builder,
 
 BUSTER_C_INTERNAL void c_ir_body_task_set_loop_cleanup_targets(CIntegerIrBuilder* builder, CIrBodyTask* task, u32 break_token, u32 continue_token)
 {
-    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                     : C_SCOPE_ID_INVALID;
-    task->break_scope = c_parse_scope_for_token(&builder->parse, root, break_token);
-    task->continue_scope = c_parse_scope_for_token(&builder->parse, root, continue_token);
+    task->break_scope = c_ir_scope_for_token(builder, break_token);
+    task->continue_scope = c_ir_scope_for_token(builder, continue_token);
     task->break_token = break_token;
     task->continue_token = continue_token;
 }
@@ -38380,10 +38677,8 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_task(CIntegerIrBuilder* builder, 
     }
     if (block.value == task.continuation.value && task.continuation.value != IR_ID_UNDERLYING_INVALID)
     {
-        CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                          : C_SCOPE_ID_INVALID;
         *token_out = task.end;
-        *scope_out = c_parse_scope_for_token(&builder->parse, root, task.end);
+        *scope_out = c_ir_scope_for_token(builder, task.end);
         return true;
     }
     return c_ir_cleanup_target_for_block(builder, tasks, task_count, block, scope_out, token_out);
@@ -38690,9 +38985,7 @@ struct CIrSwitchCase
 // which is what C says jumping past an initializer does.
 BUSTER_C_INTERNAL bool c_ir_emit_switch_prefix_locals(CIntegerIrBuilder* builder, u32 body_start, u32 prefix_end)
 {
-    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                  : C_SCOPE_ID_INVALID;
-    CScopeId scope = c_parse_scope_for_token(&builder->parse, root, body_start);
+    CScopeId scope = c_ir_scope_for_token(builder, body_start);
     if (scope.value >= builder->parse.scope_count)
     {
         return true;
@@ -38964,17 +39257,90 @@ BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
     return result;
 }
 
-BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, String8 name)
+#if BUSTER_INCLUDE_TESTS
+// Slot visits plus array rows compared by c_ir_label_find, for the growth
+// regression c_test_label_lookup_work_growth.
+BUSTER_GLOBAL_LOCAL u64 c_ir_label_find_probe_total;
+#define C_IR_LABEL_FIND_PROBE() (c_ir_label_find_probe_total += 1)
+#else
+#define C_IR_LABEL_FIND_PROBE() ((void)0)
+#endif
+
+// Slot count of the index for an array of `label_capacity` labels: the least
+// power of two, at least C_IR_LABEL_SLOT_MINIMUM, holding twice the capacity.
+BUSTER_C_INTERNAL u32 c_ir_label_slot_count(u32 label_capacity)
 {
-    for (u32 index = 0; index < label_count; index += 1)
+    u32 result = C_IR_LABEL_SLOT_MINIMUM;
+    while (result < (u64)label_capacity * 2 && result < (1u << 31))
     {
-        if (string_equal(labels[index].name, name))
+        result *= 2;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_label_hash(String8 name)
+{
+    u32 hash = C_IR_LABEL_HASH_OFFSET;
+    for (u64 byte_index = 0; byte_index < name.length; byte_index += 1)
+    {
+        hash = (hash ^ name.pointer[byte_index]) * C_IR_LABEL_HASH_PRIME;
+    }
+    return hash ^ (hash >> 15);
+}
+
+// Record labels[label_index], already stored, in the index.
+BUSTER_C_INTERNAL void c_ir_label_index_insert(CIrLabel const* labels, CIrLabelIndex* index, u32 label_index)
+{
+    u32 slot = c_ir_label_hash(labels[label_index].name) & index->slot_mask;
+    while (index->slots[slot] != C_IR_LABEL_SLOT_EMPTY)
+    {
+        slot = (slot + 1) & index->slot_mask;
+    }
+    index->slots[slot] = label_index;
+}
+
+// The first label of `labels` spelled `name`: through the index when one
+// exists, otherwise by scanning the array (the definition the index answers).
+BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, CIrLabelIndex const* index, String8 name)
+{
+    CIrLabel* result = 0;
+    if (index->slots)
+    {
+        u32 slot = c_ir_label_hash(name) & index->slot_mask;
+        while (!result && index->slots[slot] != C_IR_LABEL_SLOT_EMPTY)
         {
-            return &labels[index];
+            C_IR_LABEL_FIND_PROBE();
+            CIrLabel* candidate = labels + index->slots[slot];
+            if (string_equal(candidate->name, name))
+            {
+                result = candidate;
+            }
+            else
+            {
+                slot = (slot + 1) & index->slot_mask;
+            }
         }
     }
-    return 0;
+    else
+    {
+        for (u32 position = 0; !result && position < label_count; position += 1)
+        {
+            C_IR_LABEL_FIND_PROBE();
+            if (string_equal(labels[position].name, name))
+            {
+                result = labels + position;
+            }
+        }
+    }
+    return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED u64 c_test_ir_label_find_probes(void)
+{
+    return c_ir_label_find_probe_total;
+}
+#endif
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
@@ -41108,7 +41474,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_labels_parse(CIntegerIrBuilder* buil
                 return false;
             }
         }
-        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
+        CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]));
         if (!label)
         {
             builder->failure_message = string_format(builder->arena, S8("asm goto label '{S8}' is not defined in this function"),
@@ -42164,7 +42530,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_record_jump_targets(CIntegerIrBuilder* builder, 
             if (c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(GOTO)))
             {
                 CIrLabel* label = index + 1 < body_end && builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER
-                                      ? c_ir_label_find(state->labels, label_count,
+                                      ? c_ir_label_find(state->labels, label_count, &state->label_index,
                                                         c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]))
                                       : 0;
                 if (label)
@@ -42249,7 +42615,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
                               c_parse_label_candidate_at(&builder->parse, &builder->preprocess, declaration.body_start, index);
         }
     }
-    bool initialized = c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel));
+    bool initialized = c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel)) &&
+                       c_ir_lower_scratch_reservation(builder, sizeof(u32), c_ir_label_slot_count(label_capacity), BUSTER_ALIGN_OF(u32));
     if (initialized)
     {
         initialized = c_ir_lower_body_initialize_labels_run(builder, state, label_capacity, candidate_cursor);
@@ -42264,6 +42631,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
     u32 body_end = declaration.body_start + declaration.body_token_count;
     state->labels = arena_allocate(builder->scratch_arena, CIrLabel, label_capacity ? label_capacity : 1);
     state->label_count = 0;
+    u32 label_slot_count = c_ir_label_slot_count(label_capacity);
+    state->label_index.slot_mask = label_slot_count - 1;
+    state->label_index.slots = arena_allocate(builder->scratch_arena, u32, label_slot_count);
+    memset(state->label_index.slots, 0xff, sizeof(u32) * label_slot_count);
     for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
     {
         if (builder->label_candidates_valid)
@@ -42292,7 +42663,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         {
             continue;
         }
-        if (c_ir_label_find(state->labels, state->label_count, c_token_spelling(builder->preprocess.spelling_base, token)))
+        if (c_ir_label_find(state->labels, state->label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, token)))
         {
             builder->failure_message = string_format(builder->arena, S8("duplicate label '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, token));
             builder->failure_token_index = index;
@@ -42301,21 +42672,24 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         // Labels have function scope, including labels inside a GNU
         // statement expression. Its nested body walk must reuse the block
         // already published by the outer walk at this exact source token.
-        CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, token));
+        CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(builder->preprocess.spelling_base, token));
         IrBlockId block = existing_label && existing_label->token_index == index ? existing_label->block : c_ir_block_create(builder);
         if (block.value == IR_ID_UNDERLYING_INVALID)
         {
             return false;
         }
-        state->labels[state->label_count++] = (CIrLabel){
+        state->labels[state->label_count] = (CIrLabel){
             .name = c_token_spelling(builder->preprocess.spelling_base, token),
             .token_index = index,
             .block = block,
         };
+        c_ir_label_index_insert(state->labels, &state->label_index, state->label_count);
+        state->label_count += 1;
     }
     if (!builder->labels)
     {
         builder->labels = state->labels;
+        builder->label_index = state->label_index;
         builder->label_count = state->label_count;
     }
     if (state->label_count && !c_ir_predeclare_labeled_automatic_locals(builder, declaration.body_start, body_end))
@@ -42335,8 +42709,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
             builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
         {
             String8 label_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
-            if (c_ir_label_find(state->labels, state->label_count, label_name) ||
-                c_ir_label_find(builder->labels, builder->label_count, label_name))
+            if (c_ir_label_find(state->labels, state->label_count, &state->label_index, label_name) ||
+                c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, label_name))
             {
                 builder->label_metadata_enabled = true;
             }
@@ -42783,11 +43157,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 .continue_block = task.continue_block,
             };
             c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
-            CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                           : C_SCOPE_ID_INVALID;
             // A switch may have no compound-body scope. Its break target is
             // outside the controlled statement, within the keyword's scope.
-            CScopeId switch_break_scope = c_parse_scope_for_token(&builder->parse, root, state->switch_statement_start);
+            CScopeId switch_break_scope = c_ir_scope_for_token(builder, state->switch_statement_start);
             u32 switch_break_token = state->index;
             if (switch_break_scope.value == C_ID_UNDERLYING_INVALID)
             {
@@ -43037,7 +43409,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
                 c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
             {
-                CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, first));
+                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, first));
                 IrBlock* current = &builder->function->blocks[builder->current_block.value];
                 if (!label)
                 {
@@ -43846,7 +44218,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     builder->failure_message = S8("malformed goto statement");
                     return false;
                 }
-                CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
+                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
                 CScopeId label_scope = c_parse_scope_for_token(
                     &builder->parse,
                     builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
@@ -44577,10 +44949,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         }
         else if (cleanup_state && statement_expression_mode)
         {
-            CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                            : C_SCOPE_ID_INVALID;
             cleanup_token = task.end;
-            cleanup_scope = c_parse_scope_for_token(&builder->parse, root, cleanup_token);
+            cleanup_scope = c_ir_scope_for_token(builder, cleanup_token);
         }
         if (cleanup_state && !c_ir_emit_cleanup_calls(builder, tasks, task_count, cleanup_scope, cleanup_token, declaration_source))
         {
@@ -45309,8 +45679,8 @@ BUSTER_C_INTERNAL bool c_ir_label_difference_record(CIntegerIrBuilder* builder, 
     CIrLabelDifferenceSink* sink = builder->label_differences;
     CToken* tokens = builder->preprocess.tokens;
     char8 const* spelling_base = builder->preprocess.spelling_base;
-    CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(spelling_base, tokens[label_index])) : 0;
-    CIrLabel* base = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(spelling_base, tokens[base_index])) : 0;
+    CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(spelling_base, tokens[label_index])) : 0;
+    CIrLabel* base = builder->function ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(spelling_base, tokens[base_index])) : 0;
     bool inside = sink && slot >= sink->bytes && (u64)(slot - sink->bytes) <= sink->byte_count && size <= sink->byte_count - (u64)(slot - sink->bytes);
     bool recorded = false;
     if (!label || !base)
@@ -45847,7 +46217,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     IrType* cast = ir_type_from_id(&program->types, label_cast_type);
                     cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
                 }
-                CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
+                CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
                 if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
                                                                    (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label || !relocations ||
                     !relocation_count || *relocation_count >= relocation_capacity || !builder->function)
@@ -53906,7 +54276,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
                 IrType* cast = ir_type_from_id(&program->types, label_cast_type);
                 cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
             }
-            CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
+            CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
             if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
                                                                (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label)
             {
