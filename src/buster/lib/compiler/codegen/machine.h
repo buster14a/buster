@@ -432,7 +432,8 @@ typedef enum MachineOpcode
     MACHINE_X64_VPMOVB2M,     // def general mask, use vec
     // vpermt2b overwrites its low-table register with the result, so the
     // selector copies the low table into the destination first and the row
-    // ties destination to itself; zeroing under the mask.
+    // ties destination to itself; zeroing under the mask. The payload selects
+    // the lane width: 0 = vpermt2b, 1 = vpermt2d (16 mask bits).
     MACHINE_X64_VPERMT2B,     // use-def vec result/low, use mask, use vec indices, use vec high
     MACHINE_X64_VCOMPRESSB,   // def vec, use mask, use vec; zeroing. The
                               // payload selects the lane width: 0 =
