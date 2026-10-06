@@ -1,0 +1,8 @@
+ui_slider_tests: 43/43 assertions passed; renderer_calls=0
+ui_utf8_component_tests: 193/193 assertions passed
+object.error == OBJECT_ERROR_NONE && local_dynamic_count != 0 && dtp_offset_count >= 2 failed at /home/david/Documents/Codex/2026-10-05/fi/work/frontend_ready/review-2478/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:15178
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/frontend_ready/review-2478/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:15219
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/frontend_ready/review-2478/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:15219
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/frontend_ready/review-2478/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:15219
+TEST_MODULE_TIMING index=54 module=compiler_driver_tests duration_ns=215352853775 passed=57243 failed=4 assertions=57247 status=fail
+[5670947/5670951] Unit tests
