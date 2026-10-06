@@ -187,4 +187,6 @@ BUSTER_F_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f
 // Synthetic callback reducer controls do not establish a live XIM provider.
 BUSTER_F_DECL bool wm_x11_xim_commit_for_test(WmHandle* handle, WmWindowHandle* window, u64 input_length, String8 text);
 BUSTER_F_DECL bool wm_x11_xdnd_append_for_test(WmHandle* handle, String8 bytes);
+BUSTER_F_DECL bool wm_xim_create_ic_publication_for_test(WmWindowHandle* window, bool queued, bool synchronous_completion, xcb_xic_t synchronous_ic);
+BUSTER_F_DECL void wm_xim_disconnect_for_test(WmHandle* handle);
 #endif
