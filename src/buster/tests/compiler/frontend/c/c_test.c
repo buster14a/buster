@@ -494,6 +494,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(
     return result;
 }
 
+// A flat call lowers its arguments one re-entry at a time. Each re-entry used
+// to re-split the whole argument list and re-resolve the callee, so an
+// N-argument call cost N^2 token visits and, before its scratch was released,
+// N^2 bytes: 4,090 arguments overflowed the scratch reservation. Lower 10,000
+// arguments through a direct and an indirect variadic call.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_flat_call_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 argument_count = 10000;
+    String8 prefix = S8("int g(int, ...);\nint f(void) { int (*p)(int, ...) = g; return g(");
+    String8 middle = S8(") + p(");
+    String8 suffix = S8(");\n}\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    // Each argument spells at most five digits and a ", " separator.
+    u64 source_capacity = prefix.length + middle.length + suffix.length + 2 * (u64)argument_count * 7;
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+    for (u32 call = 0; call < 2; call += 1)
+    {
+        if (call)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, middle);
+        }
+        for (u32 index = 0; index < argument_count; index += 1)
+        {
+            if (index)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, S8(", "));
+            }
+            c_test_append_u32(source_bytes, source_capacity, &source_length, index);
+        }
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                 S8("flat-call.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+    {
+        BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
+        IrFunction* function = c_test_find_ir_function(&lowered.program->modules[0], S8("f"));
+        if (BUSTER_REQUIRE(arguments, function != 0))
+        {
+            u32 wide_call_count = 0;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                wide_call_count += instruction->opcode == IR_OPCODE_CALL && instruction->operand_count >= argument_count;
+            }
+            BUSTER_TEST(arguments, wide_call_count == 2);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 c_test_translate_source_scalar(String8 source, char8* translated)
 {
     u64 input = 0;
@@ -42609,6 +42668,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_local_tls);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
+    BUSTER_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
