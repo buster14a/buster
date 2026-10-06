@@ -43947,7 +43947,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             bool first_is_unbound_typedef_name = false;
             if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID)
             {
-                CScopeId token_scope = c_parse_scope_for_token(&builder->parse, c_ir_current_scope(builder), index);
+                CScopeId token_scope = c_ir_scope_for_token(builder, index);
                 CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, token_scope, index);
                 first_is_unbound_typedef_name = visible.value < builder->parse.entity_count
                                                     ? builder->parse.entities[visible.value].kind == C_ENTITY_TYPEDEF
