@@ -16,6 +16,7 @@
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
+// compiler_driver_test_elf_symbolic_immediates checks imm32 types and host overflow.
 // compiler_driver_test_sysv_indirect_variadic checks AL against a foreign probe.
 // compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
@@ -17383,6 +17384,177 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
     return result;
 }
 
+#if BUSTER_CPU_ARCH_X86_64
+// Independent assemblers and the host ELF linker pin the interpretation of
+// symbolic imm32 fields at both sides of the sign-extension boundary.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_symbolic_immediates(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-elf-symbolic-immediates"), S8(""));
+    os_make_directory(directory);
+    typedef struct CompilerDriverImmediateRelocationCase CompilerDriverImmediateRelocationCase;
+    struct CompilerDriverImmediateRelocationCase
+    {
+        String8 instruction;
+        bool sign_extended;
+        bool source_supported;
+    };
+    CompilerDriverImmediateRelocationCase cases[] = {
+        {S8("pushq $immediate_target"), true, true},
+        {S8("addq $immediate_target, %rbx"), true, false},
+        {S8("movq $immediate_target, (%rbx)"), true, true},
+        {S8("movl $immediate_target, %ebx"), false, true},
+        {S8("addl $immediate_target, %ebx"), false, false},
+    };
+    String8 target_definitions[] = {
+        S8("-Wl,--defsym,immediate_target=0x7fffffff"),
+        S8("-Wl,--defsym,immediate_target=0x80000000"),
+        S8("-Wl,--defsym,immediate_target=0xffffffff80000000"),
+    };
+    ProcessSpawnOptions capture = {
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .use_process_environment = true, .search_path = true,
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        CompilerDriverImmediateRelocationCase test = cases[case_index];
+        String8 source_path = string_format_z(arena, S8("{S8}/case-{u32}.s"), directory, case_index);
+        String8 object_path = string_format_z(arena, S8("{S8}/case-{u32}.o"), directory, case_index);
+        String8 reference_path = string_format_z(arena, S8("{S8}/reference-{u32}.o"), directory, case_index);
+        String8 source = string_format(arena, S8(".text\n.globl immediate_entry\nimmediate_entry:\n{S8}\nret\n"), test.instruction);
+        bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+        BUSTER_TEST(arguments, written);
+        if (written)
+        {
+            String8 command[] = {S8("-g0"), S8("-c"), S8("-o"), object_path, source_path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+            CompilerDriverResult compiled = {0};
+            if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
+                compiled = compiler_driver_execute_invocation(arena, invocation);
+            bool compiled_ok = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
+            u32 expected_type = test.sign_extended ? 11 : 10;
+            if (test.source_supported)
+                BUSTER_TEST(arguments, compiled_ok);
+            else
+            {
+                String8 diagnostic_code = compiled.diagnostic_count ? compiled.diagnostics[0].code : (String8){0};
+                FileStats object_stats = os_path_followed_stats(object_path);
+                bool object_absent = object_stats.valid && object_stats.kind == OS_FILE_KIND_MISSING;
+                BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                                               compiled.error == COMPILER_DRIVER_ERROR_INVALID_INPUT &&
+                                               compiled.diagnostic_count == 1 &&
+                                               string_equal(diagnostic_code, S8("assembly.invalid-operands")) &&
+                                               !compiled.has_object && !compiled.output.length && object_absent,
+                                string_format(arena, S8("symbolic arithmetic refusal case={u32} invocation={u32} driver={u32} "
+                                                        "diagnostics={u32} code={S8} object={u32} output={u64} file={u32}: {S8}"),
+                                              case_index, invocation.error, compiled.error, compiled.diagnostic_count, diagnostic_code,
+                                              compiled.has_object, compiled.output.length, !object_absent, compiled.diagnostic));
+            }
+            if (compiled_ok)
+            {
+                ObjectRelocationKind expected_kind = test.sign_extended ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S : OBJECT_RELOCATION_ABSOLUTE32;
+                BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&compiled.object, S8("immediate_target"), expected_kind));
+                // ELF64 r_info stores R_X86_64_32S=11 or R_X86_64_32=10
+                // in its low word. Inspect the serialized record directly.
+                FileMapRead object_map = file_map_read(arena, object_path, (FileReadOptions){0});
+                ByteSlice object_relocations = compiler_driver_test_elf_section(object_map.bytes, S8(".rela.text"));
+                bool object_type_valid = object_relocations.length == 24;
+                if (object_type_valid)
+                {
+                    u32 actual_type;
+                    memcpy(&actual_type, object_relocations.pointer + 8, sizeof(actual_type));
+                    object_type_valid = actual_type == expected_type;
+                }
+                BUSTER_TEST(arguments, object_type_valid);
+                file_map_unmap(object_map);
+            }
+
+            // All five host assembler oracles still run, including the two
+            // arithmetic forms the source assembler explicitly refuses.
+            String8 reference_command[8] = {0};
+            u32 reference_count = 0;
+            reference_command[reference_count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) reference_command[reference_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            reference_command[reference_count++] = S8("-c");
+            reference_command[reference_count++] = source_path;
+            reference_command[reference_count++] = S8("-o");
+            reference_command[reference_count++] = reference_path;
+            ProcessSpawnResult reference_spawn = os_process_spawn(
+                (SliceString8){.pointer = reference_command, .length = reference_count}, (SliceString8){0}, (SliceString8){0}, capture);
+            BUSTER_TEST(arguments, reference_spawn.handle != 0);
+            bool reference_ok = false;
+            if (reference_spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arena, reference_spawn, 30000000);
+                reference_ok = !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS;
+            }
+            BUSTER_TEST(arguments, reference_ok);
+            if (reference_ok)
+            {
+                FileMapRead reference_map = file_map_read(arena, reference_path, (FileReadOptions){0});
+                ByteSlice reference_relocations = compiler_driver_test_elf_section(reference_map.bytes, S8(".rela.text"));
+                bool reference_type_valid = reference_relocations.length == 24;
+                if (reference_type_valid)
+                {
+                    u32 reference_type;
+                    memcpy(&reference_type, reference_relocations.pointer + 8, sizeof(reference_type));
+                    reference_type_valid = reference_type == expected_type;
+                }
+                BUSTER_TEST(arguments, reference_type_valid);
+                file_map_unmap(reference_map);
+            }
+
+            for (u32 variant = 0; variant < 2; variant += 1)
+            {
+                bool available = variant == 0 ? reference_ok : compiled_ok && test.source_supported;
+                if (available)
+                {
+                    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_definitions); target_index += 1)
+                    {
+                        String8 executable_path = string_format_z(arena, S8("{S8}/image-{u32}-{u32}-{u32}"), directory, case_index,
+                                                                   variant, target_index);
+                        String8 link_command[12] = {0};
+                        u32 link_count = 0;
+                        link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
+                        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+                        link_command[link_count++] = S8("-nostdlib");
+                        link_command[link_count++] = S8("-no-pie");
+                        link_command[link_count++] = S8("-Wl,-e,immediate_entry");
+                        link_command[link_count++] = target_definitions[target_index];
+                        link_command[link_count++] = variant == 0 ? reference_path : object_path;
+                        link_command[link_count++] = S8("-o");
+                        link_command[link_count++] = executable_path;
+                        ProcessSpawnResult spawn = os_process_spawn(
+                            (SliceString8){.pointer = link_command, .length = link_count}, (SliceString8){0}, (SliceString8){0}, capture);
+                        BUSTER_TEST(arguments, spawn.handle != 0);
+                        if (spawn.handle)
+                        {
+                            ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
+                            bool expected_success = target_index == 0 || (target_index == 1 ? !test.sign_extended : test.sign_extended);
+                            bool linked = wait.result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST_RAW(arguments, !wait.timed_out && linked == expected_success,
+                                            string_format(arena, S8("symbolic immediate case={u32} variant={u32} target={u32}: {S8}"),
+                                                          case_index, variant, target_index,
+                                                          (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                                                                    .length = wait.streams[STANDARD_STREAM_ERROR].length}));
+                            if (linked) os_file_delete(executable_path);
+                        }
+                    }
+                }
+            }
+            if (compiled_ok) os_file_delete(object_path);
+            if (reference_ok) os_file_delete(reference_path);
+            os_file_delete(source_path);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
 // Real object/archive and shared-library boundaries: execute the linked
 // artifacts so valid-looking section tables cannot hide placement or startup
 // errors. The host compiler builds only the reference and the shared library.
@@ -25178,6 +25350,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_untyped_function_imports);
 #endif
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_symbolic_immediates);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_imported_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_position_independent_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_dynamic_tls);

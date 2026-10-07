@@ -92,6 +92,9 @@ BUSTER_F_DECL u32 c_test_parse_body_scope_mismatches(CParseResult* result, Arena
 BUSTER_F_DECL u32 c_test_parse_call_shape_mismatches(CTokenShape const* shapes, u32 count);
 BUSTER_F_DECL u32 c_test_parse_candidate_merge_mismatches(u32* first, u32 first_count, u32* second, u32 second_count, u32 limit);
 
+// Directional reads of the immutable pair table, including clipped ranges.
+BUSTER_F_DECL u32 c_test_parse_delimiter_match(CParseResult* result, CPreprocessResult preprocess, u32 token, u32 start, bool reverse);
+
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                      u32 start, u32 end, CTypeId* type_out);
 
