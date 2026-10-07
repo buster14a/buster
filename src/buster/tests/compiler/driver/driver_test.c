@@ -29235,6 +29235,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_plain_char_literal_sign.c"),
         S8("tests/basic_c_char_limits.c"),
         S8("tests/basic_c_explicit_allocator_sticks.c"),
+        S8("tests/basic_c_statement_expression_goto_out.c"),
         member_symbol_lookup_path,
     };
     // Each iteration compiles in-process; the module arena is never rewound,

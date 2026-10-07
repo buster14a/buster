@@ -45296,6 +45296,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                if (statement_expression_mode)
+                {
+                    // The statement expression's remaining rows, including its value, still lower after the jump.
+                    // They never run, so give them a block with no predecessor instead of the closed one.
+                    if (!c_ir_switch_block(builder, c_ir_block_create(builder)))
+                    {
+                        return false;
+                    }
+                }
                 index = end == task.end ? task.end : end + 1;
                 continue;
             }
