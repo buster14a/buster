@@ -215,8 +215,42 @@ CPU selection, optional-platform refusal and sealed metadata corruption. These
 are infrastructure tests, not compiler or physical-host performance results.
 Physical 9700X A/A and native platform CI must be reported separately when run.
 
-Further workload coverage stays under #346/#423; multicore CPU-set experiments
-under #424. Do not use this single-CPU admission path to claim multicore scaling.
+Further workload coverage stays under #346/#423. Do not use this single-CPU
+admission path to claim multicore scaling; use the `scale` series below.
+
+## Multi-TU scaling series
+
+`scale` ([contract](README.md#multi-tu-scaling-scale)) measures internal TU
+lanes on explicit CPU sets (#424). On the 8-core/16-thread 9700X, Linux
+normally numbers CPU N and N+8 as siblings; confirm this with
+`lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE` rather than assuming it.
+
+The routine way to run it there is the pull request route: add or change
+[`benchmarks/9700x/scaling.request`](../../benchmarks/9700x/scaling.request)
+in an owner pull request. The frozen `scaling-v1` profile
+(`compiler_receipt.SCALING_PROFILE`) runs two series on the pull request's
+candidate compiler, and the series do not depend on CPU numbering:
+
+| Series | Arguments | Points on the 9700X |
+|---|---|---|
+| `cores` | `--cpu-set auto --exclude-core 0 --workers 1,2,4,7 --allow-smt` | 1, 2, 4 and 7 whole cores, then 7C/14T |
+| `machine` | `--cpu-set auto --workers 8 --allow-smt`, equal/skewed/tiny shapes | 8 cores, then 8C/16T |
+
+In `cores`, CPU 0's physical core is left to the runner and other
+housekeeping. Each W runs on one logical CPU of each of the first W remaining
+cores; the siblings stay idle except at the SMT point. Report the two series
+separately: `machine` shares core 0 with housekeeping.
+
+To run one by hand on the host, build the tool while the host is idle, then:
+
+```sh
+build/throughput-tools/throughput scale --compiler /absolute/ide --output /absolute/new-scaling \
+  --cpu-set auto --exclude-core 0 --workers 1,2,4,7 --allow-smt --repeats 15
+```
+
+**Evidence.** The route's artifact keeps each bundle's reports, raw samples
+and logs beside the comparison receipt, with the observed CPU checked by the
+publisher. Hosted or container runs of `scale` are diagnostic only.
 
 ## Platform references
 

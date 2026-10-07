@@ -129,6 +129,11 @@ buster_bootstrap_manifest_valid()
                 case "$value" in ../*|*/../*) valid=0; break ;; esac
                 dependency_path="$repository_root/$value"
             fi
+            # A deleted historical input is a normal cache miss, not a cold-build error.
+            if [[ ! -f $dependency_path ]]; then
+                valid=0
+                break
+            fi
             printf '%s\n' "$value" >>"$dependency_list"
             printf 'dependency\t%s\t%s\n' "$value" "$digest" >>"$expected_snapshot"
             saw_dependency=1

@@ -1,7 +1,8 @@
 name: 9700X direct workload request
 
 # A pull request that changes a workload or its data under benchmarks/9700x/
-# (#2704), or the compiler comparison request file there (#2769), completes
+# (#2704), or the compiler comparison or scaling request file there (#2769,
+# #424), completes
 # this run, and only that completion starts 9700x-direct-bench.yml from main. This job is a marker: it runs on a hosted runner, checks out
 # nothing, executes no repository content and holds no capability. The bench
 # workflow reads who started this run from GitHub's record, not from here, so
@@ -15,6 +16,7 @@ on:
       - 'benchmarks/9700x/*.c'
       - 'benchmarks/9700x/*.data'
       - 'benchmarks/9700x/compiler-compare.request'
+      - 'benchmarks/9700x/scaling.request'
 
 # Zero token capabilities are stricter than the repository-wide static
 # read-only policy marker retained for common workflow tooling: contents: read

@@ -1431,6 +1431,12 @@ static bool wasm64_global_initializer_bytes(Wasm64Context* context, IrGlobal* gl
     case IR_GLOBAL_INITIALIZER_ZERO:
         break;
     case IR_GLOBAL_INITIALIZER_BYTES:
+        if (global->label_difference_count)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("label-difference initializers are unsupported by WebAssembly"), 0,
+                        0, 0, global->symbol);
+            return false;
+        }
         if (global->bytes.length != size || (size && !global->bytes.pointer))
         {
             wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid WebAssembly global byte initializer"), 0, 0, 0, global->symbol);
@@ -3718,6 +3724,10 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
     case IR_OPCODE_LABEL_ADDRESS:
     case IR_OPCODE_INDIRECT_BRANCH:
         wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("label control flow is unsupported by WebAssembly"), emitter->function, block,
+                    instruction, IR_SYMBOL_ID_INVALID);
+        break;
+    case IR_OPCODE_RETURN_ADDRESS:
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("return addresses are unsupported by WebAssembly"), emitter->function, block,
                     instruction, IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:

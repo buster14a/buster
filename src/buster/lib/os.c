@@ -2066,7 +2066,44 @@ bool os_file_test_map_unavailable(String8 path)
 }
 #endif
 
-OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions)
+BUSTER_GLOBAL_LOCAL bool os_file_create_mode_valid(OsFileCreateMode create_mode)
+{
+    bool result = true;
+    switch (create_mode.kind)
+    {
+        case OS_FILE_CREATE_MODE_DEFAULT:
+        case OS_FILE_CREATE_MODE_PRIVATE:
+        case OS_FILE_CREATE_MODE_EXECUTABLE:
+            result = create_mode.posix_permissions == 0;
+            break;
+        case OS_FILE_CREATE_MODE_EXPLICIT_POSIX:
+            result = create_mode.posix_permissions <= 0777;
+            break;
+        default:
+            result = false;
+            break;
+    }
+    return result;
+}
+
+#if !defined(_WIN32)
+BUSTER_GLOBAL_LOCAL u32 os_file_create_mode_posix_permissions(OsFileCreateMode create_mode)
+{
+    u32 result = 0644;
+    switch (create_mode.kind)
+    {
+        case OS_FILE_CREATE_MODE_DEFAULT: result = 0644; break;
+        case OS_FILE_CREATE_MODE_PRIVATE: result = 0600; break;
+        case OS_FILE_CREATE_MODE_EXECUTABLE: result = 0755; break;
+        case OS_FILE_CREATE_MODE_EXPLICIT_POSIX: result = create_mode.posix_permissions; break;
+        default: BUSTER_UNREACHABLE();
+    }
+    return result;
+}
+#endif
+
+OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
+                                      OsFileShareFlags share_flags)
 {
     OsFileDescriptor* result = 0;
     OsError error = {0};
@@ -2074,6 +2111,14 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
     bool selected = os_file_test_state.path.length && string_equal(path, os_file_test_state.path);
     const OsFileTestStep* step = selected ? os_file_test_take(OS_FILE_TEST_OPEN) : 0;
     if (step) error.v = (u32)step->value;
+#endif
+    if (!error.v && !os_file_create_mode_valid(create_mode)) error = os_file_invalid_error();
+#if defined(_WIN32)
+    if (!error.v && flags.create && (create_mode.kind == OS_FILE_CREATE_MODE_PRIVATE ||
+                                     create_mode.kind == OS_FILE_CREATE_MODE_EXPLICIT_POSIX))
+    {
+        error.v = (u32)ERROR_NOT_SUPPORTED;
+    }
 #endif
     if (path.pointer && !error.v)
     {
@@ -2083,6 +2128,7 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             error = os_temporary_arena_error();
         }
 #if defined(__linux__) || defined(__APPLE__)
+        BUSTER_UNUSED(share_flags);
         String8Z path_z = {0};
         if (!error.v && !string8z_copy_arena(scratch.arena, path, &path_z))
         {
@@ -2091,15 +2137,15 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
         else if (!error.v)
         {
             int o = 0;
-            if (flags.read & flags.write)
+            if (access.read & access.write)
             {
                 o = O_RDWR;
             }
-            else if (flags.read)
+            else if (access.read)
             {
                 o = O_RDONLY;
             }
-            else if (flags.write)
+            else if (access.write)
             {
                 o = O_WRONLY;
             }
@@ -2117,7 +2163,7 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             // streams, which the spawn file actions dup2 over 0, 1 and 2.
             o |= O_CLOEXEC;
 
-            mode_t mode = permissions.execute ? 0755 : 0644;
+            mode_t mode = (mode_t)os_file_create_mode_posix_permissions(create_mode);
             int fd;
             do
             {
@@ -2147,34 +2193,13 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
         DWORD flags_and_attributes = 0;
         HANDLE template_file = 0;
 
-        if (flags.read)
-        {
-            desired_access |= GENERIC_READ;
-        }
+        if (access.read) desired_access |= GENERIC_READ;
+        if (access.write) desired_access |= GENERIC_WRITE;
+        if (share_flags.read) shared_mode |= FILE_SHARE_READ;
+        if (share_flags.write) shared_mode |= FILE_SHARE_WRITE;
+        if (share_flags.delete) shared_mode |= FILE_SHARE_DELETE;
 
-        if (flags.write)
-        {
-            desired_access |= GENERIC_WRITE;
-        }
-
-        if (flags.execute)
-        {
-            desired_access |= GENERIC_EXECUTE;
-        }
-
-        if (permissions.read)
-        {
-            shared_mode |= FILE_SHARE_READ;
-        }
-
-        if (permissions.write)
-        {
-            shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        }
-
-        // The creation disposition must come from the open flags, not the share
-        // mode: mapping "writable" to CREATE_ALWAYS truncated existing files on
-        // every open with write permission.
+        // Creation disposition depends only on the operation flags.
         if (flags.create && flags.truncate)
         {
             creation_disposition = CREATE_ALWAYS;
@@ -2225,9 +2250,10 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
     return (OsFileOpenResult){result, error};
 }
 
-OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions)
+OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
+                               OsFileShareFlags share_flags)
 {
-    return os_file_open_checked(path, flags, permissions).file;
+    return os_file_open_checked(path, flags, access, create_mode, share_flags).file;
 }
 
 // Neither platform's transfer primitive takes a u64 count: WriteFile/ReadFile
@@ -2652,12 +2678,105 @@ FileStats os_file_replacement_target_stats(String8 path)
     return result;
 }
 
+FileStats os_path_followed_stats(String8 path)
+{
+    FileStats result = {0};
+    if (!path.pointer || !path.length)
+    {
+        result.error = os_file_invalid_error();
+    }
+    else
+    {
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            result.error = os_temporary_arena_error();
+        }
+#if defined(__linux__) || defined(__APPLE__)
+        String8Z path_z = {0};
+        if (!result.error.v && !string8z_copy_arena(scratch.arena, path, &path_z))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else if (!result.error.v)
+        {
+            // stat opens nothing, so a FIFO cannot block and a read-only file is fine.
+            struct stat information;
+            int status;
+            do
+            {
+                status = stat((char*)path_z.pointer, &information);
+            } while (status < 0 && errno == EINTR);
+            if (status == 0)
+            {
+                result.valid = true;
+                result.device = (u64)information.st_dev;
+                result.index = (u64)information.st_ino;
+                result.permissions = (u32)(information.st_mode & 0777);
+                result.kind = S_ISREG(information.st_mode)   ? OS_FILE_KIND_REGULAR
+                              : S_ISDIR(information.st_mode) ? OS_FILE_KIND_DIRECTORY
+                              : (S_ISCHR(information.st_mode) || S_ISFIFO(information.st_mode)) ? OS_FILE_KIND_STREAM
+                                                                                                : OS_FILE_KIND_OTHER;
+            }
+            else
+            {
+                OsError error = os_get_last_error();
+                if (error.v == (u32)ENOENT)
+                {
+                    result.valid = true;
+                    result.kind = OS_FILE_KIND_MISSING;
+                }
+                else
+                {
+                    result.error = error;
+                }
+            }
+        }
+#elif defined(_WIN32)
+        String16Z path_w = {0};
+        if (!result.error.v && !string16z_from_string8_arena(scratch.arena, path, &path_w))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else if (!result.error.v)
+        {
+            // Attribute-only access; no reparse flag, so links are followed.
+            HANDLE handle = CreateFileW(path_w.pointer, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
+                                        FILE_FLAG_BACKUP_SEMANTICS, 0);
+            if (handle != INVALID_HANDLE_VALUE)
+            {
+                OsFileDescriptor* file = (OsFileDescriptor*)handle;
+                result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+                OsError close_error = os_file_close_checked(file);
+                if (result.valid && close_error.v)
+                {
+                    result = (FileStats){.error = close_error};
+                }
+            }
+            else
+            {
+                OsError error = os_get_last_error();
+                result.valid = error.v == (u32)ERROR_FILE_NOT_FOUND || error.v == (u32)ERROR_PATH_NOT_FOUND;
+                if (!result.valid)
+                {
+                    result.error = error;
+                }
+            }
+        }
+#else
+        result.error = os_file_invalid_error();
+#endif
+        os_temporary_arena_end(scratch);
+    }
+    return result;
+}
+
 // Collisions come only from leftovers of an earlier process with the same id
 // or from foreign files, so a short bounded search suffices.
 #define OS_FILE_STAGING_ATTEMPTS 64
 BUSTER_GLOBAL_LOCAL AtomicU64 os_file_staging_counter;
 
-OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions)
+OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OsFileCreateMode create_mode, OsFileShareFlags share_flags)
 {
     OsFileStagingResult result = {0};
     u64 validation_position = arena->position;
@@ -2686,6 +2805,14 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
     const OsFileTestStep* step = selected ? os_file_test_take(OS_FILE_TEST_OPEN) : 0;
     if (step) result.error.v = (u32)step->value;
 #endif
+    if (!result.error.v && !os_file_create_mode_valid(create_mode)) result.error = os_file_invalid_error();
+#if defined(_WIN32)
+    if (!result.error.v && (create_mode.kind == OS_FILE_CREATE_MODE_PRIVATE ||
+                            create_mode.kind == OS_FILE_CREATE_MODE_EXPLICIT_POSIX))
+    {
+        result.error.v = (u32)ERROR_NOT_SUPPORTED;
+    }
+#endif
     if (!result.error.v && (!destination_valid || !destination.length || destination.length == directory_length))
     {
         result.error = os_file_invalid_error();
@@ -2701,7 +2828,8 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
                                        OS_FILE_STAGING_SUFFIX);
         OsError error = {0};
 #if defined(__linux__) || defined(__APPLE__)
-        mode_t mode = permissions.execute ? 0755 : 0644;
+        BUSTER_UNUSED(share_flags);
+        mode_t mode = (mode_t)os_file_create_mode_posix_permissions(create_mode);
         String8Z path_z = {0};
         int fd = -1;
         if (!string8z_copy_arena(arena, path, &path_z))
@@ -2728,14 +2856,9 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
             error = os_file_invalid_error();
         }
         DWORD shared_mode = 0;
-        if (permissions.read)
-        {
-            shared_mode |= FILE_SHARE_READ;
-        }
-        if (permissions.write)
-        {
-            shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        }
+        if (share_flags.read) shared_mode |= FILE_SHARE_READ;
+        if (share_flags.write) shared_mode |= FILE_SHARE_WRITE;
+        if (share_flags.delete) shared_mode |= FILE_SHARE_DELETE;
         SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
         HANDLE handle = path_w.pointer ? CreateFileW(path_w.pointer, GENERIC_WRITE, shared_mode, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0)
                                        : INVALID_HANDLE_VALUE;
@@ -2749,7 +2872,8 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
         }
         bool collision = error.v == (u32)ERROR_FILE_EXISTS || error.v == (u32)ERROR_ALREADY_EXISTS;
 #else
-        BUSTER_UNUSED(permissions);
+        BUSTER_UNUSED(create_mode);
+        BUSTER_UNUSED(share_flags);
         error = os_file_invalid_error();
         bool collision = false;
 #endif
@@ -4378,47 +4502,67 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_stat_parse(char* bytes, ssize_t length
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool os_linux_proc_read_descriptor(int descriptor, char* bytes, u64 capacity, u64* length, bool* vanished)
+{
+    *vanished = false;
+    bool result = true;
+    u64 total = 0;
+    bool exhausted = false;
+    while (result && !exhausted && total + 1 < capacity)
+    {
+        ssize_t read_result;
+        do
+        {
+            read_result = read(descriptor, bytes + total, capacity - total - 1);
+        } while (read_result < 0 && errno == EINTR);
+        result = read_result >= 0;
+        if (result)
+        {
+            exhausted = read_result == 0;
+            total += (u64)read_result;
+        }
+        else
+        {
+            // procfs can lose the task after open succeeds but before its
+            // first show/read. That ESRCH requires a new complete census.
+            *vanished = errno == ESRCH;
+        }
+    }
+    if (result && !exhausted)
+    {
+        char overflow;
+        ssize_t read_result;
+        do
+        {
+            read_result = read(descriptor, &overflow, 1);
+        } while (read_result < 0 && errno == EINTR);
+        *vanished = read_result < 0 && errno == ESRCH;
+        result = read_result == 0;
+    }
+    result = result && total != 0;
+    if (result)
+    {
+        bytes[total] = 0;
+        *length = total;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool os_linux_proc_read_at(int proc_descriptor, const char* path, char* bytes, u64 capacity, u64* length,
                                                bool* vanished)
 {
     int descriptor = openat(proc_descriptor, path, O_RDONLY | O_CLOEXEC);
     *vanished = descriptor < 0 && (errno == ENOENT || errno == ESRCH);
     bool result = descriptor >= 0;
-    u64 total = 0;
     if (result)
     {
-        bool exhausted = false;
-        while (result && !exhausted && total + 1 < capacity)
-        {
-            ssize_t read_result;
-            do
-            {
-                read_result = read(descriptor, bytes + total, capacity - total - 1);
-            } while (read_result < 0 && errno == EINTR);
-            result = read_result >= 0;
-            if (result)
-            {
-                exhausted = read_result == 0;
-                total += (u64)read_result;
-            }
-        }
-        if (result && !exhausted)
-        {
-            char overflow;
-            ssize_t read_result;
-            do
-            {
-                read_result = read(descriptor, &overflow, 1);
-            } while (read_result < 0 && errno == EINTR);
-            result = read_result == 0;
-        }
+        u64 read_length = 0;
+        result = os_linux_proc_read_descriptor(descriptor, bytes, capacity, &read_length, vanished);
         int close_result = close(descriptor);
-        result = result && total != 0 && close_result == 0;
-    }
-    if (result)
-    {
-        bytes[total] = 0;
-        *length = total;
+        // A failed close is not evidence of ordinary process churn.
+        *vanished = *vanished && close_result == 0;
+        result = result && close_result == 0;
+        if (result) { *length = read_length; }
     }
     return result;
 }
@@ -4831,6 +4975,91 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool os_linux_proc_read_self_test(void)
+{
+    char bytes[4096];
+    u64 length = 0;
+    bool vanished = true;
+    bool live_read = os_linux_proc_read_at(AT_FDCWD, "/proc/self/stat", bytes, sizeof(bytes), &length, &vanished) &&
+        !vanished && length > 0 && bytes[length] == 0;
+    length = UINT64_MAX;
+    bool full_buffer = !os_linux_proc_read_at(AT_FDCWD, "/proc/self/stat", bytes, 1, &length, &vanished) &&
+        !vanished && length == UINT64_MAX;
+    bool empty_file = !os_linux_proc_read_at(AT_FDCWD, "/dev/null", bytes, sizeof(bytes), &length, &vanished) &&
+        !vanished && length == UINT64_MAX;
+    bool invalid_descriptor = !os_linux_proc_read_descriptor(-1, bytes, sizeof(bytes), &length, &vanished) &&
+        !vanished && errno == EBADF && length == UINT64_MAX;
+
+    pid_t child = fork();
+    if (child == 0)
+    {
+        int group_status = setpgid(0, 0);
+        _exit(group_status == 0 ? 0 : 103);
+    }
+    OsProcessGroupReservation reservation = {.leader = child};
+    OsProcessGroupObservation observation = {0};
+    int descriptor = -1;
+    bool proc_resolved = false;
+    bool context_closed = false;
+    if (child > 0)
+    {
+        observation = os_process_group_observe(&reservation, false);
+        if (observation.valid && observation.exited)
+        {
+            OsLinuxProcContext context = os_linux_proc_context_open();
+            pid_t proc_child = 0;
+            proc_resolved = context.valid && os_linux_process_group_resolve_leader(&context, child, &proc_child);
+            if (proc_resolved)
+            {
+                char path[64];
+                int path_length = snprintf(path, sizeof(path), "%ld/stat", (long)proc_child);
+                if (path_length > 0 && (u64)path_length < sizeof(path))
+                {
+                    descriptor = openat(context.descriptor, path, O_RDONLY | O_CLOEXEC);
+                }
+            }
+            context_closed = os_linux_proc_context_close(&context);
+        }
+    }
+    bool child_reaped = false;
+    if (child > 0)
+    {
+        int status = 0;
+        pid_t waited;
+        do
+        {
+            waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        child_reaped = waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+
+    bool vanished_read = false;
+    bool vanished_overflow = false;
+    bool descriptor_closed = false;
+    if (descriptor >= 0)
+    {
+        if (child_reaped)
+        {
+            // Never read before reaping: seq_file must not cache live bytes.
+            vanished_read = !os_linux_proc_read_descriptor(descriptor, bytes, sizeof(bytes), &length, &vanished) &&
+                vanished && errno == ESRCH && length == UINT64_MAX;
+            vanished_overflow = !os_linux_proc_read_descriptor(descriptor, bytes, 1, &length, &vanished) &&
+                vanished && errno == ESRCH && length == UINT64_MAX;
+        }
+        descriptor_closed = close(descriptor) == 0;
+    }
+    bool result = live_read && full_buffer && empty_file && invalid_descriptor && observation.valid &&
+        observation.exited && proc_resolved && context_closed && child_reaped && vanished_read && vanished_overflow && descriptor_closed;
+    if (!result)
+    {
+        fprintf(stderr, "OS_LINUX_PROC_READ_TEST_V1 live=%d full=%d empty=%d invalid=%d observed=%d exited=%d "
+            "resolved=%d context_closed=%d reaped=%d vanished=%d overflow=%d closed=%d\n", (int)live_read, (int)full_buffer, (int)empty_file,
+            (int)invalid_descriptor, (int)observation.valid, (int)observation.exited, (int)proc_resolved,
+            (int)context_closed, (int)child_reaped, (int)vanished_read, (int)vanished_overflow, (int)descriptor_closed);
+    }
+    return result;
+}
+
 bool os_linux_proc_context_select_self_test(String8 status, s32 process_id, bool identity_valid,
                                              u32* namespace_index, u32* namespace_depth)
 {
@@ -6313,12 +6542,21 @@ OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbo
     return result;
 }
 
+// Logical CPUs this process may run on. Linux and Windows honour the affinity
+// mask (taskset, sched_setaffinity, cpusets, job objects) so a confined
+// process does not size its gangs past the CPUs it can be scheduled on; the
+// online count is the fallback when the mask cannot be read. Linux reads the
+// calling thread's mask, which new threads inherit. Apple exposes no affinity
+// mask, so it reports active CPUs. Cgroup CPU quotas are not considered.
 u32 os_get_logical_thread_count(void)
 {
     u32 result;
 
 #if defined(__linux__)
-    result = (u32)get_nprocs();
+    cpu_set_t permitted;
+    CPU_ZERO(&permitted);
+    int permitted_count = sched_getaffinity(0, sizeof(permitted), &permitted) == 0 ? CPU_COUNT(&permitted) : 0;
+    result = (u32)(permitted_count > 0 ? permitted_count : get_nprocs());
 #elif defined(__APPLE__)
     int os_result = 1;
     size_t size = sizeof(result);
@@ -6333,6 +6571,20 @@ u32 os_get_logical_thread_count(void)
     SYSTEM_INFO sysinfo = {0};
     GetSystemInfo(&sysinfo);
     result = sysinfo.dwNumberOfProcessors;
+    DWORD_PTR process_mask = 0;
+    DWORD_PTR system_mask = 0;
+    // Both masks are zero when the process spans processor groups; the mask
+    // then describes no single group and the online count stands.
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask) && process_mask)
+    {
+        u32 permitted = 0;
+        while (process_mask)
+        {
+            process_mask &= process_mask - 1;
+            permitted += 1;
+        }
+        result = BUSTER_MIN(result, permitted);
+    }
 #endif
 
     return result;

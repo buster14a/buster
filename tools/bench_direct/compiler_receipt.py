@@ -17,12 +17,26 @@ Two modes measure the same way and differ only in what they compare:
            branch, on request and without merging (#2769)
 Each mode publishes its own check name and marker.
 
+Both modes also run THROUGHPUT_PROFILE (#2761): the predeclared native
+throughput corpus of `./build.sh bench_throughput` on the same two compilers,
+so the corpus has a Zen 5 route. Its evidence must be complete and bound to
+the measured binaries; its regressions, like the self-host verdict, are
+reported and never decide.
+
+Pull mode adds SCALING_PROFILE when the pull request also adds or changes
+SCALING_REQUEST (#424): `./build.sh bench_throughput scale` times the
+candidate compiler alone, compiling and linking generated multi-TU inputs with
+-fcompile-jobs=W on whole physical cores. It is report-only too; its bundles
+must be valid and bound to the candidate binary.
+
 Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
     attempt_marker                                         one attempt's check (#2803)
     PROFILE                                                frozen profile
     APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
+    THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
+    SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -31,6 +45,7 @@ Map (searchable symbols):
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
@@ -65,6 +80,51 @@ PROFILE = {
     "profile_steps": [],
     "corpus": "not included in compiler-compare-v1",
 }
+# The throughput corpus run after the self-host comparison (#2761), frozen per
+# name like PROFILE. The harness is tools/throughput at the base revision (a
+# main commit), built by its own build.c command; `arguments` follow the
+# baseline/candidate/output/ids that compiler_compare supplies.
+THROUGHPUT_SCHEMA = 2
+THROUGHPUT_PROFILE = {
+    "name": "throughput-corpus-v1",
+    "workload": "bench_throughput run: the predeclared default CI corpus under every allocator mode, "
+                "paired, two rounds, with its regression guard",
+    "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
+    "arguments": ["--profile", "ci", "--mode", "all", "--pairs", "20", "--warmups", "2", "--timeout", "120",
+                  "--cpu", "2"],
+    "workloads": ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow",
+                  "backend_pressure"],
+    "pairs_per_round": 20,
+    "rounds": 2,
+    "warmups": 2,
+    "cpu": 2,
+}
+# The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
+# is one `bench_throughput scale` bundle on the candidate binary, with the
+# --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
+# physical core to the runner and other housekeeping and places W workers on
+# whole cores (plus one SMT point over the remaining logical CPUs); "machine"
+# is the separate whole-host series, 8 cores and 8C/16T on the 9700X.
+SCALING_REQUEST = "benchmarks/9700x/scaling.request"
+SCALING_SCHEMA = "buster-throughput-scaling-v1"
+SCALING_PROFILE = {
+    "name": "scaling-v1",
+    "workload": "bench_throughput scale: generated multi-TU compile-and-link with -fcompile-jobs=W on the "
+                "candidate compiler, workers placed on whole physical cores (report-only)",
+    "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
+    "series": {
+        "cores": ["--cpu-set", "auto", "--exclude-core", "0", "--workers", "1,2,4,7", "--allow-smt",
+                  "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
+        "machine": ["--cpu-set", "auto", "--workers", "8", "--allow-smt", "--shape", "equal", "--shape", "skewed",
+                    "--shape", "tiny", "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
+    },
+}
+# `--mode all` of tools/throughput (tp_modes) and the decisions its guard writes (tp_assess/decision in
+# throughput.c). The corpus's expected cells are THROUGHPUT_PROFILE workloads x these modes.
+THROUGHPUT_MODES = ("none", "mir-stack", "fast", "quality")
+THROUGHPUT_DECISIONS = ("regression", "inconclusive", "no substantial regression detected")
+# Each case's gate tests: the wall and peak-RSS metrics for every round.
+THROUGHPUT_TEST_METRICS = ("wall_seconds", "peak_rss_bytes")
 # A wall-time CI needs at least six complete pairs (uarch_lab sign_test_rank).
 MIN_PAIRS = 6
 # Every complete verdict counts, whatever its direction; "inconclusive" means
@@ -154,6 +214,10 @@ def range_label(commits: object, first_parent: object) -> str:
     return label
 
 
+def is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def classify(summary: object, binaries: object) -> list[str]:
     """Reasons the lab summary is not a valid core measurement; empty when valid."""
     reasons: list[str] = []
@@ -178,13 +242,198 @@ def classify(summary: object, binaries: object) -> list[str]:
     pairs = plan.get("complete_pairs")
     if type(pairs) is not int or pairs < MIN_PAIRS:
         reasons.append(f"{pairs!r} complete pairs; at least {MIN_PAIRS} are required")
+    # uarch_lab compare runs one A and one B member per planned pair (warmups and the fresh-copy reference
+    # are not timed runs), keeps going after a failed member, and counts a pair complete when both succeeded.
+    # A finished experiment therefore has runs == plan.pairs == complete_pairs on both sides; a failure
+    # or truncation leaves fewer, and a shortened plan is not a completed one.
+    planned = plan.get("pairs")
+    if type(planned) is not int or planned < MIN_PAIRS:
+        reasons.append(f"declared plan has {planned!r} pairs; the declared sample plan is required and needs "
+                       f"at least {MIN_PAIRS}")
+    counts = {role: summary.get(role, {}).get("runs") if isinstance(summary.get(role), dict) else None
+              for role in ("baseline", "candidate")}
+    if type(counts["baseline"]) is int and type(counts["candidate"]) is int and \
+            counts["baseline"] != counts["candidate"]:
+        reasons.append(f"baseline ran {counts['baseline']} times but candidate {counts['candidate']}; "
+                       "every pair has one run of each")
+    for role, count in counts.items():
+        if type(count) is int and type(pairs) is int and count != pairs:
+            reasons.append(f"{role} has {count} timed runs but {pairs} complete pairs are claimed")
+        if type(count) is int and type(planned) is int and count != planned:
+            reasons.append(f"{role} has {count} timed runs but the plan declares {planned} pairs; "
+                           "the experiment did not complete as declared")
+    if type(pairs) is int and type(planned) is int and pairs != planned:
+        reasons.append(f"{pairs} complete pairs do not match the {planned} planned pairs")
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    metrics = summary.get("metrics")
     if verdict.get("metric") != "wall" or verdict.get("outcome") not in MEASURED_OUTCOMES:
         reasons.append(f"wall-time verdict {verdict.get('outcome')!r} is not a complete measurement")
+    wall = metrics.get("wall") if isinstance(metrics, dict) and isinstance(metrics.get("wall"), dict) else {}
+    if not wall:
+        reasons.append("summary has no wall metric record to check the verdict against")
     for key in ("ratio", "ci_low", "ci_high"):
-        if not isinstance(verdict.get(key), (int, float)) or isinstance(verdict.get(key), bool):
+        value = verdict.get(key)
+        if not is_number(value):
             reasons.append(f"wall-time verdict has no numeric {key}")
+        elif not (math.isfinite(value) and value > 0):
+            reasons.append(f"wall-time verdict {key} {value!r} is not a finite positive ratio")
+        elif wall and wall.get(key) != value:
+            reasons.append(f"wall-time verdict {key} {value!r} contradicts the wall metric {wall.get(key)!r}")
+    low, high = verdict.get("ci_low"), verdict.get("ci_high")
+    if is_number(low) and is_number(high) and low > high:
+        reasons.append(f"wall-time verdict confidence interval is reversed: ci_low {low!r} > ci_high {high!r}")
+    if wall and wall.get("outcome") != verdict.get("outcome"):
+        reasons.append(f"wall-time verdict outcome {verdict.get('outcome')!r} contradicts the wall metric "
+                       f"{wall.get('outcome')!r}")
     return reasons
+
+
+def classify_throughput(summary: object, metadata: object, binaries: object) -> list[str]:
+    """Reasons the corpus evidence is not a complete run of THROUGHPUT_PROFILE on these binaries."""
+    reasons: list[str] = []
+    summary = summary if isinstance(summary, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    binaries = binaries if isinstance(binaries, dict) else {}
+    if not summary:
+        reasons.append("throughput summary.json is missing or not an object")
+    if not metadata:
+        reasons.append("throughput metadata.json is missing or not an object")
+    if summary and (summary.get("schema") != THROUGHPUT_SCHEMA or summary.get("valid") is not True
+                    or summary.get("guard_enabled") is not True):
+        reasons.append("throughput summary is not a valid guarded schema-2 comparison")
+    profile = THROUGHPUT_PROFILE
+    planned = {"schema": THROUGHPUT_SCHEMA, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
+               "rounds": profile["rounds"], "warmups": profile["warmups"], "cpu": profile["cpu"],
+               "workloads": profile["workloads"]}
+    for key, value in planned.items():
+        if metadata and metadata.get(key) != value:
+            reasons.append(f"throughput {key} {metadata.get(key)!r} is not the profile's {value!r}")
+    provenance = metadata.get("compiler_provenance")
+    provenance = provenance if isinstance(provenance, list) and len(provenance) == 2 else [{}, {}]
+    for role, row in zip(("baseline", "candidate"), provenance):
+        recorded = binaries.get(role) if isinstance(binaries.get(role), dict) else {}
+        digest = row.get("sha256") if isinstance(row, dict) else None
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or digest != recorded.get("sha256"):
+            reasons.append(f"throughput {role} compiler is not the measured {role} binary")
+    if summary:
+        reasons.extend(classify_throughput_cases(summary.get("comparisons")))
+        counted = {"confirmed_regressions": "regression", "inconclusive_cases": "inconclusive"}
+        comparisons = summary.get("comparisons") if isinstance(summary.get("comparisons"), list) else []
+        for key, decision in counted.items():
+            value = summary.get(key)
+            actual = sum(1 for row in comparisons if isinstance(row, dict) and row.get("decision") == decision)
+            if type(value) is not int:
+                reasons.append(f"throughput summary has no integer {key}")
+            elif value != actual:
+                reasons.append(f"throughput summary {key} {value} does not match its {actual} {decision!r} cases")
+    return reasons
+
+
+def classify_throughput_cases(comparisons: object) -> list[str]:
+    """Reasons the corpus rows are not exactly one valid row per profile workload x allocator mode."""
+    reasons: list[str] = []
+    rounds = THROUGHPUT_PROFILE["rounds"]
+    expected = [f"{name}/{mode}" for name in THROUGHPUT_PROFILE["workloads"] for mode in THROUGHPUT_MODES]
+    rows = comparisons if isinstance(comparisons, list) else []
+    if not isinstance(comparisons, list):
+        reasons.append("throughput summary has no comparisons list")
+    names = [row.get("name") if isinstance(row, dict) else None for row in rows]
+    seen: set = set()
+    duplicates = sorted({name for name in names if isinstance(name, str) and (name in seen or seen.add(name))})
+    if duplicates:
+        reasons.append(f"throughput comparisons repeat cells {duplicates}")
+    missing = [name for name in expected if name not in seen]
+    if missing:
+        reasons.append(f"throughput comparisons miss {len(missing)} of {len(expected)} workload/mode cells: {missing}")
+    foreign = sorted({str(name) for name in names if name not in expected})
+    if foreign:
+        reasons.append(f"throughput comparisons have cells outside the profile: {foreign}")
+    wanted_tests = {(metric, number) for metric in THROUGHPUT_TEST_METRICS for number in range(rounds)}
+    for row in rows:
+        if not isinstance(row, dict):
+            reasons.append("throughput comparison row is not an object")
+            continue
+        name = row.get("name")
+        if row.get("decision") not in THROUGHPUT_DECISIONS:
+            reasons.append(f"throughput cell {name!r} has decision {row.get('decision')!r}, not a guarded decision")
+        if not isinstance(row.get("medians"), dict):
+            reasons.append(f"throughput cell {name!r} has no medians")
+        tests = row.get("tests")
+        got = [(test.get("metric"), test.get("round")) for test in tests if isinstance(test, dict)] \
+            if isinstance(tests, list) else None
+        if got is None or len(got) != len(tests) or sorted(got, key=repr) != sorted(wanted_tests, key=repr):
+            reasons.append(f"throughput cell {name!r} does not have exactly one test per gate metric and round")
+    return reasons
+
+
+def throughput_digest(summary: object) -> dict:
+    """The report's view of a corpus summary: counts and each case's decision."""
+    summary = summary if isinstance(summary, dict) else {}
+    comparisons = summary.get("comparisons") if isinstance(summary.get("comparisons"), list) else []
+    return {"valid": summary.get("valid"), "confirmed_regressions": summary.get("confirmed_regressions"),
+            "inconclusive_cases": summary.get("inconclusive_cases"),
+            "cases": [{"name": row.get("name"), "decision": row.get("decision")}
+                      for row in comparisons if isinstance(row, dict)]}
+
+
+def classify_scaling(bundles: object, binaries: object) -> list[str]:
+    """Reasons the scaling bundles are not a complete SCALING_PROFILE run on the candidate binary.
+
+    bundles maps each series name to {"summary": scaling.json, "metadata": scaling-metadata.json}.
+    """
+    reasons: list[str] = []
+    bundles = bundles if isinstance(bundles, dict) else {}
+    binaries = binaries if isinstance(binaries, dict) else {}
+    candidate = binaries.get("candidate") if isinstance(binaries.get("candidate"), dict) else {}
+    digest = candidate.get("sha256")
+    for name in SCALING_PROFILE["series"]:
+        bundle = bundles.get(name) if isinstance(bundles.get(name), dict) else {}
+        summary = bundle.get("summary") if isinstance(bundle.get("summary"), dict) else {}
+        metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+        if not summary or not metadata:
+            reasons.append(f"scaling series {name} has no scaling.json or scaling-metadata.json")
+            continue
+        if summary.get("schema") != SCALING_SCHEMA or metadata.get("schema") != SCALING_SCHEMA:
+            reasons.append(f"scaling series {name} is not a {SCALING_SCHEMA} bundle")
+        if summary.get("status") != "valid":
+            reasons.append(f"scaling series {name} is {summary.get('status')!r}: {summary.get('reason')!r}")
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or metadata.get("compiler_sha256") != digest:
+            reasons.append(f"scaling series {name} compiler is not the measured candidate binary")
+        measured = [row for row in summary.get("series", []) if isinstance(row, dict) and isinstance(row.get("points"), list)] \
+            if isinstance(summary.get("series"), list) else []
+        if summary.get("status") == "valid" and not measured:
+            reasons.append(f"scaling series {name} has no measured points")
+    return reasons
+
+
+def scaling_digest(bundles: object) -> dict:
+    """The report's view of each scaling series: placement and every measured point."""
+    bundles = bundles if isinstance(bundles, dict) else {}
+    digest = {}
+    for name in SCALING_PROFILE["series"]:
+        bundle = bundles.get(name) if isinstance(bundles.get(name), dict) else {}
+        summary = bundle.get("summary") if isinstance(bundle.get("summary"), dict) else {}
+        metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+        series = summary.get("series") if isinstance(summary.get("series"), list) else []
+        digest[name] = {
+            "status": summary.get("status"), "cpu_set": metadata.get("cpu_set"),
+            "excluded_cpus": metadata.get("excluded_cpus"), "physical_cores": metadata.get("physical_cores"),
+            "logical_cpus": metadata.get("logical_cpus"),
+            "series": [{"name": row.get("name"), "inputs": row.get("inputs"),
+                        "points": [{key: point.get(key) for key in (
+                            "workers", "placement", "observed_workers", "wall_median", "speedup", "speedup_interval",
+                            "efficiency", "cpu_inflation", "rss_inflation")}
+                            for point in row.get("points", []) if isinstance(point, dict)]}
+                       for row in series if isinstance(row, dict) and isinstance(row.get("points"), list)],
+        }
+    return digest
+
+
+# Report rows: summary key, label and the unit uarch_lab.COMPARE_METRICS declares for it.
+REPORT_METRICS = (("wall", "wall time (harness span)", "s"), ("task_clock", "task-clock", "s"),
+                  ("instructions", "instructions", "count"), ("cycles", "cycles", "count"),
+                  ("branch_misses", "branch misses", "count"), ("page_faults", "page faults", "count"),
+                  ("peak_rss", "peak RSS", "bytes"))
 
 
 def number(value: object, form: str) -> str:
@@ -218,20 +467,61 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
               f"Observed host: `{host.get('cpu_model', 'NA') if isinstance(host, dict) else 'NA'}`.", ""]
     metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
     if metrics:
-        lines += ["| Metric | A median | B median | B/A | 95% CI | Outcome |", "| --- | --- | --- | --- | --- | --- |"]
-        for key in ("wall", "task_clock", "instructions", "cycles", "branch_misses", "page_faults", "peak_rss"):
+        lines += ["A = baseline, B = candidate. B/A is the candidate-to-baseline ratio (below 1 means the candidate is lower; "
+                  "lower is better for every metric below). The 95% interval is a confidence interval of the dimensionless "
+                  "B/A ratio, not of the medians. Medians are in the unit column (exact base units); NA means not measured.", "",
+                  "| Metric | Unit | A (baseline) median | B (candidate) median | B/A ratio | 95% CI of B/A | Outcome |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        for key, label, unit in REPORT_METRICS:
             row = metrics.get(key) if isinstance(metrics.get(key), dict) else {}
-            lines.append("| %s | %s | %s | %s | [%s, %s] | %s |" % (
-                key, number(row.get("a_median"), "%.6g"), number(row.get("b_median"), "%.6g"),
+            if isinstance(row.get("unit"), str) and row["unit"] != unit:
+                row = {"outcome": f"rejected: unit {row['unit']!r}, expected {unit!r}"}
+            lines.append("| %s | %s | %s | %s | %s | [%s, %s] | %s |" % (
+                label, unit, number(row.get("a_median"), "%.6g"), number(row.get("b_median"), "%.6g"),
                 number(row.get("ratio"), "%.4f"), number(row.get("ci_low"), "%.4f"),
                 number(row.get("ci_high"), "%.4f"), row.get("outcome", "NA")))
         lines.append("")
     timings = timings if isinstance(timings, dict) else {}
     builds = timings.get("build_seconds") if isinstance(timings.get("build_seconds"), dict) else {}
-    lines.append("Host time: builds %s s, measurement %s s, total %s s; queue delay before the host job %s s." % (
+    scaled = ", scaling %s s" % number(timings.get("scaling_seconds"), "%.0f") if "scaling_seconds" in timings else ""
+    lines.append("Host time: builds %s s, measurement %s s, corpus %s s%s, total %s s; queue delay before the host "
+                 "job %s s." % (
         " + ".join(number(builds.get(key), "%.0f") for key in ("baseline", "candidate", "closure")),
-        number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("total_seconds"), "%.0f"),
+        number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("throughput_seconds"), "%.0f"),
+        scaled, number(timings.get("total_seconds"), "%.0f"),
         number(timings.get("queue_delay_seconds"), "%.0f")))
+    corpus = receipt.get("throughput") if isinstance(receipt, dict) else None
+    if isinstance(corpus, dict):
+        cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
+        flagged = [f"{row.get('name')}: {row.get('decision')}" for row in cases if isinstance(row, dict)
+                   and row.get("decision") != "no substantial regression detected"]
+        lines += ["", f"Throughput corpus `{THROUGHPUT_PROFILE['name']}`: {len(cases)} cases, "
+                  f"{corpus.get('confirmed_regressions', 'NA')} confirmed regressions, "
+                  f"{corpus.get('inconclusive_cases', 'NA')} inconclusive (report-only)."
+                  + (" " + "; ".join(flagged) + "." if flagged else "")]
+    scaling = receipt.get("scaling") if isinstance(receipt, dict) else None
+    if isinstance(scaling, dict):
+        lines += ["", f"Multi-TU scaling `{SCALING_PROFILE['name']}` (report-only; speedup against the one-worker "
+                  "reference of the same inputs, with conservative 95% bounds; CPU and RSS are inflation over "
+                  "that reference):"]
+        for name in SCALING_PROFILE["series"]:
+            row = scaling.get(name) if isinstance(scaling.get(name), dict) else {}
+            lines += ["", f"Series `{name}`: {row.get('status', 'NA')} on CPU set `{row.get('cpu_set', 'NA')}` "
+                      f"({row.get('physical_cores', 'NA')} cores, {row.get('logical_cpus', 'NA')} logical CPUs"
+                      + (f"; housekeeping `{row.get('excluded_cpus')}` excluded" if row.get("excluded_cpus") else "")
+                      + ").", "", "| Inputs | Workers | Placement | Observed | Wall s | Speedup | 95% bounds | "
+                      "Efficiency | CPU | RSS |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+            for shape in row.get("series", []) if isinstance(row.get("series"), list) else []:
+                for point in shape.get("points", []) if isinstance(shape, dict) else []:
+                    if not isinstance(point, dict) or not point.get("workers"):
+                        continue
+                    bounds = point.get("speedup_interval") if isinstance(point.get("speedup_interval"), list) else []
+                    lines.append("| %s (%s) | %s | %s | %s | %s | %s | [%s, %s] | %s | %s | %s |" % (
+                        shape.get("name"), shape.get("inputs"), point.get("workers"), point.get("placement"),
+                        point.get("observed_workers"), number(point.get("wall_median"), "%.4f"),
+                        number(point.get("speedup"), "%.3f"), number(bounds[0] if len(bounds) == 2 else None, "%.3f"),
+                        number(bounds[1] if len(bounds) == 2 else None, "%.3f"), number(point.get("efficiency"), "%.3f"),
+                        number(point.get("cpu_inflation"), "%.3f"), number(point.get("rss_inflation"), "%.3f")))
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

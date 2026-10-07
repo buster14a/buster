@@ -29,7 +29,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: dwarf-lifetime-${{ github.ref }}
+  # Preserve every push, including pending validation in a merge burst.
+  group: dwarf-lifetime-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:

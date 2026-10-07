@@ -432,7 +432,8 @@ typedef enum MachineOpcode
     MACHINE_X64_VPMOVB2M,     // def general mask, use vec
     // vpermt2b overwrites its low-table register with the result, so the
     // selector copies the low table into the destination first and the row
-    // ties destination to itself; zeroing under the mask.
+    // ties destination to itself; zeroing under the mask. The payload selects
+    // the lane width: 0 = vpermt2b, 1 = vpermt2d (16 mask bits).
     MACHINE_X64_VPERMT2B,     // use-def vec result/low, use mask, use vec indices, use vec high
     MACHINE_X64_VCOMPRESSB,   // def vec, use mask, use vec; zeroing. The
                               // payload selects the lane width: 0 =
@@ -1410,7 +1411,10 @@ struct MachineFunction
     // over disjoint lifetimes is only sound while this holds. Unknown,
     // manual, and structural-replay functions leave it false.
     bool returns_twice_absence_certified;
-    u8 reserved[3];
+    // Pinned debug locals: every frame object keeps storage of its own, so a
+    // debugger reading a dead local's slot never sees a later object's bytes.
+    bool distinct_frame_objects;
+    u8 reserved[2];
     // One flag byte per stack slot, or null. Volatile canonical lowering
     // taints every frame object it touches. Object identities do not change
     // during CFG/SSA/scheduling rewrites, so this immutable table is shared.
@@ -2118,6 +2122,7 @@ BUSTER_F_DECL bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacit
 BUSTER_F_DECL bool machine_a64_test_emit_long_branch(u8* bytes, u32 capacity, s64 displacement, u32* byte_count);
 BUSTER_F_DECL u8 machine_a64_test_branch_relaxation_tier(u16 opcode, u32 condition, s64 displacement);
 typedef struct MachineA64TestSparseFixup MachineA64TestSparseFixup;
+typedef struct MachineA64TestRelaxStats MachineA64TestRelaxStats;
 struct MachineA64TestSparseFixup
 {
     u32 source_offset;
@@ -2131,6 +2136,20 @@ struct MachineA64TestSparseFixup
 };
 BUSTER_F_DECL bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
                                                  u32* final_code_size);
+// Deterministic work counters for the relaxation scaling regression: planning
+// scans, expansions decided, bytes shifted by insertion sweeps, and metadata
+// entries visited by remap sweeps.
+struct MachineA64TestRelaxStats
+{
+    u64 passes;
+    u64 expansions;
+    u64 bytes_moved;
+    u64 metadata_visits;
+};
+BUSTER_F_DECL bool machine_a64_test_relax_sparse_stats(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
+                                                       u32* final_code_size, MachineA64TestRelaxStats* stats);
+BUSTER_F_DECL bool machine_a64_test_relax_dense_compare_chain(Arena* arena, u32 target_distance, u32 condition, u32* words, u32 word_capacity,
+                                                             u32* final_code_size, u8* tier);
 typedef struct MachineX64ExactMapAudit MachineX64ExactMapAudit;
 struct MachineX64ExactMapAudit
 {

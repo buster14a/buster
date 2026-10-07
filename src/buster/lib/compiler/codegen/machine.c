@@ -2954,11 +2954,13 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place(IrFunction* function, Ma
     {
         place = parameter_place;
     }
-    if (place.value != IR_ID_UNDERLYING_INVALID && machine_debug_place_promoted(machine_function, facts, place))
+    if ((local->is_parameter || !machine_function->distinct_frame_objects) && place.value != IR_ID_UNDERLYING_INVALID &&
+        machine_debug_place_promoted(machine_function, facts, place))
     {
-        // A promoted place is only an implementation cell. Preserve the ABI
-        // parameter value when one exists; canonical block-local SSA values
-        // carry every non-parameter source variable's value.
+        // A promoted parameter place is only an implementation cell. Preserve
+        // the ABI parameter value when one exists. Only pinned debug locals
+        // keep a named local's mutable register: a register rewritten later in
+        // its range would show a stale value without the pinned frame layout.
         place = parameter_place;
     }
     if (place.value == IR_ID_UNDERLYING_INVALID && local->is_parameter)
@@ -3387,7 +3389,7 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place_dense(IrFunction* functi
     {
         place = parameter_place;
     }
-    if (place.value != IR_ID_UNDERLYING_INVALID)
+    if ((local->is_parameter || !machine_function->distinct_frame_objects) && place.value != IR_ID_UNDERLYING_INVALID)
     {
         for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
         {
@@ -3749,6 +3751,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
         case MACHINE_X64_VPCMP_K:
             valid = instruction->payload < 5;
             break;
+        case MACHINE_X64_VPERMT2B_K:
         case MACHINE_X64_VCOMPRESSB_K:
             valid = instruction->payload < 2;
             break;
