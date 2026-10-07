@@ -38255,6 +38255,96 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_gnu_library_builtins_sources[] = {
 };
 #endif
 
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+// <tgmath.h> on a glibc host (#1271). Clang's resource header overloads with
+// __attribute__((overloadable)), which this frontend lacks, so the builtin
+// _Generic header must answer instead. Each argument type -- float, double,
+// long double, their complex forms and integers -- must pick the C11 7.25
+// function and result type, and every argument must be evaluated once. The
+// body is the program a host Clang or GCC accepts with a conforming
+// <tgmath.h>. Without system <math.h> and <complex.h> it is an empty main.
+BUSTER_GLOBAL_LOCAL String8 const c_test_tgmath_runtime_source = S8_INITIALIZER(
+    "#if __has_include(<math.h>) && __has_include(<complex.h>)\n"
+    "#include <tgmath.h>\n"
+    "#define K(x) _Generic((x), float: 1, double: 2, long double: 3, float _Complex: 4, double _Complex: 5, long double _Complex: 6, default: 9)\n"
+    "static int calls;\n"
+    "static double nine(void) { calls += 1; return 9.0; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    double d = 4.0, ip; float f = 4.0f, fp; long double l = 4.0L; int i = 4, q; const double cd = 9.0;\n"
+    "    float _Complex fc = 3.0f + 4.0f * I; double _Complex dc = 3.0 + 4.0 * I; long double _Complex lc = 3.0L + 4.0L * I;\n"
+    "    int bad = 0;\n"
+    "    bad |= K(sqrt(f)) != 1 || K(sqrt(d)) != 2 || K(sqrt(l)) != 3 || K(sqrt(i)) != 2 || K(sqrt(cd)) != 2;\n"
+    "    bad |= K(sqrt(fc)) != 4 || K(sqrt(dc)) != 5 || K(sqrt(lc)) != 6;\n"
+    "    bad |= sizeof(sqrt(f)) != sizeof(float) || sizeof(sqrt(d)) != sizeof(double) || sizeof(sqrt(l)) != sizeof(long double);\n"
+    "    bad |= sqrt(f) != 2.0f || sqrt(d) != 2.0 || sqrt(l) != 2.0L || sqrt(i) != 2.0 || sqrt(cd) != 3.0;\n"
+    "    bad |= K(pow(f, f)) != 1 || K(pow(f, d)) != 2 || K(pow(f, l)) != 3 || K(pow(i, i)) != 2;\n"
+    "    bad |= K(pow(fc, f)) != 4 || K(pow(f, dc)) != 5 || K(pow(d, lc)) != 6;\n"
+    "    bad |= pow(d, 2) != 16.0 || pow(f, 2) != 16.0 || pow(l, 0.5f) != 2.0L || sizeof(pow(f, f)) != sizeof(float);\n"
+    "    bad |= K(fabs(f)) != 1 || K(fabs(d)) != 2 || K(fabs(l)) != 3 || K(fabs(-i)) != 2;\n"
+    "    bad |= K(fabs(fc)) != 1 || K(fabs(dc)) != 2 || K(fabs(lc)) != 3;\n"
+    "    bad |= fabs(-d) != 4.0 || fabs(dc) != 5.0 || fabs(fc) != 5.0f || fabs(lc) != 5.0L || cabs(dc) != 5.0;\n"
+    "    bad |= K(carg(f)) != 1 || K(carg(d)) != 2 || K(carg(l)) != 3 || K(carg(i)) != 2 || K(carg(dc)) != 2;\n"
+    "    bad |= carg(1.0) != 0.0 || carg(-1.0f) < 3.14f || carg(dc) <= 0.9 || carg(dc) >= 0.93;\n"
+    "    bad |= K(creal(fc)) != 1 || K(conj(dc)) != 5 || creal(conj(dc)) != 3.0 || cimag(conj(dc)) != -4.0;\n"
+    "    bad |= K(exp(lc)) != 6 || K(atan2(f, i)) != 2 || K(atan2(f, f)) != 1 || K(fmax(f, l)) != 3 || fmax(f, l) != 4.0L;\n"
+    "    bad |= K(floor(f)) != 1 || floor(2.5) != 2.0 || K(sin(1)) != 2 || lround(2.5f) != 3L || K(lround(2.5f)) != 9;\n"
+    "    bad |= K(ldexp(f, 2)) != 1 || ldexp(d, 2) != 16.0 || K(fma(f, f, l)) != 3 || fma(d, d, 1) != 17.0;\n"
+    "    bad |= frexp(8.0f, &q) != 0.5f || q != 4 || modf(6.5, &ip) != 0.5 || ip != 6.0 || modf(6.5f, &fp) != 0.5f || fp != 6.0f;\n"
+    "    bad |= sqrt(nine()) != 3.0 || calls != 1 || sqrt(fabs(pow(d, 2))) != 4.0 || K(sqrt(fabs(pow(f, 2)))) != 2;\n"
+    "    return bad;\n"
+    "}\n"
+    "#else\n"
+    "int main(void) { return 0; }\n"
+    "#endif\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tgmath_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=c11"), S8("-std=gnu17")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("tgmath-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_tgmath_runtime_source))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("tgmath-runtime-run"), S8(".exe"));
+                String8 command[] = {dialects[dialect], modes[mode], S8("-o"), output, source, S8("-lm")};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("tgmath {S8} {S8}: {S8}"), dialects[dialect], modes[mode], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("tgmath runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                dialects[dialect], modes[mode], execution.platform_status, (u32)execution.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(source));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_library_builtins_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -49575,6 +49665,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
     C_TEST_FIXTURE(arguments, c_test_target_abi_macros);
     C_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
+    C_TEST_FIXTURE(arguments, c_test_tgmath_runtime);
     C_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     C_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
     C_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
