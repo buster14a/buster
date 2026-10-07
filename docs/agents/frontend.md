@@ -178,6 +178,18 @@ clz/ctz runtime oracles on nonzero inputs.
 operands; lowering counts leading zeros of `((x ^ (x >> (w - 1))) << 1) | 1`,
 which is never zero.
 
+`__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
+`popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
+`unsigned int` and `unsigned long long` (`c_semantic_byte_swap_kind`) and lower
+to masked-shift stages (`c_ir_emit_byte_swap`); canonical IR has no byte-swap
+operation. `__builtin_copysign`/`f`/`l` rewrite the sign field of the stored
+image of the first operand from the second (`c_ir_emit_float_with_sign`, shared
+with `fabsl` and complex division), so NaN payloads survive and no libm or
+`__*tf2` runtime call appears for x87 or binary128. Long-double math results
+are selected by `c_semantic_math_link_is_long_double`, not by a trailing `l`
+(which `ceil` and `huge_val` also have). `c_test_gnu_library_builtins_runtime`
+covers all of these (#3037).
+
 The typed `__builtin_{s,u}{add,sub,mul}{,l,ll}_overflow` checks
 (`c_ir_overflow_builtins`) convert both operands to the spelling's type, store
 the wrapped result through the third argument and answer `_Bool`. Lowering

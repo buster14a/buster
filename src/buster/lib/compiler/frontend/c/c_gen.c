@@ -2579,6 +2579,7 @@ BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_acosf"), S8("acosf")},   {S8("__builtin_acos"), S8("acos")},   {S8("__builtin_fabsf"), S8("fabsf")}, {S8("__builtin_fabs"), S8("fabs")},
         {S8("__builtin_roundf"), S8("roundf")}, {S8("__builtin_round"), S8("round")},
         {S8("__builtin_fabsl"), S8("fabsl")},
+        {S8("__builtin_copysignf"), S8("copysignf")}, {S8("__builtin_copysign"), S8("copysign")}, {S8("__builtin_copysignl"), S8("copysignl")},
         {S8("__builtin_fmaxf"), S8("fmaxf")},   {S8("__builtin_fmax"), S8("fmax")},   {S8("__builtin_fmaxl"), S8("fmaxl")},
         {S8("__builtin_fminf"), S8("fminf")},   {S8("__builtin_fmin"), S8("fmin")},   {S8("__builtin_fminl"), S8("fminl")},
         {S8("__builtin_powif"), S8("powif")},   {S8("__builtin_powi"), S8("powi")},   {S8("__builtin_powil"), S8("powil")},
@@ -9023,6 +9024,8 @@ BUSTER_C_INTERNAL IrType* c_ir_value_complex_type(CIntegerIrBuilder* builder, Ir
 BUSTER_C_INTERNAL bool c_ir_complex_split(CIntegerIrBuilder* builder, IrValueId value, IrValueId* real, IrValueId* imaginary, IrSourceRange source);
 BUSTER_C_INTERNAL IrValueId c_ir_complex_zero(CIntegerIrBuilder* builder, IrTypeId element_type, IrSourceRange source);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type_id, IrSourceRange source);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_with_sign(CIntegerIrBuilder* builder, IrValueId value, IrValueId sign_source, IrTypeId type_id, IrSourceRange source);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_byte_swap(CIntegerIrBuilder* builder, IrValueId operand, IrTypeId type, CToken token, IrSourceRange source);
 BUSTER_C_INTERNAL IrTypeId c_ir_complex_type_for_element(CIntegerIrBuilder* builder, IrTypeId element);
 BUSTER_C_INTERNAL IrTypeId c_ir_float_literal_type(CIntegerIrBuilder* builder, String8 spelling);
 BUSTER_C_INTERNAL IrValueId c_ir_complex_compose(CIntegerIrBuilder* builder, IrTypeId complex_type, IrValueId real, IrValueId imaginary,
@@ -19876,7 +19879,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_classifier_infinity(CIntegerIrBuilder* bui
 BUSTER_C_INTERNAL IrTypeId c_ir_math_suffix_type(CIntegerIrBuilder* builder, String8 link_name)
 {
     return string_ends_with_sequence(link_name, S8("f")) ? builder->f32_type
-           : string_ends_with_sequence(link_name, S8("l")) ? c_ir_builder_scalar_type(builder, C_TYPE_LONG_DOUBLE)
+           : c_semantic_math_link_is_long_double(link_name) ? c_ir_builder_scalar_type(builder, C_TYPE_LONG_DOUBLE)
                                                          : builder->f64_type;
 }
 
@@ -20084,6 +20087,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
     {
         IrTypeId value_type = string_equal(link_name, S8("fabsf")) ? builder->f32_type : builder->f64_type;
         return argument_count == 1 ? c_ir_emit_fabs_value(builder, token, arguments[0], value_type) : IR_VALUE_ID_INVALID;
+    }
+    if (string_starts_with_sequence(link_name, S8("copysign")))
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        IrTypeId value_type = c_ir_math_suffix_type(builder, link_name);
+        IrValueId magnitude = argument_count == 2 ? c_ir_emit_cast(builder, arguments[0], value_type, source) : IR_VALUE_ID_INVALID;
+        IrValueId sign = magnitude.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, arguments[1], value_type, source) : IR_VALUE_ID_INVALID;
+        return sign.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_float_with_sign(builder, magnitude, sign, value_type, source) : IR_VALUE_ID_INVALID;
     }
     if (string_equal(link_name, S8("fabsl")))
     {
@@ -20649,29 +20660,18 @@ BUSTER_C_INTERNAL bool c_ir_complex_element_supported(CIntegerIrBuilder* builder
 // sign/exponent field at byte eight, which is exactly the `se` member of
 // musl's `union ldshape`, and the ten-byte significand below it is left
 // alone. Binary128 clears the top bit of its high limb, also at byte eight.
-BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type_id, IrSourceRange source)
+// The place of the sign-carrying halfword or word of the float stored in
+// `slot`: the whole image for 32 and 64 bits, byte eight of the sixteen-byte
+// slot for x87 and binary128. NULL-like (invalid) when it cannot be formed.
+BUSTER_C_INTERNAL IrValueId c_ir_float_sign_field_place(CIntegerIrBuilder* builder, IrValueId slot, IrTypeId type_id, IrTypeId bits_type,
+                                                          u32 bit_width, bool binary128, IrSourceRange source)
 {
-    IrType* type = ir_type_from_id(&builder->program->types, type_id);
-    bool binary128 = c_ir_type_is_binary128_runtime(builder, type_id);
-    if (!type || type->kind != IR_TYPE_FLOAT || (type->bit_width != 32 && type->bit_width != 64 && type->bit_width != 80 && !binary128))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    u32 bit_width = type->bit_width;
-    CTypeKind bits_kind = bit_width == 32 ? C_TYPE_UNSIGNED_INT : bit_width == 80 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_LONG_LONG;
-    IrTypeId bits_type = c_ir_builder_scalar_type(builder, bits_kind);
-    IrValueId slot = c_ir_emit_temporary(builder, type_id, source);
-    if (bits_type.value == IR_ID_UNDERLYING_INVALID || slot.value == IR_ID_UNDERLYING_INVALID ||
-        !c_ir_emit_store_place(builder, slot, type_id, value, source))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
+    IrValueId result = IR_VALUE_ID_INVALID;
     IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
     IrValueId address = c_ir_emit_address_of_place(builder, slot, type_id, source);
     IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
                                  ? c_ir_emit_cast(builder, address, bits_pointer_type, source)
                                  : IR_VALUE_ID_INVALID;
-    IrValueId bits_place = IR_VALUE_ID_INVALID;
     if (bits_address.value != IR_ID_UNDERLYING_INVALID)
     {
         if (bit_width > 64)
@@ -20679,30 +20679,77 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder
             // Byte eight of the sixteen-byte slot: the fifth x87 halfword,
             // which holds its sign and exponent, or the binary128 high limb.
             IrValueId halfword_index = c_ir_emit_integer_value_typed(builder, binary128 ? 1 : 4, false, (CToken){0}, builder->s32_type);
-            bits_place = halfword_index.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, bits_address, halfword_index, source)
-                                                                         : IR_VALUE_ID_INVALID;
+            result = halfword_index.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, bits_address, halfword_index, source)
+                                                                      : IR_VALUE_ID_INVALID;
         }
         else
         {
-            bits_place = c_ir_emit_dereference_place(builder, bits_address, source);
+            result = c_ir_emit_dereference_place(builder, bits_address, source);
         }
     }
-    IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
-    IrValueId mask = c_ir_emit_integer_value_typed(builder,
-                                                   bit_width == 32   ? UINT64_C(0x7fffffff)
-                                                   : bit_width == 80 ? UINT64_C(0x7fff)
-                                                                     : UINT64_C(0x7fffffffffffffff),
-                                                   false, (CToken){0}, bits_type);
-    if (bits.value == IR_ID_UNDERLYING_INVALID || mask.value == IR_ID_UNDERLYING_INVALID)
+    return result;
+}
+
+// |value|, or |value| with the sign of `sign_source` when that is valid
+// (copysign). Both operands are already of `type_id`. The sign field is
+// rewritten in the stored image, so a NaN keeps its payload and quiet bit and
+// no libm or compiler-runtime call is needed for any float width.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_with_sign(CIntegerIrBuilder* builder, IrValueId value, IrValueId sign_source, IrTypeId type_id, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrType* type = ir_type_from_id(&builder->program->types, type_id);
+    bool binary128 = c_ir_type_is_binary128_runtime(builder, type_id);
+    if (type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64 || type->bit_width == 80 || binary128))
     {
-        return IR_VALUE_ID_INVALID;
+        u32 bit_width = type->bit_width;
+        CTypeKind bits_kind = bit_width == 32 ? C_TYPE_UNSIGNED_INT : bit_width == 80 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_LONG_LONG;
+        IrTypeId bits_type = c_ir_builder_scalar_type(builder, bits_kind);
+        IrValueId slot = c_ir_emit_temporary(builder, type_id, source);
+        IrValueId sign_slot = sign_source.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_temporary(builder, type_id, source) : IR_VALUE_ID_INVALID;
+        bool stored = bits_type.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID &&
+                      c_ir_emit_store_place(builder, slot, type_id, value, source);
+        if (stored && sign_source.value != IR_ID_UNDERLYING_INVALID)
+        {
+            stored = sign_slot.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, sign_slot, type_id, sign_source, source);
+        }
+        IrValueId bits_place = stored ? c_ir_float_sign_field_place(builder, slot, type_id, bits_type, bit_width, binary128, source) : IR_VALUE_ID_INVALID;
+        IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
+        IrValueId mask = c_ir_emit_integer_value_typed(builder,
+                                                       bit_width == 32   ? UINT64_C(0x7fffffff)
+                                                       : bit_width == 80 ? UINT64_C(0x7fff)
+                                                                         : UINT64_C(0x7fffffffffffffff),
+                                                       false, (CToken){0}, bits_type);
+        IrValueId cleared = bits.value != IR_ID_UNDERLYING_INVALID && mask.value != IR_ID_UNDERLYING_INVALID
+                                ? c_ir_emit_binary_value(builder, bits, mask, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source)
+                                : IR_VALUE_ID_INVALID;
+        IrValueId merged = cleared;
+        if (cleared.value != IR_ID_UNDERLYING_INVALID && sign_source.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId sign_place = c_ir_float_sign_field_place(builder, sign_slot, type_id, bits_type, bit_width, binary128, source);
+            IrValueId sign_bits = sign_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, sign_place, bits_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId sign_mask = c_ir_emit_integer_value_typed(builder,
+                                                                bit_width == 32   ? UINT64_C(0x80000000)
+                                                                : bit_width == 80 ? UINT64_C(0x8000)
+                                                                                  : UINT64_C(0x8000000000000000),
+                                                                false, (CToken){0}, bits_type);
+            IrValueId sign_only = sign_bits.value != IR_ID_UNDERLYING_INVALID && sign_mask.value != IR_ID_UNDERLYING_INVALID
+                                      ? c_ir_emit_binary_value(builder, sign_bits, sign_mask, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source)
+                                      : IR_VALUE_ID_INVALID;
+            merged = sign_only.value != IR_ID_UNDERLYING_INVALID
+                         ? c_ir_emit_binary_value(builder, cleared, sign_only, bits_type, IR_BINARY_INTEGER_BITWISE_OR, source)
+                         : IR_VALUE_ID_INVALID;
+        }
+        if (merged.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, bits_place, bits_type, merged, source))
+        {
+            result = c_ir_emit_load_place(builder, slot, type_id, source);
+        }
     }
-    IrValueId cleared = c_ir_emit_binary_value(builder, bits, mask, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source);
-    if (cleared.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store_place(builder, bits_place, bits_type, cleared, source))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    return c_ir_emit_load_place(builder, slot, type_id, source);
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type_id, IrSourceRange source)
+{
+    return c_ir_emit_float_with_sign(builder, value, IR_VALUE_ID_INVALID, type_id, source);
 }
 
 // One arm of Smith's algorithm, with `dominant` the denominator half of
@@ -22967,7 +23014,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                                           builtin_kind == C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS) ? IR_UNARY_INTEGER_COUNT_LEADING_ZEROS
                                          : (builtin_kind == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ||
                                             builtin_kind == C_SYMBOL_BUILTIN_FIND_FIRST_SET) ? IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS
-                                         : builtin_kind == C_SYMBOL_BUILTIN_POPULATION_COUNT       ? IR_UNARY_INTEGER_POPULATION_COUNT
+                                         : (builtin_kind == C_SYMBOL_BUILTIN_POPULATION_COUNT ||
+                                            builtin_kind == C_SYMBOL_BUILTIN_PARITY)               ? IR_UNARY_INTEGER_POPULATION_COUNT
+                                         // Byte swap has no canonical unary operation; the marker only routes the call
+                                         // through the unary-shaped path, which dispatches on the builtin kind first.
+                                         : builtin_kind == C_SYMBOL_BUILTIN_BYTE_SWAP              ? IR_UNARY_INTEGER_BITWISE_NOT
                                                                                                   : IR_UNARY_COUNT;
         CTypeId indirect_function_type = C_TYPE_ID_INVALID;
         if (token.kind == C_TOKEN_IDENTIFIER)
@@ -23337,6 +23388,40 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
 // call site. The layout matches what the `vector_size` attribute produces for
 // the same spelling, so the two are the same IR type and not two that happen to
 // agree.
+// __builtin_bswap16/32/64 on an unsigned operand of exactly the swap width.
+// Each stage exchanges adjacent groups of `shift` bits (8, 16, 32 while
+// shift < width) with two masked shifts, so a 16-bit swap is one stage and a
+// 64-bit swap three. The masks keep every shifted value inside the operand
+// width, so no narrow-type wraparound is relied on.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_byte_swap(CIntegerIrBuilder* builder, IrValueId operand, IrTypeId type, CToken token, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrType* integer = ir_type_from_id(&builder->program->types, type);
+    if (integer && integer->kind == IR_TYPE_INTEGER && (integer->bit_width == 16 || integer->bit_width == 32 || integer->bit_width == 64))
+    {
+        u32 width = integer->bit_width;
+        IrValueId value = operand;
+        for (u32 shift = 8; shift < width && value.value != IR_ID_UNDERLYING_INVALID; shift *= 2)
+        {
+            u64 pattern = 0;
+            for (u32 bit = 0; bit < width; bit += 2 * shift)
+            {
+                pattern |= ((UINT64_C(1) << shift) - 1) << bit;
+            }
+            IrValueId amount = c_ir_emit_integer_value_typed(builder, shift, false, token, type);
+            IrValueId mask = c_ir_emit_integer_value_typed(builder, pattern, false, token, type);
+            IrValueId low = amount.value != IR_ID_UNDERLYING_INVALID && mask.value != IR_ID_UNDERLYING_INVALID
+                                ? c_ir_emit_binary_value(builder, value, mask, type, IR_BINARY_INTEGER_BITWISE_AND, source) : IR_VALUE_ID_INVALID;
+            IrValueId up = low.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, low, amount, type, IR_BINARY_SHIFT_LEFT, source) : IR_VALUE_ID_INVALID;
+            IrValueId down = up.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, value, amount, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source) : IR_VALUE_ID_INVALID;
+            IrValueId high = down.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, down, mask, type, IR_BINARY_INTEGER_BITWISE_AND, source) : IR_VALUE_ID_INVALID;
+            value = high.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, up, high, type, IR_BINARY_INTEGER_BITWISE_OR, source) : IR_VALUE_ID_INVALID;
+        }
+        result = value;
+    }
+    return result;
+}
+
 // __builtin_popcount is one instruction where the target has POPCNT and the
 // classic SWAR sequence where it does not, decided here rather than in the
 // backends: an IR expansion is the same handful of ordinary instructions every
@@ -25051,6 +25136,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, token);
             CTypeKind parameter_kind = c_semantic_integer_count_parameter_kind(builtin,
                 c_token_spelling(builder->preprocess.spelling_base, token));
+            CTypeKind swap_kind = c_semantic_byte_swap_kind(builtin, c_token_spelling(builder->preprocess.spelling_base, token));
             bool find_first_set = builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
             IrTypeId original_type = builder->function->values[operand.value].canonical_type;
             IrType* original = ir_type_from_id(&builder->program->types, original_type);
@@ -25058,6 +25144,14 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                               original->kind != IR_TYPE_FLOAT && !original->is_complex))
             {
                 return false;
+            }
+            if (swap_kind != C_TYPE_INVALID)
+            {
+                operand = c_ir_emit_cast(builder, operand, c_ir_builder_scalar_type(builder, swap_kind), c_ir_token_source_range(builder, token));
+                if (operand.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
             }
             if (parameter_kind != C_TYPE_INVALID)
             {
@@ -25082,9 +25176,24 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 result = c_ir_emit_find_first_set(builder, operand, token, instruction_source);
             }
+            else if (swap_kind != C_TYPE_INVALID)
+            {
+                result = c_ir_emit_byte_swap(builder, operand, type, token, instruction_source);
+                if (result.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+            }
             else if (selected->builtin_unary == IR_UNARY_INTEGER_POPULATION_COUNT)
             {
                 result = c_ir_emit_population_count(builder, operand, type, token, instruction_source);
+                if (result.value != IR_ID_UNDERLYING_INVALID && builtin == C_SYMBOL_BUILTIN_PARITY)
+                {
+                    // Parity is the population count's low bit.
+                    IrValueId one = c_ir_emit_integer_value_typed(builder, 1, false, token, type);
+                    result = one.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, result, one, type, IR_BINARY_INTEGER_BITWISE_AND, instruction_source)
+                                                                   : IR_VALUE_ID_INVALID;
+                }
                 if (result.value == IR_ID_UNDERLYING_INVALID)
                 {
                     return false;
@@ -31525,6 +31634,23 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
             return false;
         }
         *type_out = builder->s32_type;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+    }
+
+    // bswap16/32/64 answer their fixed unsigned operand type.
+    CTypeKind byte_swap_kind = c_semantic_byte_swap_kind(c_ir_token_builtin_kind(builder, token), name);
+    if (byte_swap_kind != C_TYPE_INVALID)
+    {
+        if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            return false;
+        }
+        u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close >= end)
+        {
+            return false;
+        }
+        *type_out = c_ir_builder_scalar_type(builder, byte_swap_kind);
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 

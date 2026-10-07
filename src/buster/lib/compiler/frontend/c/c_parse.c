@@ -5636,12 +5636,16 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
             {
                 String8 name = c_token_spelling(preprocess.spelling_base, first);
                 CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
+                if (builtin == C_SYMBOL_BUILTIN_BYTE_SWAP)
+                {
+                    return c_parse_expression_scalar_type(result, c_semantic_byte_swap_kind(builtin, name));
+                }
                 if (builtin == C_SYMBOL_BUILTIN_MATH || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET ||
                     c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID)
                 {
                     CTypeKind kind = builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
                                          ? C_TYPE_INT : name.length && name.pointer[name.length - 1] == 'f' && !string_equal(name, S8("__builtin_inf"))
-                                         ? C_TYPE_FLOAT : name.length && name.pointer[name.length - 1] == 'l'
+                                         ? C_TYPE_FLOAT : name.length && c_semantic_math_link_is_long_double(string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name)
                                          ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
                     return c_parse_expression_scalar_type(result, kind);
                 }
@@ -29580,7 +29584,11 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
         case C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS:
         case C_SYMBOL_BUILTIN_FIND_FIRST_SET:
-        case C_SYMBOL_BUILTIN_POPULATION_COUNT: minimum = maximum = 1; break;
+        case C_SYMBOL_BUILTIN_POPULATION_COUNT:
+        case C_SYMBOL_BUILTIN_PARITY:
+        case C_SYMBOL_BUILTIN_BYTE_SWAP: minimum = maximum = 1; break;
+        case C_SYMBOL_BUILTIN_MATH: minimum = string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : 0;
+                                    maximum = string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : UINT32_MAX; break;
         case C_SYMBOL_BUILTIN_DEBUGTRAP:
         case C_SYMBOL_BUILTIN_SPIN_PAUSE:
         case C_SYMBOL_BUILTIN_UNREACHABLE: maximum = 0; break;
@@ -29627,7 +29635,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                 location = starts[0];
             }
         }
-        if (c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID && !message.length)
+        if ((c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID || builtin == C_SYMBOL_BUILTIN_BYTE_SWAP) && !message.length)
         {
             CTypeId type = C_TYPE_ID_INVALID;
             bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,

@@ -4328,6 +4328,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_fabsf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fabs"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fabsl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_copysignf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_copysign"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_copysignl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fmaxf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fmax"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fmaxl"), C_SYMBOL_BUILTIN_MATH },
@@ -4416,6 +4419,14 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
+    // parity is the population count's low bit; bswap reverses the bytes of
+    // its fixed-width unsigned operand and result.
+    { S8_INITIALIZER("__builtin_parity"), C_SYMBOL_BUILTIN_PARITY },
+    { S8_INITIALIZER("__builtin_parityl"), C_SYMBOL_BUILTIN_PARITY },
+    { S8_INITIALIZER("__builtin_parityll"), C_SYMBOL_BUILTIN_PARITY },
+    { S8_INITIALIZER("__builtin_bswap16"), C_SYMBOL_BUILTIN_BYTE_SWAP },
+    { S8_INITIALIZER("__builtin_bswap32"), C_SYMBOL_BUILTIN_BYTE_SWAP },
+    { S8_INITIALIZER("__builtin_bswap64"), C_SYMBOL_BUILTIN_BYTE_SWAP },
     // The target-fixed 512-bit vocabulary. These names are a buster extension
     // and exist so `<buster/lib/simd.h>` can write one kernel that the host
     // compilers and the self-hosted stages both compile; see the SIMD section
@@ -4474,7 +4485,7 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
 {
     CTypeKind result = C_TYPE_INVALID;
     if (builtin == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS || builtin == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ||
-        builtin == C_SYMBOL_BUILTIN_POPULATION_COUNT)
+        builtin == C_SYMBOL_BUILTIN_POPULATION_COUNT || builtin == C_SYMBOL_BUILTIN_PARITY)
     {
         result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_UNSIGNED_LONG_LONG :
                  string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
@@ -4485,6 +4496,28 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
                  string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_LONG : C_TYPE_INT;
     }
     return result;
+}
+
+// The fixed unsigned type of a __builtin_bswap16/32/64 operand and result, or
+// C_TYPE_INVALID for any other builtin. The 64-bit form is unsigned long long
+// on every data model.
+CTypeKind c_semantic_byte_swap_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_BYTE_SWAP)
+    {
+        result = string_ends_with_sequence(spelling, S8("64")) ? C_TYPE_UNSIGNED_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("32")) ? C_TYPE_UNSIGNED_INT : C_TYPE_UNSIGNED_SHORT;
+    }
+    return result;
+}
+
+// The math builtins whose result is long double, by link name. A bare `l`
+// suffix test is wrong: ceil and huge_val end in `l` but return double.
+bool c_semantic_math_link_is_long_double(String8 link_name)
+{
+    return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
+           string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl"));
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -7785,6 +7818,11 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_umulll_overflow",
         "__builtin_popcount",      "__builtin_popcountl",
         "__builtin_popcountll",
+        "__builtin_parity",        "__builtin_parityl",
+        "__builtin_parityll",      "__builtin_bswap16",
+        "__builtin_bswap32",       "__builtin_bswap64",
+        "__builtin_copysign",      "__builtin_copysignf",
+        "__builtin_copysignl",
         "__builtin_assume_aligned", "__builtin_choose_expr",
         "__builtin_constant_p",    "__builtin_object_size",
         "__builtin_expect",        "__builtin_expect_with_probability",
