@@ -6,8 +6,18 @@ if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC AND NOT CMAKE_SYSTEM_NAME STREQUAL
     elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
         list(APPEND BUSTER_RENDERING_TEXTURE_FORMAT_MODULES aarch64)
     endif()
+    # This standalone executable compiles the test and modules separately, so
+    # its declarations must remain external in optimized Clang matrix builds.
+    set(BUSTER_RENDERING_TEXTURE_FORMAT_UNITY_BUILD_DEFINE "${BUSTER_UNITY_BUILD_DEFINE}")
+    set(BUSTER_RENDERING_TEXTURE_FORMAT_NON_UNITY_SOURCE_CONDITION "${BUSTER_NON_UNITY_SOURCE_CONDITION}")
+    set(BUSTER_UNITY_BUILD_DEFINE 0)
+    set(BUSTER_NON_UNITY_SOURCE_CONDITION 1)
     executable_add(rendering_texture_format_component_tests OFF src/buster/tests/rendering_texture_format_component_test.c
         MODULES ${BUSTER_RENDERING_TEXTURE_FORMAT_MODULES} rendering)
+    set(BUSTER_UNITY_BUILD_DEFINE "${BUSTER_RENDERING_TEXTURE_FORMAT_UNITY_BUILD_DEFINE}")
+    set(BUSTER_NON_UNITY_SOURCE_CONDITION "${BUSTER_RENDERING_TEXTURE_FORMAT_NON_UNITY_SOURCE_CONDITION}")
+    unset(BUSTER_RENDERING_TEXTURE_FORMAT_UNITY_BUILD_DEFINE)
+    unset(BUSTER_RENDERING_TEXTURE_FORMAT_NON_UNITY_SOURCE_CONDITION)
     if (UNIX)
         target_link_libraries(rendering_texture_format_component_tests PRIVATE m)
     endif()
