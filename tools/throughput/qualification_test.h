@@ -383,7 +383,7 @@ static void test_host_qualification(char const* executable, char const* root)
         TpJob job = {0};
         strcpy(job.workload.name, "fixture");
         memset(job.workload.hash, '0', 64);
-        job.mode = 2;
+        job.mode = TP_FAST_MODE;
         CHECK(tp_host_capture(&host, cpu, "fixture-not-hardware-acceptance", path) == 0);
         config.host = &host;
         config.cpu = cpu;

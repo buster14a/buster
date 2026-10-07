@@ -12,6 +12,9 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 
 #if BUSTER_INCLUDE_TESTS
+// Calling-thread requested association-list bytes; excludes other type-machine
+// scratch and never includes the small local list.
+BUSTER_F_DECL u64 c_test_generic_association_scratch_bytes(void);
 BUSTER_F_DECL CTypeId c_test_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
@@ -64,8 +67,16 @@ struct CTestMemberAlignmentQuery
 BUSTER_F_DECL CTestMemberAlignmentQuery c_test_member_alignment_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                               CScopeId scope, u32 start, u32 end);
 
+// Member rows c_parse_member_type examined on this thread, and the name indexes
+// it built for wide aggregates.
+BUSTER_F_DECL void c_test_member_lookup_counts(u64* visits, u64* builds);
+
 // Promoted-member searches on this thread, and how many needed a per-type table.
 BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
+
+// Member rows the initializer slot helpers have read on this thread, by their
+// reference walks and by the per-walk slot tables.
+BUSTER_F_DECL void c_test_initializer_slot_member_visits(u64* visits);
 
 BUSTER_F_DECL u32 c_test_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol);
 BUSTER_F_DECL void c_test_parse_binding_unwind(CParseResult* result, u32 mark);
@@ -97,6 +108,8 @@ enum
     C_TEST_PARSE_NESTING_CALL_KEYWORDS_SKIPPED,
     C_TEST_PARSE_NESTING_CALL_LOOKUPS,
     C_TEST_PARSE_NESTING_BODY_SCOPE_STORES,
+    C_TEST_PARSE_NESTING_SCOPE_LEVELS,
+    C_TEST_PARSE_NESTING_STATEMENT_END_STEPS,
     C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS,
     C_TEST_PARSE_NESTING_SLOTS,
 };
@@ -127,6 +140,8 @@ struct CTestTypeConstantQuery
 };
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);
+BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant_sparse(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                                       CScopeId scope, u32 start, u32 end);
 
 // One layout query that reaches the solve, as a machineless caller without a
 // cache asks it: through the demand-driven agenda when `agenda_allowed` (which

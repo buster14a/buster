@@ -22,6 +22,7 @@ permissions:
 concurrency:
   group: native-retirement-catch-up
   cancel-in-progress: false
+  queue: max
 
 jobs:
   open:

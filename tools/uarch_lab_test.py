@@ -237,6 +237,25 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(lab.measured_input(lab.parse_cc_metrics(CC_METRICS.replace("measured=1", "measured=0"))))
         self.assertIsNone(lab.measured_input(lab.parse_cc_metrics("")))
 
+    def test_missing_phase_telemetry_is_unavailable(self):
+        def record(**fields):
+            return dict({"measured": 1, "start_ns": 1}, **fields)
+        # No total_ns: not selected (no KeyError later); the next valid record is.
+        self.assertIsNone(lab.measured_input({"inputs": [record(parse_ns=2)]}))
+        self.assertIsNone(lab.measured_input({"inputs": [record(total_ns="7")]}))
+        self.assertIsNone(lab.measured_input({"inputs": [record(total_ns=True)]}))
+        self.assertIsNone(lab.measured_input({"inputs": [record(total_ns=-1)]}))
+        good = record(total_ns=10000000, parse_ns=2000000, emit_ns=0)
+        self.assertIs(lab.measured_input({"inputs": [record(parse_ns=2), good]}), good)
+        # Absent phases are None; a declared zero is a real zero.
+        self.assertEqual(lab.phase_ns_series([good], "emit"), [0])
+        self.assertIsNone(lab.phase_ns_series([good], "analysis"))
+        # Partially populated series are incomplete, not padded or shrunk.
+        self.assertIsNone(lab.phase_ns_series([good, record(total_ns=1, parse_ns=3)], "emit"))
+        self.assertIsNone(lab.phase_ns_series([good, record(total_ns=1, parse_ns="x")], "parse"))
+        self.assertEqual(lab.phase_ns_series([good, record(total_ns=1, parse_ns=3)], "parse"), [2000000, 3])
+        self.assertIsNone(lab.phase_ns_series([], "parse"))
+
     def test_report_self_strips_ipc_columns(self):
         sections = lab.parse_report(REPORT_SELF)
         self.assertEqual(list(sections), ["cycles:u"])
@@ -1907,6 +1926,27 @@ class RetirementLimitTests(unittest.TestCase):
         summary, _ = self.directory(self.all_cells(), {"quality": "failed"})
         self.assertEqual(summary["verdict"]["outcome"], "INCONCLUSIVE")
         self.assertIn("quality sub-run failed (stopped)", summary["verdict"]["inconclusive"])
+
+
+class RetirementCompilerTests(unittest.TestCase):
+    def test_current_compiler_rejects_historical_execution_before_cells(self):
+        arguments = lab.argparse.Namespace(baseline="/x/baseline", candidate="/x/candidate", repo_root=".")
+        rejected = lab.subprocess.CompletedProcess([], 1, b"", b"error: unsupported register allocator: none\n")
+        with mock.patch.object(lab.subprocess, "run", return_value=rejected) as run:
+            with self.assertRaisesRegex(SystemExit, "archived compilers supporting none and mir-stack"):
+                lab.retirement_legacy_compilers_available(arguments)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("-fsyntax-only", run.call_args.args[0])
+        self.assertIn("-fregister-allocator=none", run.call_args.args[0])
+
+    def test_generic_failure_keeps_historical_failure_controls(self):
+        arguments = lab.argparse.Namespace(baseline="/x/baseline", candidate="/x/candidate", repo_root=".")
+        failed = lab.subprocess.CompletedProcess([], 1, b"", b"deliberate compiler failure\n")
+        with mock.patch.object(lab.subprocess, "run", return_value=failed) as run:
+            lab.retirement_legacy_compilers_available(arguments)
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual([call.args[0][3] for call in run.call_args_list],
+                         ["-fregister-allocator=none", "-fregister-allocator=mir-stack"] * 2)
 
 
 def copied_interpreter_environment(directory):

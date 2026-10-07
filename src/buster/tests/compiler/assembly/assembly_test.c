@@ -2658,6 +2658,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArgu
         {S8_INITIALIZER(".data.table"), ASSEMBLY_UNIT_SECTION_DATA},
         {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO},
         {S8_INITIALIZER(".bss.value"), ASSEMBLY_UNIT_SECTION_ZERO},
+        {S8_INITIALIZER(".init_array"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER(".init_array.00101"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER(".fini_array"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY},
+        {S8_INITIALIZER(".tdata"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
+        {S8_INITIALIZER(".tbss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO},
         {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO},
         {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV},
         {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE},
@@ -2681,13 +2686,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArgu
             {
                 AssemblyUnitSection section = unit.sections[0];
                 BUSTER_TEST(arguments, string_equal(section.name, rows[row].name) && section.kind == rows[row].kind &&
-                                       (section.kind == ASSEMBLY_UNIT_SECTION_ZERO ? section.zero_size == 1 : section.data.length == 1));
+                                       (section.kind == ASSEMBLY_UNIT_SECTION_ZERO || section.kind == ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO
+                                            ? section.zero_size == 1
+                                            : section.data.length == 1));
             }
         }
         String8 rejected[] = {
             S8(".section .textual_rodata\n"), S8(".section .initdata\n"), S8(".section .datafile\n"),
-            S8(".section .rodatafile\n"), S8(".section .bssfile\n"), S8(".section .init_array\n"),
-            S8(".section .fini_array\n"), S8(".section .debug_info_extra\n"), S8(".section .mysec\n"),
+            S8(".section .rodatafile\n"), S8(".section .bssfile\n"), S8(".section .init_arrayx\n"),
+            S8(".section .fini_arrays\n"), S8(".section .debug_info_extra\n"), S8(".section .tdatax\n"), S8(".section .mysec\n"),
         };
         for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
         {
@@ -2706,6 +2713,126 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArgu
         {
             BUSTER_TEST(arguments, explicit_flags.sections[0].kind == ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA &&
                                    explicit_flags.sections[0].data.length == 1 && explicit_flags.sections[0].data.pointer[0] == 42);
+        }
+    }
+    return result;
+}
+
+// `.section NAME,"flags",@type` honours the GNU letters and types the object
+// model can represent and diagnoses the rest, on both architectures (#1279).
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_section_flags_and_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    static const struct
+    {
+        String8 source;
+        AssemblyUnitSectionKind kind;
+    } accepted[] = {
+        {S8_INITIALIZER(".section .init_array,\"aw\",@init_array\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER(".section .init_array.00101,\"aw\",@init_array\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER(".section .myinit,\"aw\",@init_array\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER(".section .preinit_array,\"aw\",@preinit_array\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER(".section .fini_array,\"aw\",@fini_array\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY},
+        {S8_INITIALIZER(".section .tdata,\"awT\",@progbits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
+        {S8_INITIALIZER(".section .mytls,\"awT\"\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
+        {S8_INITIALIZER(".section .tbss,\"awT\",@nobits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO},
+        {S8_INITIALIZER(".section .note.gnu.property,\"a\",@note\n.p2align 3\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
+        {S8_INITIALIZER(".section .note.gnu.property,\"a\",%note\n.p2align 3\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
+        {S8_INITIALIZER(".section .rodata.str1.1,\"aMS\",@progbits,1\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
+        {S8_INITIALIZER(".section .mydata,\"aw\",@progbits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_DATA},
+        {S8_INITIALIZER(".section .mybss,\"aw\",@nobits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_ZERO},
+    };
+    static const String8 refused[] = {
+        S8_INITIALIZER(".section .note.foo,\"a\",@unwind\n"),
+        S8_INITIALIZER(".section .foo,\"ae\"\n"),
+        S8_INITIALIZER(".section .foo,\"aG\",@progbits\n"),
+        S8_INITIALIZER(".section .foo,\"awx\",@init_array\n"),
+        S8_INITIALIZER(".section .foo,\"awT\",@init_array\n"),
+        S8_INITIALIZER(".section .foo,\"aw\",@preinit_array\n"),
+        S8_INITIALIZER(".section .foo,\"axT\"\n"),
+        S8_INITIALIZER(".section .foo,\"aw\",@mystery\n"),
+        S8_INITIALIZER(".section .foo,\"aw\",@init_array\n.section .foo,\"aw\",@progbits\n"),
+        S8_INITIALIZER(".section .foo,\"awT\"\n.pushsection .foo,\"aw\"\n"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(accepted); row += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, accepted[row].source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.section_count == 1);
+            if (!unit.diagnostic_count && unit.section_count == 1)
+            {
+                AssemblyUnitSection section = unit.sections[0];
+                BUSTER_TEST(arguments, section.kind == accepted[row].kind &&
+                                       (section.kind == ASSEMBLY_UNIT_SECTION_ZERO || section.kind == ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO
+                                            ? section.zero_size == 8 && section.data.length == 0
+                                            : section.data.length == 8));
+            }
+        }
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(refused); row += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, refused[row], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count >= 1);
+            if (unit.diagnostic_count >= 1)
+            {
+                BUSTER_TEST(arguments, unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                       string_first_sequence(unit.diagnostics[0].message, S8("section")) < unit.diagnostics[0].message.length);
+            }
+        }
+        // A TLS label is typed through its section, and `.tbss` takes no bytes.
+        AssemblyUnitResult tls = assembly_unit_encode(arguments->arena, S8(".section .tdata,\"awT\",@progbits\ntv: .long 5\n"),
+                                                      (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, tls.diagnostic_count == 0 && tls.symbol_count == 1 && tls.symbols[0].defined &&
+                               tls.sections[tls.symbols[0].section].kind == ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_section_stack(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        // The pushed section takes bytes, and the pop resumes the earlier one;
+        // a bare name and an explicit flags string both push.
+        AssemblyUnitResult nested = assembly_unit_encode(arguments->arena,
+            S8(".data\n.byte 1\n.pushsection .rodata\n.byte 2\n.pushsection .mysec,\"a\",@progbits\n.byte 3\n.popsection\n.byte 4\n"
+               ".popsection\n.byte 5\n"),
+            (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, nested.diagnostic_count == 0 && nested.section_count == 3);
+        if (!nested.diagnostic_count && nested.section_count == 3)
+        {
+            BUSTER_TEST(arguments, string_equal(nested.sections[0].name, S8(".data")) && nested.sections[0].data.length == 2 &&
+                                   nested.sections[0].data.pointer[0] == 1 && nested.sections[0].data.pointer[1] == 5);
+            BUSTER_TEST(arguments, string_equal(nested.sections[1].name, S8(".rodata")) && nested.sections[1].data.length == 2 &&
+                                   nested.sections[1].data.pointer[0] == 2 && nested.sections[1].data.pointer[1] == 4);
+            BUSTER_TEST(arguments, string_equal(nested.sections[2].name, S8(".mysec")) && nested.sections[2].data.length == 1 &&
+                                   nested.sections[2].data.pointer[0] == 3);
+        }
+        AssemblyUnitResult previous = assembly_unit_encode(arguments->arena,
+            S8(".data\n.byte 1\n.section .rodata\n.byte 2\n.previous\n.byte 3\n.previous\n.byte 4\n"), (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, previous.diagnostic_count == 0 && previous.section_count == 2);
+        if (!previous.diagnostic_count && previous.section_count == 2)
+        {
+            BUSTER_TEST(arguments, previous.sections[0].data.length == 2 && previous.sections[0].data.pointer[1] == 3 &&
+                                   previous.sections[1].data.length == 2 && previous.sections[1].data.pointer[1] == 4);
+        }
+        String8 rejected[] = {
+            S8(".popsection\n"), S8(".previous\n"), S8(".data\n.popsection\n"), S8(".pushsection\n"), S8(".pushsection .mysec\n"),
+            S8(".data\n.popsection extra\n"),
+        };
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[row], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count >= 1);
         }
     }
     return result;
@@ -3380,10 +3507,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_gnu_compatible_spellings(UnitTe
             arguments->show(arguments, S8("X86_GNU_SPELLING_REGRESSION case={u32} input={S8}"), index, fixture->source);
         }
     }
-    // A byte literal out of range names the immediate, not a disabled APX twin.
-    AssemblyEncodeResult wide = assembly_encode(arguments->arena, S8("and al, 0x100\n"),
+    // A matching operand shape with a wide literal names the immediate rather
+    // than a disabled APX twin or an unrelated metadata form's operands.
+    struct AssemblyRangeCase
+    {
+        bool intel;
+        String8 source;
+    } const range_cases[] = {
+        {true, S8("and al, 0x100\n")},
+        {true, S8("mov al, -129\n")},
+        {false, S8("andb $256, %cl\n")},
+        {false, S8("movb $-129, (%rdi)\n")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(range_cases); index += 1)
+    {
+        struct AssemblyRangeCase const* fixture = range_cases + index;
+        AssemblyEncodeResult wide = assembly_encode(arguments->arena, fixture->source,
+            (AssemblyEncodeOptions){.target = target, .syntax = fixture->intel ? ASSEMBLY_SYNTAX_INTEL : ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, wide.diagnostic_count == 1 && wide.bytes.length == 0 &&
+                               wide.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION &&
+                               string_equal(wide.diagnostics[0].message, S8("x86 immediate is out of range")));
+    }
+    AssemblyEncodeResult mismatched = assembly_encode(arguments->arena, S8("and al, xmm0\n"),
         (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
-    BUSTER_TEST(arguments, wide.diagnostic_count == 1 && wide.diagnostics[0].kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    BUSTER_TEST(arguments, mismatched.diagnostic_count == 1 && mismatched.bytes.length == 0 &&
+                           mismatched.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     return result;
 }
 
@@ -4334,24 +4482,185 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_adr_and_backward_displacem
         AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = aarch64});
         BUSTER_TEST_RAW(arguments, unit.diagnostic_count != 0, source);
     }
-    // `adrp` is a different relocation family and stays as it was.
-    AssemblyUnitResult adrp = assembly_unit_encode(arguments->arena, S8(".text\nadrp x0, ext\nret\n"), (AssemblyEncodeOptions){.target = aarch64});
-    BUSTER_TEST(arguments, adrp.diagnostic_count != 0);
+    return result;
+}
+
+// Symbolic ADRP and low-12 operands (#2933). Words and relocation meaning are
+// llvm-mc's for `aarch64-linux-gnu`: every reference keeps its relocation, the
+// patched field stays zero, and an access-size-scaled LDST kind follows the
+// encoded load/store (byte 0 .. quad 4). A symbol defined in the unit is still
+// retained: final section placement decides the pages.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct AssemblyPageCase AssemblyPageCase;
+    struct AssemblyPageCase
+    {
+        String8 line;
+        u32 word;
+        AssemblyRelocationKind kind;
+        s64 addend;
+        String8 symbol;
+    };
+    Target aarch64 = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    AssemblyPageCase const cases[] = {
+        {S8("adrp x0, object"), 0x90000000, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0, S8("object")},
+        {S8("add x0, x0, :lo12:object"), 0x91000000, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+        {S8("ldr x1, [x0, :lo12:object]"), 0xf9400001, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("adrp x2, object+0x1008"), 0x90000002, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0x1008, S8("object")},
+        {S8("ldrb w3, [x2, :lo12:object+0x1008]"), 0x39400043, ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12, 0x1008, S8("object")},
+        {S8("ldrh w3, [x2, :lo12:object+0x1008]"), 0x79400043, ASSEMBLY_RELOCATION_AARCH64_LDST16_LO12, 0x1008, S8("object")},
+        {S8("ldr w4, [x2, :lo12:object+8]"), 0xb9400044, ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12, 8, S8("object")},
+        {S8("str q5, [x2, :lo12:object+16]"), 0x3d800045, ASSEMBLY_RELOCATION_AARCH64_LDST128_LO12, 16, S8("object")},
+        {S8("ldr d6, [x2, :lo12:object]"), 0xfd400046, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("ldr s6, [x2, :lo12:object]"), 0xbd400046, ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12, 0, S8("object")},
+        {S8("str x7, [sp, :lo12:object]"), 0xf90003e7, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("add x9, sp, :lo12:object"), 0x910003e9, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+        {S8("ldrsw x1, [x2, :lo12:object]"), 0xb9800041, ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12, 0, S8("object")},
+        {S8("ldrsb w1, [x2, :lo12:object]"), 0x39c00041, ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12, 0, S8("object")},
+        {S8("prfm pldl1keep, [x2, :lo12:object]"), 0xf9800040, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("adrp x10, \"quoted name\""), 0x9000000a, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0, S8("quoted name")},
+        {S8("add x10, x10, :lo12:\"quoted name\""), 0x9100014a, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("quoted name")},
+        {S8("adrp x11, local"), 0x9000000b, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0, S8("local")},
+        {S8("add x11, x11, :lo12:local-4"), 0x9100016b, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, -4, S8("local")},
+        {S8("adrp x12, ext-8"), 0x9000000c, ASSEMBLY_RELOCATION_AARCH64_PAGE21, -8, S8("ext")},
+        {S8("add w1, w2, :lo12:object"), 0x11000041, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+        {S8("ldr x1, [x0, #:lo12:object]"), 0xf9400001, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("add x0, x0, :LO12:object"), 0x91000000, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+    };
+    String8 source = S8(".text\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        source = string_format(arguments->arena, S8("{S8}{S8}\n"), source, cases[index].line);
+    }
+    source = string_format(arguments->arena, S8("{S8}.data\n.balign 16\nlocal: .quad 1\n"), source);
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = aarch64});
+    BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && unit.relocation_count == BUSTER_ARRAY_LENGTH(cases) && unit.section_count >= 1 &&
+        unit.sections[0].data.length == 4 * BUSTER_ARRAY_LENGTH(cases), source);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases) && !unit.diagnostic_count && unit.relocation_count == BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        u32 word = 0;
+        for (u32 byte = 0; byte < 4; byte += 1)
+        {
+            word |= (u32)unit.sections[0].data.pointer[4 * index + byte] << (byte * 8);
+        }
+        AssemblyUnitRelocation relocation = unit.relocations[index];
+        BUSTER_TEST_RAW(arguments, word == cases[index].word && relocation.kind == cases[index].kind && relocation.offset == 4 * index &&
+            relocation.addend == cases[index].addend && relocation.section == 0 && relocation.symbol < unit.symbol_count &&
+            string_equal(unit.symbols[relocation.symbol].name, cases[index].symbol), cases[index].line);
+    }
+    // A forward or backward definition in the unit's own section is not folded either.
+    String8 const defined[] = {
+        S8(".text\nadrp x0, later\nadd x0, x0, :lo12:later\nldr x1, [x0, :lo12:later]\nlater: ret\n"),
+        S8(".text\nearlier: nop\nadrp x0, earlier\nadd x0, x0, :lo12:earlier\nldr x1, [x0, :lo12:earlier]\n"),
+        S8(".text\n.globl g\ng: nop\nadrp x0, g\nadd x0, x0, :lo12:g\n"),
+        S8(".text\n.weak w\nw: nop\nadrp x0, w\nadd x0, x0, :lo12:w\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(defined); index += 1)
+    {
+        AssemblyUnitResult unit_defined = assembly_unit_encode(arguments->arena, defined[index], (AssemblyEncodeOptions){.target = aarch64});
+        bool retained = unit_defined.relocation_count >= 2 && unit_defined.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_PAGE21 &&
+                        unit_defined.relocations[1].kind == ASSEMBLY_RELOCATION_AARCH64_ADD_LO12 &&
+                        unit_defined.relocations[0].addend == 0 && unit_defined.relocations[1].addend == 0;
+        BUSTER_TEST_RAW(arguments, !unit_defined.diagnostic_count && retained, defined[index]);
+    }
+    // Mach-O spells the same operands @PAGE/@PAGEOFF, and COFF reuses :lo12:.
+    Target macho = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS};
+    Target coff = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS};
+    AssemblyUnitResult macho_unit = assembly_unit_encode(arguments->arena,
+        S8(".text\nadrp x0, sym@PAGE\nadd x0, x0, sym@PAGEOFF\nldr x1, [x0, sym@PAGEOFF]\nadrp x2, sym@PAGE+8\nldr w3, [x2, sym@PAGEOFF+8]\n"),
+        (AssemblyEncodeOptions){.target = macho});
+    AssemblyRelocationKind const macho_kinds[] = {ASSEMBLY_RELOCATION_AARCH64_PAGE21, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12,
+        ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, ASSEMBLY_RELOCATION_AARCH64_PAGE21, ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12};
+    s64 const macho_addends[] = {0, 0, 0, 8, 8};
+    BUSTER_TEST(arguments, !macho_unit.diagnostic_count && macho_unit.relocation_count == BUSTER_ARRAY_LENGTH(macho_kinds));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(macho_kinds) && macho_unit.relocation_count == BUSTER_ARRAY_LENGTH(macho_kinds); index += 1)
+    {
+        BUSTER_TEST(arguments, macho_unit.relocations[index].kind == macho_kinds[index] && macho_unit.relocations[index].addend == macho_addends[index] &&
+            macho_unit.relocations[index].offset == 4 * index);
+    }
+    AssemblyUnitResult coff_unit = assembly_unit_encode(arguments->arena,
+        S8(".text\nadrp x0, sym\nadd x0, x0, :lo12:sym\nldr x1, [x0, :lo12:sym]\n"), (AssemblyEncodeOptions){.target = coff});
+    BUSTER_TEST(arguments, !coff_unit.diagnostic_count && coff_unit.relocation_count == 3 &&
+        coff_unit.relocations[2].kind == ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12);
+    // Modifier and instruction or object-format combinations the architecture or format has no relocation for.
+    String8 const refused[] = {
+        S8("adrp x0, :lo12:sym"), S8("sub x0, x0, :lo12:sym"), S8("adds x0, x0, :lo12:sym"), S8("mov x0, :lo12:sym"),
+        S8("add x0, x0, :lo12:sym, lsl #12"), S8("add x0, :lo12:sym, x0"), S8("ldr x0, [x1, :lo12:sym]!"), S8("ldr x0, [x1], :lo12:sym"),
+        S8("ldur x0, [x1, :lo12:sym]"), S8("ldp x0, x1, [x2, :lo12:sym]"), S8("add x0, x0, :lo12:"), S8("add x0, x0, :lo12:5"),
+        S8("ldr x0, [x1, :got_lo12:sym]"), S8("adrp x0, :got:sym"), S8("add x0, x0, sym@PAGEOFF"), S8("adrp x0, sym@PAGE"),
+        S8("add x0, x0, :lo12:a, :lo12:b"), S8("ldr x0, [x1, :lo12:a+:lo12:b]"), S8("ldr x0, [:lo12:sym]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), refused[index]);
+        AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = aarch64});
+        BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
+    }
+    String8 const macho_refused[] = {
+        S8("add x0, x0, :lo12:sym"), S8("adrp x0, sym@PAGEOFF"), S8("add x0, x0, sym@PAGE"), S8("ldr x0, [x1, sym@PAGE]"),
+        S8("sub x0, x0, sym@PAGEOFF"), S8("ldr x0, [x1, sym@PAGEOFF]!"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(macho_refused); index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), macho_refused[index]);
+        AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = macho});
+        BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_stack_note(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    String8 sources[] = {
+        S8(".section .note.GNU-stack,\"\",@progbits\n.text\n"),
+        S8(".section .note.GNU-stack,\"x\",@progbits\n.text\n"),
+        S8(".section \".note.GNU-stack\",\"\",@progbits\n.text\n"),
+        S8(".section .note.GNU-stack,\"x\",%progbits\n.section .note.GNU-stack,\"\",%progbits\n.text\n"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, sources[index], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, !unit.diagnostic_count && unit.requires_executable_stack == (index == 1 || index == 3));
+            BUSTER_TEST(arguments, unit.section_count == 1 && string_equal(unit.sections[0].name, S8(".text")));
+        }
+        String8 rejected[] = {
+            S8(".section .note.GNU-stack,\"a\",@progbits\n"),
+            S8(".section .note.GNU-stack,\"\",@nobits\n"),
+            S8(".section .note.GNU-stack,\"\",@progbits\n.byte 1\n"),
+            S8(".section .note.GNU-stack,\"\",@progbits\n.zero 8\n"),
+            S8(".section \".note.GNU-stack\",\"\",@progbits\n.zero 8\n"),
+            S8(".section .note.GNU-stack,\"x\",@progbits\nret\n"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[index], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count != 0);
+        }
+    }
     return result;
 }
 
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_stack_note);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_data_widths);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_quoted_instruction_symbols);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_bare_sections);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_stack);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_flags_and_types);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_control_labels);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_current_address_branches);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_adr_and_backward_displacements);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbolic_page_relocations);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
@@ -6226,7 +6535,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_x86_integer_increment.diagnostic_count == 8);
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_integer_increment.diagnostic_count; diagnostic_index += 1)
     {
-        BUSTER_TEST(arguments, invalid_x86_integer_increment.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        AssemblyDiagnosticKind expected = diagnostic_index == 6 ? ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION
+                                                                 : ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS;
+        BUSTER_TEST(arguments, invalid_x86_integer_increment.diagnostics[diagnostic_index].kind == expected);
     }
     AssemblyEncodeResult invalid_att_integer_increment = assembly_encode(
         arguments->arena,
@@ -7493,7 +7804,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_x86_bit_atomic.diagnostic_count == 8);
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_bit_atomic.diagnostic_count; diagnostic_index += 1)
     {
-        BUSTER_TEST(arguments, invalid_x86_bit_atomic.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        AssemblyDiagnosticKind expected = diagnostic_index == 2 ? ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION
+                                                                 : ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS;
+        BUSTER_TEST(arguments, invalid_x86_bit_atomic.diagnostics[diagnostic_index].kind == expected);
     }
     AssemblyEncodeResult invalid_x86_forms =
         assembly_encode(arguments->arena, S8("mov rax, eax\nadd rax, 0x80000000\nnopq\n"),
@@ -7886,7 +8199,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_x86_scalar_integer_family.diagnostic_count == 28);
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_scalar_integer_family.diagnostic_count; diagnostic_index += 1)
     {
-        BUSTER_TEST(arguments, invalid_x86_scalar_integer_family.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        AssemblyDiagnosticKind expected = diagnostic_index == 22 || diagnostic_index == 23 ? ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION
+                                                                                           : ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS;
+        BUSTER_TEST(arguments, invalid_x86_scalar_integer_family.diagnostics[diagnostic_index].kind == expected);
     }
 
     Target aarch64_target = {
@@ -12151,10 +12466,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "add r16d, 4294967296\n"
            "{nf} add dword ptr [r16], 4294967296\n"),
         (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
-    BUSTER_TEST(arguments, invalid_apx_ndd_memory_immediate.diagnostic_count == 3);
-    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_ndd_memory_immediate.diagnostic_count; diagnostic_index += 1)
+    if (BUSTER_REQUIRE(arguments, invalid_apx_ndd_memory_immediate.diagnostic_count == 3))
     {
-        BUSTER_TEST(arguments, invalid_apx_ndd_memory_immediate.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        BUSTER_TEST(arguments, invalid_apx_ndd_memory_immediate.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               invalid_apx_ndd_memory_immediate.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION &&
+                               string_equal(invalid_apx_ndd_memory_immediate.diagnostics[1].message,
+                                            S8("x86 immediate is out of range")) &&
+                               invalid_apx_ndd_memory_immediate.diagnostics[2].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
     AssemblyEncodeResult advanced_vrndscale_signed_immediate = assembly_encode(

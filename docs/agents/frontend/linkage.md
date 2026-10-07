@@ -27,7 +27,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `object_test.c` pins both action orders, real nonzero frame offsets, saved
   registers and small/large allocations. The existing native Windows x64
   stack-walk fixture also checks fixed-frame instruction boundaries using
-  `RtlVirtualUnwind` in all four allocators, with and without debug information
+  `RtlVirtualUnwind` in FAST and QUALITY, with and without debug information
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
@@ -145,7 +145,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   the target/spelling matrix and guarded noreturn control flow;
   `compiler_driver_test_attribute_queries` reads emitted ELF/Mach-O/COFF
   symbols and initializer arrays, then runs the guarded fixture through
-  native source and object links in all four allocators (GitHub #666).
+  native source and object links in FAST and QUALITY (GitHub #666).
 - **ELF unwind records name the producing object's instruction bytes.**
   `object_append_dwarf_cfi` uses local text-section symbols plus function
   offsets on x86-64 and AArch64, with or without PIC and debug information.
@@ -154,8 +154,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `link_elf_eh_frame_header_write` refuses duplicate initial locations with
   `LINK_ERROR_RELOCATION`, including legacy function-symbol FDEs that resolve
   to the same winner; no unwinder search order chooses between their rules.
-  Registered driver tests inspect serialized relocations in all four allocator
-  modes and exercise host-compiled overrides under GNU ld, available LLD and
+  Registered driver tests inspect serialized relocations in FAST and QUALITY
+  and exercise host-compiled overrides under GNU ld, available LLD and
   Buster's linker in both input orders on native Linux x86-64 and AArch64.
   Link tests cover duplicate refusal and distinct local-anchor controls for
   both architectures on every test host.
@@ -205,6 +205,23 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   marker attribute has no argument shape to recognise it by, and `weak` and
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
+- **LLVM weak linkage distinguishes definitions from imports.**
+  `llvm_bc_linkage` emits weak definitions as wire linkage 16 (`weak`) and
+  unresolved declarations as 7 (`extern_weak`), for both data and functions.
+  Ordinary external symbols keep linkage 0; internal definitions keep 3 and
+  default visibility. Hidden external symbols retain their separate visibility
+  operand. These encodings follow LLVM 23.1.2
+  [getEncodedLinkage](https://github.com/llvm/llvm-project/blob/85ac560262434c9ccfc0c183ec22d4138ed647fb/llvm/lib/Bitcode/Writer/BitcodeWriter.cpp#L1333-L1360),
+  whose legacy weak value 1 implies old COMDAT behavior and is not emitted.
+  Registered `llvm_bitcode_test_weak_records` checks both ELF target triples,
+  deterministic bytes, definition/import and visibility controls. On Linux
+  x86-64/AArch64, `llvm_bitcode_test_weak_consumers` requires independent Clang
+  O0/O2 consumers and llvm-readelf/readelf: missing and supplied optional data
+  and functions, direct/indirect guarded use, strong overrides, repeated weak
+  definitions, ordinary/internal controls, and required-import/duplicate-strong
+  negative controls. LLVM's inspected source is
+  [Apache-2.0 WITH LLVM-exception](https://github.com/llvm/llvm-project/blob/85ac560262434c9ccfc0c183ec22d4138ed647fb/llvm/LICENSE.TXT);
+  no LLVM implementation is copied into this serializer.
 - **`__attribute__((constructor))` and `__attribute__((destructor))`** run a
   function before and after `main`. They are read out of the declaration's
   attribute list by the same `c_declaration_binding` walk as `weak` and
@@ -462,7 +479,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   whose libraries are never read, Android today, is unchanged.
 - **Linux x86-64 fixed-address imported function pointers preserve provider
   identity** (#1275). GOT address references use separate loader-filled
-  `GLOB_DAT` slots; lazy `.got.plt` slots remain call-only. Pointer-wide
+  `GLOB_DAT` slots; the PLT's `.got.plt` slots (eagerly bound, `DF_BIND_NOW`) remain call-only. Pointer-wide
   literals use `R_X86_64_64`, preserving the signed addend, including weak
   and protected providers. Read-only literal sites publish `DT_TEXTREL` so
   the loader can write them during relocation. A direct `PC32`, `PC64`, or
@@ -481,11 +498,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `compiler_driver_test_imported_function_addresses` uses an independent host
   PIC provider and preload library, typed pointer getters, static and constant
   pointer tables, protected call-only functions, weak-present/absent functions
-  and imported data. Both frontend forms and all four allocators execute PIC
+  and imported data. Both frontend forms with FAST and QUALITY execute PIC
   and non-PIC forms under lazy/eager binding and default/preloaded definitions.
   In the default Linux x86-64 code model, undefined default-visible weak
-  function addresses use GOT references in both the canonical and MIR
-  emitters; direct calls retain PLT32. The existing weak/null runtime fixture
+  function addresses use GOT references in native MIR emission; direct calls
+  retain PLT32. The existing weak/null runtime fixture
   keeps its default flags and assertions. Foreign or handwritten direct weak
   address relocations still receive the named representability refusal.
 - **A C library keeps some of its own names out of its shared object**, and
@@ -570,7 +587,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unsigned-immediate LDR; the writer binds index-pair relocations to that
   loader symbol. TLS section offsets use shifted ADD type 10
   (`SECREL_HIGH12A`) followed by unshifted ADD type 9 (`SECREL_LOW12A`).
-  Canonical and MIR producers emit both halves, preserving offset bits 12..23
+  Native MIR producers emit both halves, preserving offset bits 12..23
   beyond 4 KiB. COFF's inline imm12 addend is an unscaled byte count even in
   the shifted ADD; the PE linker adds it before splitting the final template
   offset. Offsets beyond 24 bits, malformed ADD forms and arithmetic overflow

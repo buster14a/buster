@@ -331,7 +331,7 @@ This is exhaustive over those finite domains, **not** all 2^32 displacements or
 the entire x86 ISA.
 
 Existing driver TLS tests now assert the complete independent GD byte oracle and
-paired TLSGD/PLT32 offsets, symbols and addends for all four allocators with and
+paired TLSGD/PLT32 offsets, symbols and addends for FAST and QUALITY with and
 without PIC. Existing execution tests remain enabled. Cross-target disassembly
 checks are reported separately from native execution.
 

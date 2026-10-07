@@ -9,7 +9,7 @@ clang and gcc both reproduce the oracle exactly and the subject does not.
 
 Usage:
   run.py --oracle scope_oracle.py --subject IDE --families D1,D2 --seeds 0-99
-         --work DIR [--fault K] [--configs default,nossa,none,quality] [--jobs N]
+         --work DIR [--fault K] [--configs default,nossa,fast,quality] [--jobs N]
 """
 import argparse, concurrent.futures, json, os, subprocess, sys
 
@@ -17,8 +17,7 @@ REF_FLAGS = ["-std=c17", "-pedantic-errors", "-w"]
 CONFIGS = {
     "default": [],
     "nossa": ["-fno-frontend-ssa"],
-    "none": ["-fregister-allocator=none"],
-    "mirstack": ["-fregister-allocator=mir-stack"],
+    "fast": ["-fregister-allocator=fast"],
     "quality": ["-fregister-allocator=quality"],
     "nofast": ["-fno-canonical-fast"],
     "O2": ["-O2"],
@@ -101,11 +100,13 @@ def main():
     p.add_argument("--seeds", required=True)
     p.add_argument("--work", required=True)
     p.add_argument("--fault", type=int)
-    p.add_argument("--configs", default="default,nossa,none,quality")
+    p.add_argument("--configs", default="default,nossa,fast,quality")
     p.add_argument("--jobs", type=int, default=4)
     p.add_argument("--json", help="write all rows to this file")
     args = p.parse_args()
     args.configs = args.configs.split(",")
+    if not args.configs or any(config not in CONFIGS for config in args.configs) or len(set(args.configs)) != len(args.configs):
+        p.error("--configs takes distinct values from " + ",".join(CONFIGS))
     os.makedirs(args.work, exist_ok=True)
     work = [(f, s) for f in args.families.split(",") for s in seeds(args.seeds)]
     results = []

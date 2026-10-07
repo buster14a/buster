@@ -35,7 +35,8 @@ jobs:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-26.04
+          requested-runner: >-
+            ubuntu-26.04
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -59,6 +60,14 @@ jobs:
           cat docs/source-size-baseline.txt
           "$RUNNER_TEMP/buster-metrics-build" source_size --base HEAD^1
           git diff --check HEAD^1 HEAD
+      - name: Retain native-generated size acknowledgment candidate
+        if: ${{ always() }}
+        run: |
+          test -x "$RUNNER_TEMP/buster-metrics-build"
+          "$RUNNER_TEMP/buster-metrics-build" source_size --write-baseline
+          printf 'SOURCE_SIZE_BASELINE_GENERATED_BEGIN revision=%s\n' "$GITHUB_SHA"
+          cat docs/source-size-baseline.txt
+          printf 'SOURCE_SIZE_BASELINE_GENERATED_END\n'
   preview:
     name: Authentic desktop architecture execution joins
     if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -71,7 +80,8 @@ jobs:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-26.04
+          requested-runner: >-
+            ubuntu-26.04
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -119,7 +129,8 @@ jobs:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-26.04
+          requested-runner: >-
+            ubuntu-26.04
       - name: Trusted collector checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -171,7 +182,8 @@ jobs:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-26.04
+          requested-runner: >-
+            ubuntu-26.04
       - name: Trusted publisher checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
