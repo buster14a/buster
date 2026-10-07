@@ -79,7 +79,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_predicate_pick(MachinePredicateState* state, Mac
     return selected;
 }
 
-BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Arena* arena, MachineFunction* function, u32 mode)
+BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Arena* arena, MachineFunction* function, bool quality)
 {
     bool inspect = function->target && function->target->predicate_allocatable_mask && !function->predicate_absence_certified;
     u32 predicate_count = 0;
@@ -180,11 +180,13 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
         }
     }
     MachineStackPlacement placement;
-    switch (mode)
+    if (quality)
     {
-        case 1: placement = machine_fast_placement_build_core(arena, &projected); break;
-        case 2: placement = machine_quality_placement_build_core(arena, &projected); break;
-        default: placement = machine_stack_placement_build_core(arena, &projected); break;
+        placement = machine_quality_placement_build_core(arena, &projected);
+    }
+    else
+    {
+        placement = machine_fast_placement_build_core(arena, &projected);
     }
     if (has_predicates && placement.valid)
     {
@@ -321,11 +323,6 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
                         placement.operand_registers[(u64)row * 4 + slot] = (u8)(MACHINE_PREDICATE_REGISTER_BASE + reg);
                     }
                 }
-                if (mode == 0 && !boundary)
-                {
-                    MachinePoint after = machine_point_make(row, MACHINE_POINT_AFTER);
-                    for (u32 reg = 1; reg < MACHINE_PREDICATE_REGISTER_COUNT; reg += 1) machine_predicate_release(&state, after, reg);
-                }
                 if (row + 1 == block_info->first_instruction + block_info->instruction_count)
                 {
                     MachinePoint end = (opcode_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) ? before : machine_point_make(row, MACHINE_POINT_AFTER);
@@ -416,17 +413,12 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
     return placement;
 }
 
-MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function)
-{
-    return machine_predicate_placement_build(arena, function, 0);
-}
-
 MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function)
 {
-    return machine_predicate_placement_build(arena, function, 1);
+    return machine_predicate_placement_build(arena, function, false);
 }
 
 MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function)
 {
-    return machine_predicate_placement_build(arena, function, 2);
+    return machine_predicate_placement_build(arena, function, true);
 }

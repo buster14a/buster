@@ -451,19 +451,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult investigation_test_driver(UnitTestArguments* 
     };
     CompilerDriverInvocation plain = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(plain_command));
     CompilerDriverInvocation captured = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(captured_command));
-    plain_command[4] = S8("-fregister-allocator=mir-stack");
-    captured_command[4] = S8("-fregister-allocator=mir-stack");
-    CompilerDriverInvocation plain_stack = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(plain_command));
-    CompilerDriverInvocation captured_stack = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(captured_command));
     BUSTER_TEST(arguments, !plain.investigation_path.length && !plain.investigation_function.length && !plain.investigation_configuration.length);
     if (BUSTER_REQUIRE(arguments, plain.error == COMPILER_DRIVER_ERROR_NONE && captured.error == COMPILER_DRIVER_ERROR_NONE &&
-                                  plain_stack.error == COMPILER_DRIVER_ERROR_NONE && captured_stack.error == COMPILER_DRIVER_ERROR_NONE &&
                                   source_bytes.pointer && source_bytes.length))
     {
         compiler_prewarm();
         // Pair zero warms both paths. Alternate order to expose order effects;
         // no threshold or qualified hardware claim is made from these samples.
-        for (u32 pair = 0; pair < 5; pair += 1)
+        for (u32 pair = 0; pair < 4; pair += 1)
         {
             TemporalArena temporary = arena_begin_temporal(arena);
             ByteSlice artifacts[2] = {0};
@@ -475,7 +470,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult investigation_test_driver(UnitTestArguments* 
                 u32 enabled = (step + pair) % 2;
                 BUSTER_TEST(arguments, os_file_delete(sidecar));
                 TimeDataType begin = timestamp_take();
-                CompilerDriverInvocation invocation = pair == 4 ? (enabled ? captured_stack : plain_stack) : (enabled ? captured : plain);
+                CompilerDriverInvocation invocation = enabled ? captured : plain;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
                 TimeDataType end = timestamp_take();
                 elapsed[enabled] = timestamp_ns_between(begin, end);
@@ -512,12 +507,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult investigation_test_driver(UnitTestArguments* 
                 BUSTER_STRING_TEST(arguments, capture.input_path, source);
                 BUSTER_STRING_TEST(arguments, capture.artifact_path, output);
                 BUSTER_STRING_TEST(arguments, capture.section_name, S8(".buster_investigation"));
-                BUSTER_STRING_TEST(arguments, capture.configuration, pair == 4 ? captured_stack.investigation_configuration : captured.investigation_configuration);
+                BUSTER_STRING_TEST(arguments, capture.configuration, captured.investigation_configuration);
                 BUSTER_STRING_TEST(arguments, capture.revision, investigation_compiler_revision());
                 BUSTER_STRING_TEST(arguments, string_from_pointer_length(capture.input_sha256, 64), string_from_pointer_length(source_sha256, 64));
                 BUSTER_TEST(arguments, capture.cpu == (u32)plain.target.cpu_arch && capture.os == (u32)plain.target.os);
                 BUSTER_TEST(arguments, capture.target.length);
-                BUSTER_TEST(arguments, capture.allocator == (u32)(pair == 4 ? CODEGEN_REGISTER_ALLOCATOR_MIR_STACK : CODEGEN_REGISTER_ALLOCATOR_FAST));
+                BUSTER_TEST(arguments, capture.allocator == (u32)CODEGEN_REGISTER_ALLOCATOR_FAST);
                 BUSTER_TEST(arguments, investigation_matches(&capture, artifacts[1], capture.revision));
                 bool conversion = false;
                 u64 conversion_offset = 0;
@@ -573,7 +568,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult investigation_test_driver(UnitTestArguments* 
                     result.test_count += consumer.test_count;
                     result.succeeded_test_count += consumer.succeeded_test_count;
                 }
-                if (pair && pair < 4)
+                if (pair)
                 {
                     bool capture_slower = elapsed[1] >= elapsed[0];
                     u64 difference = capture_slower ? elapsed[1] - elapsed[0] : elapsed[0] - elapsed[1];

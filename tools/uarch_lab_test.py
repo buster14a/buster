@@ -1928,6 +1928,27 @@ class RetirementLimitTests(unittest.TestCase):
         self.assertIn("quality sub-run failed (stopped)", summary["verdict"]["inconclusive"])
 
 
+class RetirementCompilerTests(unittest.TestCase):
+    def test_current_compiler_rejects_historical_execution_before_cells(self):
+        arguments = lab.argparse.Namespace(baseline="/x/baseline", candidate="/x/candidate", repo_root=".")
+        rejected = lab.subprocess.CompletedProcess([], 1, b"", b"error: unsupported register allocator: none\n")
+        with mock.patch.object(lab.subprocess, "run", return_value=rejected) as run:
+            with self.assertRaisesRegex(SystemExit, "archived compilers supporting none and mir-stack"):
+                lab.retirement_legacy_compilers_available(arguments)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("-fsyntax-only", run.call_args.args[0])
+        self.assertIn("-fregister-allocator=none", run.call_args.args[0])
+
+    def test_generic_failure_keeps_historical_failure_controls(self):
+        arguments = lab.argparse.Namespace(baseline="/x/baseline", candidate="/x/candidate", repo_root=".")
+        failed = lab.subprocess.CompletedProcess([], 1, b"", b"deliberate compiler failure\n")
+        with mock.patch.object(lab.subprocess, "run", return_value=failed) as run:
+            lab.retirement_legacy_compilers_available(arguments)
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual([call.args[0][3] for call in run.call_args_list],
+                         ["-fregister-allocator=none", "-fregister-allocator=mir-stack"] * 2)
+
+
 def copied_interpreter_environment(directory):
     """Return the environment additions under which a copy of the test
     interpreter, moved away from its installation, still starts; raise
