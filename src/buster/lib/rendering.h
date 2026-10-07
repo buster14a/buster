@@ -46,6 +46,8 @@ typedef enum RenderFontType
 typedef enum TextureFormat
 {
     TEXTURE_FORMAT_R8_UNORM,
+    // Stored RGB bytes use sRGB encoding and decode to linear RGB when sampled;
+    // alpha remains an ordinary unorm channel.
     TEXTURE_FORMAT_R8G8B8A8_SRGB,
     TEXTURE_FORMAT_COUNT,
 } TextureFormat;

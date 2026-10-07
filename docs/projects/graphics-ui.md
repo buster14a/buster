@@ -18,6 +18,23 @@ IDE, nor a request to restore the removed custom-language editor.
 | `graphics-ui.fonts` | [truetype.h](../../src/buster/lib/truetype.h), [font_provider.h](../../src/buster/lib/font_provider.h) | TrueType has a registered headless test consumer; the current headless compiler has no production font consumer. |
 | `graphics-ui.construction` | [ui_builder.h](../../src/buster/lib/ui_builder.h) | Retained UI construction API, not a supported end-user application by itself. |
 
+## Texture storage and sampling
+
+`TEXTURE_FORMAT_R8_UNORM` stores one linear unorm channel. The retained font
+atlas currently packs white RGB and glyph coverage in alpha into
+`TEXTURE_FORMAT_R8G8B8A8_SRGB`, which stores four 8-bit channels: sampled RGB
+decodes from sRGB to linear values, while alpha remains unorm. Vulkan uses
+`VK_FORMAT_R8G8B8A8_SRGB`, D3D12 uses `DXGI_FORMAT_R8G8B8A8_UNORM_SRGB` for
+both the texture resource and sampled view, and Metal uses
+`MTLPixelFormatRGBA8Unorm_sRGB` for the sampled texture. These texture mappings
+do not select a render-target or presentation color space; those remain separate
+backend contracts.
+
+`test_rendering_texture_formats` checks the shared channel/encoding contract
+and, when a native renderer is selected, its native format mapping without
+creating a device or submitting GPU commands. It does not establish executed
+sampling or cross-device pixel equivalence.
+
 The [platform/backend guide](../agents/platform.md) owns native-surface boundaries,
 backend inclusion, TrueType limits and the current dependency contract. Source
 presence, build integration, test coverage and product support are different facts.

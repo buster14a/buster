@@ -3369,22 +3369,25 @@ BUSTER_GLOBAL_LOCAL VkFormat vk_texture_format(TextureFormat format)
 
 BUSTER_GLOBAL_LOCAL u32 format_channel_count(TextureFormat format)
 {
-    u32 result;
-    switch (format)
-    {
-    case TEXTURE_FORMAT_R8_UNORM:
-        result = 1;
-        break;
-    case TEXTURE_FORMAT_R8G8B8A8_SRGB:
-        result = 4;
-        break;
-    case TEXTURE_FORMAT_COUNT:
-    default:
-        BUSTER_TODO();
-    }
+    return rendering_texture_format_properties(format).channel_count;
+}
 
+#if BUSTER_INCLUDE_TESTS
+RenderingTextureFormatBackendProbe rendering_texture_format_backend_probe_for_test(void)
+{
+    RenderingTextureFormatBackendProbe result = {
+        .backend = RENDERING_BACKEND_VULKAN,
+        .r8_native_format = (u32)vk_texture_format(TEXTURE_FORMAT_R8_UNORM),
+        .rgba8_native_format = (u32)vk_texture_format(TEXTURE_FORMAT_R8G8B8A8_SRGB),
+        .expected_r8_native_format = (u32)VK_FORMAT_R8_UNORM,
+        .expected_rgba8_srgb_native_format = (u32)VK_FORMAT_R8G8B8A8_SRGB,
+        .r8_channel_count = format_channel_count(TEXTURE_FORMAT_R8_UNORM),
+        .rgba8_channel_count = format_channel_count(TEXTURE_FORMAT_R8G8B8A8_SRGB),
+        .native_mapping_available = true,
+    };
     return result;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL VulkanBuffer vk_buffer_create(VkDevice device, const VkAllocationCallbacks* allocation_callbacks,
                                                   const VkPhysicalDeviceMemoryProperties* physical_device_memory_properties, VkDeviceSize buffer_size,
