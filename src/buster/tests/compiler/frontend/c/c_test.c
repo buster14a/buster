@@ -45743,6 +45743,178 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_label_differences(UnitTestArgum
     return result;
 }
 
+// GNU label differences and label offsets in function bodies (issue 2887):
+// `&&b - &&a` is the byte distance between two block entries, and
+// `goto *(&&base + n)` dispatches over every label the body takes the address
+// of, so a static table of differences drives a computed goto. Both reproducers
+// must validate, select on both native targets under every allocator and
+// frontend form, and run to the values the reference compilers give.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_automatic_label_differences(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("static int run(int op, int x)\n"
+                        "{\n"
+                        "    static const int table[] = { &&add - &&add, &&sub - &&add, &&dbl - &&add };\n"
+                        "    goto *(&&add + table[op]);\n"
+                        "add: return x + 1;\n"
+                        "sub: return x - 1;\n"
+                        "dbl: return x * 2;\n"
+                        "}\n"
+                        "static int automatic(void) { int d = &&b - &&a; a: b: return d; }\n"
+                        "static int distances(int n)\n"
+                        "{\n"
+                        "    int acc = 0;\n"
+                        "    int count = 0;\n"
+                        "    int d = &&bump - &&start;\n"
+                        "    long span = &&stop - &&start;\n"
+                        "start:\n"
+                        "    acc += 1;\n"
+                        "bump:\n"
+                        "    acc += 10;\n"
+                        "    count += 1;\n"
+                        "    if (count < n) goto *(&&start + 0);\n"
+                        "stop:\n"
+                        "    return acc * 1000 + (span > 0) * 100 + (d > 0) * 10 + (&&start - &&start);\n"
+                        "}\n"
+                        "static int backward(int op)\n"
+                        "{\n"
+                        "    static const int table[] = { &&base - &&one, &&base - &&two };\n"
+                        "    goto *(&&base - table[op]);\n"
+                        "base: return -1;\n"
+                        "one: return 1;\n"
+                        "two: return 2;\n"
+                        "}\n"
+                        "static int commuted(int op)\n"
+                        "{\n"
+                        "    static const int table[] = { &&one - &&base, &&two - &&base };\n"
+                        "    int i = op;\n"
+                        "    goto *(table[i] + &&base);\n"
+                        "base: return -1;\n"
+                        "one: return 1;\n"
+                        "two: return 2;\n"
+                        "}\n"
+                        "int main(void)\n"
+                        "{\n"
+                        "    if (run(0, 10) != 11 || run(1, 10) != 9 || run(2, 10) != 20) return 1;\n"
+                        "    if (automatic() != 0) return 2;\n"
+                        "    if (distances(3) != 33110) return 3;\n"
+                        "    if (backward(0) != 1 || backward(1) != 2) return 4;\n"
+                        "    if (commuted(0) != 1 || commuted(1) != 2) return 5;\n"
+                        "    return 0;\n"
+                        "}\n");
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            String8 context = string_format(temporary.arena, S8("automatic label differences target={u32} form={u32}"), target_index, form);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("automatic-label-differences.c"), tokens, syntax, target,
+                                                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool ready = !tokens.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count && lowered.program &&
+                         lowered.canonical_ir_certified && lowered.program->module_count == 1;
+            BUSTER_TEST_RAW(arguments, ready,
+                            string_format(temporary.arena, S8("{S8}: {S8}"), context,
+                                          lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("canonical lowering")));
+            if (ready)
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                BUSTER_TEST_RAW(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE, context);
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule code = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST_RAW(arguments, code.error == CODEGEN_ERROR_NONE,
+                                    string_format(temporary.arena, S8("{S8} allocator={u32}"), context, mode));
+                }
+                // The numeric view of a label is native-only: the LLVM
+                // bitcode writer refuses the label address it starts from.
+                if (target_index == 0 && form == 0)
+                {
+                    LlvmBitcodeArtifact bitcode = llvm_bitcode_emit_program(temporary.arena, program);
+                    BUSTER_TEST_RAW(arguments, !bitcode.success && bitcode.error.message.length, context);
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    typedef struct CAutomaticLabelRejection CAutomaticLabelRejection;
+    struct CAutomaticLabelRejection
+    {
+        String8 source;
+        String8 message;
+    };
+    CAutomaticLabelRejection rejected[] = {
+        // An offset has no label identity once stored, so it cannot be a target.
+        {S8("int f(void) { void *p = &&a + 1; goto *p; a: return 0; }\n"), S8("computed goto requires a function-local void pointer label value")},
+        {S8("int f(void) { int *p = (int *)&&a; a: return 0; }\n"),
+         S8("a label-provenance value may only be used with its original void pointer type")},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[row].source,
+                                                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("automatic-label-rejected.c"), tokens, syntax, target_native,
+                                                        (CIRLowerOptions){0});
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count && !lowered.canonical_ir_certified &&
+                                       string_ends_with_sequence(lowered.diagnostics[0].message, rejected[row].message),
+                        string_format(temporary.arena, S8("rejected automatic label row={u32}: {S8}"), row,
+                                      lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("accepted")));
+        c_test_scratch_end(temporary);
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 input = buster_test_temporary_path(arguments->arena, S8("automatic-label-differences"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 allocator = 0; written && allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("automatic-label-differences"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fverify-codegen"), allocators[allocator], forms[form], S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = allocator != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                            string_format(temporary.arena, S8("automatic label differences {S8} {S8}: {S8}"), allocators[allocator], forms[form],
+                                          compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("automatic label differences runtime {S8} {S8}: status={u32} timeout={u32}"),
+                                                  allocators[allocator], forms[form], execution.platform_status, (u32)execution.timed_out));
+                }
+                BUSTER_TEST(arguments, os_file_delete(output));
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    if (written)
+    {
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -49389,6 +49561,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
     C_TEST_FIXTURE(arguments, c_test_static_compound_literal);
     C_TEST_FIXTURE(arguments, c_test_static_label_differences);
+    C_TEST_FIXTURE(arguments, c_test_automatic_label_differences);
     C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
     C_TEST_FIXTURE(arguments, c_test_obsolete_designator_labels);
     C_TEST_FIXTURE(arguments, c_test_static_range_designators);

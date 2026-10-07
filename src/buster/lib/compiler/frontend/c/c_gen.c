@@ -3192,6 +3192,12 @@ struct CIntegerIrBuilder
     // their canonical type. Allocate lazily; ordinary functions pay no table.
     u8* bit_field_promotions;
     u32 bit_field_value_capacity;
+    // Values that are a label address moved by an integer offset
+    // (`&&base + n`). They carry no label identity, so the one consumer that
+    // accepts them is a computed goto, which dispatches over the labels the
+    // body takes the address of. Marked lazily like the promotions above.
+    u8* label_offset_marks;
+    u32 label_offset_capacity;
     CIrVlaArrayType* vla_array_types;
     CIrVlaSavedBound* vla_saved_bounds;
     IrTypeId* vla_c_types;
@@ -5323,6 +5329,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_add_result(CIntegerIrBuilder* builder, IrTypeId
         // Speculative lowering can reuse a value id after rolling back.
         builder->bit_field_promotions[result.value] = 0;
     }
+    if (result.value < builder->label_offset_capacity)
+    {
+        builder->label_offset_marks[result.value] = 0;
+    }
     return result;
 }
 
@@ -5391,6 +5401,31 @@ BUSTER_C_INTERNAL void c_ir_mark_bit_field_value(CIntegerIrBuilder* builder, IrV
         }
         builder->bit_field_promotions[value.value] = (u8)promotion;
     }
+}
+
+BUSTER_C_INTERNAL void c_ir_mark_label_offset_value(CIntegerIrBuilder* builder, IrValueId value)
+{
+    if (value.value < builder->function->value_count)
+    {
+        if (value.value >= builder->label_offset_capacity)
+        {
+            u32 capacity = builder->function->value_capacity;
+            u8* marks = arena_allocate(builder->arena, u8, capacity);
+            memset(marks, 0, capacity);
+            if (builder->label_offset_capacity)
+            {
+                memcpy(marks, builder->label_offset_marks, builder->label_offset_capacity);
+            }
+            builder->label_offset_marks = marks;
+            builder->label_offset_capacity = capacity;
+        }
+        builder->label_offset_marks[value.value] = 1;
+    }
+}
+
+BUSTER_C_INTERNAL bool c_ir_value_is_label_offset(CIntegerIrBuilder* builder, IrValueId value)
+{
+    return value.value < builder->label_offset_capacity && builder->label_offset_marks[value.value];
 }
 
 BUSTER_C_INTERNAL void c_ir_copy_label_provenance(CIntegerIrBuilder* builder, IrValueId destination, IrValueId source)
@@ -10827,6 +10862,61 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_label_address(CIntegerIrBuilder* builder, 
         c_ir_append_instruction(builder, instruction, instruction_source);
     }
 
+    return result;
+}
+
+// The numeric view of a bare `&&label` value: its address as a pointer-width
+// integer. This is the one conversion a label value permits, because the
+// integer starts a label difference or label offset and carries no label
+// identity -- the validator's cast rule accepts exactly this shape.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_label_numeric_view(CIntegerIrBuilder* builder, IrValueId label, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    if (c_ir_is_computed_goto_target(builder, label))
+    {
+        IrValueId value = c_ir_add_result(builder, builder->ptrdiff_type);
+        if (value.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
+            operands[0] = label;
+            IrInstruction cast = c_ir_instruction_initialize(IR_OPCODE_CAST, builder->ptrdiff_type);
+            cast.operands = operands;
+            cast.operand_count = 1;
+            cast.conversion_operation = (u8)IR_CONVERSION_POINTER_TO_INTEGER;
+            cast.result = value;
+            c_ir_append_instruction(builder, cast, source);
+            // The append copies the operand's provenance onto every cast result.
+            c_ir_label_metadata_clear(builder, value);
+            result = value;
+        }
+    }
+    return result;
+}
+
+// `&&label + n` and `&&label - n`: the label's address moved by `n` bytes. The
+// result is a plain void pointer marked as a label offset, which a computed
+// goto dispatches over every label the body takes the address of.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_label_offset(CIntegerIrBuilder* builder, IrValueId label, IrValueId offset, bool subtract, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrType* offset_type = offset.value < builder->function->value_count
+                              ? ir_type_from_id(&builder->program->types, builder->function->values[offset.value].canonical_type)
+                              : 0;
+    bool integer_offset = offset_type && (offset_type->kind == IR_TYPE_INTEGER || offset_type->kind == IR_TYPE_ENUM || offset_type->kind == IR_TYPE_BOOLEAN);
+    IrValueId base = integer_offset ? c_ir_emit_label_numeric_view(builder, label, source) : IR_VALUE_ID_INVALID;
+    IrValueId moved = base;
+    if (base.value != IR_ID_UNDERLYING_INVALID)
+    {
+        offset = c_ir_emit_cast(builder, offset, builder->ptrdiff_type, source);
+        moved = offset.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID
+                                                         : c_ir_emit_binary_value(builder, base, offset, builder->ptrdiff_type,
+                                                                                  subtract ? IR_BINARY_INTEGER_SUBTRACT : IR_BINARY_INTEGER_ADD, source);
+    }
+    if (moved.value != IR_ID_UNDERLYING_INVALID && base.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_emit_cast(builder, moved, c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type), source);
+        c_ir_mark_label_offset_value(builder, result);
+    }
     return result;
 }
 
@@ -26834,6 +26924,23 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             values[(*value_count)++] = result;
             return true;
         }
+        if (operation == C_CONDITIONAL_SUBTRACT && c_ir_is_computed_goto_target(builder, values[first]) &&
+            c_ir_is_computed_goto_target(builder, values[first + 1]))
+        {
+            // `&&b - &&a` counts bytes between two labels of this function.
+            IrValueId minuend = c_ir_emit_label_numeric_view(builder, values[first], source);
+            IrValueId subtrahend = c_ir_emit_label_numeric_view(builder, values[first + 1], source);
+            IrValueId difference = minuend.value == IR_ID_UNDERLYING_INVALID || subtrahend.value == IR_ID_UNDERLYING_INVALID
+                                       ? IR_VALUE_ID_INVALID
+                                       : c_ir_emit_binary_value(builder, minuend, subtrahend, builder->ptrdiff_type, IR_BINARY_INTEGER_SUBTRACT, source);
+            if (difference.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+            *value_count = first;
+            values[(*value_count)++] = difference;
+            return true;
+        }
         if (operation == C_CONDITIONAL_SUBTRACT && left_pointer_like && right_pointer_like)
         {
             if ((left_pointer && left->is_nullptr) || (right_pointer && right->is_nullptr))
@@ -26907,6 +27014,17 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             }
             IrValueId base = left_pointer_like ? values[first] : values[first + 1];
             IrValueId index = left_pointer_like ? values[first + 1] : values[first];
+            if (c_ir_is_computed_goto_target(builder, base))
+            {
+                IrValueId moved = c_ir_emit_label_offset(builder, base, index, operation == C_CONDITIONAL_SUBTRACT, source);
+                if (moved.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                *value_count = first;
+                values[(*value_count)++] = moved;
+                return true;
+            }
             IrTypeId pointer_type = left_pointer    ? left_type
                                     : right_pointer ? right_type
                                     : left_array    ? c_ir_add_pointer_type(builder->program, builder->pointer_types, left->element_type)
@@ -39168,7 +39286,8 @@ BUSTER_C_INTERNAL bool c_ir_emit_cleanup_calls(CIntegerIrBuilder* builder, CIrBo
 BUSTER_C_INTERNAL bool c_ir_emit_computed_goto_cleanup_dispatch(CIntegerIrBuilder* builder, IrValueId target, IrBlockId* targets, u32 target_count,
                                                                   CIrLabel* labels, u32 label_count, CScopeId root_scope, IrSourceRange source)
 {
-    if (!target_count || (!c_ir_is_computed_goto_target(builder, target) && !c_ir_is_computed_goto_storage_target(builder, target)))
+    if (!target_count || (!c_ir_value_is_label_offset(builder, target) && !c_ir_is_computed_goto_target(builder, target) &&
+                          !c_ir_is_computed_goto_storage_target(builder, target)))
     {
         if (!builder->failure_message.length)
         {
@@ -42839,6 +42958,37 @@ BUSTER_C_INTERNAL u32 c_ir_label_candidate_lower_bound(CIntegerIrBuilder* builde
 BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* builder, CIrLowerBodyState* state,
                                                               u32 label_capacity, u32 candidate_cursor);
 
+// The conservative jump-target set of a label offset: every label whose
+// address the body names with `&&label`, which is also every label a label
+// difference or static offset table can have been derived from. Offsets move
+// only addresses the body took, so no other label can be the destination.
+BUSTER_C_INTERNAL IrBlockId* c_ir_address_taken_label_blocks(CIntegerIrBuilder* builder, CIrLowerBodyState* state, u32* count_out)
+{
+    CDeclaration declaration = state->declaration;
+    u32 body_end = declaration.body_start + declaration.body_token_count;
+    IrBlockId* blocks = arena_allocate(builder->arena, IrBlockId, state->label_count ? state->label_count : 1);
+    u32 count = 0;
+    for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
+    {
+        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+            builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER && c_ir_label_address_prefix(builder, declaration.body_start, index))
+        {
+            CIrLabel* label = c_ir_label_find(state->labels, state->label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
+            bool known = label == 0;
+            for (u32 previous = 0; !known && previous < count; previous += 1)
+            {
+                known = blocks[previous].value == label->block.value;
+            }
+            if (!known)
+            {
+                blocks[count++] = label->block;
+            }
+        }
+    }
+    *count_out = count;
+    return blocks;
+}
+
 // Record the function body's jump targets for direct SSA: every named label
 // with the extent of its gotos, and every case/default with its enclosing
 // switch. The function body's walk covers nested statement expressions, so it
@@ -43348,7 +43498,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         else if (continuation == C_IR_LOWER_BODY_CONTINUE_COMPUTED_GOTO)
         {
             IrValueId target = builder->lower_machine.child_result.value;
-            if (!c_ir_is_computed_goto_target(builder, target) && !c_ir_is_computed_goto_storage_target(builder, target))
+            bool offset_target = c_ir_value_is_label_offset(builder, target);
+            if (!offset_target && !c_ir_is_computed_goto_target(builder, target) && !c_ir_is_computed_goto_storage_target(builder, target))
             {
                 if (!builder->failure_message.length)
                 {
@@ -43357,8 +43508,18 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 return false;
             }
             IrValueLabelMetadata target_value = ir_value_label_metadata(builder->function, target);
-            IrBlockId* targets = arena_allocate(builder->arena, IrBlockId, target_value.label_block_count);
+            IrBlockId* targets = 0;
             u32 target_count = 0;
+            u32 target_capacity = offset_target ? 0 : target_value.label_block_count;
+            if (offset_target)
+            {
+                targets = c_ir_address_taken_label_blocks(builder, state, &target_count);
+                target_value.label_block_count = 0;
+            }
+            else
+            {
+                targets = arena_allocate(builder->arena, IrBlockId, target_capacity);
+            }
             for (u32 label_index = 0; label_index < target_value.label_block_count; label_index += 1)
             {
                 IrBlockId label = target_value.label_blocks[label_index];
