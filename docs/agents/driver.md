@@ -1351,6 +1351,13 @@ selected-function and scheduled-function counts and the effective allocator.
 Normal compilation keeps its existing validation certificates and fast paths.
 The [native differential runner](../differential-testing.md) consumes this
 explicit opt-in evidence and compares executable observations independently.
+
+The x86-64 System V mixed-object stack fixture checks aggregate and floating
+returns and live dynamic allocations in both compiler directions. Its exact
+sixteen-byte allocation-distance check is specific to Buster's caller lowering
+and is guarded by `__BUSTER__`; host callers retain the value and live-byte
+checks without assuming their `__builtin_alloca` layout.
+
 When selected or scheduled MIR fails verification, the refusal names the
 `MachineVerifyError` and its block, machine instruction, and operand. Without a
 failing canonical instruction its opcode is `unknown`, not an IR enum default.
