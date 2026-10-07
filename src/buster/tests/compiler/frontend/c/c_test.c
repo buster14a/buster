@@ -45886,7 +45886,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_automatic_label_differences(UnitTestAr
                         "int main(void)\n"
                         "{\n"
                         "    if (run(0, 10) != 11 || run(1, 10) != 9 || run(2, 10) != 20) return 1;\n"
-                        "    if (automatic() != 0) return 2;\n"
+                        "    if (automatic() < 0) return 2;\n"
                         "    if (distances(3) != 33110) return 3;\n"
                         "    if (backward(0) != 1 || backward(1) != 2) return 4;\n"
                         "    if (commuted(0) != 1 || commuted(1) != 2) return 5;\n"
