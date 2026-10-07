@@ -1982,7 +1982,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_dwarf_location_
 // the object's debug-section relocations so the assertion reaches the exact
 // value DIE's DW_AT_location list, not an unrelated location range.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_debug_local_location(ObjectFile* object, String8 function_name,
-                                                                                       u64 function_start, u64 function_end)
+                                                                                       String8 local_name, u64 function_start,
+                                                                                       u64 function_end)
 {
     bool result = false;
     ByteSlice info = object ? object->sections[OBJECT_SECTION_DEBUG_INFO].data : (ByteSlice){0};
@@ -2023,25 +2024,29 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_debug_local_loc
         {
             continue;
         }
-        u8 child_abbrev = info.pointer[cursor++];
-        if (child_abbrev != COMPILER_DRIVER_DWARF_ABBREV_VARIABLE && child_abbrev != COMPILER_DRIVER_DWARF_ABBREV_PARAMETER)
+        // Walk the function's leading parameter and variable children; every
+        // one carries name, file, line, type and location attributes.
+        while (!result && cursor < info.length &&
+               (info.pointer[cursor] == COMPILER_DRIVER_DWARF_ABBREV_VARIABLE || info.pointer[cursor] == COMPILER_DRIVER_DWARF_ABBREV_PARAMETER))
         {
-            continue;
-        }
-        u32 child_name_offset = 0;
-        if (!compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &child_name_offset) ||
-            !compiler_driver_test_dwarf_advance(info, &cursor, 4) ||
-            !string_equal(compiler_driver_test_dwarf_string(strings, child_name_offset), S8("value")) ||
-            !compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) ||
-            !compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) ||
-            !compiler_driver_test_dwarf_advance(info, &cursor, 4))
-        {
-            continue;
-        }
-        u32 location_offset = 0;
-        if (compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &location_offset))
-        {
-            result = compiler_driver_test_dwarf_location_list(locations, location_offset, function_start, function_end);
+            cursor += 1;
+            u32 child_name_offset = 0;
+            u32 location_offset = 0;
+            bool child_valid = compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &child_name_offset) &&
+                               compiler_driver_test_dwarf_advance(info, &cursor, 4) &&
+                               compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) &&
+                               compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) &&
+                               compiler_driver_test_dwarf_advance(info, &cursor, 4) &&
+                               compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &location_offset) &&
+                               compiler_driver_test_dwarf_advance(info, &cursor, 4);
+            if (!child_valid)
+            {
+                break;
+            }
+            if (string_equal(compiler_driver_test_dwarf_string(strings, child_name_offset), local_name))
+            {
+                result = compiler_driver_test_dwarf_location_list(locations, location_offset, function_start, function_end);
+            }
         }
     }
     return result;
@@ -3354,6 +3359,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_void_function_pointer_ro
                 }
                 scratch_end(temporary);
             }
+        }
+    }
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
+// The address of a shared library's STT_GNU_IFUNC export (glibc's floor and
+// sin) is its canonical PLT/GOT address, one value in every translation unit,
+// and calling through it reaches the resolver's choice (GitHub #3009).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_shared_ifunc_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID
+    static String8 const libm_paths[] = {S8_INITIALIZER("/lib/x86_64-linux-gnu/libm.so.6"), S8_INITIALIZER("/usr/lib/x86_64-linux-gnu/libm.so.6"),
+                                         S8_INITIALIZER("/usr/lib64/libm.so.6"), S8_INITIALIZER("/lib64/libm.so.6")};
+    bool has_libm = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(libm_paths) && !has_libm; index += 1)
+    {
+        FileMapRead libm = file_map_read(arguments->arena, libm_paths[index], (FileReadOptions){0});
+        has_libm = libm.bytes.pointer != 0;
+        file_map_unmap(libm);
+    }
+    String8 main_source = S8(
+        "double floor(double);\n"
+        "double sin(double);\n"
+        "int same_floor(double (*)(double));\n"
+        "int same_sin(double (*)(double));\n"
+        "int main(void) {\n"
+        "    double (*f)(double) = floor;\n"
+        "    double (*s)(double) = sin;\n"
+        "    double (*g)(double) = (floor);\n"
+        "    return f(1.5) != 1.0 || s(0.0) != 0.0 || g(-1.5) != -2.0 || f != floor || s != sin || f != g ||\n"
+        "           !same_floor(f) || !same_sin(s);\n"
+        "}\n");
+    String8 other_source = S8(
+        "double floor(double);\n"
+        "double sin(double);\n"
+        "int same_floor(double (*p)(double)) { double (*q)(double) = floor; return p == q && q(2.5) == 2.0; }\n"
+        "int same_sin(double (*p)(double)) { return p == sin && p(0.0) == 0.0; }\n");
+#define BUSTER_IFUNC_ALLOCATOR(name, mode) S8("-fregister-allocator=" name),
+    String8 allocators[] = {BUSTER_CODEGEN_ALLOCATORS(BUSTER_IFUNC_ALLOCATOR)};
+#undef BUSTER_IFUNC_ALLOCATOR
+    String8 positions[] = {S8("-fno-pic"), S8("-fPIC"), S8("-fPIE")};
+    for (u32 mode = 0; has_libm && mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+    {
+        for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 main_input = buster_test_temporary_path(arena, S8("buster-ifunc-main"), S8(".c"));
+            String8 other_input = buster_test_temporary_path(arena, S8("buster-ifunc-other"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-ifunc-address"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, file_write(main_input, BUSTER_SLICE_TO_BYTE_SLICE(main_source))) &&
+                BUSTER_REQUIRE(arguments, file_write(other_input, BUSTER_SLICE_TO_BYTE_SLICE(other_source))))
+            {
+                String8 command[] = {
+                    S8("-nostdinc"), S8("-O0"), S8("-g0"), S8("-fverify-codegen"), allocators[mode], positions[position],
+                    S8("-o"), output, main_input, other_input, S8("-lm"),
+                };
+                CompilerDriverResult linked = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+            scratch_end(temporary);
         }
     }
 #else
@@ -4973,6 +5055,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_symbol_binding(
     return result;
 }
 
+// Symbolic ADRP and low-12 operands in a standalone AArch64 `.s` (#2933): the
+// driver spells each assembler relocation in its object format's own kind, the
+// ELF object round-trips through the writer and reader, and the retained
+// relocations resolve to coherent addresses around page boundaries. The
+// resolution check decodes the patched words instead of re-encoding them, so
+// premature folding or a wrong access-size scale would show.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_symbolic_pages(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    typedef struct SymbolicPageFormat SymbolicPageFormat;
+    struct SymbolicPageFormat
+    {
+        String8 target;
+        String8 source;
+        u32 line_count;
+        ObjectRelocationKind kinds[8];
+    };
+    SymbolicPageFormat const formats[] = {
+        {S8("aarch64-unknown-linux"),
+         S8(".text\nadrp x0, object\nadd x0, x0, :lo12:object\nadrp x1, object+0x1008\nldr x2, [x1, :lo12:object+0x1008]\n"
+            "ldrb w3, [x1, :lo12:object+0x1008]\nstr q4, [x1, :lo12:object+0x1010]\nldrh w5, [x1, :lo12:object+0x1006]\n"
+            "ldr w6, [x1, :lo12:object+3]\n"),
+         8,
+         {OBJECT_RELOCATION_AARCH64_ELF_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_PAGE21,
+          OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12,
+          OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12}},
+        {S8("aarch64-apple-macos"),
+         S8(".text\nadrp x0, object@PAGE\nadd x0, x0, object@PAGEOFF\nadrp x1, object@PAGE+8\nldr x2, [x1, object@PAGEOFF+8]\n"
+            "ldrb w3, [x1, object@PAGEOFF+8]\nstr q4, [x1, object@PAGEOFF+16]\nldrh w5, [x1, object@PAGEOFF+6]\n"),
+         7,
+         {OBJECT_RELOCATION_AARCH64_MACH_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+          OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+          OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12}},
+        {S8("aarch64-pc-windows-msvc"),
+         S8(".text\nadrp x0, object\nadd x0, x0, :lo12:object\nadrp x1, object+8\nldr x2, [x1, :lo12:object+8]\n"
+            "ldrb w3, [x1, :lo12:object+8]\nstr q4, [x1, :lo12:object+16]\nldrh w5, [x1, :lo12:object+6]\n"),
+         7,
+         {OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21,
+          OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L, OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L, OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L,
+          OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L}},
+    };
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(formats); format_index += 1)
+    {
+        SymbolicPageFormat const* format = formats + format_index;
+        String8 input = buster_test_temporary_path(arena, S8("symbolic-pages"), S8(".s"));
+        String8 output = buster_test_temporary_path(arena, S8("symbolic-pages"), S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(format->source))))
+        {
+            String8 command[] = {S8("-target"), format->target, S8("-c"), input, S8("-o"), output};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object &&
+                assembled.object.relocation_count == format->line_count, assembled.diagnostic);
+            if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object && assembled.object.relocation_count == format->line_count)
+            {
+                for (u32 index = 0; index < format->line_count; index += 1)
+                {
+                    ObjectRelocation relocation = assembled.object.relocations[index];
+                    BUSTER_TEST_RAW(arguments, relocation.kind == format->kinds[index] && relocation.offset == 4 * index &&
+                        relocation.symbol < assembled.object.symbol_count &&
+                        string_equal(assembled.object.symbols[relocation.symbol].name, S8("object")), format->source);
+                }
+                // The written object reads back with the same relocation meaning.
+                ObjectFile reread = object_read(arena, file_read(arena, output, (FileReadOptions){0}), assembled.object.target);
+                BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && reread.relocation_count == format->line_count);
+                for (u32 index = 0; index < format->line_count && reread.relocation_count == format->line_count; index += 1)
+                {
+                    BUSTER_TEST(arguments, reread.relocations[index].kind == format->kinds[index] &&
+                        reread.relocations[index].offset == 4 * index);
+                }
+                if (format_index == 0 && reread.error == OBJECT_ERROR_NONE && reread.relocation_count == format->line_count)
+                {
+                    // Link: each retained ELF relocation is resolved against definitions that straddle page boundaries.
+                    u64 const places[] = {UINT64_C(0x10000000), UINT64_C(0x10000ff8), UINT64_C(0x1000fff8)};
+                    u64 const targets[] = {UINT64_C(0x20000000), UINT64_C(0x20000ff0), UINT64_C(0x20000ff8), UINT64_C(0x20000fff),
+                                           UINT64_C(0x20001000), UINT64_C(0x1fffffe0), UINT64_C(0x7ffffff000)};
+                    u32 accepted = 0;
+                    u32 rejected = 0;
+                    for (u32 place_index = 0; place_index < BUSTER_ARRAY_LENGTH(places); place_index += 1)
+                    {
+                        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+                        {
+                            for (u32 index = 0; index < reread.relocation_count; index += 1)
+                            {
+                                ObjectRelocation relocation = reread.relocations[index];
+                                u32 word = 0;
+                                memcpy(&word, reread.sections[relocation.section].data.pointer + relocation.offset, sizeof(word));
+                                u64 place = places[place_index] + relocation.offset;
+                                u64 address = targets[target_index] + (u64)relocation.addend;
+                                u32 patched = 0;
+                                bool resolved = object_aarch64_elf_page_relocate(relocation.kind, word, place, targets[target_index],
+                                                                                 relocation.addend, &patched);
+                                bool page = relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21;
+                                bool add = relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12;
+                                u32 scale = page || add ? 0 : (u32)(relocation.kind - OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12);
+                                bool aligned = page || add || !((address & 0xfff) & ((UINT64_C(1) << scale) - 1));
+                                s64 pages = (s64)(address >> 12) - (s64)(place >> 12);
+                                bool in_range = !page || (pages >= -(s64)(1 << 20) && pages < (s64)(1 << 20));
+                                BUSTER_TEST(arguments, resolved == (aligned && in_range));
+                                if (resolved && page)
+                                {
+                                    u32 immediate = ((patched >> 29) & 3u) | (((patched >> 5) & 0x7ffffu) << 2);
+                                    s64 decoded = (s64)((s32)(immediate << 11) >> 11);
+                                    BUSTER_TEST(arguments, (s64)(place >> 12) + decoded == (s64)(address >> 12) && (patched & 31) == (word & 31));
+                                }
+                                else if (resolved)
+                                {
+                                    u64 field = (patched >> 10) & 0xfffu;
+                                    BUSTER_TEST(arguments, (field << scale) == (address & 0xfff) && (patched & UINT32_C(0xffc003ff)) == (word & UINT32_C(0xffc003ff)));
+                                }
+                                accepted += resolved;
+                                rejected += !resolved;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, accepted != 0 && rejected != 0);
+                }
+            }
+        }
+        os_file_delete(input);
+        os_file_delete(output);
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Exercise the complete native-language boundary, then drive a nonstandard-
 // suffix assembly unit through parsing, assembly, object serialization and
 // object reading. This reaches the native target resolver, unlike an
@@ -6194,6 +6408,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_global_relocations
     return result;
 }
 
+// Scalar locals that are reassigned, copied from a parameter, widened or built
+// with -fno-frontend-ssa once got an empty DWARF location list in every
+// allocator mode, so a debugger showed <optimized out> at every line. Each
+// named local below must now carry a location list with at least one range
+// inside its function, read back through the object's own debug sections.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("int sink;\n"
+                        "int g(int x) { return x + 100; }\n"
+                        "int copies(int v)\n"
+                        "{\n"
+                        "    int a = v * 2;\n"
+                        "    int b = v;\n"
+                        "    int c = g(v);\n"
+                        "    int d = 5;\n"
+                        "    int e = v + c;\n"
+                        "    long long w = (long long)v << 40;\n"
+                        "    sink = a + b + c + d + e + (int)(w >> 40);\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int reassigned(int v)\n"
+                        "{\n"
+                        "    int once = v * 2;\n"
+                        "    int twice = v * 3;\n"
+                        "    sink = once + twice;\n"
+                        "    twice = twice + 1;\n"
+                        "    sink = once + twice;\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int looped(int n)\n"
+                        "{\n"
+                        "    int total = 0;\n"
+                        "    int i;\n"
+                        "    for (i = 0; i < n; i += 1) { total += i; }\n"
+                        "    return total;\n"
+                        "}\n");
+    String8 path = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    typedef struct DebugScalarLocalCase DebugScalarLocalCase;
+    struct DebugScalarLocalCase
+    {
+        String8 function;
+        String8 locals[6];
+    };
+    static DebugScalarLocalCase const cases[] = {
+        {S8_INITIALIZER("copies"), {S8_INITIALIZER("v"), S8_INITIALIZER("a"), S8_INITIALIZER("b"), S8_INITIALIZER("c"), S8_INITIALIZER("d"), S8_INITIALIZER("w")}},
+        {S8_INITIALIZER("reassigned"), {S8_INITIALIZER("v"), S8_INITIALIZER("once"), S8_INITIALIZER("twice")}},
+        {S8_INITIALIZER("looped"), {S8_INITIALIZER("n"), S8_INITIALIZER("total"), S8_INITIALIZER("i")}},
+    };
+    String8 const allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 const frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            String8 output = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals"), S8(".o"));
+            String8 command[] = {S8("-c"), S8("-g"), S8("-fpinned-debug-locals"), S8("-target"), S8("x86_64-unknown-linux-gnu"), allocators[allocator], frontends[frontend],
+                                 S8("-o"), output, path};
+            CompilerDriverResult built = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            String8 label = string_format(temporary.arena, S8("{S8} {S8}: {S8}"), allocators[allocator], frontends[frontend], built.diagnostic);
+            BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, label);
+            for (u32 case_index = 0; built.has_object && case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                DebugScalarLocalCase const* test_case = cases + case_index;
+                ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&built.object, test_case->function);
+                BUSTER_TEST_RAW(arguments, symbol != 0, label);
+                for (u32 local = 0; symbol && local < BUSTER_ARRAY_LENGTH(test_case->locals) && test_case->locals[local].length; local += 1)
+                {
+                    String8 description = string_format(temporary.arena, S8("{S8} {S8}.{S8}"), label, test_case->function,
+                                                        test_case->locals[local]);
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_debug_local_location(&built.object, test_case->function,
+                                                                                         test_case->locals[local], symbol->value,
+                                                                                         symbol->value + symbol->size), description);
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // The default and -g0 must omit debug payloads in the serialized artifact,
 // while -g opts in and the final debug option wins for every native format.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_options(UnitTestArguments* arguments)
@@ -6854,6 +7152,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_join_parameter_registers
                 invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 String8 description = string_format(temporary.arena, S8("join parameter native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
+// __builtin_return_address(0) lowers to IR_OPCODE_RETURN_ADDRESS, which reads
+// the frame record every System V and Darwin MIR function builds. The callees
+// cover a plain frame, a dynamic allocation and an over-aligned local, under
+// every allocator and both frontend forms; the host runs the program, and each
+// object target must select without fallback. Targets without a fixed slot
+// (Windows frames, Wasm64, eBPF) and every non-zero level must fail with a
+// diagnostic instead of producing code.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_return_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "void* plain_callee(void)\n"
+        "{\n"
+        "    return __builtin_return_address(0);\n"
+        "}\n"
+        "void* alloca_callee(int n)\n"
+        "{\n"
+        "    char* p = __builtin_alloca((unsigned long)n);\n"
+        "    p[0] = 1;\n"
+        "    return (char*)__builtin_return_address(0) + (p[0] - 1);\n"
+        "}\n"
+        "void* aligned_callee(void)\n"
+        "{\n"
+        "    _Alignas(64) char buffer[64];\n"
+        "    buffer[0] = 0;\n"
+        "    return (char*)__builtin_return_address(0) + buffer[0];\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    char* start = (char*)main;\n"
+        "    char* a = (char*)plain_callee();\n"
+        "    char* b = (char*)alloca_callee(100);\n"
+        "    char* c = (char*)aligned_callee();\n"
+        "    int bad = a == 0 || b == 0 || c == 0;\n"
+        "    bad |= a <= start || a >= start + 4096 || b <= a || b >= start + 4096 || c <= b || c >= start + 4096;\n"
+        "    return bad;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-return-address"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("aarch64-linux"), S8("aarch64-macos"), S8("x86_64-macos")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-return-address-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("return address object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+        String8 refused_targets[] = {S8("x86_64-windows"), S8("aarch64-windows"), S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(refused_targets); target += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-return-address-refused"), S8(".o"));
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), refused_targets[target], frontends[frontend],
+                                     S8("-fno-machine-fallback"), S8("-o"), output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(temporary.arena, S8("return address refused {S8} {S8}"), refused_targets[target], frontends[frontend]);
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length != 0, description);
+                scratch_end(temporary);
+            }
+        }
+        String8 level_sources[] = {S8("void* f(void){return __builtin_return_address(1);}\n"),
+                                   S8("void* f(int n){return __builtin_return_address(n);}\n")};
+        for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(level_sources); level += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 level_input = buster_test_temporary_path(temporary.arena, S8("buster-return-address-level"), S8(".c"));
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-return-address-level"), S8(".o"));
+                if (BUSTER_REQUIRE(arguments, file_write(level_input, BUSTER_SLICE_TO_BYTE_SLICE(level_sources[level]))))
+                {
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), S8("x86_64-linux"), frontends[frontend], S8("-o"), output, level_input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length != 0, level_sources[level]);
+                }
+                scratch_end(temporary);
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-return-address-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("return address native {S8} {S8}: {S8}"),
                     allocators[allocator], frontends[frontend], compiled.diagnostic);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -9726,7 +10149,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
                         }
                     }
                     BUSTER_TEST(arguments, found);
-                    bool local_location = symbol && compiler_driver_test_debug_local_location(&compiled.object, test_case->symbol,
+                    bool local_location = symbol && compiler_driver_test_debug_local_location(&compiled.object, test_case->symbol, S8("value"),
                                                                                                 symbol->value, symbol->value + symbol->size);
                     BUSTER_TEST(arguments, local_location);
                     if (found)
@@ -22079,6 +22502,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_has_builtin_targets(Unit
         "#if __has_builtin(__builtin_complex) != QUERY_COMPLEX\n#error wrong complex support\n#endif\n"
         "#if __has_builtin(__atomic_load_n) || __has_builtin(__c11_atomic_load) || __has_builtin(__sync_synchronize)\n"
         "#error unsupported atomic IR advertised\n#endif\n"
+        "#if __has_builtin(__builtin_return_address)\n#error unsupported return address advertised\n#endif\n"
         "struct query_record { char tag; int values[3]; };\n"
         "int query_offset(void) { return __builtin_offsetof(struct query_record, values[2]); }\n"
         "#if QUERY_COMPLEX\n"
@@ -24526,6 +24950,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_symbolic_pages);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
@@ -24627,6 +25052,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_count_signatures);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frame_address_rematerialization);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_join_parameter_registers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
@@ -24645,6 +25071,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_options);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_scalar_local_locations);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);
@@ -24665,6 +25092,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bounded_address_space);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_result_references);

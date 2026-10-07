@@ -108,8 +108,8 @@ LLVM consumer `-O0` and `-O2`, including guarded zero for count-leading/trailing
 and unguarded zero for population count.
 
 Canonical operations that do not yet have an LLVM record mapping, including
-slice/reverse helpers, inline assembly, SIMD, label addresses, and indirect
-branches, are deliberate diagnostics.
+slice/reverse helpers, SIMD, label addresses, and indirect branches, are
+deliberate diagnostics.
 
 Instruction-cache clearing (`__builtin___clear_cache`) lowers to a call of a
 synthetic `void @llvm.clear_cache(ptr, ptr)` declaration, added once per module
@@ -123,6 +123,38 @@ selected function uses it. Unlike a trap, it is not a terminator: no
 `unreachable` follows and execution may continue. The regression places traps
 in branches that are not taken and runs the result against a separately
 compiled caller at LLVM consumer `-O0` and `-O2` for both frontend modes.
+
+## Inline assembly
+
+GNU inline assembly on x86-64 and AArch64 lowers to an LLVM `call asm`, or
+`callbr asm` for `asm goto`, using the same translation Clang applies to GCC
+statements; an LLVM consumer sees the constraint strings Clang would emit:
+
+| C form | LLVM form |
+|---|---|
+| Template `$`, `%N`, `%[name]`, `%cN`, `%=` | `$$`, `$N`, `$N`, `${N:c}`, `${:uid}` |
+| x86-64 dialect alternatives `{att\|intel}` | `$(att$\|intel$)`; AArch64 keeps braces literal |
+| `r`, `m`, `x`, `t`, `u`, `X` | `r`, indirect `*m` with `elementtype`, `x`, `{st}`, `{st(1)}`, `r` |
+| `a`, `b`, `c`, `d`, `S`, `D` | `{ax}`, `{bx}`, `{cx}`, `{dx}`, `{si}`, `{di}` |
+| Local register variables | `{r8}`-`{r11}` on x86-64, `{xN}` on AArch64 |
+| Register outputs, `&` | Call results (an anonymous struct for several), `=&` |
+| Matching input `"N"` | Tied constraint `N` |
+| Read-write `+` output | Output plus a tie appended after the inputs: the output number, or the named register for a register variable; `+m` repeats `*m` |
+| `asm goto` labels | One `!i` per label after every operand and tie; `%lN` becomes `${N:l}` |
+| Clobbers | `~{name}` with a leading `%` removed; x86-64 also adds Clang's `~{dirflag},~{fpsr},~{flags}` |
+
+The call has side effects when the statement is `volatile`, has no outputs, or
+is `asm goto`. `-masm=intel` sets LLVM's Intel dialect on x86-64 templates.
+Register results are stored back through their output places after the call;
+read-write register outputs load their current value first.
+
+`asm goto` with register outputs, boolean or aggregate register operands, and
+matching operands whose LLVM types differ or whose output is in memory remain
+explicit diagnostics. A module emitted without an x86-64 or AArch64 target
+triple refuses inline assembly.
+`llvm_bitcode_test_inline_assembly` emits a fixture covering these forms twice,
+compares the bytes, and runs each answer through a Clang-built caller at `-O0`
+and `-O2` on the host, x86-64 or AArch64.
 
 Scalar `va_start`, `va_copy`, `va_end`, and `va_arg` are admitted only for
 x86-64 Linux (System V) and x86-64 Windows (Win64) variadic definitions using
@@ -310,8 +342,8 @@ restore without publishing bytes. The C fixture runs nested and repeated VLAs,
 continue, break, outward goto, early return, and a live outer allocation;
 the independently compiled observer reads only live elements. The 1024-iteration
 16 KiB case exposes an omitted loop restore by exhausting a typical stack.
-The test module also checks (using the still-unsupported inline assembly) that a later unsupported operation cannot replace
-an existing output. When Clang is available, the fixture is consumed and run
+The test module also checks, with a still-unsupported label address, that a
+later unsupported operation cannot replace an existing output. When Clang is available, the fixture is consumed and run
 at both `-O0` and `-O2` for both frontend modes.
 
 ## Lifecycle registration validation

@@ -1655,9 +1655,16 @@ one publication per member, refusal neighbors and both canonical frontend
 forms on Linux x86-64/AArch64 and Windows x86-64. The registered
 `c_test_expression_enum_runtime` executes the same scope/order family on
 supported desktop native targets in FAST and QUALITY and both forms.
-Expression enums inside
-initializers, qualified type names and expression-defined record members
-remain separate pending cases under #1615.
+The local initializer walk also publishes direct enum type names in explicitly
+typed scalar block initializers at that lexical point, before later operands
+and comma declarators. It uses only the owning enum's member range.
+`c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
+and both canonical frontend forms on the same three layouts.
+`c_test_initializer_enum_runtime` executes initializer order, cast/literal,
+tag, static-local and later-declarator cases in FAST and QUALITY
+and both forms on supported desktop targets. Inferred array initializers,
+constexpr/GNU inferred declarations, for initializers, file-scope initializers, qualified type
+names and expression-defined record members remain pending under #1615.
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,

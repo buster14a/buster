@@ -4140,7 +4140,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         u32* group_sizes = arena_allocate(arena, u32, slot_axis);
         u32* group_alignments = arena_allocate(arena, u32, slot_axis);
         u32* group_offsets = arena_allocate(arena, u32, slot_axis);
-        bool coalesce_slots = reuse_frame_storage && description->frame_address_opcode != 0;
+        bool coalesce_slots = reuse_frame_storage && description->frame_address_opcode != 0 && !function->distinct_frame_objects;
         u8* slot_addressed = arena_allocate(arena, u8, slot_axis);
         u8* address_safe = arena_allocate(arena, u8, slot_axis);
         memset(slot_addressed, 0, slot_axis);

@@ -14754,6 +14754,23 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, 2) == UINT8_MAX);
     }
     {
+        // A switch compare-chain edge whose P+4 word is the next compare's MOV
+        // (not a B) and whose target is past B.cond range but inside B range
+        // takes tier one: inverse-cond over one inserted B, +4 bytes, with
+        // the original P+4 word preserved at P+8.
+        u32 chain_words[4] = {0};
+        u32 chain_size = 0;
+        u8 chain_tier = 0xff;
+        u32 chain_distance = 1122304u;
+        BUSTER_TEST(arguments, machine_a64_test_relax_dense_compare_chain(arguments->arena, chain_distance, 0, chain_words, 4, &chain_size, &chain_tier));
+        BUSTER_TEST(arguments, chain_tier == 1 && chain_size == chain_distance + 4u + 4u);
+        BUSTER_TEST(arguments, chain_words[0] == UINT32_C(0x54000041));
+        BUSTER_TEST(arguments, chain_words[1] == (UINT32_C(0x14000000) | ((chain_distance + 4u - 4u) >> 2)));
+        BUSTER_TEST(arguments, chain_words[2] == UINT32_C(0xd2800020));
+        BUSTER_TEST(arguments, machine_a64_test_relax_dense_compare_chain(arguments->arena, 1000u, 0, chain_words, 4, &chain_size, &chain_tier));
+        BUSTER_TEST(arguments, chain_tier == 0 && chain_size == 1004u && chain_words[1] == UINT32_C(0xd2800020));
+    }
+    {
         // Two interacting edges force a genuine convergence sequence without
         // allocating their 200 MiB virtual layout.  The first BCC starts in
         // the medium tier, its fallthrough B is at the adjacent word, and a

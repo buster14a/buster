@@ -237,6 +237,25 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(lab.measured_input(lab.parse_cc_metrics(CC_METRICS.replace("measured=1", "measured=0"))))
         self.assertIsNone(lab.measured_input(lab.parse_cc_metrics("")))
 
+    def test_missing_phase_telemetry_is_unavailable(self):
+        def record(**fields):
+            return dict({"measured": 1, "start_ns": 1}, **fields)
+        # No total_ns: not selected (no KeyError later); the next valid record is.
+        self.assertIsNone(lab.measured_input({"inputs": [record(parse_ns=2)]}))
+        self.assertIsNone(lab.measured_input({"inputs": [record(total_ns="7")]}))
+        self.assertIsNone(lab.measured_input({"inputs": [record(total_ns=True)]}))
+        self.assertIsNone(lab.measured_input({"inputs": [record(total_ns=-1)]}))
+        good = record(total_ns=10000000, parse_ns=2000000, emit_ns=0)
+        self.assertIs(lab.measured_input({"inputs": [record(parse_ns=2), good]}), good)
+        # Absent phases are None; a declared zero is a real zero.
+        self.assertEqual(lab.phase_ns_series([good], "emit"), [0])
+        self.assertIsNone(lab.phase_ns_series([good], "analysis"))
+        # Partially populated series are incomplete, not padded or shrunk.
+        self.assertIsNone(lab.phase_ns_series([good, record(total_ns=1, parse_ns=3)], "emit"))
+        self.assertIsNone(lab.phase_ns_series([good, record(total_ns=1, parse_ns="x")], "parse"))
+        self.assertEqual(lab.phase_ns_series([good, record(total_ns=1, parse_ns=3)], "parse"), [2000000, 3])
+        self.assertIsNone(lab.phase_ns_series([], "parse"))
+
     def test_report_self_strips_ipc_columns(self):
         sections = lab.parse_report(REPORT_SELF)
         self.assertEqual(list(sections), ["cycles:u"])
