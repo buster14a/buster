@@ -26,6 +26,9 @@
 // dynamic STACK_ALLOCATE records remain at their canonical instruction sites.
 // llvm_bc_plan_value_spills gives every non-place aggregate GEP base one entry
 // alloca, filled in llvm_bc_emit_instruction after the value's definition.
+// llvm_bc_prepare_inline_assembly translates GCC inline assembly into an
+// INLINEASM constant during collection; llvm_bc_emit_inline_assembly writes
+// its call or callbr. LLVM_BITCODE.md tabulates the translation.
 // Test-only integer operand access lives at llvm_bitcode_test_integer_operand;
 // normal builds omit that private boundary entirely.
 
@@ -54,6 +57,7 @@ enum
     LLVM_BC_ATTRIBUTE_SRET = 29,
     LLVM_BC_ATTRIBUTE_SIGNEXT = 24,
     LLVM_BC_ATTRIBUTE_ZEROEXT = 34,
+    LLVM_BC_ATTRIBUTE_ELEMENTTYPE = 77,
 
     LLVM_BC_MODULE_VERSION = 1,
     LLVM_BC_MODULE_TRIPLE = 2,
@@ -91,6 +95,7 @@ enum
     LLVM_BC_CST_STRING = 8,
     LLVM_BC_CST_CE_CAST = 11,
     LLVM_BC_CST_CE_GEP_OLD = 12,
+    LLVM_BC_CST_INLINEASM = 30,
 
     LLVM_BC_FUNC_DECLAREBLOCKS = 1,
     LLVM_BC_FUNC_BINOP = 2,
@@ -117,6 +122,7 @@ enum
     LLVM_BC_FUNC_STOREATOMIC = 45,
     LLVM_BC_FUNC_CMPXCHG = 46,
     LLVM_BC_FUNC_UNOP = 56,
+    LLVM_BC_FUNC_CALLBR = 57,
     LLVM_BC_FUNC_ATOMICRMW = 59,
 
     LLVM_BC_CAST_TRUNC = 0,
@@ -153,6 +159,9 @@ enum
     LLVM_BC_ORDERING_SEQCST = 6,
 
     LLVM_BC_CALL_EXPLICIT_TYPE = 1 << 15,
+
+    LLVM_BC_INLINEASM_SIDE_EFFECT = 1 << 0,
+    LLVM_BC_INLINEASM_INTEL_DIALECT = 1 << 2,
 
     LLVM_BC_LINKAGE_EXTERNAL = 0,
     LLVM_BC_LINKAGE_APPENDING = 2,
@@ -287,6 +296,18 @@ struct LlvmBcAttributeGroup
     u32 alignment;
 };
 
+// One lowered inline-assembly instruction: the INLINEASM constant it calls,
+// the asm function type, its elementtype attribute list (0 when no operand is
+// indirect) and the call's result type.
+typedef struct LlvmBcInlineAssembly LlvmBcInlineAssembly;
+struct LlvmBcInlineAssembly
+{
+    u32 callee_value_id;
+    u32 function_type_id;
+    u32 attribute_list_id;
+    u32 result_type_id;
+};
+
 typedef struct LlvmBcGlobal LlvmBcGlobal;
 struct LlvmBcGlobal
 {
@@ -335,7 +356,8 @@ struct LlvmBcFunction
     u32* value_type_ids;
     // Per instruction: the constant-pool value id collection found for a
     // constant instruction's own value, which value numbering reads instead
-    // of searching the pool again. LLVM_BC_INVALID_ID elsewhere.
+    // of searching the pool again; for inline assembly, the index of its
+    // LlvmBcInlineAssembly row. LLVM_BC_INVALID_ID elsewhere.
     u32* constant_value_ids;
     LlvmBcInstructionPlan* instruction_plans;
     LlvmBcFixedAlloca* fixed_allocas;
@@ -425,6 +447,9 @@ struct LlvmBcContext
     LlvmBcString* strings;
     u32 string_count;
     u32 string_capacity;
+    LlvmBcInlineAssembly* inline_assemblies;
+    u32 inline_assembly_count;
+    u32 inline_assembly_capacity;
 
     u32* symbol_value_ids;
     u8* symbol_seen;
@@ -3017,6 +3042,433 @@ BUSTER_GLOBAL_LOCAL bool llvm_bc_aggregate_is_byte_array(IrType* type)
 BUSTER_GLOBAL_LOCAL u32 llvm_bc_bit_field_aggregate(LlvmBcContext* context, LlvmBcFunction* record, IrFunction* function, IrBlock* block,
                                                     IrInstruction* instruction, u32* current_value_id, LlvmBcBitFieldAggregateMode mode);
 
+BUSTER_GLOBAL_LOCAL void llvm_bc_text_append(LlvmBcBuffer* text, String8 bytes)
+{
+    llvm_bc_buffer_reserve(text, text->length + bytes.length);
+    if (bytes.length)
+    {
+        memcpy(text->data + text->length, bytes.pointer, (size_t)bytes.length);
+    }
+    text->length += bytes.length;
+}
+
+BUSTER_GLOBAL_LOCAL void llvm_bc_text_append_decimal(LlvmBcBuffer* text, u64 value)
+{
+    char8 digits[20];
+    u32 count = 0;
+    do
+    {
+        digits[BUSTER_ARRAY_LENGTH(digits) - 1 - count] = (char8)('0' + value % 10);
+        value /= 10;
+        count += 1;
+    } while (value);
+    llvm_bc_text_append(text, (String8){.pointer = digits + BUSTER_ARRAY_LENGTH(digits) - count, .length = count});
+}
+
+// The register vocabulary below is the one the C frontend admits for the
+// target; LLVM receives Clang's spelling for each class.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_inline_assembly_append_class(LlvmBcContext* context, LlvmBcBuffer* text, u64 constraint)
+{
+    static String8 const x86_classes[IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT] = {
+        [IR_INLINE_ASSEMBLY_CONSTRAINT_A] = S8_INITIALIZER("{ax}"),     [IR_INLINE_ASSEMBLY_CONSTRAINT_B] = S8_INITIALIZER("{bx}"),
+        [IR_INLINE_ASSEMBLY_CONSTRAINT_C] = S8_INITIALIZER("{cx}"),     [IR_INLINE_ASSEMBLY_CONSTRAINT_D] = S8_INITIALIZER("{dx}"),
+        [IR_INLINE_ASSEMBLY_CONSTRAINT_SI] = S8_INITIALIZER("{si}"),    [IR_INLINE_ASSEMBLY_CONSTRAINT_DI] = S8_INITIALIZER("{di}"),
+        [IR_INLINE_ASSEMBLY_CONSTRAINT_R8] = S8_INITIALIZER("{r8}"),    [IR_INLINE_ASSEMBLY_CONSTRAINT_R9] = S8_INITIALIZER("{r9}"),
+        [IR_INLINE_ASSEMBLY_CONSTRAINT_R10] = S8_INITIALIZER("{r10}"),  [IR_INLINE_ASSEMBLY_CONSTRAINT_R11] = S8_INITIALIZER("{r11}"),
+        [IR_INLINE_ASSEMBLY_CONSTRAINT_R] = S8_INITIALIZER("r"),        [IR_INLINE_ASSEMBLY_CONSTRAINT_M] = S8_INITIALIZER("m"),
+        [IR_INLINE_ASSEMBLY_CONSTRAINT_X] = S8_INITIALIZER("x"),        [IR_INLINE_ASSEMBLY_CONSTRAINT_T] = S8_INITIALIZER("{st}"),
+        [IR_INLINE_ASSEMBLY_CONSTRAINT_U] = S8_INITIALIZER("{st(1)}"),
+    };
+    u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+    bool physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint);
+    bool valid = false;
+    if (context->abi_target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        valid = !physical && constraint_class < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+        if (valid)
+        {
+            llvm_bc_text_append(text, x86_classes[constraint_class]);
+        }
+    }
+    else if (physical)
+    {
+        valid = IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint) <= 30;
+        if (valid)
+        {
+            llvm_bc_text_append(text, S8("{x"));
+            llvm_bc_text_append_decimal(text, IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint));
+            llvm_bc_text_append(text, S8("}"));
+        }
+    }
+    else
+    {
+        valid = constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_R || constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_M;
+        if (valid)
+        {
+            llvm_bc_text_append(text, x86_classes[constraint_class]);
+        }
+    }
+    return valid;
+}
+
+// GCC's template becomes LLVM's: `$` is LLVM's operand sigil, so a literal
+// one doubles; `%N`, `%[name]` and `%cN` become `$N` or `${N:c}`; `%=` is the
+// per-instance `${:uid}`; and where the target has assembler dialects (x86),
+// unescaped `{|}` select between them as `$( $| $)`. Label operands follow
+// every operand and every read-write tie, exactly as
+// ir_inline_assembly_label_operand_base numbers them.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_inline_assembly_template(LlvmBcBuffer* text, String8 source, IrInstructionExtra extra, u32 label_base,
+                                                          u32 label_count, bool variants)
+{
+    bool valid = true;
+    u64 index = 0;
+    while (valid && index < source.length)
+    {
+        char8 character = source.pointer[index];
+        index += 1;
+        if (character == '$')
+        {
+            llvm_bc_text_append(text, S8("$$"));
+        }
+        else if (variants && (character == '{' || character == '|' || character == '}'))
+        {
+            llvm_bc_text_append(text, character == '{' ? S8("$(") : character == '|' ? S8("$|") : S8("$)"));
+        }
+        else if (character != '%')
+        {
+            llvm_bc_text_append(text, (String8){.pointer = source.pointer + index - 1, .length = 1});
+        }
+        else if (index >= source.length)
+        {
+            valid = false;
+        }
+        else if (source.pointer[index] == '%' || source.pointer[index] == '{' || source.pointer[index] == '|' || source.pointer[index] == '}')
+        {
+            llvm_bc_text_append(text, (String8){.pointer = source.pointer + index, .length = 1});
+            index += 1;
+        }
+        else if (source.pointer[index] == '=')
+        {
+            llvm_bc_text_append(text, S8("${:uid}"));
+            index += 1;
+        }
+        else
+        {
+            char8 modifier = 0;
+            char8 next = source.pointer[index];
+            if ((next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z'))
+            {
+                modifier = next;
+                index += 1;
+            }
+            u64 operand = UINT64_MAX;
+            if (index < source.length && source.pointer[index] >= '0' && source.pointer[index] <= '9')
+            {
+                operand = 0;
+                while (index < source.length && source.pointer[index] >= '0' && source.pointer[index] <= '9' && operand <= UINT32_MAX)
+                {
+                    operand = operand * 10 + (u64)(source.pointer[index] - '0');
+                    index += 1;
+                }
+            }
+            else if (index < source.length && source.pointer[index] == '[')
+            {
+                u64 close = index + 1;
+                while (close < source.length && source.pointer[close] != ']')
+                {
+                    close += 1;
+                }
+                String8 name = {.pointer = source.pointer + index + 1, .length = close - index - 1};
+                for (u32 name_index = 0; operand == UINT64_MAX && name.length && extra.operand_names && name_index < extra.operand_name_count;
+                     name_index += 1)
+                {
+                    operand = string_equal(extra.operand_names[name_index], name) ? name_index : UINT64_MAX;
+                }
+                for (u32 name_index = 0; operand == UINT64_MAX && name.length && extra.label_names && name_index < extra.label_name_count;
+                     name_index += 1)
+                {
+                    operand = string_equal(extra.label_names[name_index], name) ? (u64)label_base + name_index : UINT64_MAX;
+                }
+                index = close + 1;
+            }
+            valid = operand < (u64)label_base + label_count;
+            if (valid)
+            {
+                llvm_bc_text_append(text, modifier ? S8("${") : S8("$"));
+                llvm_bc_text_append_decimal(text, operand);
+                if (modifier)
+                {
+                    char8 suffix[3] = {':', modifier, '}'};
+                    llvm_bc_text_append(text, (String8){.pointer = suffix, .length = 3});
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+// The LLVM type an inline-assembly register operand of this canonical type
+// travels in, or LLVM_BC_INVALID_ID when no register class can carry it.
+// Booleans are refused: LLVM has no register for i1.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_inline_assembly_register_type(LlvmBcContext* context, IrTypeId type_id)
+{
+    IrType* type = llvm_bc_ir_type(context, type_id);
+    u32 result = LLVM_BC_INVALID_ID;
+    if (type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION))
+    {
+        result = context->pointer_type_id;
+    }
+    else if (type && (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_ENUM || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_VECTOR))
+    {
+        result = context->ir_type_ids[type_id.value];
+    }
+    return result;
+}
+
+// The pointee an indirect ("*m") operand names in its elementtype attribute.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_inline_assembly_memory_type(LlvmBcContext* context, IrTypeId type_id)
+{
+    IrType* type = llvm_bc_ir_type(context, type_id);
+    u32 result = LLVM_BC_INVALID_ID;
+    if (type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION))
+    {
+        result = context->pointer_type_id;
+    }
+    else if (type && type->kind != IR_TYPE_VOID)
+    {
+        result = context->ir_type_ids[type_id.value];
+    }
+    return result;
+}
+
+// Lower one canonical inline-assembly instruction to an INLINEASM constant
+// using Clang's GCC translation. LLVM orders the constraints as every output
+// (register results and indirect "=*m" places, in GCC order), every input,
+// one tied input per read-write output, one "!i" per asm-goto label, then the
+// clobbers; call arguments follow the same order minus the register results.
+// Returns the LlvmBcInlineAssembly row index, or LLVM_BC_INVALID_ID after a
+// diagnostic.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_prepare_inline_assembly(LlvmBcContext* context, IrFunction* function, IrInstruction* instruction)
+{
+    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
+    u32 operand_count = instruction->operand_count;
+    u32 label_count = instruction->target_count ? (u32)instruction->target_count - 1 : 0;
+    u32 label_base = ir_inline_assembly_label_operand_base(instruction);
+    bool x86 = context->abi_target_valid && context->abi_target.cpu_arch == CPU_ARCH_X86_64;
+    bool aarch64 = context->abi_target_valid && context->abi_target.cpu_arch == CPU_ARCH_AARCH64;
+    char8 const* failure = 0;
+    LlvmBitcodeErrorCode failure_code = LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION;
+    // Read-write outputs add one tied argument each, so at most twice the operands.
+    u64* parameters = arena_allocate(context->arena, u64, (u64)operand_count * 2 + 2);
+    u64* results = arena_allocate(context->arena, u64, (u64)operand_count + 2);
+    u32* memory_types = arena_allocate(context->arena, u32, (u64)operand_count * 2 + 1);
+    for (u64 index = 0; index < (u64)operand_count * 2 + 1; index += 1)
+    {
+        memory_types[index] = LLVM_BC_INVALID_ID;
+    }
+    u32 parameter_count = 0;
+    u32 result_count = 0;
+    u32 output_count = 0;
+    LlvmBcBuffer constraints = {.arena = context->arena};
+    LlvmBcBuffer text = {.arena = context->arena};
+    if (!x86 && !aarch64)
+    {
+        failure = "LLVM bitcode inline assembly requires an x86-64 or AArch64 target triple";
+    }
+    else if (label_base == UINT32_MAX || (!extra.literal.pointer && extra.literal.length))
+    {
+        failure = "invalid canonical inline assembly";
+        failure_code = LLVM_BITCODE_ERROR_IR_VALIDATION;
+    }
+    // Pass 0 writes the outputs and inputs, pass 1 the read-write ties.
+    for (u32 pass = 0; pass < 2 && !failure; pass += 1)
+    {
+        for (u32 index = 0; index < operand_count && !failure; index += 1)
+        {
+            u64 constraint = instruction->immediates[index];
+            u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+            bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+            bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+            bool memory = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint_class);
+            IrValue* value = function->values + instruction->operands[index].value;
+            if (pass == 1 && !read_write)
+            {
+                continue;
+            }
+            if (constraints.length)
+            {
+                llvm_bc_text_append(&constraints, S8(","));
+            }
+            // Places carry the object type; values carry their own.
+            u32 type = memory ? llvm_bc_inline_assembly_memory_type(context, value->canonical_type)
+                              : llvm_bc_inline_assembly_register_type(context, value->canonical_type);
+            if (type == LLVM_BC_INVALID_ID)
+            {
+                failure = "LLVM inline assembly operand type has no register class";
+                failure_code = LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE;
+            }
+            else if (pass == 0 && output)
+            {
+                output_count += 1;
+                llvm_bc_text_append(&constraints, S8("="));
+                if (memory)
+                {
+                    llvm_bc_text_append(&constraints, S8("*"));
+                    memory_types[parameter_count] = type;
+                    parameters[parameter_count++] = context->pointer_type_id;
+                }
+                else
+                {
+                    results[result_count++] = type;
+                }
+                if (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER)
+                {
+                    llvm_bc_text_append(&constraints, S8("&"));
+                }
+                failure = llvm_bc_inline_assembly_append_class(context, &constraints, constraint) ? 0 : "unsupported LLVM inline assembly constraint";
+            }
+            else if (pass == 0 && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH))
+            {
+                u32 match = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+                IrValue* tied = function->values + instruction->operands[match].value;
+                llvm_bc_text_append_decimal(&constraints, match);
+                parameters[parameter_count++] = type;
+                if (memory)
+                {
+                    failure = "LLVM inline assembly cannot tie an input to a memory output";
+                }
+                else if (llvm_bc_inline_assembly_register_type(context, tied->canonical_type) != type)
+                {
+                    failure = "LLVM inline assembly matching operands require one LLVM type";
+                    failure_code = LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE;
+                }
+            }
+            else if (memory)
+            {
+                llvm_bc_text_append(&constraints, S8("*"));
+                memory_types[parameter_count] = type;
+                parameters[parameter_count++] = context->pointer_type_id;
+                failure = llvm_bc_inline_assembly_append_class(context, &constraints, constraint) ? 0 : "unsupported LLVM inline assembly constraint";
+            }
+            else
+            {
+                parameters[parameter_count++] = type;
+                // Clang ties a read-write output by number unless a local
+                // register variable names its register, which it repeats.
+                bool named_register = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint) ||
+                                      (constraint_class >= IR_INLINE_ASSEMBLY_CONSTRAINT_R8 && constraint_class <= IR_INLINE_ASSEMBLY_CONSTRAINT_R11);
+                if (pass == 1 && !named_register)
+                {
+                    llvm_bc_text_append_decimal(&constraints, index);
+                }
+                else
+                {
+                    failure = llvm_bc_inline_assembly_append_class(context, &constraints, constraint) ? 0 : "unsupported LLVM inline assembly constraint";
+                }
+            }
+        }
+    }
+    if (!failure && label_count && result_count)
+    {
+        failure = "LLVM bitcode asm goto with register outputs is not implemented";
+    }
+    for (u32 label = 0; !failure && label < label_count; label += 1)
+    {
+        llvm_bc_text_append(&constraints, constraints.length ? S8(",!i") : S8("!i"));
+    }
+    for (u32 index = 0; !failure && index < extra.clobber_count; index += 1)
+    {
+        String8 clobber = extra.clobbers[index];
+        if (clobber.length > 1 && clobber.pointer[0] == '%')
+        {
+            clobber = string_slice(clobber, 1, clobber.length);
+        }
+        for (u64 character = 0; !failure && character < clobber.length; character += 1)
+        {
+            failure = clobber.pointer[character] == ',' || clobber.pointer[character] == '{' || clobber.pointer[character] == '}'
+                          ? "malformed LLVM inline assembly clobber"
+                          : 0;
+        }
+        if (!failure && clobber.length)
+        {
+            llvm_bc_text_append(&constraints, constraints.length ? S8(",~{") : S8("~{"));
+            llvm_bc_text_append(&constraints, clobber);
+            llvm_bc_text_append(&constraints, S8("}"));
+        }
+    }
+    if (!failure && x86)
+    {
+        // Clang's x86 clobbers on every GCC asm statement.
+        llvm_bc_text_append(&constraints, constraints.length ? S8(",~{dirflag},~{fpsr},~{flags}") : S8("~{dirflag},~{fpsr},~{flags}"));
+    }
+    if (!failure && !llvm_bc_inline_assembly_template(&text, extra.literal, extra, label_base, label_count, x86))
+    {
+        failure = "unsupported LLVM inline assembly template reference";
+    }
+    u32 row = LLVM_BC_INVALID_ID;
+    if (failure)
+    {
+        llvm_bc_fail(context, failure_code, llvm_bc_s8(failure), function, 0, instruction, instruction->symbol);
+    }
+    else
+    {
+        LlvmBcInlineAssembly assembly = {.result_type_id = context->void_type_id};
+        if (result_count == 1)
+        {
+            assembly.result_type_id = (u32)results[0];
+        }
+        else if (result_count > 1)
+        {
+            u64* elements = arena_allocate(context->arena, u64, (u64)result_count + 1);
+            elements[0] = 0;
+            memcpy(elements + 1, results, (size_t)result_count * sizeof(*results));
+            assembly.result_type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, elements, result_count + 1);
+        }
+        u64* signature = arena_allocate(context->arena, u64, (u64)parameter_count + 2);
+        signature[0] = 0;
+        signature[1] = assembly.result_type_id;
+        memcpy(signature + 2, parameters, (size_t)parameter_count * sizeof(*parameters));
+        assembly.function_type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, signature, parameter_count + 2);
+        // LLVM requires each indirect operand to name its pointee type.
+        LlvmBcAbiSignature* attributes = arena_allocate(context->arena, LlvmBcAbiSignature, 1);
+        *attributes = (LlvmBcAbiSignature){.first_attribute_group = context->attribute_group_count};
+        for (u32 parameter = 0; parameter < parameter_count; parameter += 1)
+        {
+            if (memory_types[parameter] != LLVM_BC_INVALID_ID)
+            {
+                llvm_bc_abi_attribute(context, attributes, parameter + 1, LLVM_BC_ATTRIBUTE_ELEMENTTYPE, memory_types[parameter], 0);
+            }
+        }
+        llvm_bc_register_attribute_list(context, attributes);
+        assembly.attribute_list_id = attributes->attribute_list_id;
+        bool side_effect = instruction->volatile_access || !output_count || label_count;
+        u64* operands = arena_allocate(context->arena, u64, text.length + constraints.length + 4);
+        u32 count = 0;
+        operands[count++] = assembly.function_type_id;
+        operands[count++] = (side_effect ? LLVM_BC_INLINEASM_SIDE_EFFECT : 0) |
+                            (x86 && context->options.intel_inline_assembly ? LLVM_BC_INLINEASM_INTEL_DIALECT : 0);
+        operands[count++] = text.length;
+        for (u64 index = 0; index < text.length; index += 1)
+        {
+            operands[count++] = text.data[index];
+        }
+        operands[count++] = constraints.length;
+        for (u64 index = 0; index < constraints.length; index += 1)
+        {
+            operands[count++] = constraints.data[index];
+        }
+        assembly.callee_value_id = llvm_bc_add_constant(context, context->pointer_type_id, LLVM_BC_CST_INLINEASM, operands, count);
+        if (!llvm_bc_failed(context))
+        {
+            llvm_bc_vec_reserve(context->arena, (void**)&context->inline_assemblies, &context->inline_assembly_capacity,
+                                context->inline_assembly_count + 1, sizeof(*context->inline_assemblies), BUSTER_ALIGN_OF(LlvmBcInlineAssembly));
+            context->inline_assemblies[context->inline_assembly_count] = assembly;
+            row = context->inline_assembly_count++;
+        }
+    }
+    return row;
+}
+
 static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
 {
     llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
@@ -3043,6 +3495,9 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
             {
             case IR_OPCODE_CALL:
                 llvm_bc_call_signature(context, function, instruction);
+                break;
+            case IR_OPCODE_INLINE_ASSEMBLY:
+                constant_value_ids[instruction_index] = llvm_bc_prepare_inline_assembly(context, function, instruction);
                 break;
             case IR_OPCODE_CONSTANT_INTEGER:
             case IR_OPCODE_ENUM:
@@ -3304,6 +3759,25 @@ BUSTER_GLOBAL_LOCAL bool llvm_bc_va_shape_supported(LlvmBcContext* context, IrFu
     return supported;
 }
 
+// Register outputs are the call's results, extracted one by one when there are
+// several; each read-write register output first loads its tied input.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_inline_assembly_value_count(IrInstruction* instruction)
+{
+    u32 results = 0;
+    u32 loads = 0;
+    for (u32 index = 0; index < instruction->operand_count; index += 1)
+    {
+        u64 constraint = instruction->immediates[index];
+        if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
+            !IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+        {
+            results += 1;
+            loads += (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+        }
+    }
+    return loads + (results ? 1 : 0) + (results > 1 ? results : 0);
+}
+
 static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction* function, IrBlock* block, IrInstruction* instruction)
 {
     switch (instruction->opcode)
@@ -3457,9 +3931,7 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
         return count;
     }
     case IR_OPCODE_INLINE_ASSEMBLY:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode inline assembly is not implemented"), function, block,
-                     instruction, instruction->symbol);
-        return LLVM_BC_INVALID_ID;
+        return llvm_bc_inline_assembly_value_count(instruction);
     case IR_OPCODE_SIMD:
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode exact SIMD lowering is unavailable; select an explicit source fallback"), function, block,
                      instruction, instruction->symbol);
@@ -4712,6 +5184,126 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_va_instruction(LlvmBcContext* context, Llv
     }
 }
 
+// Arguments follow llvm_bc_prepare_inline_assembly's constraint order: the
+// indirect output places, the inputs (places for memory operands), then one
+// tie per read-write output. asm goto becomes callbr, whose register outputs
+// preparation already refused, so nothing follows the terminator.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_emit_inline_assembly(LlvmBcContext* context, LlvmBcFunction* record, IrBlock* block, IrInstruction* instruction,
+                                                      u32* current_value_id)
+{
+    IrFunction* function = record->function;
+    u32 row = record->constant_value_ids[ir_instruction_self_id(function, instruction).value];
+    bool valid = row < context->inline_assembly_count;
+    u32 operand_count = instruction->operand_count;
+    u32* tied = arena_allocate(context->arena, u32, (u64)operand_count + 1);
+    for (u32 index = 0; valid && index < operand_count; index += 1)
+    {
+        u64 constraint = instruction->immediates[index];
+        IrValueId place = instruction->operands[index];
+        tied[index] = llvm_bc_function_value_id(context, record, place);
+        if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) &&
+            !IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+        {
+            IrValue* place_value = function->values + place.value;
+            u32 alignment = llvm_bc_access_alignment(context, function, place_value, place_value->canonical_type);
+            u64 operands[6];
+            u32 count = 0;
+            llvm_bc_push_value_and_type(operands, &count, *current_value_id, tied[index], context->pointer_type_id);
+            operands[count++] = llvm_bc_inline_assembly_register_type(context, place_value->canonical_type);
+            operands[count++] = alignment;
+            operands[count++] = place_value->is_volatile;
+            llvm_bc_record(&context->stream, LLVM_BC_FUNC_LOAD, operands, count);
+            tied[index] = (*current_value_id)++;
+            valid = alignment != UINT32_MAX;
+        }
+    }
+    LlvmBcInlineAssembly assembly = valid ? context->inline_assemblies[row] : (LlvmBcInlineAssembly){0};
+    u64* operands = arena_allocate(context->arena, u64, (u64)operand_count * 2 + instruction->target_count + 8);
+    u32 count = 0;
+    if (valid)
+    {
+        operands[count++] = assembly.attribute_list_id;
+        operands[count++] = LLVM_BC_CALL_EXPLICIT_TYPE;
+        if (instruction->target_count)
+        {
+            operands[count++] = llvm_bc_function_block_index(context, record, instruction->targets[0]);
+            operands[count++] = (u64)instruction->target_count - 1;
+            for (u32 target = 1; target < instruction->target_count; target += 1)
+            {
+                operands[count++] = llvm_bc_function_block_index(context, record, instruction->targets[target]);
+            }
+        }
+        operands[count++] = assembly.function_type_id;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, assembly.callee_value_id, context->pointer_type_id);
+    }
+    // Pass 0: indirect outputs; pass 1: inputs; pass 2: read-write ties.
+    for (u32 pass = 0; valid && pass < 3; pass += 1)
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            u64 constraint = instruction->immediates[index];
+            bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+            bool memory = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+            bool argument = pass == 0   ? output && memory
+                            : pass == 1 ? !output
+                                        : output && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE);
+            if (argument)
+            {
+                llvm_bc_push_relative(operands, &count, *current_value_id, tied[index]);
+            }
+        }
+    }
+    if (valid)
+    {
+        llvm_bc_record(&context->stream, instruction->target_count ? LLVM_BC_FUNC_CALLBR : LLVM_BC_FUNC_CALL, operands, count);
+    }
+    u32 register_outputs = 0;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        u64 constraint = instruction->immediates[index];
+        register_outputs += (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
+                            !IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+    }
+    u32 call = *current_value_id;
+    *current_value_id += valid && register_outputs;
+    u32 result_index = 0;
+    for (u32 index = 0; valid && index < operand_count; index += 1)
+    {
+        u64 constraint = instruction->immediates[index];
+        if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
+            !IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+        {
+            IrValueId place = instruction->operands[index];
+            IrValue* place_value = function->values + place.value;
+            u32 type = llvm_bc_inline_assembly_register_type(context, place_value->canonical_type);
+            u32 value = call;
+            if (register_outputs > 1)
+            {
+                u64 extract[2] = {*current_value_id - call, result_index};
+                llvm_bc_record(&context->stream, LLVM_BC_FUNC_EXTRACTVAL, extract, 2);
+                value = (*current_value_id)++;
+            }
+            result_index += 1;
+            u32 alignment = llvm_bc_access_alignment(context, function, place_value, place_value->canonical_type);
+            valid = alignment != UINT32_MAX;
+            u64 store[8];
+            u32 store_count = 0;
+            llvm_bc_push_value_and_type(store, &store_count, *current_value_id, llvm_bc_function_value_id(context, record, place),
+                                        context->pointer_type_id);
+            llvm_bc_push_value_and_type(store, &store_count, *current_value_id, value, type);
+            store[store_count++] = alignment;
+            store[store_count++] = place_value->is_volatile;
+            llvm_bc_record(&context->stream, LLVM_BC_FUNC_STORE, store, store_count);
+        }
+    }
+    if (!valid && !llvm_bc_failed(context))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("invalid LLVM inline assembly operand alignment"), function, block,
+                     instruction, instruction->symbol);
+    }
+    return valid && !llvm_bc_failed(context);
+}
+
 static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* record, IrBlock* block, IrInstruction* instruction,
                                      u32* current_value_id)
 {
@@ -5203,9 +5795,14 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
     case IR_OPCODE_UNREACHABLE:
         llvm_bc_record(&context->stream, LLVM_BC_FUNC_UNREACHABLE, 0, 0);
         break;
+    case IR_OPCODE_INLINE_ASSEMBLY:
+        if (!llvm_bc_emit_inline_assembly(context, record, block, instruction, current_value_id))
+        {
+            return false;
+        }
+        break;
     case IR_OPCODE_SLICE:
     case IR_OPCODE_REVERSE:
-    case IR_OPCODE_INLINE_ASSEMBLY:
     case IR_OPCODE_SIMD:
     case IR_OPCODE_LABEL_ADDRESS:
     case IR_OPCODE_INDIRECT_BRANCH:
@@ -5355,6 +5952,12 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
                 // Enum attributes carry neither a storage type nor alignment.
                 u64 operands[4] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_ENUM, group->kind};
                 llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 4);
+            }
+            else if (group->kind == LLVM_BC_ATTRIBUTE_ELEMENTTYPE)
+            {
+                // An indirect inline-assembly operand names its pointee type only.
+                u64 operands[5] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_TYPE, group->kind, group->type_id};
+                llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 5);
             }
             else
             {

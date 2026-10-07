@@ -989,8 +989,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
+        // Inline assembly now lowers (#3008); a label address is still refused.
         String8 source = S8("int invalid_stack(int n) { volatile unsigned char bytes[n]; bytes[0] = 1;"
-                            " __asm__ volatile(\"\" ::: \"memory\"); return bytes[0]; }\n");
+                            " void* target = &&done; goto *target; done: return bytes[0]; }\n");
         String8 sentinel = S8("existing bitcode must survive a failed emission");
         String8 input = buster_test_temporary_path(arena, S8("buster-llvm-stack-invalid"), S8(".c"));
         String8 output = buster_test_temporary_path(arena, S8("buster-llvm-stack-invalid"), S8(".bc"));
@@ -1000,7 +1001,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
         CompilerDriverResult rejected = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_LLVM_BITCODE && !rejected.has_llvm_bitcode &&
-                               !rejected.llvm_bitcode.bytes.length && rejected.llvm_bitcode.error.opcode == IR_OPCODE_INLINE_ASSEMBLY);
+                               !rejected.llvm_bitcode.bytes.length && rejected.llvm_bitcode.error.opcode == IR_OPCODE_LABEL_ADDRESS);
         FileMapRead preserved = file_map_read(arena, output, (FileReadOptions){0});
         BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
                                !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
@@ -1225,6 +1226,213 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_clear_cache(UnitTestArgumen
     if (!compiler.length)
     {
         arguments->show(arguments, S8("LLVM clear_cache consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    return result;
+}
+
+// Inline assembly lowers to LLVM call/callbr asm with Clang's GCC translation
+// (#3008). The fixture covers the constraint shapes the C frontend admits on
+// the host: plain, fixed, early-clobber, matching, read-write, memory,
+// register-variable and multiple register results, plus %=, a literal $,
+// dialect alternatives, named operands, asm goto and a memory clobber. A
+// Clang-built caller checks every answer at -O0 and -O2; emission is also
+// byte-deterministic, and asm goto with register outputs stays an explicit
+// diagnostic that keeps existing output.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_inline_assembly(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#if defined(__x86_64__)\n"
+        "int asm_add(int a, int b) { int r; __asm__(\"movl %1, %0\\n\\taddl %2, %0\" : \"=&r\"(r) : \"r\"(a), \"r\"(b)); return r; }\n"
+        "int asm_tied(int a, int b) { __asm__(\"addl %2, %0\" : \"=r\"(a) : \"0\"(a), \"r\"(b)); return a; }\n"
+        "int asm_read_write(int a) { __asm__(\"shll $3, %0\" : \"+r\"(a)); return a; }\n"
+        "int asm_memory(int* p, int v) { __asm__(\"addl %1, %0\" : \"+m\"(*p) : \"r\"(v) : \"cc\"); return *p; }\n"
+        "int asm_memory_input(int* p) { int r; __asm__(\"movl %1, %0\" : \"=r\"(r) : \"m\"(*p)); return r; }\n"
+        "unsigned long long asm_pair(unsigned a, unsigned b)\n"
+        "{\n"
+        "    unsigned lo, hi;\n"
+        "    __asm__(\"xchgl %%eax, %%edx\" : \"=a\"(lo), \"=d\"(hi) : \"a\"(a), \"d\"(b));\n"
+        "    return ((unsigned long long)hi << 32) | lo;\n"
+        "}\n"
+        "long long asm_register_variable(long long v) { register long long r8 __asm__(\"r8\") = v; __asm__(\"addq %0, %0\" : \"+r\"(r8)); return r8; }\n"
+        "int asm_unique(int v) { __asm__ volatile(\"jmp .Lskip%=\\n.Lskip%=:\\n\\tincl %0\" : \"+r\"(v)); return v; }\n"
+        "int asm_dialect(int v) { __asm__(\"{addl $5, %0|add %0, 5}\" : \"+r\"(v)); return v; }\n"
+        "int asm_goto(int v) { __asm__ goto(\"testl %0, %0\\n\\tjnz %l1\" :: \"r\"(v) : \"cc\" : nonzero); return 0; nonzero: return 1; }\n"
+        "int asm_named(int v) { __asm__(\"negl %[value]\" : [value] \"+r\"(v)); return v; }\n"
+        "#elif defined(__aarch64__)\n"
+        "int asm_add(int a, int b) { int r; __asm__(\"add %w0, %w1, %w2\" : \"=&r\"(r) : \"r\"(a), \"r\"(b)); return r; }\n"
+        "int asm_tied(int a, int b) { __asm__(\"add %w0, %w0, %w2\" : \"=r\"(a) : \"0\"(a), \"r\"(b)); return a; }\n"
+        "int asm_read_write(int a) { __asm__(\"lsl %w0, %w0, #3\" : \"+r\"(a)); return a; }\n"
+        "int asm_memory(int* p, int v)\n"
+        "{\n"
+        "    int t;\n"
+        "    __asm__(\"ldr %w1, %0\\n\\tadd %w1, %w1, %w2\\n\\tstr %w1, %0\" : \"+m\"(*p), \"=&r\"(t) : \"r\"(v));\n"
+        "    return *p;\n"
+        "}\n"
+        "int asm_memory_input(int* p) { int r; __asm__(\"ldr %w0, %1\" : \"=r\"(r) : \"m\"(*p)); return r; }\n"
+        "unsigned long long asm_pair(unsigned a, unsigned b)\n"
+        "{\n"
+        "    unsigned lo, hi;\n"
+        "    __asm__(\"mov %w0, %w3\\n\\tmov %w1, %w2\" : \"=&r\"(lo), \"=&r\"(hi) : \"r\"(a), \"r\"(b));\n"
+        "    return ((unsigned long long)hi << 32) | lo;\n"
+        "}\n"
+        "long long asm_register_variable(long long v) { register long long x9 __asm__(\"x9\") = v; __asm__(\"add %0, %0, %0\" : \"+r\"(x9)); return x9; }\n"
+        "int asm_unique(int v) { __asm__ volatile(\"b .Lskip%=\\n.Lskip%=:\\n\\tadd %w0, %w0, #1\" : \"+r\"(v)); return v; }\n"
+        "int asm_dialect(int v) { __asm__(\"add %w0, %w0, #5\" : \"+r\"(v)); return v; }\n"
+        "int asm_goto(int v) { __asm__ goto(\"cbnz %w0, %l1\" :: \"r\"(v) :: nonzero); return 0; nonzero: return 1; }\n"
+        "int asm_named(int v) { __asm__(\"neg %w[value], %w[value]\" : [value] \"+r\"(v)); return v; }\n"
+        "#endif\n"
+        "void asm_barrier(void) { __asm__ volatile(\"\" ::: \"memory\"); }\n");
+    String8 caller = S8(
+        "// Compiled by Clang, independently of the Buster-produced bitcode.\n"
+        "int asm_add(int, int);\n"
+        "int asm_tied(int, int);\n"
+        "int asm_read_write(int);\n"
+        "int asm_memory(int*, int);\n"
+        "int asm_memory_input(int*);\n"
+        "unsigned long long asm_pair(unsigned, unsigned);\n"
+        "long long asm_register_variable(long long);\n"
+        "int asm_unique(int);\n"
+        "int asm_dialect(int);\n"
+        "int asm_goto(int);\n"
+        "int asm_named(int);\n"
+        "void asm_barrier(void);\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    int cell = 40;\n"
+        "    failures += asm_add(30, 12) != 42;\n"
+        "    failures += asm_tied(30, 12) != 42;\n"
+        "    failures += asm_read_write(5) != 40;\n"
+        "    failures += asm_memory(&cell, 2) != 42 || cell != 42;\n"
+        "    failures += asm_memory_input(&cell) != 42;\n"
+        "    failures += asm_pair(7, 9) != ((7ull << 32) | 9ull);\n"
+        "    failures += asm_register_variable(21) != 42;\n"
+        "    failures += asm_unique(41) != 42;\n"
+        "    failures += asm_dialect(37) != 42;\n"
+        "    failures += asm_goto(0) != 0 || asm_goto(3) != 1;\n"
+        "    failures += asm_named(-42) != 42;\n"
+        "    asm_barrier();\n"
+        "    return failures;\n"
+        "}\n");
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-asm"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-asm-caller"), S8(".c"));
+        String8 outputs[] = {buster_test_temporary_path(arena, S8("buster-llvm-asm"), S8(".bc")),
+                             buster_test_temporary_path(arena, S8("buster-llvm-asm-repeat"), S8(".bc"))};
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
+        bool emitted = true;
+        for (u32 output = 0; output < BUSTER_ARRAY_LENGTH(outputs); output += 1)
+        {
+            String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), outputs[output], input};
+            CompilerDriverResult result_emission = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            if (result_emission.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                arguments->show(arguments, S8("LLVM inline assembly fixture {S8}: {S8}\n"), frontends[frontend], result_emission.diagnostic);
+            }
+            emitted &= result_emission.error == COMPILER_DRIVER_ERROR_NONE && result_emission.has_llvm_bitcode &&
+                       result_emission.llvm_bitcode.success;
+        }
+        BUSTER_TEST(arguments, emitted);
+        if (emitted)
+        {
+            FileMapRead first = file_map_read(arena, outputs[0], (FileReadOptions){0});
+            FileMapRead second = file_map_read(arena, outputs[1], (FileReadOptions){0});
+            BUSTER_TEST(arguments, first.bytes.length && first.bytes.length == second.bytes.length &&
+                                   !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+            file_map_unmap(first);
+            file_map_unmap(second);
+        }
+        if (compiler.length && emitted)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-asm"),
+#if BUSTER_WINDOWS
+                                                               S8(".exe"));
+#else
+                                                               S8(""));
+#endif
+                String8 compile[] = {compiler, optimizations[optimization], outputs[0], caller_input, S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM inline assembly consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM inline assembly answers differ: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM inline assembly consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 refused = S8("int goto_output(int v)\n"
+                             "{\n"
+                             "    int r;\n"
+                             "#if defined(__x86_64__)\n"
+                             "    __asm__ goto(\"movl %1, %0\\n\\tjmp %l2\" : \"=r\"(r) : \"r\"(v) :: out);\n"
+                             "#else\n"
+                             "    __asm__ goto(\"mov %w0, %w1\\n\\tb %l2\" : \"=r\"(r) : \"r\"(v) :: out);\n"
+                             "#endif\n"
+                             "    return r;\n"
+                             "out:\n"
+                             "    return -1;\n"
+                             "}\n");
+        String8 sentinel = S8("existing bitcode must survive a refused asm goto");
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-asm-goto"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-asm-goto"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(refused)));
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, input};
+        CompilerDriverResult rejected = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_LLVM_BITCODE && !rejected.has_llvm_bitcode &&
+                               rejected.llvm_bitcode.error.opcode == IR_OPCODE_INLINE_ASSEMBLY);
+        FileMapRead preserved = file_map_read(arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
+                               !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
+        file_map_unmap(preserved);
+        scratch_end(temporary);
     }
     return result;
 }
@@ -4445,6 +4653,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult stack_scopes = llvm_bitcode_test_stack_scopes(arguments);
     result.test_count += stack_scopes.test_count;
     result.succeeded_test_count += stack_scopes.succeeded_test_count;
+    UnitTestResult inline_assembly = llvm_bitcode_test_inline_assembly(arguments);
+    result.test_count += inline_assembly.test_count;
+    result.succeeded_test_count += inline_assembly.succeeded_test_count;
     UnitTestResult debug_trap = llvm_bitcode_test_debug_trap(arguments);
     result.test_count += debug_trap.test_count;
     result.succeeded_test_count += debug_trap.succeeded_test_count;
