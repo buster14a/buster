@@ -15,10 +15,10 @@ union SimdTestLanes
 {
     Simd512 vector;
     u8 bytes[64];
-    u32 words[16];
+    u32 u32_lanes[16];
 };
 
-BUSTER_GLOBAL_LOCAL Mask64 simd_test_less_word_oracle(u32 const* left, u32 const* right)
+BUSTER_GLOBAL_LOCAL Mask64 simd_test_less_u32_oracle(u32 const* left, u32 const* right)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 16; lane += 1)
@@ -28,7 +28,7 @@ BUSTER_GLOBAL_LOCAL Mask64 simd_test_less_word_oracle(u32 const* left, u32 const
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL Mask64 simd_test_equal_word_oracle(u32 const* left, u32 const* right)
+BUSTER_GLOBAL_LOCAL Mask64 simd_test_equal_u32_oracle(u32 const* left, u32 const* right)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 16; lane += 1)
@@ -38,7 +38,7 @@ BUSTER_GLOBAL_LOCAL Mask64 simd_test_equal_word_oracle(u32 const* left, u32 cons
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u32 simd_test_compress_word_oracle(u32* result, Mask64 mask, u32 const* source)
+BUSTER_GLOBAL_LOCAL u32 simd_test_compress_u32_oracle(u32* result, Mask64 mask, u32 const* source)
 {
     u32 count = 0;
     for (u32 lane = 0; lane < 16; lane += 1)
@@ -54,6 +54,15 @@ BUSTER_GLOBAL_LOCAL u32 simd_test_compress_word_oracle(u32* result, Mask64 mask,
         result[lane] = 0;
     }
     return count;
+}
+
+BUSTER_GLOBAL_LOCAL void simd_test_permute2_u32_oracle(u32* result, Mask64 mask, u32 const* low, u32 const* indices, u32 const* high)
+{
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        u32 index = indices[lane] & 31;
+        result[lane] = (mask >> lane) & 1 ? (index < 16 ? low[index] : high[index - 16]) : 0;
+    }
 }
 
 UnitTestResult simd_tests(UnitTestArguments* arguments)
@@ -178,143 +187,175 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
 
     // Comparisons. Byte `lane` equals 7 only at lane 7 and is below it in the
     // seven lanes under it.
-    BUSTER_TEST(arguments, simd512_equal_byte(value, simd512_splat(7)) == ((Mask64)1 << 7));
-    BUSTER_TEST(arguments, simd512_less_byte(value, simd512_splat(7)) == 0x7F);
-    BUSTER_TEST(arguments, simd512_equal_byte(value, value) == ~(Mask64)0);
-    BUSTER_TEST(arguments, simd512_less_byte(value, value) == 0);
-    BUSTER_TEST(arguments, simd512_sign_byte(simd512_load(signs)) == UINT64_C(0xAAAAAAAAAAAAAAAA));
-    BUSTER_TEST(arguments, simd512_sign_byte(value) == 0);
-    BUSTER_TEST(arguments, simd512_sign_byte(simd512_load(high)) == ~(Mask64)0);
+    BUSTER_TEST(arguments, simd512_equal_u8(value, simd512_splat(7)) == ((Mask64)1 << 7));
+    BUSTER_TEST(arguments, simd512_less_u8(value, simd512_splat(7)) == 0x7F);
+    BUSTER_TEST(arguments, simd512_equal_u8(value, value) == ~(Mask64)0);
+    BUSTER_TEST(arguments, simd512_less_u8(value, value) == 0);
+    BUSTER_TEST(arguments, simd512_sign_u8(simd512_load(signs)) == UINT64_C(0xAAAAAAAAAAAAAAAA));
+    BUSTER_TEST(arguments, simd512_sign_u8(value) == 0);
+    BUSTER_TEST(arguments, simd512_sign_u8(simd512_load(high)) == ~(Mask64)0);
     // lane & 3 is non-zero for three lanes in every four.
-    BUSTER_TEST(arguments, simd512_test_byte(value, simd512_splat(3)) == UINT64_C(0xEEEEEEEEEEEEEEEE));
-    BUSTER_TEST(arguments, simd512_test_byte(value, simd512_zero()) == 0);
+    BUSTER_TEST(arguments, simd512_test_u8(value, simd512_splat(3)) == UINT64_C(0xEEEEEEEEEEEEEEEE));
+    BUSTER_TEST(arguments, simd512_test_u8(value, simd512_zero()) == 0);
 
-    // The dword compare answers one bit per u32 lane in the low sixteen and
+    // The u32 compare answers one bit per u32 lane in the low sixteen and
     // zeroes the rest -- the property the allocator's free-register kernel
     // consumes without any byte-mask collapse. A lane differing in a single
     // byte must not match, and the all-ones free sentinel is reachable
     // through the byte splat because the bit pattern is width-agnostic.
-    BUSTER_TEST(arguments, simd512_equal_word(value, value) == 0xFFFF);
-    SimdTestLanes word_probe;
-    word_probe.vector = value;
-    word_probe.bytes[4 * 5] ^= 1;
-    BUSTER_TEST(arguments, simd512_equal_word(value, word_probe.vector) == (0xFFFF & ~((Mask64)1 << 5)));
+    BUSTER_TEST(arguments, simd512_equal_u32(value, value) == 0xFFFF);
+    SimdTestLanes u32_probe;
+    u32_probe.vector = value;
+    u32_probe.bytes[4 * 5] ^= 1;
+    BUSTER_TEST(arguments, simd512_equal_u32(value, u32_probe.vector) == (0xFFFF & ~((Mask64)1 << 5)));
     SimdTestLanes free_file;
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        free_file.words[word] = word & 1 ? UINT32_MAX : word;
+        free_file.u32_lanes[u32_lane] = u32_lane & 1 ? UINT32_MAX : u32_lane;
     }
-    BUSTER_TEST(arguments, simd512_equal_word(free_file.vector, simd512_splat(UINT8_MAX)) == 0xAAAA);
-    BUSTER_TEST(arguments, simd512_equal_word(value, simd512_zero()) == 0);
+    BUSTER_TEST(arguments, simd512_equal_u32(free_file.vector, simd512_splat(UINT8_MAX)) == 0xAAAA);
+    BUSTER_TEST(arguments, simd512_equal_u32(value, simd512_zero()) == 0);
 
-    // The dword splat reaches every lane with a value no byte splat can
-    // spell, and the dword compare is unsigned and strict: 0x80000000 is
+    // The u32 splat reaches every lane with a value no byte splat can
+    // spell, and the u32 compare is unsigned and strict: 0x80000000 is
     // above every small value, not below it, and nothing is below itself.
     SimdTestLanes splat_probe;
-    splat_probe.vector = simd512_splat_word(0x01020304u);
+    splat_probe.vector = simd512_splat_u32(0x01020304u);
     lanes_match = true;
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match = lanes_match && splat_probe.words[word] == 0x01020304u;
+        lanes_match = lanes_match && splat_probe.u32_lanes[u32_lane] == 0x01020304u;
     }
     BUSTER_TEST(arguments, lanes_match);
     SimdTestLanes ascending;
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        ascending.words[word] = word;
+        ascending.u32_lanes[u32_lane] = u32_lane;
     }
-    BUSTER_TEST(arguments, simd512_less_word(ascending.vector, simd512_splat_word(5)) == 0x001F);
-    BUSTER_TEST(arguments, simd512_less_word(ascending.vector, ascending.vector) == 0);
-    BUSTER_TEST(arguments, simd512_less_word(simd512_splat_word(UINT32_C(0x80000000)), simd512_splat_word(1)) == 0);
-    BUSTER_TEST(arguments, simd512_less_word(simd512_splat_word(1), simd512_splat_word(UINT32_C(0x80000000))) == 0xFFFF);
+    BUSTER_TEST(arguments, simd512_less_u32(ascending.vector, simd512_splat_u32(5)) == 0x001F);
+    BUSTER_TEST(arguments, simd512_less_u32(ascending.vector, ascending.vector) == 0);
+    BUSTER_TEST(arguments, simd512_less_u32(simd512_splat_u32(UINT32_C(0x80000000)), simd512_splat_u32(1)) == 0);
+    BUSTER_TEST(arguments, simd512_less_u32(simd512_splat_u32(1), simd512_splat_u32(UINT32_C(0x80000000))) == 0xFFFF);
 
     // Cross-check nonuniform lanes against scalar C so neither a repeated
     // input nor a hand-written expected mask can hide lane-order, signedness,
     // or upper-mask-bit errors. Include both unsigned boundaries and values
     // with unrelated byte patterns.
-    SimdTestLanes word_left;
-    SimdTestLanes word_right;
-    u32 word_boundaries[] = {0, 1, UINT32_C(0x7fffffff), UINT32_C(0x80000000), UINT32_MAX};
-    for (u32 word = 0; word < 16; word += 1)
+    SimdTestLanes u32_left;
+    SimdTestLanes u32_right;
+    u32 u32_boundaries[] = {0, 1, UINT32_C(0x7fffffff), UINT32_C(0x80000000), UINT32_MAX};
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        word_left.words[word] = word < BUSTER_ARRAY_LENGTH(word_boundaries) ? word_boundaries[word] : UINT32_C(0x9e3779b9) * word;
-        word_right.words[word] = word_boundaries[(word * 3 + 1) % BUSTER_ARRAY_LENGTH(word_boundaries)] ^ (UINT32_C(0x01020408) * word);
+        u32_left.u32_lanes[u32_lane] = u32_lane < BUSTER_ARRAY_LENGTH(u32_boundaries) ? u32_boundaries[u32_lane] : UINT32_C(0x9e3779b9) * u32_lane;
+        u32_right.u32_lanes[u32_lane] = u32_boundaries[(u32_lane * 3 + 1) % BUSTER_ARRAY_LENGTH(u32_boundaries)] ^ (UINT32_C(0x01020408) * u32_lane);
     }
-    SimdTestLanes word_equal_right;
-    for (u32 word = 0; word < 16; word += 1)
+    SimdTestLanes u32_equal_right;
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        word_equal_right.words[word] = word_left.words[word];
-        if (word % 3 == 0)
+        u32_equal_right.u32_lanes[u32_lane] = u32_left.u32_lanes[u32_lane];
+        if (u32_lane % 3 == 0)
         {
-            word_equal_right.words[word] ^= UINT32_C(0x80000001);
+            u32_equal_right.u32_lanes[u32_lane] ^= UINT32_C(0x80000001);
         }
     }
-    Mask64 expected_equal = simd_test_equal_word_oracle(word_left.words, word_equal_right.words);
-    Mask64 observed_equal = simd512_equal_word(word_left.vector, word_equal_right.vector);
+    Mask64 expected_equal = simd_test_equal_u32_oracle(u32_left.u32_lanes, u32_equal_right.u32_lanes);
+    Mask64 observed_equal = simd512_equal_u32(u32_left.vector, u32_equal_right.vector);
     BUSTER_TEST(arguments, observed_equal == expected_equal);
     BUSTER_TEST(arguments, (observed_equal & ~UINT64_C(0xffff)) == 0);
-    Mask64 expected_less = simd_test_less_word_oracle(word_left.words, word_right.words);
-    Mask64 observed_less = simd512_less_word(word_left.vector, word_right.vector);
+    Mask64 expected_less = simd_test_less_u32_oracle(u32_left.u32_lanes, u32_right.u32_lanes);
+    Mask64 observed_less = simd512_less_u32(u32_left.vector, u32_right.vector);
     BUSTER_TEST(arguments, observed_less == expected_less);
     BUSTER_TEST(arguments, (observed_less & ~UINT64_C(0xffff)) == 0);
-    expected_less = simd_test_less_word_oracle(word_right.words, word_left.words);
-    observed_less = simd512_less_word(word_right.vector, word_left.vector);
+    expected_less = simd_test_less_u32_oracle(u32_right.u32_lanes, u32_left.u32_lanes);
+    observed_less = simd512_less_u32(u32_right.vector, u32_left.vector);
     BUSTER_TEST(arguments, observed_less == expected_less);
     BUSTER_TEST(arguments, (observed_less & ~UINT64_C(0xffff)) == 0);
-    for (u32 boundary = 0; boundary < BUSTER_ARRAY_LENGTH(word_boundaries); boundary += 1)
+    for (u32 boundary = 0; boundary < BUSTER_ARRAY_LENGTH(u32_boundaries); boundary += 1)
     {
-        splat_probe.vector = simd512_splat_word(word_boundaries[boundary]);
+        splat_probe.vector = simd512_splat_u32(u32_boundaries[boundary]);
         lanes_match = true;
-        for (u32 word = 0; word < 16; word += 1)
+        for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
         {
-            lanes_match = lanes_match && splat_probe.words[word] == word_boundaries[boundary];
+            lanes_match = lanes_match && splat_probe.u32_lanes[u32_lane] == u32_boundaries[boundary];
         }
         BUSTER_TEST(arguments, lanes_match);
     }
 
-    // vpcompressd packs the selected dword lanes down and zeroes the rest;
+    // vpcompressd packs the selected u32 lanes down and zeroes the rest;
     // only the low sixteen mask bits participate.
     SimdTestLanes compacted;
-    compacted.vector = simd512_compress_word(0xAAAA, ascending.vector);
+    compacted.vector = simd512_compress_u32(0xAAAA, ascending.vector);
     lanes_match = true;
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match = lanes_match && compacted.words[word] == (word < 8 ? word * 2 + 1 : 0);
+        lanes_match = lanes_match && compacted.u32_lanes[u32_lane] == (u32_lane < 8 ? u32_lane * 2 + 1 : 0);
     }
     BUSTER_TEST(arguments, lanes_match);
-    compacted.vector = simd512_compress_word(0, ascending.vector);
+    compacted.vector = simd512_compress_u32(0, ascending.vector);
     lanes_match = true;
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match = lanes_match && compacted.words[word] == 0;
+        lanes_match = lanes_match && compacted.u32_lanes[u32_lane] == 0;
     }
     BUSTER_TEST(arguments, lanes_match);
-    compacted.vector = simd512_compress_word(0xFFFF, ascending.vector);
+    compacted.vector = simd512_compress_u32(0xFFFF, ascending.vector);
     lanes_match = true;
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match = lanes_match && compacted.words[word] == word;
+        lanes_match = lanes_match && compacted.u32_lanes[u32_lane] == u32_lane;
     }
     BUSTER_TEST(arguments, lanes_match);
-    compacted.vector = simd512_compress_word(UINT64_C(0x10001), ascending.vector);
-    BUSTER_TEST(arguments, compacted.words[0] == 0 && compacted.words[1] == 0);
+    compacted.vector = simd512_compress_u32(UINT64_C(0x10001), ascending.vector);
+    BUSTER_TEST(arguments, compacted.u32_lanes[0] == 0 && compacted.u32_lanes[1] == 0);
 
     Mask64 compact_mask = UINT64_C(0xfedcba987654a5c3);
     u32 expected_compacted[16];
-    u32 compacted_count = simd_test_compress_word_oracle(expected_compacted, compact_mask, word_left.words);
-    compacted.vector = simd512_compress_word(compact_mask, word_left.vector);
+    u32 compacted_count = simd_test_compress_u32_oracle(expected_compacted, compact_mask, u32_left.u32_lanes);
+    compacted.vector = simd512_compress_u32(compact_mask, u32_left.vector);
     lanes_match = true;
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match = lanes_match && compacted.words[word] == expected_compacted[word];
+        lanes_match = lanes_match && compacted.u32_lanes[u32_lane] == expected_compacted[u32_lane];
     }
     BUSTER_TEST(arguments, lanes_match);
     BUSTER_TEST(arguments, compacted_count == mask64_count(compact_mask & UINT64_C(0xffff)));
 
+    // u32 addition wraps per lane without carrying into its neighbor.
+    SimdTestLanes sum;
+    sum.vector = simd512_add_u32(u32_left.vector, u32_right.vector);
+    lanes_match = true;
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
+    {
+        lanes_match = lanes_match && sum.u32_lanes[u32_lane] == u32_left.u32_lanes[u32_lane] + u32_right.u32_lanes[u32_lane];
+    }
+    BUSTER_TEST(arguments, lanes_match);
+
+    // vpermt2d reads only the low five index bits and the low sixteen mask
+    // bits. The first three masks are the C lexer's 12-byte row interleave.
+    SimdTestLanes permute_indices;
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
+    {
+        permute_indices.u32_lanes[u32_lane] = (u32_lane * 7 + 3) | (UINT32_C(0x9e3779c0) * (u32_lane + 1));
+    }
+    Mask64 permute_masks[] = {0xDB6D, 0x6DB6, 0xB6DB, 0xFFFF, 0, UINT64_C(0xffff8001)};
+    for (u32 mask_index = 0; mask_index < BUSTER_ARRAY_LENGTH(permute_masks); mask_index += 1)
+    {
+        u32 expected_permuted[16];
+        simd_test_permute2_u32_oracle(expected_permuted, permute_masks[mask_index], u32_left.u32_lanes, permute_indices.u32_lanes, u32_right.u32_lanes);
+        SimdTestLanes permuted;
+        permuted.vector = simd512_permute2_u32(permute_masks[mask_index], u32_left.vector, permute_indices.vector, u32_right.vector);
+        lanes_match = true;
+        for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
+        {
+            lanes_match = lanes_match && permuted.u32_lanes[u32_lane] == expected_permuted[u32_lane];
+        }
+        BUSTER_TEST(arguments, lanes_match);
+    }
+
     // vpermt2b indexes a 128-byte table split across two vectors; the indices
     // count down from 127, so lane 0 selects the last byte of the high half.
     lanes_match = true;
-    probe.vector = simd512_permute2_byte(~(Mask64)0, value, simd512_load(indices), simd512_load(high));
+    probe.vector = simd512_permute2_u8(~(Mask64)0, value, simd512_load(indices), simd512_load(high));
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         u32 index = 127 - lane;
@@ -323,7 +364,7 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, lanes_match);
 
     lanes_match = true;
-    probe.vector = simd512_permute2_byte(0x07, value, simd512_load(indices), simd512_load(high));
+    probe.vector = simd512_permute2_u8(0x07, value, simd512_load(indices), simd512_load(high));
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         lanes_match &= probe.bytes[lane] == (lane < 3 ? high[63 - lane] : 0);
@@ -332,7 +373,7 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
 
     // vpcompressb packs the selected lanes down and zeroes the rest.
     lanes_match = true;
-    probe.vector = simd512_compress_byte(UINT64_C(0x5555555555555555), value);
+    probe.vector = simd512_compress_u8(UINT64_C(0x5555555555555555), value);
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         lanes_match &= probe.bytes[lane] == (lane < 32 ? (u8)(lane * 2) : 0);
@@ -340,7 +381,7 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, lanes_match);
 
     lanes_match = true;
-    probe.vector = simd512_compress_byte(~(Mask64)0, value);
+    probe.vector = simd512_compress_u8(~(Mask64)0, value);
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         lanes_match &= probe.bytes[lane] == (u8)lane;
@@ -353,7 +394,7 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     {
         written[lane] = 0xCD;
     }
-    simd512_compress_store_byte(written, 0x55, value);
+    simd512_compress_store_u8(written, 0x55, value);
     lanes_match = true;
     for (u32 lane = 0; lane < 4; lane += 1)
     {
@@ -365,42 +406,42 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     // vpmovzxbd, one quarter at a time, and the high bytes must zero-extend
     // rather than sign-extend.
     lanes_match = true;
-    probe.vector = simd512_widen_byte(value, 0);
-    for (u32 word = 0; word < 16; word += 1)
+    probe.vector = simd512_widen_u8(value, 0);
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match &= probe.words[word] == word;
+        lanes_match &= probe.u32_lanes[u32_lane] == u32_lane;
     }
     BUSTER_TEST(arguments, lanes_match);
 
     lanes_match = true;
-    probe.vector = simd512_widen_byte(value, 1);
-    for (u32 word = 0; word < 16; word += 1)
+    probe.vector = simd512_widen_u8(value, 1);
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match &= probe.words[word] == word + 16;
+        lanes_match &= probe.u32_lanes[u32_lane] == u32_lane + 16;
     }
     BUSTER_TEST(arguments, lanes_match);
 
     lanes_match = true;
-    probe.vector = simd512_widen_byte(value, 2);
-    for (u32 word = 0; word < 16; word += 1)
+    probe.vector = simd512_widen_u8(value, 2);
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match &= probe.words[word] == word + 32;
+        lanes_match &= probe.u32_lanes[u32_lane] == u32_lane + 32;
     }
     BUSTER_TEST(arguments, lanes_match);
 
     lanes_match = true;
-    probe.vector = simd512_widen_byte(value, 3);
-    for (u32 word = 0; word < 16; word += 1)
+    probe.vector = simd512_widen_u8(value, 3);
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match &= probe.words[word] == word + 48;
+        lanes_match &= probe.u32_lanes[u32_lane] == u32_lane + 48;
     }
     BUSTER_TEST(arguments, lanes_match);
 
     lanes_match = true;
-    probe.vector = simd512_widen_byte(simd512_load(high), 3);
-    for (u32 word = 0; word < 16; word += 1)
+    probe.vector = simd512_widen_u8(simd512_load(high), 3);
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match &= probe.words[word] == (u32)high[48 + word];
+        lanes_match &= probe.u32_lanes[u32_lane] == (u32)high[48 + u32_lane];
     }
     BUSTER_TEST(arguments, lanes_match);
 
@@ -408,28 +449,28 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     // The fallback masks malformed selectors to the architectural low
     // two bits, so 5 selects quarter 1 without reading beyond `value`.
     lanes_match = true;
-    probe.vector = simd512_widen_byte(value, 5);
-    for (u32 word = 0; word < 16; word += 1)
+    probe.vector = simd512_widen_u8(value, 5);
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match &= probe.words[word] == word + 16;
+        lanes_match &= probe.u32_lanes[u32_lane] == u32_lane + 16;
     }
     BUSTER_TEST(arguments, lanes_match);
 #endif
 
     lanes_match = true;
-    probe.vector = simd512_shift_left_word(simd512_widen_byte(value, 1), 8);
-    for (u32 word = 0; word < 16; word += 1)
+    probe.vector = simd512_shift_left_u32(simd512_widen_u8(value, 1), 8);
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match &= probe.words[word] == (word + 16) << 8;
+        lanes_match &= probe.u32_lanes[u32_lane] == (u32_lane + 16) << 8;
     }
     BUSTER_TEST(arguments, lanes_match);
 
     // The token-stream shape the tokenizer builds: kind | (length << 8).
     lanes_match = true;
-    probe.vector = simd512_ternary_word(simd512_widen_byte(value, 0), simd512_shift_left_word(simd512_widen_byte(value, 1), 8), simd512_zero(), 0xFE);
-    for (u32 word = 0; word < 16; word += 1)
+    probe.vector = simd512_ternary_u32(simd512_widen_u8(value, 0), simd512_shift_left_u32(simd512_widen_u8(value, 1), 8), simd512_zero(), 0xFE);
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        lanes_match &= probe.words[word] == (word | ((word + 16) << 8));
+        lanes_match &= probe.u32_lanes[u32_lane] == (u32_lane | ((u32_lane + 16) << 8));
     }
     BUSTER_TEST(arguments, lanes_match);
 
@@ -439,17 +480,17 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     Simd512 a = simd512_splat(0xF0);
     Simd512 b = simd512_splat(0xCC);
     Simd512 c = simd512_splat(0xAA);
-    probe.vector = simd512_ternary_word(a, b, c, 0xFE);
+    probe.vector = simd512_ternary_u32(a, b, c, 0xFE);
     BUSTER_TEST(arguments, probe.bytes[0] == (0xF0 | 0xCC | 0xAA));
-    probe.vector = simd512_ternary_word(a, b, c, 0x80);
+    probe.vector = simd512_ternary_u32(a, b, c, 0x80);
     BUSTER_TEST(arguments, probe.bytes[0] == (0xF0 & 0xCC & 0xAA));
-    probe.vector = simd512_ternary_word(a, b, c, 0x96);
+    probe.vector = simd512_ternary_u32(a, b, c, 0x96);
     BUSTER_TEST(arguments, probe.bytes[0] == (0xF0 ^ 0xCC ^ 0xAA));
-    probe.vector = simd512_ternary_word(a, b, c, 0xF0);
+    probe.vector = simd512_ternary_u32(a, b, c, 0xF0);
     BUSTER_TEST(arguments, probe.bytes[0] == 0xF0);
-    probe.vector = simd512_ternary_word(a, b, c, 0xCC);
+    probe.vector = simd512_ternary_u32(a, b, c, 0xCC);
     BUSTER_TEST(arguments, probe.bytes[0] == 0xCC);
-    probe.vector = simd512_ternary_word(a, b, c, 0xAA);
+    probe.vector = simd512_ternary_u32(a, b, c, 0xAA);
     BUSTER_TEST(arguments, probe.bytes[0] == 0xAA);
 
     // Lanewise arithmetic and bitwise operations.
@@ -459,12 +500,12 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, probe.bytes[0] == (0xF0 | 0xCC));
     probe.vector = simd512_xor(a, b);
     BUSTER_TEST(arguments, probe.bytes[0] == (0xF0 ^ 0xCC));
-    probe.vector = simd512_add_byte(value, simd512_splat(1));
+    probe.vector = simd512_add_u8(value, simd512_splat(1));
     BUSTER_TEST(arguments, probe.bytes[0] == 1 && probe.bytes[63] == 64);
     // Lane 0 is the wraparound case in the other direction: 0 - 1 is 0xFF.
-    probe.vector = simd512_subtract_byte(value, simd512_splat(1));
+    probe.vector = simd512_subtract_u8(value, simd512_splat(1));
     BUSTER_TEST(arguments, probe.bytes[0] == 0xFF && probe.bytes[63] == 62);
-    probe.vector = simd512_add_byte(simd512_splat(0xFF), simd512_splat(2));
+    probe.vector = simd512_add_u8(simd512_splat(0xFF), simd512_splat(2));
     BUSTER_TEST(arguments, probe.bytes[0] == 1);
 
     // One pass of the shape a chunked scan actually runs: classify, take the
@@ -476,7 +517,7 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
         iota[lane] = (u8)lane;
         text[lane] = (u8)(lane % 8 < 3 ? 'a' : ' ');
     }
-    Mask64 letters = simd512_equal_byte(simd512_load(text), simd512_splat('a'));
+    Mask64 letters = simd512_equal_u8(simd512_load(text), simd512_splat('a'));
     Mask64 starts = mask64_run_starts(letters);
     Mask64 ends = mask64_run_ends(letters);
     BUSTER_TEST(arguments, mask64_count(letters) == 24);
@@ -485,8 +526,8 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
 
     SimdTestLanes start_positions;
     SimdTestLanes end_positions;
-    start_positions.vector = simd512_compress_byte(starts, simd512_load(iota));
-    end_positions.vector = simd512_compress_byte(ends, simd512_load(iota));
+    start_positions.vector = simd512_compress_u8(starts, simd512_load(iota));
+    end_positions.vector = simd512_compress_u8(ends, simd512_load(iota));
     lanes_match = true;
     for (u32 run = 0; run < 8; run += 1)
     {

@@ -80,6 +80,33 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Linux) and `c_test_tagged_member_microsoft_anonymous` (x86-64 and AArch64
   Windows) name their targets, and the Clang corpus pins both answers byte for
   byte on every native target.
+- File-scope object redeclarations compare each declaration's effective explicit
+  alignment in `c_parse_validate_alignment_redeclarations` before canonical IR
+  construction (#1561). The strictest request within one declaration is its
+  effective alignment; requests on separate declarations must agree. A conflict
+  is reported once at the later explicit declaration and names both alignments,
+  including when every declaration is tentative or `extern`. Zero-only runs
+  compare as the declared type's natural alignment; zero mixed with a stronger
+  request leaves that stronger request in force.
+  Buster merges compatible explicit requests across tentative declarations in
+  both source orders: `_Alignas(16) int x; int x;` and
+  `int x; _Alignas(16) int x;` produce the same aligned object. Lowering records
+  whether the selected global declaration has an initializer; a tentative
+  omission cannot refuse the merged alignment. Its existing declaration site,
+  composite type and symbol linkage remain authoritative.
+  `c_test_tentative_alignment_merging` pins source identity, static linkage,
+  composite array types and direct-lowering initialized-definition refusals.
+  An initialized definition must still carry a
+  specifier when another declaration used standard `_Alignas`, while GNU
+  `aligned` can supply the alignment of a bare initialized definition. The
+  agreement rule applies to GNU requests too; it preserves their existing
+  rejection of unequal requests on a defined object and checks extern-only
+  disagreements during semantics. These tentative, extern-only and zero cases
+  are Buster compatibility policy, not a claim to settle WG14 open issue 1044.
+  `c_test_alignment_redeclarations` pins semantic-only analysis, both canonical
+  forms, target layouts, malformed-specifier ownership and accepted neighbors.
+  The structured driver `alignment_redeclaration` record deliberately changes
+  from syntax-only success to the same later-declaration error as object mode.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,
@@ -167,8 +194,27 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `sizeof(int) * 8 - 7` lays out identically in a folded `sizeof`/`offsetof`
   and in the object. An unresolved width holds the layout unresolved instead
   of reading as zero; lowering still evaluates such a width itself as a
-  temporary bridge, and `c_parse_validate_bit_field_widths` re-evaluates only
-  unresolved widths to diagnose a non-integer one.
+  temporary bridge. A constant the declaration evaluates but the field cannot
+  hold (negative, or wider than 32 bits) is diagnosed at the declaration with
+  the constant it evaluated, and the member's unresolved `bit_width` is set to
+  `C_PARSE_BIT_WIDTH_DIAGNOSED` so nothing evaluates it again;
+  `c_parse_validate_members` re-evaluates only other unresolved widths to
+  diagnose non-integer values. Both paths build their text with
+  `c_parse_bit_field_width_message`. A lexically invalid literal such as
+  `3junk` is reported by the parser's invalid-integer-literal check instead.
+  Semantic validation also refuses a width exceeding the target's declared integer
+  type, including an enum's resolved underlying type and qualified,
+  typedef, or `typeof` spellings. `_Bool` has a one-bit value limit even
+  though its storage occupies a byte. Resolved widths keep their declaration
+  point value; this check does not add a layout or constant-evaluation
+  authority. The `C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH` error names the
+  member, actual width, and type limit, or points at the width expression
+  for an unnamed field. `c_analyze_semantics_only` and both canonical
+  lowering forms report the same error before attempting to lower a record.
+  `c_test_bit_field_width_constraints` covers the issue #1560 rows, unnamed
+  fields, nonconstant and wide or signed folded widths, target-dependent
+  `long` limits, scoped enumerators, and valid width boundaries on x86-64
+  and AArch64 Linux and Windows in GNU17 and GNU23.
   `c_test_bit_field_width_authority` pins clang's answers for each spelling.
   `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
   one-diagnostic-per-type budget with the rejected alignment specifier -- they
@@ -501,6 +547,27 @@ const-union queries. Reference semantics come from GCC's
 and [declaration alignment](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/clang/lib/AST/ASTContext.cpp).
 The held Microsoft aligned-typedef packing repair (#2226/#2203) retains its
 separate rule ownership.
+
+## Array bounds over named objects
+
+An array bound such as `sizeof(g)`, `sizeof g` or `_Alignof(g)` reads the named
+object's layout in the same parse-side solve as the array (#1782). Recorded
+identifier uses retain declaration-point binding; a missing use falls back to
+the token's enclosing scope and source position. Redundant parentheses preserve
+that identity, and array/function parameters use their adjusted pointer layout.
+An unresolved object type becomes an ordinary agenda dependency; the reader
+does not start another layout solve or add a whole-table pass. A runtime VLA
+therefore remains nonconstant.
+
+Object alignment consumes the same declaration runs as standalone `_Alignof`,
+including literal requests, type-naming requests and completed redeclarations.
+The legacy layout reader still cannot evaluate identifier-bearing alignment
+expressions such as `_Alignas(A)` for an enumerator `A`; a bound using that
+object's alignment stays unresolved rather than treating the identifier as
+zero. The typed constant authority migration in #1247 owns that remaining
+boundary. `c_test_array_bound_object_layout` checks semantic-only analysis,
+both frontend SSA forms, enum and static-assert constants, canonical array
+sizes/counts, shadowing, parameter adjustment, false assertions and refusals.
 
 ## Padded GNU vectors
 

@@ -40,6 +40,12 @@
 #define BUSTER_SANITIZE 0
 #endif
 
+// Reference-equivalence and other invariant checks too costly for the
+// production Release tree. Debug and every sanitized build compile them, so
+// the checks-enabled sanitized Release suite executes them now that sanitized
+// Debug is build-only CI coverage (#2657). Ordinary Release pays nothing.
+#define BUSTER_REFERENCE_CHECKS (!BUSTER_OPTIMIZE || BUSTER_SANITIZE)
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN 1
 #endif

@@ -6,6 +6,8 @@
 // selection, placement, and metadata-backed emission. The legacy NONE
 // spelling is an alias for MIR_STACK; a machine failure is returned to the
 // caller and never rerouted to the direct canonical emitter.
+// Optional investigation_record snapshots one named function after a retained
+// machine encoding, before scratch release; ordinary options have no sink.
 //
 // codegen_layout_globals owns the per-attempt data images and global
 // descriptors; codegen_plan_module_capacity computes the reservation bound
@@ -46,6 +48,10 @@
 //                                                descriptors
 //   codegen_plan_module_capacity                 pure code/debug reservation
 //                                                and value-slot bound
+//   codegen_machine_canonical_block_offsets,     canonical block offsets of an
+//   codegen_resolve_label_differences            emitted function; label
+//                                                differences written into the
+//                                                data images from them
 //   codegen_machine_debug_index_build,           MIR debug values to native
 //   codegen_machine_debug_reference_timeline,    location ranges, event-driven:
 //   codegen_record_machine_locations             per-function indexes, one
@@ -55,6 +61,7 @@
 
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
+#include <buster/lib/compiler/codegen/investigation.h>
 
 bool codegen_module_relocation_kind_valid(u8 kind)
 {
@@ -4305,6 +4312,17 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
     }
 }
 
+// The operand slot a two-address row overwrites in place, or UINT32_MAX. The
+// row reads that source from the register it then replaces with the result, so
+// certifying the read must not publish the register after the row. A plain
+// move shares registers with its source but leaves the same value there.
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_destructive_source(MachineOpcodeInfo const* info)
+{
+    u32 destination = info ? info->tied_pair & 0x0fu : 0;
+    u32 source = info ? (info->tied_pair >> 4) & 0x0fu : 0;
+    return destination && source ? source - 1u : UINT32_MAX;
+}
+
 // MIR debug-location recording. Recording turns MIR debug values into native
 // location ranges. The work is event-driven: one pass over the finished
 // function builds the indexes below, and each referenced virtual register is
@@ -5187,13 +5205,15 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                         state.physical_register = -1;
                     }
                     MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                    u32 destructive_source = codegen_machine_debug_destructive_source(info);
                     for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
                     {
                         u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
                         MachineRef operand = instruction->operands[operand_index];
                         bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
                         u32 physical = placement->operand_registers[(u64)next * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
-                        if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0)
+                        if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0 &&
+                            operand_index != destructive_source)
                         {
                             // Entry/CFG parameters intentionally have no
                             // definition row. Their first allocated use is
@@ -5719,13 +5739,15 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
             state.physical_register = -1;
         }
         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        u32 destructive_source = codegen_machine_debug_destructive_source(info);
         for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
         {
             u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
             MachineRef operand = instruction->operands[operand_index];
             bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
             u32 physical = placement->operand_registers[(u64)row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
-            if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0)
+            if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0 &&
+                operand_index != destructive_source)
             {
                 // Entry/CFG parameters intentionally have no definition row.
                 // Their first allocated use is nevertheless a certified read
@@ -6438,6 +6460,38 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_canonical_block_offsets(u32* offsets, I
     return result;
 }
 
+// Writes `function`'s label differences into `generated`'s data image as
+// little- or big-endian integers of their declared width, truncating as a
+// C conversion does. Differences owned by other functions are left for them.
+BUSTER_GLOBAL_LOCAL bool codegen_resolve_label_differences(IrProgram* program, CodegenModule* result, IrGlobal* global, CodegenModuleGlobal generated,
+                                                           IrFunction* function, u32 const* block_offsets)
+{
+    ByteSlice image = generated.is_thread_local ? result->thread_local_data : generated.read_only ? result->read_only_data : result->writable_data;
+    bool little = program->data_layout.endianness == TARGET_ENDIAN_LITTLE;
+    bool valid = true;
+    for (u32 index = 0; valid && index < global->label_difference_count; index += 1)
+    {
+        IrGlobalLabelDifference difference = global->label_differences[index];
+        if (difference.symbol.value == function->symbol.value)
+        {
+            valid = block_offsets && difference.label_block.value < function->block_count && difference.base_block.value < function->block_count &&
+                    !generated.zero_fill && difference.size <= sizeof(u64) && difference.offset <= generated.size &&
+                    difference.size <= generated.size - difference.offset && generated.offset <= image.length &&
+                    generated.size <= image.length - generated.offset;
+            if (valid)
+            {
+                u64 value = (u64)block_offsets[difference.label_block.value] - (u64)block_offsets[difference.base_block.value];
+                u8* slot = image.pointer + generated.offset + difference.offset;
+                for (u32 byte = 0; byte < difference.size; byte += 1)
+                {
+                    slot[little ? byte : difference.size - 1 - byte] = (u8)(value >> (byte * 8));
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 #if BUSTER_INCLUDE_TESTS
 bool codegen_test_canonical_block_offsets(u32* offsets, IrFunction* function, MachineSelectResult* selected,
                                           MachineEncodeResult* encoded)
@@ -6564,6 +6618,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             label_address_relocation_indices[label_address_relocation_count++] = relocation_index;
         }
     }
+    // Label differences resolve to constants, not relocations: each owning
+    // function writes them into the data image once its blocks are placed.
+    u32* label_difference_globals = module->label_difference_count ? arena_allocate(arena, u32, module->global_count) : 0;
+    u32 label_difference_global_count = 0;
+    for (u32 global_index = 0; label_difference_globals && global_index < module->global_count; global_index += 1)
+    {
+        if (module->globals[global_index].label_difference_count)
+        {
+            label_difference_globals[label_difference_global_count++] = global_index;
+        }
+    }
+    bool block_offsets_needed = label_address_relocation_count || label_difference_global_count;
     u64 instruction_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? 128 : 48;
     u64 capacity = ((u64)instruction_count * instruction_capacity + (u64)module->function_count * 64 + stack_probe_capacity + aligned_argument_capacity +
                     assembly_capacity * 4 + assembly_alignment_capacity + 64) *
@@ -6721,7 +6787,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         u32 machine_simd_operation_count = 0;
         u32 machine_stack_frame_size = 0;
         // Label relocations are resolved after machine_scratch is released.
-        u32* machine_block_offsets = label_address_relocation_count ? arena_allocate(arena, u32, function->block_count) : 0;
+        u32* machine_block_offsets = block_offsets_needed ? arena_allocate(arena, u32, function->block_count) : 0;
         bool machine_function_emitted = false;
         CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
         IrOpcode fallback_opcode = IR_OPCODE_COUNT;
@@ -6847,7 +6913,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
                             if (options.verify_invariants && !scheduled_placement.valid)
                             {
-                                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+                                // Frame capacity keeps its own diagnostic; any other
+                                // invalid placement is a verification failure.
+                                fallback_reason = scheduled_placement.capacity_exceeded ? CODEGEN_FALLBACK_PLACEMENT : CODEGEN_FALLBACK_VERIFICATION;
+                                placement.capacity_exceeded = scheduled_placement.capacity_exceeded;
                                 placement.valid = false;
                             }
                             u32 placement_saved_registers = 0;
@@ -6871,7 +6940,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 if (!placement.valid)
                 {
                     fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
-                    if (options.verify_invariants)
+                    if (options.verify_invariants && !placement.capacity_exceeded)
                     {
                         fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
                     }
@@ -7103,7 +7172,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
-                                if (label_address_relocation_count)
+                                if (options.investigation)
+                                {
+                                    investigation_record(arena, options.investigation, program, function, &selected.function,
+                                                         encoded.row_offsets, encoded.bytes, encoded.byte_count, descriptor->code_offset);
+                                }
+                                if (block_offsets_needed)
                                 {
                                     if (!codegen_machine_canonical_block_offsets(machine_block_offsets, function, &selected, &encoded))
                                     {
@@ -7232,7 +7306,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
-                                if (label_address_relocation_count)
+                                if (options.investigation)
+                                {
+                                    investigation_record(arena, options.investigation, program, function, &selected.function,
+                                                         encoded.row_offsets, encoded.bytes, encoded.byte_count, descriptor->code_offset);
+                                }
+                                if (block_offsets_needed)
                                 {
                                     if (!codegen_machine_canonical_block_offsets(machine_block_offsets, function, &selected, &encoded))
                                     {
@@ -7289,6 +7368,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
                 relocation->addend += block_addend;
                 relocation->label_address = false;
+            }
+            for (u32 side_index = 0; side_index < label_difference_global_count; side_index += 1)
+            {
+                u32 global_index = label_difference_globals[side_index];
+                if (!codegen_resolve_label_differences(program, &result, module->globals + global_index, result.globals[global_index], function,
+                                                       machine_block_offsets))
+                {
+                    result.error = CODEGEN_ERROR_INVALID_IR;
+                    return result;
+                }
             }
             // Canonical emission accounts for SIMD operations while lowering
             // each row. The machine path bypasses that code, so preserve the
@@ -7443,6 +7532,17 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     for (u64 capacity_scale = 1;; capacity_scale *= 2)
     {
         bool code_buffer_exhausted = false;
+        if (options.investigation)
+        {
+            // A retry rewinds all attempt-owned arrays and bytes. Publish
+            // only the final retained attempt's provenance.
+            options.investigation->found = false;
+            options.investigation->diagnostic = (String8){0};
+            options.investigation->rows = 0;
+            options.investigation->marks = 0;
+            options.investigation->code = (ByteSlice){0};
+            options.investigation->capture_ns = 0;
+        }
         if (bootstrap_trace)
         {
             bootstrap_trace_string(bootstrap_trace, S8("codegen attempt"));

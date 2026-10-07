@@ -4,6 +4,12 @@
 
 ## Compiler output streams
 
+For optional one-function native source/MIR/object investigation, see
+[the capture and command guide](../native-compiler-investigation.md). Capture
+uses `-finvestigation=PATH` with `-finvestigation-function=NAME`; `ide investigate`
+consumes the sidecar and exact object. The initial supported route is x86-64
+Linux C `-c` with FAST or MIR_STACK. Missing/transformed mappings stay explicit.
+
 `ide cc` writes warnings, source diagnostics, and `cc: error:` driver errors to
 stderr. With `-E` or `-S` and no `-o`, or with `-o -`, generated text
 goes to stdout;
@@ -24,6 +30,19 @@ destinations are explicitly refused. Write failures name the path and the OS
 error when supplied; native link failures identify the executable or PDB that
 failed. External GPU tools retain their own file-publication behavior.
 
+Publication (`file_publish_checked`, `file_publish_slices_checked` and
+`file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside
+the destination, closes it and renames it over the destination. It promises
+completion and atomic replacement, not crash durability: nothing calls
+`fsync(2)` or `FlushFileBuffers`, so after a power loss or kernel crash a
+just-published artifact may be missing, stale or empty, as with Clang and GCC
+objects. A process that observes a successful publication, including the
+build driver's self-host verification, sees the complete bytes; build systems
+recover from a crash by rebuilding from timestamps. Removing the per-artifact
+flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
+needs durability today; one that does should flush explicitly with
+`os_file_flush` rather than make every artifact pay for it.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
@@ -38,10 +57,10 @@ Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
 `-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
 nothing per unit and leave `CompilerDriverResult.object` unset.
 
-The registered `compiler_diagnostic_tests` include a desktop flush-failure
-cleanup regression. It injects one refusal after the real staging write, checks
-source mapping and native handle balance, old-or-absent destination bytes and
-a private directory inventory, then reuses the same invocation successfully
+The registered `compiler_diagnostic_tests` include a desktop close-failure
+cleanup regression. It injects one refusal after the real staging write and
+close, checks source mapping and native handle balance, old-or-absent
+destination bytes and a private directory inventory, then reuses the same invocation successfully
 against an independent literal preprocessing result. Close and staging deletion
 remain native operations. Android and iOS skip this desktop observation path
 explicitly; the existing portable write-failure tests still run. This is
@@ -56,8 +75,11 @@ inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
 `-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
 existing execution. Objects, archives, assembly and each `-l` occurrence are
 serial boundaries, even when `-x c` is present. A library between C sources
-ends the cohort before later translation units can publish definitions. Worker count is clamped to logical CPUs, input
-count and one inside an embedding caller's multi-lane gang.
+ends the cohort before later translation units can publish definitions. Worker count is clamped to the logical CPUs the
+process may run on (the affinity mask on Linux and Windows, so `taskset`, a
+cpuset or a job object narrows it; cgroup CPU quotas are not considered), input
+count and one inside an embedding caller's multi-lane gang. The default
+`lane_run` width uses the same count.
 
 Each cohort contains at most one full TU per worker. `lane_range` gives
 stable input slots, the existing persistent gang is reused, and each worker
@@ -247,6 +269,9 @@ Host detection falls back to the dynamic `native` identity if a virtualized
 family/model description names a processor incompatible with the executing
 architecture; independently probed host features are preserved. Explicit
 `-march`/`-mcpu` requests still receive the incompatibility diagnostic.
+`-mtune=<model>` is accepted with any nonempty value, `native` included, and
+ignored: it selects only a scheduling model, and instruction selection here has
+no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
@@ -448,7 +473,8 @@ layer above `assembly_encode`: it interprets the directive vocabulary, tracks
 one offset per section, resolves labels, and hands each instruction line to
 the instruction layer beneath, and the driver turns its sections, symbols and
 relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
-`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`/`.extern`, `.weak`,
+`.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
+`.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
@@ -483,6 +509,15 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
+declaration; `"x"` explicitly requests an executable stack. `@progbits` and
+`%progbits` are accepted, repeated declarations preserve any request, and
+payload or other flags/types are diagnosed. C and ordinary assembly objects
+always emit the nonexecuting declaration. Native linking refuses an explicit
+request from assembly, an external ELF object or a selected archive member
+with a diagnostic naming that input; it publishes no image. Inputs with no
+note remain accepted as nonexecuting. See [object emission](../object-emission.md).
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
@@ -512,18 +547,28 @@ longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
 choice; both are equal-value encodings left alone because changing them would
 change shared encoder selection.
 
-Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
-and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
-DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_str`,
-`.debug_loc`, `.debug_ranges`, `.debug_addr`, `.debug_str_offsets`,
-`.debug_line_str`, `.debug_rnglists`, `.debug_loclists`). DWARF sections
-retain nonallocated object identities through the driver. Raw-prefix
-lookalikes such as `.initdata` cannot acquire executable flags. Other bare
-names are diagnosed while the wider explicit flag/type and generic
-nonallocated section contract remains tracked in
-[#1279](https://github.com/buster14a/buster/issues/1279). These known bare
-DWARF names cover the section directives emitted by the current `-S` printer;
-quoted instruction operands and the broader round trip are tracked in
+Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
+`.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
+suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
+and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
+`.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
+`.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
+`.debug_loclists`). DWARF sections retain nonallocated object identities
+through the driver. Raw-prefix lookalikes such as `.initdata` cannot acquire
+flags from the prefix and other bare names are diagnosed.
+
+`.section NAME,"flags",@type` (and `.pushsection`) honours `w`, `x`, `T`
+(TLS: `SHF_TLS`, so labels become `STT_TLS`) and the types `@progbits`,
+`@nobits`, `@init_array`, `@fini_array` and `@preinit_array` (the last only
+for a `.preinit_array` name). `a`, `M`, `S` and `R` are accepted and change
+nothing the object stores. Other flag letters (`G`, `e`, `o`, ...), other
+types (`@unwind`, ...), array types combined with `x`/`T`/`@nobits`,
+`T` with `x`, and reopening a section as or from an array/TLS section with
+different flags are diagnosed naming the directive. Still open in
+[#1279](https://github.com/buster14a/buster/issues/1279): a section without
+`a` (such as `.note.GNU-stack,""`) is still written allocated, and `M`/`S`
+merging has no object representation, and `@note` is accepted as an approximation: the section takes the kind its flags select (read-only data for `"a"`) and `SHT_NOTE` is not preserved.
+Quoted instruction operands and the broader round trip are tracked in
 [#2519](https://github.com/buster14a/buster/issues/2519).
 
 Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
@@ -1026,6 +1071,29 @@ On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
 
+The default fixed-address dynamic executable
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
+dynamic writers also build on) is hardened the way GNU ld's default is
+(#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
+`.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
+`.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
+with the `PT_GNU_RELRO` range, `.got.plt` then `.dynamic`, padded to a page
+boundary because the loader seals whole pages; `.data`, TLS and `.bss` follow.
+`DT_FLAGS` `DF_BIND_NOW` and `DT_FLAGS_1` `DF_1_NOW` request eager binding, so
+the sealed range covers the PLT slots too. No page is both writable and
+executable. Each load starts on a page boundary, so images grow by up to three
+pages of zero padding against the earlier single R+X load. The static
+(no-import) writers have no GOT and keep their single R+X load; separating
+their `.rodata` is not done yet. `link_test_elf_hardened_layout` checks the
+structure on both machines without `readelf`.
+
+`-static` follows the same split on every target: `-c`, `-S`, `-E` and
+`-fsyntax-only` ignore it, and a link refuses it as
+`unsupported option: -static (...)` because no image writer produces a
+static executable; hosted ELF links import `libc.so.6` dynamically. A
+configure probe that links with `-static` therefore learns the truth instead of
+receiving a dynamic executable (GitHub #2851).
+
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
 
@@ -1225,6 +1293,17 @@ invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
 
+A lone `-` is an input naming standard input, as for GCC and Clang. It has no
+suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
+it as C source; without either, or under another language, the parser refuses
+it, and it may appear only once. The source text travels in
+`CompilerDriverInvocation.standard_input`: the `cc` command reads standard
+input to EOF into it after parsing, and embedding callers fill it themselves. A
+null pointer there fails the input as a read error. Diagnostics and `__FILE__`
+name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+`compiler_driver_test_probe_spellings` covers the admission rules, both routes
+and the `-static`/`-mtune` spellings (GitHub #2851).
+
 ## Response files
 
 `compiler_driver_parse_arguments` expands `@path` arguments before it reads
@@ -1265,3 +1344,16 @@ are NUL-terminated copies in the invocation arena.
 `compiler_driver_test_response_file_arguments` covers the grammar and bounds;
 `compiler_driver_test_response_file_batch` checks that a 400-input `-c` batch
 writes the same objects through `@file` as on the command line.
+
+## Opt-in source lex cache
+
+`-fsource-cache` requests one bounded 16 MiB raw translation/lex cache for the
+current invocation; `-fno-source-cache` cancels it (last wins, default disabled).
+Use it for serial multi-input builds; separate CLI processes start empty.
+Embedding callers can retain their own `CSourceCache` across serial invocations
+through `CompilerDriverInvocation.source_cache`. Cache presence clamps TU workers
+to one. `-v` prints a versioned `SOURCE_CACHE` record separately from conceptual
+SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
+IR validation, backends and publication run fresh. See
+[bounded raw source reuse](../source-lex-reuse.md), including ownership and
+qualified-host performance acceptance, which remains pending.

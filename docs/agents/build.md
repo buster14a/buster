@@ -89,6 +89,11 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+A cached driver whose recorded dependency was deleted is a normal cache miss:
+the wrapper quietly rejects it and selects another valid entry or rebuilds.
+A missing dependency in a fresh TCC closure still fails with a diagnostic.
+The canonical hosted TCC workflow covers deletion, rebuild and warm reuse.
+
 Absolute dependency paths may contain lexical `..` components, as TinyCC
 resource paths can when its installation prefix contains them. Cold publication
 and warm validation hash the files at those paths and retain their spelling in
@@ -128,7 +133,9 @@ the validated merge revision against its first parent.
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
 `0fb54300b56512754221d80adda85ddb9815bceb` (0.9.28rc) bootstraps this tree
-without changing those initializers. Keep the chosen TCC source/binary identity
+without changing those initializers, so 0.9.28rc is the minimum supported
+TinyCC. `build.c` checks `__TINYC__` and stops an older TCC with an `#error`
+naming that minimum, before the first shared source it would reject. Keep the chosen TCC source/binary identity
 with local validation evidence; the older compiler's failure is not a reason
 to report a Clang-built driver as the canonical TCC bootstrap.
 
@@ -273,32 +280,59 @@ toolchain cross-links from any host — x86-64 and AArch64, each as ELF, PE and
 Mach-O, 24 legs. Where `test_self_host` is deep on one mode and one target,
 this matrix is wide: each leg links a small self-checking fixture corpus
 (`basic_c_call_abi`, `basic_c_x86_64_i128_stack_abi`, `basic_c_float_abi`,
-`basic_c_vector_register_pressure`) at the default CPU model and then takes
+`basic_c_vector_register_pressure`, `basic_c_machine_alias`,
+`basic_c_fast_ra_cfg`) at the default CPU model and then takes
 the strongest verification avenue the host offers — native execution when
 host and target agree, `qemu-aarch64` for AArch64 ELF, `wine` for x86-64 PE,
 and an `llvm-objdump` disassembly oracle for images nothing on the host can
-run. A leg whose avenue tool is missing still compiles, links and
-oracle-checks, and reports the downgraded avenue in its `MODE_MATRIX` row
-rather than vanishing. A leg that must fail belongs in
+run. If objdump is also missing, the leg still compiles and links. Each
+`MODE_MATRIX` row names its avenue and verification level: `behavioral` for
+native/emulated execution, `structural` for disassembly, and `link-only` for
+the tool-free fallback. Structural acceptance requires objdump exit zero,
+at least one decoded instruction and no unexplained `<unknown>` instruction
+rows. Raw instruction bytes delimit a narrow AArch64 address-literal recipe:
+`LDR Xn, PC+8`, `B PC+12`, eight complete data bytes, and a decoded instruction
+at the branch target. Only those two literal rows are data, even when their
+bytes happen to decode. The classifier consumes the payload before examining
+another recipe; malformed, overlapping or incomplete evidence receives no
+waiver. Headers, symbol labels and operand annotations are not instruction mnemonics.
+It proves decoding, not program behavior, relocation correctness or refusal
+of every architecturally UNPREDICTABLE encoding. No assembler round trip runs.
+
+The command always exercises parser controls, including empty/header-only
+output, data directives and `<unknown>` text outside instruction mnemonics,
+plus exact/raw-byte literal forms, corrupt load/branch fields, incomplete or
+discontinuous rows, section boundaries, overflow, nested payload recipes and
+unknown instructions after a valid literal. When both
+`llvm-objdump` and `llvm-objcopy` are available, it also checks real AArch64 PE
+and Mach-O images from the first `none` fixture, even on native macOS. The
+pristine image must pass; a test-owned copy whose entire text section is
+replaced with same-length `0xFF` bytes must fail the same structural helper
+despite objdump exit zero. The original fixture remains intact. Each attempted
+control is fatal on failure; the result reports two passed controls, or
+`controls=unavailable` when either tool is absent. Unavailable controls are
+unrun, not passing tests. Ordinary GitHub CI provisions both tools and runs
+`test_mode_matrix` in its Unix and Windows desktop lanes.
+
+A leg that must fail belongs in
 `mode_matrix_expected_failures` in `build.c` with its issue number; the leg
 is then required to fail, so a regression and a silently landed fix are both
 caught. Fixture runs are deliberately uncaptured — wine's background services
 inherit captured pipe ends and stretch a 10 ms run to seconds — and every
-child is bounded by `MODE_MATRIX_TIMEOUT_SECONDS`. The whole matrix costs
-about four seconds on a warm tree; CI runs it on the dedicated Linux runner
-and on macOS (where the Mach-O rows execute natively), and skips the Windows
-runner because that box is the CI wall-time gate and its PE rows already run
-under wine on Linux. GitHub CI runs it on all four of its Unix runners, which
-is what makes the ELF and Mach-O rows execute natively at both x86-64 and
-AArch64; those images carry no wine, so their PE rows stay on the oracle.
-The combination matrix shares one multi-config build tree across configurations
-when their configure-time policy matches. Clang omits unsanitized Debug because
-sanitized Debug provides the stronger coverage; it builds and runs unsanitized
-Release plus sanitized Debug and Release. Non-Apple Clang configurations use
-dedicated trees because their fuzz-runtime policy differs, while AppleClang's
-two sanitized configurations share one cross-config Ninja graph. GCC and Zig
-compile unsanitized Debug only and do not execute it; MSVC does the same on
-Windows. Only optimized, unsanitized Clang/AppleClang builds use the requested
+child is bounded by `MODE_MATRIX_TIMEOUT_SECONDS`. Execution depends on the
+actual host/tool availability; an oracle pass supplies structural evidence
+even when another CI host executes that same target behaviorally.
+The combination matrix gives every configuration its own single-configuration
+tree. Clang omits unsanitized Debug because sanitized Debug provides the
+stronger build coverage; it builds and runs unsanitized Release and the
+checks-enabled sanitized Release, and compiles and links sanitized Debug
+without running it (#2657, see the
+[sanitizer execution policy](../ci-combination-shards.md#sanitizer-execution-policy-2657)).
+Where libFuzzer exists, the unsanitized and sanitized Release trees are the
+fuzz-enabled builds. GCC and Zig compile unsanitized Debug only and do not
+execute it; MSVC does the same on Windows. For a local sanitized Debug test
+run use `./build.sh generate --sanitize` and `./build.sh build -t test_all`.
+Only optimized, unsanitized Clang/AppleClang builds use the requested
 unity build; every other build uses split translation units. TCC is retained
 only as the bootstrap compiler for `build.c` and is omitted from all
 application/compiler combinations.
@@ -324,18 +358,25 @@ work, use every CPU instead of one each (#892 measured macOS arm64 checks at
 compile-only trees). A matrix without test trees, or one whose concurrent
 self-host worker would then exceed the CPU budget, keeps the one-job-per-tree
 allocation (`matrix_superbuild_allocate_jobs`). With two or more test trees and
-no self-host worker (the hosted checks shards), test phases are serialized:
-each test tree keeps its share as the inner Ninja quota but runs its tests with
-the whole CPU budget, one tree at a time in declaration order (sanitized Debug
-first). The superbuild makes each tree's test target wait for the previous test
-tree's, and the phase plan records that edge as `after`. Builds are not
-serialized, so a test phase can still overlap the remaining compiles; that
-deliberately extends the bounded overlap above to the sanitized Release build
-(up to about twice the CPU count in nominal workers for its duration) in
-exchange for no idle CPUs during the long sanitized Debug test tail. Sanitized
-Clang CI trees run `test_all` through the isolated-process runner
-(`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a four-worker quota into two
-two-worker processes and runs the ordinary invocation below four. Larger hosts retain the weighted
+no self-host worker, test phases are serialized: each test tree keeps its
+share as the inner Ninja quota but runs its tests with the whole CPU budget,
+one tree at a time in declaration order. The superbuild makes each tree's test
+target wait for the previous test tree's, and the phase plan records that edge
+as `after`. Builds are not serialized, so a test phase can still overlap the
+remaining compiles (up to about twice the CPU count in nominal workers) in
+exchange for no idle CPUs during a long sanitized test tail. Before #2657 this
+applied to the grouped hosted checks shards (sanitized Debug and Release
+tests); since #2657 every hosted desktop shard has at most one test tree, so
+serialization remains only for multi-test-tree local selections. Sanitized
+Clang CI trees and Windows AArch64 Release run `test_all` through the existing
+isolated-process runner (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a
+four-worker quota into two two-worker processes and runs the ordinary invocation
+below four. The `primary` group owns `c_frontend_tests` on Windows x86-64 and
+`compiler_driver_tests` elsewhere; `rest` owns every other enabled module.
+The parent independently checks both complete inventories and their exact
+disjoint union. Windows AArch64 has no artifact-fanout consumer; supported
+canonical producers retain their standard configure arguments.
+See [Windows critical-path attribution](../windows-ci-critical-path.md). Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Clang tests then run concurrently in the same bounded
 pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
@@ -353,8 +394,9 @@ from a shared pool in declaration order and a fresh CI checkout has no
 `BUSTER_MATRIX_DIRECT=1` only to diagnose the retained legacy scheduler,
 `BUSTER_MATRIX_NO_TREE_ORDER=1` to restore the previous declaration order, and
 `BUSTER_MATRIX_THREADS=<n>` to state a CPU budget instead of the detected one
-(`get_nprocs()` ignores CPU affinity, so `taskset` alone cannot reproduce a
-small runner's admission behavior). The last two exist so the ordering can be
+(the detected count honours CPU affinity on Linux and Windows, so `taskset`
+narrows it too, but the variable states the budget without confining the
+processes). The last two exist so the ordering can be
 A/B measured on one host. When artifact fan-out is enabled on the supported
 desktop CI platforms, the canonical trusted Clang Release tree also gets a
 self-host worker in this same pool. The build-driver boundary is mandatory:
@@ -547,6 +589,31 @@ and retained evidence. Run `./build.sh test_uefi --self-test <fresh-directory>`
 first. Missing firmware or mismatched pins fail explicitly. See
 [the reference lane](../uefi-target.md#reference-firmware-execution-gate) for
 prerequisites, negative controls, pins and the runtime success contract.
+
+## Investigation capture compiler identity
+
+`BUSTER_INVESTIGATION_REVISION` is an optional CMake string, empty by default.
+For a compiler investigation build, supply the exact clean checkout revision:
+
+```sh
+revision=$(git rev-parse --verify HEAD)
+./build.sh generate --build-directory build/investigation --ci -- -DBUSTER_INVESTIGATION_REVISION="$revision"
+./build.sh build --build-directory build/investigation --config Release -t ide
+```
+
+Configuration requires one 40-character lowercase hexadecimal commit ID,
+Git `HEAD` matching that ID, and no tracked changes outside `build/`. Failed
+or timed-out Git reads, malformed IDs, mismatches and tracked source changes
+fail configuration. Only `ide` receives the verified string as a compile
+definition. Untracked files and external build inputs are not authenticated
+by this check. Keep the checkout unchanged from configuration through build
+and capture; configuring an identity is not a durable build receipt.
+
+With the option omitted, the macro is undefined and an investigation capture
+reports the revision as unavailable. Ordinary capture-disabled builds and
+default self-hosting retain their existing configuration. Captures and any
+hosted on/off overhead measurements remain diagnostics, separate from the
+qualified native-retirement performance route.
 
 ## Production Clang PGO/LTO
 

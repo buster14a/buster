@@ -770,7 +770,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_fill_nul_distances(char8 const* poo
         // as terminators, so the window mask gates the compare result too.
         Mask64 window_mask = mask64_prefix(size - window_base);
         Simd512 bytes = simd512_load_masked(pool + window_base, window_mask);
-        Mask64 terminators = mask64_and(simd512_equal_byte(bytes, terminator), window_mask);
+        Mask64 terminators = mask64_and(simd512_equal_u8(bytes, terminator), window_mask);
         while (terminators)
         {
             u64 nul = window_base + mask64_first_set(terminators);
@@ -11875,7 +11875,6 @@ bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86Metada
 bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, BusterX86MetadataExactPlan* result)
 {
     if (!result || !buster_x86_metadata_prewarmed || !key.stable_hash || key.form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
     u16 slot_plus_one = buster_x86_metadata_exact_plan_slots[key.form_id];
     if (slot_plus_one)
     {
@@ -11895,6 +11894,9 @@ bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, Buster
         *result = existing->identity;
         return true;
     }
+    // A prepared identity is immutable even while the persistent gang lives.
+    // Only a miss can build or publish state and requires serial prewarm.
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     if (buster_x86_metadata_exact_plan_count >= BUSTER_X86_METADATA_EXACT_PLAN_CAPACITY) return false;
     BusterX86MetadataForm form = {0};
     if (!buster_x86_metadata_lookup_form_key(key, &form) || form.operand_count > BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY)
@@ -13717,7 +13719,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const buster_x86_metadata_featu
     {S8_INITIALIZER("WBNOINVD"), {S8_INITIALIZER("wbnoinvd")}},
     {S8_INITIALIZER("WRMSRNS"), {S8_INITIALIZER("wrmsrns")}},
     {S8_INITIALIZER("XSAVE"), {S8_INITIALIZER("xsave")}},
+    {S8_INITIALIZER("XSAVEC"), {S8_INITIALIZER("xsavec")}},
+    {S8_INITIALIZER("XSAVEOPT"), {S8_INITIALIZER("xsaveopt")}},
     {S8_INITIALIZER("XSAVES"), {S8_INITIALIZER("xsaves")}},
+    {S8_INITIALIZER("MOVDIRI"), {S8_INITIALIZER("movdiri")}},
+    {S8_INITIALIZER("RDPID"), {S8_INITIALIZER("rdpid")}},
     {S8_INITIALIZER("F16C"), {S8_INITIALIZER("f16c")}},
     {S8_INITIALIZER("FMA"), {S8_INITIALIZER("fma")}},
     {S8_INITIALIZER("SSSE3"), {S8_INITIALIZER("ssse3")}},
@@ -13756,6 +13762,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const buster_x86_metadata_featu
     {S8_INITIALIZER("APX_F_INVPCID"), {S8_INITIALIZER("apx"), S8_INITIALIZER("invpcid")}},
     {S8_INITIALIZER("APX_F_MSR_IMM"), {S8_INITIALIZER("apx"), S8_INITIALIZER("msr-imm")}},
     {S8_INITIALIZER("APX_F_MOVDIR64B"), {S8_INITIALIZER("apx"), S8_INITIALIZER("movdir64b")}},
+    {S8_INITIALIZER("APX_F_MOVDIRI"), {S8_INITIALIZER("apx"), S8_INITIALIZER("movdiri")}},
     {S8_INITIALIZER("APX_F_VMX"), {S8_INITIALIZER("apx"), S8_INITIALIZER("vmx")}},
     // Every target this compiler emits for is 64-bit, so long mode needs no
     // capability token behind it.

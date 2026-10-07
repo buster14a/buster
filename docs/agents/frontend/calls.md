@@ -119,6 +119,17 @@ allocator modes and both frontend forms.
   it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
   both macros under all four allocators and
   `c_test_typeof_conditional_type` pins the resolved types themselves.
+  Both engines type an operand in time linear in its token count (GitHub
+  #2715). A left-associative chain such as `a + b + ... + z` folds left to
+  right instead of splitting at its last operator and retyping the prefix:
+  the gen-side `CIrSizeofFrame` keeps the operands folded so far in
+  `first_type` and resumes `c_ir_sizeof_operator_scan` after each operator to
+  find the next one, while the parse side pushes a chain's prefixes at once. A
+  shift chain is typed by its first operand alone. A conditional's false arm
+  receives its own top-level `?` and `:` (`question_hint`/`colon_hint`, and
+  `c_parse_expression_next_conditional` on the parse side) instead of
+  rescanning the rest of the chain. `c_test_tall_expression_types` types
+  10,000-operand chains.
 - **Every conditional converts to its own common type before its consumer.**
   The selection worklist types immediate children in postorder, retaining only
   the type at each question token. Flattened control flow shares a result place
@@ -282,6 +293,32 @@ allocator modes and both frontend forms.
   storage through an explicit builtin-list place cast. This supports either
   header order without turning ordinary pointer typedefs into builtin types.
   The modern CRT `__crt_va_*` macros use the same bridge when already defined.
+
+  Literal `__va_start(&cursor, last)` also admits the CRT's modifiable public
+  `char *` cursor on Windows x86-64 and AArch64. Its addressed place is evaluated
+  once, then the existing typed address/cast/dereference helpers view that
+  storage as the target's builtin list. The original C pointer type remains
+  intact; a volatile cursor retains a volatile list store. Arity and variadic
+  function checks remain in force. The CRT's non-addressed
+  `__builtin_va_start(cursor, last)` and `__builtin_va_end(cursor)` take the
+  same bridge when `cursor` is a modifiable place of that type; `va_end` lowers
+  the bridged list address to the ordinary `IR_OPCODE_VA_END`, exactly as for a
+  builtin list. `__builtin_va_copy` and `__builtin_va_arg` keep refusing a
+  bare `char *` cursor; the CRT reads arguments through the explicit builtin-list
+  place cast. Other builtin spellings, non-Windows targets,
+  rvalue or array operands, const/atomic destinations and non-character or
+  qualified character pointees keep their refusal. Canonical validators still require
+  `IR_TYPE_VA_LIST`; ordinary pointer typedefs do not gain builtin identity.
+
+  `c_test_windows_va_start_cursor` checks live named/member/subscript/dereference
+  and volatile cursors, fixed integer/double/long-long values, builtin-list and
+  explicit-copy controls, plus negative neighbors through semantic validation
+  and both canonical frontend forms on Windows/Linux/macOS x86-64/AArch64.
+  Native Windows execution covers both forms and four allocator modes, with
+  original source readback, finite process-group deadlines and full transport
+  failure checks. The earlier unused-body diagnostic sources and real SDK
+  formatting witnesses remain unchanged. This fixture is a validation contract,
+  not evidence of an executed or passing repair.
 
 ## Declarator constraints
 
@@ -475,6 +512,50 @@ allocators and both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
+
+## C99 inline function identity
+
+A body whose file-scope declarations all specify inline without extern is an
+inline definition, which supplies no external definition. Calls and address
+expressions share the external function identity; a referenced body must not
+become a second strong definition. A compatible extern or non-inline
+declaration in the same unit supplies the external definition. Static inline
+and GNU inline semantics retain their separate rules.
+
+The registered c_test_c99_inline_linkage checks symbol linkage, definition
+status and canonical function state in both frontend forms across six native
+target layouts and C99/C11/C17. Controls retain static inline, a preceding
+non-inline prototype and both GNU attribute directions. Its two-unit program
+checks the literal result 14, distinct private static helpers and equal
+function pointers. All four native allocator modes compile the units together
+and separately; Linux x86-64 also links the Buster objects with GCC and Clang
+and runs independent host-built versions of the same source recipe.
+
+The existing per-entity declaration scan decides whether a body supplies an
+external definition. A referenced C99 inline-only body retains a canonical
+external declaration and emits no body; calls and addresses bind to the
+external definition from another unit. Pre-created function symbols take the
+same definition decision, preserving real alias definitions; GNU inline-only
+bodies do not mark those symbols defined. Unused bodies retain their existing
+dropped state. No inline optimizer, dependency walk or GNU policy is added.
+
+Needed Windows `__inline`/`__forceinline` bodies retain callable definitions
+and their shared function identity. The Windows predefines preserve `__inline`
+and map `__forceinline` to that spelling. The existing reachability walk admits
+transitive header helpers; its roots and worklist are unchanged. The existing
+entity-definition map makes every redeclaration share the needed body decision,
+including a later raw-inline prototype. Only the two late registration/body
+predicates exempt those Windows bodies from C99 dropping. Unused header bodies
+remain omitted, so an unused intrinsic header
+cannot introduce an unavailable runtime import. Plain `inline`, GNU `__inline__`,
+explicit GNU-inline attributes and Linux `__inline` retain their existing rules.
+This bounded compatibility policy does not implement full MSVC mixed-spelling
+synonyms or multi-TU COMDAT coalescing.
+
+The registered `c_test_windows_inline_bodies` checks transitive helpers, source
+static/extern storage, function address and local option-word identity, and unused
+nondefinitions. Original inline sources and real Windows `<stdio.h>` formatting
+run in both frontend forms and all four native allocator modes.
 
 ## Calls through returned function pointers
 

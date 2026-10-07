@@ -24,6 +24,7 @@
 // uses demand-paged commits, so this headroom does not eagerly consume 8 GiB
 // of physical memory.
 #define COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE BUSTER_GB(32)
+#define COMPILER_DRIVER_SOURCE_CACHE_BYTE_LIMIT BUSTER_MB(16)
 
 // Bounds of `@path` response-file expansion in compiler_driver_parse_arguments:
 // the bytes read from all response files of one invocation together, and the
@@ -143,6 +144,11 @@ struct CompilerDriverInvocation
     String8 output_path;
     String8 entry_symbol;
     String8 sysroot;
+    // Source text of the `-` input. A parsed command line names it with the
+    // path `-`; the cc command reads standard input into it before execution
+    // and embedding callers supply it themselves. A null pointer means it was
+    // not supplied; an empty translation unit has a nonnull pointer.
+    String8 standard_input;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
@@ -155,8 +161,16 @@ struct CompilerDriverInvocation
     // other preprocessed count is still gathered. The cc command sets it when
     // it prints neither report.
     bool omit_spelled_bytes;
+    // `-dM`: with -E, print the macros defined at the end of preprocessing as
+    // `#define` lines instead of the preprocessed text. Ignored without -E.
+    bool dump_macros;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
+    // Optional one-function native ELF investigation. CLI parsing snapshots
+    // length-framed expanded arguments; API callers supply their configuration.
+    String8 investigation_path;
+    String8 investigation_function;
+    String8 investigation_configuration;
     String8 gpu_architecture;
     String8 gpu_entry_point;
     String8 gpu_stage;
@@ -178,6 +192,12 @@ struct CompilerDriverInvocation
     // Zero/default is one. The caller owns its total process/thread budget;
     // this does not infer available RAM from the TU's virtual reservation.
     u32 compile_jobs;
+    // API-only raw lex reuse across serial units/invocations. Caller owns the
+    // cache, exclusively on this thread. Presence clamps TU workers to one.
+    CSourceCache* source_cache;
+    // -fsource-cache creates an invocation-local cache when the API pointer
+    // is null; -fno-source-cache cancels that request. Default is disabled.
+    bool enable_source_cache;
     u32 include_path_count;
     u32 system_include_path_count;
     u32 macro_operation_count;
@@ -418,6 +438,8 @@ struct CompilerDriverResult
     u32 lexed_file_count;
     u32 lexed_files_reserved;
     CPreprocessedMetrics preprocessed;
+    // Cumulative cache counters at invocation exit, separate from SOURCE metrics.
+    CSourceCacheStats source_cache;
     CompilerDriverError error;
     CodegenError codegen_error;
     ObjectError object_error;

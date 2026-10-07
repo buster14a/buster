@@ -30,6 +30,8 @@
 // compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
 // Optional fallback_records retain source/function attribution across TU arena
 // destruction; no per-function recording is allocated in ordinary compilation.
+// compiler_driver_finish_investigation publishes an optional single-function
+// capture only after binding retained machine bytes to the completed object.
 // compiler_driver_unit_lane fills one private TU arena/collector per stable
 // input slot; the coordinator creates and destroys those arenas, so the
 // per-thread arena pool circulates them. Opt-in native C link batches publish
@@ -56,6 +58,8 @@
 // unresolved half/quad helper calls after explicit library exports are known.
 // compiler_driver_publish_slices preserves atomic artifacts and write failures;
 // execute_invocation normalizes textual -o - before choosing a pipeline.
+// A lone `-` input is admitted by the parser only as C source; execute_c_single
+// reads its text from CompilerDriverInvocation.standard_input.
 
 // compiler_driver_elf_shared_is_incompatible keeps alien shared candidates
 // from hiding usable archives during that ordered search.
@@ -68,6 +72,9 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
+#include <buster/lib/compiler/codegen/investigation.h>
+#include <buster/lib/byte_writer.h>
+#include <buster/lib/time.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
@@ -1383,10 +1390,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     // image, kept for the diagnostic on a target with no writer for one.
     String8 position_independent_image_option = {0};
     bool common_storage_requested = false;
+    bool static_link_requested = false;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
-        if (options_ended || !argument.length || argument.pointer[0] != '-')
+        // A lone `-` names standard input, as it does for GCC and Clang.
+        if (options_ended || !argument.length || argument.pointer[0] != '-' || argument.length == 1)
         {
             u32 input_index = invocation.input_count++;
             invocation.input_paths[input_index] = argument;
@@ -1451,6 +1460,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.emit_llvm_bitcode = true;
             continue;
         }
+        if (string_equal(argument, S8("-fsource-cache")) || string_equal(argument, S8("-fno-source-cache")))
+        {
+            invocation.enable_source_cache = string_equal(argument, S8("-fsource-cache"));
+            continue;
+        }
         String8 compile_jobs_prefix = S8("-fcompile-jobs=");
         if (string_starts_with_sequence(argument, compile_jobs_prefix))
         {
@@ -1482,6 +1496,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             compiler_driver_argument_error(arena, &invocation, S8("unsupported debug option: {S8}"), argument);
             break;
+        }
+        if (string_equal(argument, S8("-dM")))
+        {
+            invocation.dump_macros = true;
+            continue;
         }
         if (string_equal(argument, S8("-nostdinc")))
         {
@@ -1855,6 +1874,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.bootstrap_trace_prefix = value;
             continue;
         }
+        value = compiler_driver_option_value(argument, S8("-finvestigation="));
+        if (value.length)
+        {
+            invocation.investigation_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("-finvestigation-function="));
+        if (value.length)
+        {
+            invocation.investigation_function = value;
+            continue;
+        }
         value = compiler_driver_option_value(argument, S8("-fsource-metrics="));
         if (value.length)
         {
@@ -2007,6 +2038,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             architecture_option = value;
             continue;
         }
+        // -mtune selects a scheduling model without changing the ISA or the
+        // ABI. Instruction selection here has no per-CPU tuning, so every
+        // spelling, native included, already describes the code it emits.
+        if (compiler_driver_option_value(argument, S8("-mtune=")).length)
+        {
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-mattr=")))
         {
             value = string_slice(argument, S8("-mattr=").length, argument.length);
@@ -2146,6 +2184,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             position_independent_executable_model = false;
             continue;
         }
+        // A static executable would carry libc's archive members and their
+        // own startup in place of the dynamic loader, and no writer here
+        // produces one: hosted ELF links import libc.so.6. Compiling alone
+        // ignores the link option as GCC does; a link refuses it below.
+        if (string_equal(argument, S8("-static")))
+        {
+            static_link_requested = true;
+            continue;
+        }
         // The image a link produces. -shared outranks -pie wherever the two
         // meet, as it does for GCC; -no-pie returns to the fixed-address
         // executable only from -pie.
@@ -2191,6 +2238,34 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), argument);
         break;
     }
+    // Standard input has no suffix to classify, so, as for Clang, it needs an
+    // explicit C language or -E, which reads it as C source. It is one stream
+    // and can be consumed once.
+    u32 standard_input_count = 0;
+    for (u32 input_index = 0; input_index < invocation.input_count && invocation.error == COMPILER_DRIVER_ERROR_NONE; input_index += 1)
+    {
+        if (string_equal(invocation.input_paths[input_index], S8("-")))
+        {
+            standard_input_count += 1;
+            if (invocation.input_languages[input_index] == COMPILER_DRIVER_LANGUAGE_AUTOMATIC &&
+                invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+            {
+                invocation.input_languages[input_index] = COMPILER_DRIVER_LANGUAGE_C;
+            }
+            if (standard_input_count > 1)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("standard input {S8} can be named only once"), S8("-"));
+            }
+            else if (invocation.input_languages[input_index] == COMPILER_DRIVER_LANGUAGE_AUTOMATIC)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("-E or -x c is required when input is from standard input {S8}"), S8("-"));
+            }
+            else if (!compiler_driver_c_input(invocation.input_languages[input_index], S8("-")))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("standard input {S8} is supported only for C source"), S8("-"));
+            }
+        }
+    }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {
         if (invocation.has_gpu_target)
@@ -2217,6 +2292,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.action != COMPILER_DRIVER_ACTION_PREPROCESS && invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.dump_macros && invocation.has_gpu_target && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for a GPU target"), S8("-dM"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && static_link_requested && invocation.action == COMPILER_DRIVER_ACTION_LINK)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} (static executables are not linked; hosted links import libc dynamically)"),
+                                       S8("-static"));
     }
     compiler_driver_validate_spirv_invocation(&invocation);
     // Only the x86-64 Linux writer places a position-independent image. The
@@ -2288,6 +2372,27 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             !link_validate_linker_arguments(invocation.target, options, true, &unsupported))
         {
             compiler_driver_argument_error(arena, &invocation, S8("unsupported linker argument for this output: {S8}"), unsupported);
+        }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.investigation_path.length)
+    {
+        // Frame each expanded argument by its byte length; quoted spaces or
+        // response-file boundaries cannot make different argv lists coincide.
+        ByteWriter configuration = byte_writer_make(arena_allocate(arena, u8, INVESTIGATION_TEXT_LIMIT), INVESTIGATION_TEXT_LIMIT);
+        for (u64 index = 0; !configuration.overflow && index < arguments.length; index += 1)
+        {
+            String8 length = string_format(arena, S8("{u64}:"), arguments.pointer[index].length);
+            byte_writer_emit_bytes(&configuration, length.pointer, length.length);
+            byte_writer_emit_bytes(&configuration, arguments.pointer[index].pointer, arguments.pointer[index].length);
+        }
+        if (configuration.overflow)
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("investigation configuration exceeds 4096 bytes");
+        }
+        else
+        {
+            invocation.investigation_configuration = (String8){.pointer = (char8*)configuration.bytes, .length = configuration.count};
         }
     }
     compiler_driver_validate_native_pic_invocation(arena, &invocation, position_independent_code_option);
@@ -4121,6 +4226,10 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(Asse
     case ASSEMBLY_UNIT_SECTION_TEXT: object_kind = OBJECT_SECTION_TEXT; break;
     case ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA: object_kind = OBJECT_SECTION_READ_ONLY_DATA; break;
     case ASSEMBLY_UNIT_SECTION_DATA: object_kind = OBJECT_SECTION_DATA; break;
+    case ASSEMBLY_UNIT_SECTION_INIT_ARRAY: object_kind = OBJECT_SECTION_INIT_ARRAY; break;
+    case ASSEMBLY_UNIT_SECTION_FINI_ARRAY: object_kind = OBJECT_SECTION_FINI_ARRAY; break;
+    case ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA: object_kind = OBJECT_SECTION_THREAD_LOCAL_DATA; break;
+    case ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO: object_kind = OBJECT_SECTION_THREAD_LOCAL_ZERO; break;
     case ASSEMBLY_UNIT_SECTION_DEBUG_INFO: object_kind = OBJECT_SECTION_DEBUG_INFO; break;
     case ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV: object_kind = OBJECT_SECTION_DEBUG_ABBREV; break;
     case ASSEMBLY_UNIT_SECTION_DEBUG_LINE: object_kind = OBJECT_SECTION_DEBUG_LINE; break;
@@ -4211,6 +4320,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
         .relocations = arena_allocate(arena, ObjectRelocation, unit.relocation_count ? unit.relocation_count : 1),
         .section_count = unit.section_count,
         .symbol_count = unit.symbol_count,
+        .requires_executable_stack = unit.requires_executable_stack,
+        .executable_stack_source = unit.requires_executable_stack ? path : (String8){0},
     };
     for (u32 index = 0; index < unit.section_count; index += 1)
     {
@@ -4388,6 +4499,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .assembly_comment_lines = true,
                                                     .retain_output_spacing = true,
+                                                    .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     file_map_unmap(source_file);
     String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, diagnostics, &preprocess, preprocess.diagnostics,
@@ -4397,13 +4509,15 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
         result.tokenizer_error_count = (u32)preprocess.error_count;
         result.diagnostic = preprocessing_error;
+        c_preprocess_release(&preprocess);
         return result;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
     }
-    String8 source = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
+    String8 source = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ? c_preprocess_detail(preprocess)->macro_dump
+                                                                                                      : compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = source;
@@ -4411,9 +4525,133 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
         {
             compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);
         }
+        c_preprocess_release(&preprocess);
         return result;
     }
-    return compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess, (String8){.pointer = split, .length = split_length}, metrics);
+    result = compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess, (String8){.pointer = split, .length = split_length}, metrics);
+    c_preprocess_release(&preprocess);
+    return result;
+}
+
+// The spelling arena holds the text every name in the frontend's IR points
+// into, and the driver gives it back as soon as the unit is compiled. An
+// object the result carries must therefore not name anything inside it: copy
+// each string (and any section payload) that does into the result arena.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_in_released_arena(Arena const* released, void const* pointer, u64 length)
+{
+    u8 const* begin = (u8 const*)released;
+    u8 const* address = (u8 const*)pointer;
+    return length != 0 && address >= begin && address < begin + released->reserved_size;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_detach_string(Arena* arena, Arena const* released, String8 value)
+{
+    String8 result = value;
+    if (compiler_driver_in_released_arena(released, value.pointer, value.length))
+    {
+        result = string_duplicate_arena(arena, value, false);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_detach_object(Arena* arena, CPreprocessResult const* preprocess, ObjectFile* object)
+{
+    Arena const* released = preprocess->recovery ? preprocess->recovery->spelling_arena : 0;
+    if (released)
+    {
+        for (u32 index = 0; index < object->section_count; index += 1)
+        {
+            ObjectSection* section = &object->sections[index];
+            section->name = compiler_driver_detach_string(arena, released, section->name);
+            if (compiler_driver_in_released_arena(released, section->data.pointer, section->data.length))
+            {
+                u8* copy = arena_allocate(arena, u8, section->data.length);
+                memcpy(copy, section->data.pointer, section->data.length);
+                section->data.pointer = copy;
+            }
+        }
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            object->symbols[index].name = compiler_driver_detach_string(arena, released, object->symbols[index].name);
+        }
+        for (u32 index = 0; index < object->comdat_count; index += 1)
+        {
+            object->comdats[index].key = compiler_driver_detach_string(arena, released, object->comdats[index].key);
+        }
+        for (u32 index = 0; index < object->debug_module_count; index += 1)
+        {
+            object->debug_modules[index].name = compiler_driver_detach_string(arena, released, object->debug_modules[index].name);
+        }
+        object->diagnostic = compiler_driver_detach_string(arena, released, object->diagnostic);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_investigation_tokens(InvestigationCapture* capture, CPreprocessResult preprocess)
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    for (u64 index = 0; index < preprocess.token_count; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        String8 spelling = token.kind == C_TOKEN_END_OF_FILE ? (String8){0} : c_token_spelling(preprocess.spelling_base, token);
+        u8 frame[12];
+        ByteWriter writer = byte_writer_make(frame, sizeof(frame));
+        byte_writer_emit_u32_le(&writer, token.kind);
+        byte_writer_emit_u32_le(&writer, (u32)spelling.length);
+        byte_writer_emit_u32_le(&writer, (u32)(spelling.length >> 32));
+        sha256_add(&hash, frame, sizeof(frame));
+        if (spelling.length)
+        {
+            sha256_add(&hash, spelling.pointer, spelling.length);
+        }
+    }
+    sha256_finish_hex(&hash, capture->translation_sha256);
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_finish_investigation(Arena* arena, CompilerDriverInvocation invocation,
+                                                             InvestigationCapture* capture, ObjectFile const* object, CompilerDriverResult* result)
+{
+    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
+    String8 capture_absolute = os_path_absolute(arena, invocation.investigation_path, false);
+    String8 output_absolute = os_path_absolute(arena, output, false);
+    String8 input_absolute = os_path_absolute(arena, invocation.input_paths[0], false);
+    bool aliases = capture_absolute.length && (string_equal(capture_absolute, output_absolute) || string_equal(capture_absolute, input_absolute));
+    FileMapRead artifact = {0};
+    ByteSlice sidecar = {0};
+    if (aliases)
+    {
+        capture->diagnostic = S8("investigation capture path resolves to its input or object output");
+    }
+    else if (!capture->found && !capture->diagnostic.length)
+    {
+        capture->diagnostic = S8("investigation function has no retained machine encoding (missing function or canonical fallback)");
+    }
+    if (!capture->diagnostic.length)
+    {
+        TimeDataType start = timestamp_take();
+        capture->artifact_path = output;
+        artifact = file_map_read(arena, output, (FileReadOptions){0});
+        if (!artifact.bytes.pointer || !investigation_bind_object(arena, capture, object, artifact.bytes))
+        {
+            if (!capture->diagnostic.length) capture->diagnostic = S8("could not read completed investigation object");
+        }
+        capture->capture_ns += timestamp_ns_between(start, timestamp_take());
+        if (!capture->diagnostic.length)
+        {
+            sidecar = investigation_serialize(arena, capture);
+            if (!sidecar.pointer) capture->diagnostic = S8("investigation capture exceeds its format bounds");
+        }
+    }
+    if (!capture->diagnostic.length && !file_publish(invocation.investigation_path, sidecar))
+    {
+        capture->diagnostic = S8("could not publish investigation capture");
+    }
+    file_map_unmap(artifact);
+    if (capture->diagnostic.length)
+    {
+        result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
+        result->diagnostic = capture->diagnostic;
+    }
 }
 
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
@@ -4424,6 +4662,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         .diagnostic = invocation.diagnostic,
     };
     FileMapRead source_file = {0};
+    // Filled once the source is preprocessed; the end label releases its
+    // private arenas, which nothing the result holds points into.
+    CPreprocessResult preprocess = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -4444,7 +4685,15 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = S8("the C frontend currently requires exactly one C input");
         goto end;
     }
-    source_file = file_map_read(arena, invocation.input_paths[0], (FileReadOptions){0});
+    // The `-` input arrives already read; it has no file identity.
+    if (string_equal(invocation.input_paths[0], S8("-")))
+    {
+        source_file.bytes = (ByteSlice){.pointer = (u8*)invocation.standard_input.pointer, .length = invocation.standard_input.length};
+    }
+    else
+    {
+        source_file = file_map_read(arena, invocation.input_paths[0], (FileReadOptions){0});
+    }
     ByteSlice bytes = source_file.bytes;
     if (!bytes.pointer)
     {
@@ -4459,7 +4708,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
     }
     WORK_LEDGER_PHASE(PREPROCESS);
-    CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
+    preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
                                                     .macro_operations = invocation.macro_operations,
                                                     .definitions = definitions,
@@ -4481,6 +4730,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                     .omit_spelled_bytes = invocation.omit_spelled_bytes,
                                                     .retain_output_spacing = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
+                                                    .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
+                                                    .source_cache = invocation.source_cache,
+                                                    .preserve_spellings = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of
@@ -4504,7 +4756,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
-        result.output = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
+        result.output = invocation.dump_macros ? c_preprocess_detail(preprocess)->macro_dump : compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
         if (invocation.output_path.length)
         {
             compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);
@@ -4568,13 +4820,17 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
-    if (!lowered.program || lowered.diagnostic_count)
+    if (!lowered.program || lowered.diagnostic_count || !lowered.program->modules || lowered.program->module_count != 1)
     {
         result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
         if (lowered.diagnostic_count)
         {
             result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, lowered.diagnostics,
                                                                       lowered.diagnostic_count, invocation.input_paths[0], (String8){0});
+        }
+        else
+        {
+            result.diagnostic = string_format(arena, S8("{S8}: C analysis or lowering did not publish a complete program"), invocation.input_paths[0]);
         }
         goto end;
     }
@@ -4652,6 +4908,31 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         compiler_driver_write_ebpf(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
+    InvestigationCapture* investigation = 0;
+    if (invocation.investigation_path.length)
+    {
+        investigation = arena_allocate(arena, InvestigationCapture, 1);
+        *investigation = (InvestigationCapture){
+            .function_name = invocation.investigation_function,
+            .revision = investigation_compiler_revision(),
+            .configuration = invocation.investigation_configuration,
+            .input_path = invocation.input_paths[0],
+            .allocator = invocation.register_allocator,
+            .cpu = (u32)invocation.target.cpu_arch,
+            .os = (u32)invocation.target.os,
+        };
+        investigation_digest(bytes, investigation->input_sha256);
+        compiler_driver_investigation_tokens(investigation, preprocess);
+        TargetCpuFeatures features = target_cpu_features_effective(invocation.target);
+        investigation->target = string_format(arena, S8("arch={u32} model={u32} os={u32} version={u16}.{u8}.{u8} char={u32}"),
+                                              (u32)invocation.target.cpu_arch, (u32)invocation.target.cpu_model, (u32)invocation.target.os,
+                                              invocation.target.os_version_major, invocation.target.os_version_minor, invocation.target.os_version_patch,
+                                              (u32)invocation.target.plain_char_policy);
+        for (u32 word = 0; word < TARGET_CPU_FEATURE_WORD_COUNT; word += 1)
+        {
+            investigation->target = string_format(arena, S8("{S8} features{u32}={u64:x}"), investigation->target, word, features.words[word]);
+        }
+    }
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_CODEGEN);
     BootstrapTrace mir_trace = {0};
     if (invocation.bootstrap_trace_prefix.length)
@@ -4679,6 +4960,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CodegenModule code = codegen_generate_canonical_module_with_trace(arena, lowered.program, module, invocation.target,
                                                            (CodegenModuleOptions){
+                                                               .investigation = investigation,
                                                                .debug_info = invocation.debug_info,
                                                                .assume_validated = true,
                                                                .verify_invariants = invocation.verify_codegen,
@@ -4839,7 +5121,16 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     WORK_LEDGER_PHASE(OUTPUT);
     compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    if (investigation && result.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        compiler_driver_finish_investigation(arena, invocation, investigation, &object, &result);
+    }
 end:
+    if (result.has_object)
+    {
+        compiler_driver_detach_object(arena, &preprocess, &result.object);
+    }
+    c_preprocess_release(&preprocess);
     file_map_unmap(source_file);
     return result;
 }
@@ -5339,7 +5630,7 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_worker_limit(CompilerDriverInvocati
 #if !BUSTER_SINGLE_THREADED
     // An embedding caller's existing gang already owns its parallel budget.
     // Do not turn each of its invocations into another gang.
-    if (invocation.compile_jobs > 1 && lane_count() == 1)
+    if (invocation.compile_jobs > 1 && !invocation.source_cache && lane_count() == 1)
     {
         u32 logical = BUSTER_MAX(os_get_logical_thread_count(), (u32)1);
         result = BUSTER_MAX((u32)1, BUSTER_MIN(invocation.compile_jobs, BUSTER_MIN(logical, invocation.input_count)));
@@ -5496,6 +5787,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     u32 fallback_record_capacity = 0;
     CompilerDriverUnit* unit_tasks = 0;
     u32 unit_task_count = 0;
+    CSourceCache* owned_source_cache = 0;
     // Per-input records live outside `result`, which several paths replace
     // wholesale, and are attached at `finish`.
     CompilerDriverInputResult* inputs = 0;
@@ -5510,6 +5802,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         result.diagnostic = S8("compiler driver requires an arena");
         return result;
+    }
+    if (invocation.enable_source_cache && !invocation.source_cache)
+    {
+        owned_source_cache = c_source_cache_create(arena, COMPILER_DRIVER_SOURCE_CACHE_BYTE_LIMIT);
+        invocation.source_cache = owned_source_cache;
     }
     if ((measure || invocation.keep_going) && invocation.input_count && invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {
@@ -5602,6 +5899,38 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         result.diagnostic = S8("bootstrap traces require exactly one native C input and object or executable output");
         goto finish;
+    }
+    if (invocation.investigation_path.length || invocation.investigation_function.length)
+    {
+        bool supported = invocation.investigation_path.length && invocation.investigation_function.length &&
+                         invocation.investigation_function.length <= INVESTIGATION_TEXT_LIMIT &&
+                         invocation.investigation_path.length <= INVESTIGATION_TEXT_LIMIT &&
+                         invocation.investigation_configuration.length &&
+                         invocation.investigation_configuration.length <= INVESTIGATION_TEXT_LIMIT &&
+                         invocation.input_count == 1 && invocation.input_paths && !invocation.library_count && !invocation.framework_count &&
+                         compiler_driver_c_input(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) &&
+                         !compiler_driver_assembly_input(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) &&
+                         invocation.action == COMPILER_DRIVER_ACTION_OBJECT && !invocation.has_gpu_target && !invocation.emit_llvm_bitcode &&
+                         invocation.target.cpu_arch == CPU_ARCH_X86_64 && invocation.target.os == OPERATING_SYSTEM_LINUX &&
+                         (invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST ||
+                          invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK);
+        if (!supported)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("investigation requires a bounded configuration, capture path, function name, and one x86-64 Linux C -c input with fast or mir-stack allocation");
+            goto finish;
+        }
+        String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
+        String8 capture_absolute = os_path_absolute(arena, invocation.investigation_path, false);
+        String8 input_absolute = os_path_absolute(arena, invocation.input_paths[0], false);
+        String8 output_absolute = os_path_absolute(arena, output, false);
+        bool aliases = capture_absolute.length && (string_equal(capture_absolute, input_absolute) || string_equal(capture_absolute, output_absolute));
+        if (aliases || string_equal(invocation.investigation_path, output) || string_equal(invocation.investigation_path, invocation.input_paths[0]))
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("investigation capture path aliases its input or object output");
+            goto finish;
+        }
     }
     if (string_equal(invocation.output_path, S8("-")))
     {
@@ -5928,6 +6257,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 goto finish;
             }
             ObjectFile object = object_read(arena, object_file.bytes, invocation.target);
+            if (object.requires_executable_stack) object.executable_stack_source = input_path;
             file_map_unmap(object_file);
             if (object.error != OBJECT_ERROR_NONE)
             {
@@ -6452,6 +6782,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
     }
 finish:
+    result.source_cache = c_source_cache_stats(invocation.source_cache);
+    c_source_cache_destroy(owned_source_cache);
     if (archive_state.arena) arena_destroy(archive_state.arena, 1);
     for (u32 index = 0; input_archive_maps && index < invocation.input_count; index += 1) file_map_unmap(input_archive_maps[index]);
     for (u32 index = 0; library_archive_maps && index < invocation.library_count; index += 1) file_map_unmap(library_archive_maps[index]);
