@@ -29013,7 +29013,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
     // suffixes (the caller's prefix has consumed the pointer run).
     bool finished = !allow_function_pointer;
     IrTypeId plain = finished ? c_ir_type_name_suffix(builder, type, index, end) : IR_TYPE_ID_INVALID;
-    while (!finished && type.value != IR_ID_UNDERLYING_INVALID)
+    // A parameter whose type waits on a query leaves its request pending;
+    // nothing further may issue another one this attempt.
+    while (!finished && type.value != IR_ID_UNDERLYING_INVALID && !builder->queries->has_request)
     {
         while (index < end && c_token_is_punctuator(&tokens[index], C_PUNCTUATOR_STAR))
         {
@@ -29066,7 +29068,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
                     suffix_count += 1;
                 }
             }
-            for (u32 suffix = suffix_count; valid && type.value != IR_ID_UNDERLYING_INVALID && suffix > 0; suffix -= 1)
+            for (u32 suffix = suffix_count; valid && type.value != IR_ID_UNDERLYING_INVALID && !builder->queries->has_request && suffix > 0; suffix -= 1)
             {
                 u32 open = opens[suffix - 1];
                 u32 close = closes[suffix - 1];
