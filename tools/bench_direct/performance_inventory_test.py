@@ -15,7 +15,10 @@ deleted one cannot leave a stale row behind:
 
 Each row is `performance`, `diagnostic` or `policy`. A performance row either
 names an existing Zen 5 route and the consumer that checks its evidence
-(`covered`), or is explicitly `NOT VALIDATED` with a resolution. Diagnostic
+(`covered`), or is explicitly `NOT VALIDATED` with a resolution. A covered
+row's consumer must itself refuse evidence from any host but the approved
+Zen 5 host (it uses compiler_receipt's APPROVED_HOST or host_problem), so a
+route cannot count as covered through a consumer that never checks hardware. Diagnostic
 and policy rows are `not applicable` with a reason. The summary line reports
 how many performance entries are covered; the inventory never claims more.
 
@@ -36,6 +39,7 @@ ROUTE_JOBS = {"main-compare": "  compare:", "pull-compare": "  compare-pull:", "
 VALIDATIONS = ("performance", "diagnostic", "policy")
 BUILD_COMMAND = re.compile(r"bench|throughput|^production_profile$")
 TOOL = re.compile(r"bench|benchmark|scaling|survey|performance")
+HOST_CHECK = re.compile(r"\b(?:APPROVED_HOST|host_problem)\b")
 WORKFLOW = re.compile(r"bench|throughput|profile|lab\b|perf|708", re.IGNORECASE)
 
 
@@ -105,6 +109,8 @@ def check_rows(data: object, discovered: set[str], bench_workflow: str) -> tuple
             errors.append(f"{name}: route {route!r} is not a job of the 9700X workflow")
         elif status != "covered" or not (isinstance(zen5.get("consumer"), str) and (ROOT / zen5["consumer"]).is_file()):
             errors.append(f"{name}: a routed row is covered and names an existing evidence consumer")
+        elif not HOST_CHECK.search((ROOT / zen5["consumer"]).read_text(encoding="utf-8")):
+            errors.append(f"{name}: consumer {zen5['consumer']} never checks the observed host against APPROVED_HOST")
         else:
             counts["covered"] += 1
     return errors, counts
@@ -133,6 +139,9 @@ def main() -> int:
         ("route to a missing job fails", {**synthetic, "entries": [dict(row, zen5=dict(row["zen5"], route="main-compare"))]},
          {"tool:x.py"}, False),
         ("unrouted covered claim fails", {**synthetic, "entries": [dict(row, zen5={"route": "none", "status": "covered"})]},
+         {"tool:x.py"}, False),
+        ("consumer without a host check fails",
+         {**synthetic, "entries": [dict(row, zen5=dict(row["zen5"], consumer="tools/bench_direct/authorize.py"))]},
          {"tool:x.py"}, False),
         ("NOT VALIDATED needs a resolution", {**synthetic, "entries": [dict(row, zen5={"route": "none", "status": "NOT VALIDATED"})]},
          {"tool:x.py"}, False),

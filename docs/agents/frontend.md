@@ -24,6 +24,32 @@ allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
 The cross-frontend/backend ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+## Macro argument rescan boundaries
+
+Argument collection preserves `no_expand` on identifiers whose definition is
+disabled when the token is collected. Collection can consume the producer's
+ENABLE marker before argument prescan begins; clearing that definition's
+disabled bit must not make the captured identifier eligible again. Raw
+stringization and token-paste construction retain their existing rules.
+The registered argument-demand controls in `macro_conditional_test.c` cover
+this boundary in C17/GNU17, including duplicate substitution and raw/paste
+controls. The external Clang `macro_disable.c` assertion remains unchanged.
+
+## Line-control filenames
+
+`#line` and GNU linemarkers decode ordinary string-literal filenames with the
+shared literal decoder before storing their logical path. Escaped quotes,
+backslashes, numeric escapes and universal character names therefore denote
+the same bytes in source maps, diagnostics, `__FILE__` and `__FILE_NAME__`.
+`__BASE_FILE__` continues to name the main input. File builtins quote control
+bytes with three-digit octal escapes, keeping their output valid without
+absorbing a following digit. Encoding-prefixed or malformed filename literals
+receive the existing invalid-line diagnostic.
+
+Registered `c_test_line_filename_escapes` pins these byte values, builtin token
+spellings, re-lexing, diagnostic paths and source locations in C17/GNU23,
+including macro operands and already-preprocessed GNU linemarkers.
+
 ## Conditional directive comments
 
 The `#if`/`#elif` operand range ends at the first newline outside a block comment.
@@ -133,7 +159,13 @@ Never admit an arbitrary `__atomic_` or `__c11_atomic_` suffix by prefix.
 The active target admits atomic builtins on x86-64/AArch64, and complex
 construction there and on Wasm64. Wasm64 and eBPF reject atomic IR; eBPF also
 rejects floating IR. Operand types and access widths are still validated by
-lowering. A positive runtime builtin query does not assert that the builtin
+lowering. `__builtin_return_address(0)` lowers to `IR_OPCODE_RETURN_ADDRESS`
+(not `IR_OPCODE_STACK_SAVE`, which is the stack pointer): the x86-64 and
+AArch64 MIR selectors read the frame record every non-Windows MIR function
+builds (`[rbp+8]`, `[x29+8]`), so the query answers 1 only there. Windows
+frames, Wasm64 and eBPF refuse it with a structured diagnostic, as does any
+non-zero or non-constant level; `compiler_driver_test_return_address` runs it.
+A positive runtime builtin query does not assert that the builtin
 can be folded in every constant initializer; the complex global-initializer
 work is tracked separately in #675.
 
@@ -157,6 +189,27 @@ signed int. Semantic expression queries and lowering share the spelling policy;
 the canonical count operation runs at the converted operand width, and its
 result converts to int before the surrounding C expression uses it. Keep
 clz/ctz runtime oracles on nonzero inputs.
+`__builtin_clrsb`/`l`/`ll` share that policy with signed int/long/long long
+operands; lowering counts leading zeros of `((x ^ (x >> (w - 1))) << 1) | 1`,
+which is never zero.
+
+The typed `__builtin_{s,u}{add,sub,mul}{,l,ll}_overflow` checks
+(`c_ir_overflow_builtins`) convert both operands to the spelling's type, store
+the wrapped result through the third argument and answer `_Bool`. Lowering
+computes in the unsigned counterpart: sign tests for add/sub, and for multiply
+a divide-back check of the magnitudes' product, so no wider type, trap or
+runtime helper is needed. The generic `__builtin_*_overflow` forms (#1394) and
+`__builtin_return_address` are not implemented and answer `__has_builtin` 0.
+`__builtin_fabsl` clears the stored sign bit, `__builtin_fmax`/`fmin` and their
+`f`/`l` forms read NaN-ness from the stored bits and select the other operand,
+and `__builtin_powi`/`powif`/`powil` run an inline square-and-multiply loop;
+none of them imports libm or a compiler-runtime `__powi*f2` helper. The
+`__builtin_strcmp`/`strcpy`/`strchr` forms and a non-constant `__builtin_strlen`
+share `c_ir_emit_library_call` with the memory family: they prefer a
+translation-unit declaration and otherwise import the standard prototype from
+`c_ir_memory_builtin_signatures`, so no `<string.h>` is needed.
+`c_test_gnu_library_builtins_runtime` checks all of these against exact oracles
+in every native allocator mode and both frontend forms.
 
 ## Target ABI predefined macros
 
@@ -186,6 +239,22 @@ macro policy and preventing optimized header paths from assuming inline
 support. `__VERSION__` expands to the existing `__clang_version__` compatibility
 string, `"18.0.0 (buster)"`; this does not establish an implemented driver version
 query. The remaining driver-query work belongs to #1418.
+
+`<tgmath.h>` is a builtin header (`c_include_builtin` in `c_source.c`, searched
+before the system and Clang resource directories). Clang's resource header
+needs `__attribute__((overloadable))`, which this frontend does not implement,
+so on a glibc host (`__GLIBC__`, known only after the header's own
+`<math.h>` include) the builtin supplies the C11 7.25 macros with `_Generic`:
+the real `<math.h>` functions with `f`/`l` variants, the complex-capable
+ones mapped to `<complex.h>` `c*` names (`fabs` to `cabs`), and
+`carg`/`cimag`/`conj`/`cproj`/`creal`. Integer arguments select the `double`
+function. Each arm calls its function by name rather than selecting a function
+designator: an indirect call would need the address of glibc's IFUNC libm
+functions (`floor`, `sin`, ...), which the linker cannot relocate. Elsewhere
+(musl, Darwin, MinGW) the builtin forwards with `#include_next`. The source
+must stay under the 4095-byte portable string-literal limit, so the arms are
+generated by the `__TG_R`/`__TG_C` helper macros. `c_test_tgmath_runtime`
+runs the type and value checks under every register allocator.
 
 `c_test_target_abi_macros` has fixed expectations for thirteen target triples
 in GNU17/C23 and both frontend forms. It checks type compatibility, literal
@@ -350,6 +419,24 @@ C99/C11/C17; hosted Linux x86-64 also requires GCC and Clang to compile and
 execute the same self-checking source. These are registered validation paths,
 not claims that a local compiler or external performance host was run.
 
+## GNU local labels
+
+`__label__ a, b;` at the start of a block scopes those label names to the
+block (GCC "Local Labels"), so statement-expression macros can define labels
+once per expansion. Lowering keys a function's labels by spelling, so the
+final preprocessing pass `c_preprocess_rename_local_labels` (beside
+`c_preprocess_respell_identifiers`) respells each declared name's label uses
+inside the block -- definitions after a statement boundary, `goto`, unary
+`&&`, and `asm goto` label lists -- to a translation-unit-unique identifier,
+and turns the declaration into empty statements. Ordinary identifiers of the
+same spelling keep theirs. Inner declarations are processed first, so a nested
+redeclaration shadows the outer one. Malformed and file-scope declarations are
+left untouched for the parser to diagnose. Only units that intern `__label__`
+enter the pass. The driver sets `CPreprocessOptions.preserve_spellings` for
+`-E`, which keeps the source spelling. `c_test_local_labels` covers both token
+forms, macro expansions, shadowing, label addresses, `asm goto` and a rejected
+use outside the block.
+
 ## Lexer diagnostic reservation failure
 
 Diagnostic rows allocate lazily. If their worst case does not fit scratch and
@@ -381,3 +468,11 @@ passes oversized sentinel lengths through preprocessing and all lexer entries,
 and checks bounded allocation, structured errors, shared-space exhaustion and
 valid empty/declaration controls. It never allocates or maps a multi-gigabyte
 source to exercise the limit.
+
+## Opt-in raw source reuse
+
+`CPreprocessOptions.source_cache` reuses only exact captured raw translation/lex
+results, before fresh symbol interning and preprocessing. It imports owned
+copies into the current phase/spelling arenas; no cache pointer reaches a sealed
+result or canonical IR. Read [bounded raw source reuse](../source-lex-reuse.md)
+for the input model, limits, ownership, replay contract and pending cost gates.

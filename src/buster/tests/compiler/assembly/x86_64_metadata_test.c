@@ -3881,6 +3881,23 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_conditions(UnitTestArguments* argu
     return valid;
 }
 
+void x86_64_metadata_test_prewarm_symbolic_immediate_plans(void)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    // These exact relocation witnesses include forms outside the machine
+    // encoder's closed shape registry. Prepare their keys before test lanes.
+    u32 form_ids[] = {9743, 9270, 607, 9533, 9534, 10018, 9454, 9745, 326};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(form_ids); index += 1)
+    {
+        BusterX86MetadataFormKey key = {0};
+        BusterX86MetadataExactPlan plan = {0};
+        if (buster_x86_metadata_form_key(form_ids[index], &key))
+        {
+            buster_x86_metadata_exact_plan_prepare(key, &plan);
+        }
+    }
+}
+
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};

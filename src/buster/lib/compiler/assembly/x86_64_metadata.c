@@ -770,7 +770,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_fill_nul_distances(char8 const* poo
         // as terminators, so the window mask gates the compare result too.
         Mask64 window_mask = mask64_prefix(size - window_base);
         Simd512 bytes = simd512_load_masked(pool + window_base, window_mask);
-        Mask64 terminators = mask64_and(simd512_equal_byte(bytes, terminator), window_mask);
+        Mask64 terminators = mask64_and(simd512_equal_u8(bytes, terminator), window_mask);
         while (terminators)
         {
             u64 nul = window_base + mask64_first_set(terminators);
@@ -13727,7 +13727,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const buster_x86_metadata_featu
     {S8_INITIALIZER("WBNOINVD"), {S8_INITIALIZER("wbnoinvd")}},
     {S8_INITIALIZER("WRMSRNS"), {S8_INITIALIZER("wrmsrns")}},
     {S8_INITIALIZER("XSAVE"), {S8_INITIALIZER("xsave")}},
+    {S8_INITIALIZER("XSAVEC"), {S8_INITIALIZER("xsavec")}},
+    {S8_INITIALIZER("XSAVEOPT"), {S8_INITIALIZER("xsaveopt")}},
     {S8_INITIALIZER("XSAVES"), {S8_INITIALIZER("xsaves")}},
+    {S8_INITIALIZER("MOVDIRI"), {S8_INITIALIZER("movdiri")}},
+    {S8_INITIALIZER("RDPID"), {S8_INITIALIZER("rdpid")}},
     {S8_INITIALIZER("F16C"), {S8_INITIALIZER("f16c")}},
     {S8_INITIALIZER("FMA"), {S8_INITIALIZER("fma")}},
     {S8_INITIALIZER("SSSE3"), {S8_INITIALIZER("ssse3")}},
@@ -13766,6 +13770,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const buster_x86_metadata_featu
     {S8_INITIALIZER("APX_F_INVPCID"), {S8_INITIALIZER("apx"), S8_INITIALIZER("invpcid")}},
     {S8_INITIALIZER("APX_F_MSR_IMM"), {S8_INITIALIZER("apx"), S8_INITIALIZER("msr-imm")}},
     {S8_INITIALIZER("APX_F_MOVDIR64B"), {S8_INITIALIZER("apx"), S8_INITIALIZER("movdir64b")}},
+    {S8_INITIALIZER("APX_F_MOVDIRI"), {S8_INITIALIZER("apx"), S8_INITIALIZER("movdiri")}},
     {S8_INITIALIZER("APX_F_VMX"), {S8_INITIALIZER("apx"), S8_INITIALIZER("vmx")}},
     // Every target this compiler emits for is 64-bit, so long mode needs no
     // capability token behind it.

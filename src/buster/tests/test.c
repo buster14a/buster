@@ -120,6 +120,7 @@
 #include <buster/tests/compiler/codegen/machine_select_test.h>
 #include <buster/tests/compiler/codegen/machine_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/tests/compiler/codegen/investigation_test.h>
 #include <buster/tests/compiler/codegen/debug_location_block_start_test_internal.h>
 #include <buster/tests/compiler/codegen/aarch64_stride_test.h>
 #include <buster/tests/compiler/debug/debug_test.h>
@@ -185,6 +186,7 @@
 #include <buster/tests/compiler/codegen/machine_select_test.c>
 #include <buster/tests/compiler/codegen/machine_test.c>
 #include <buster/tests/compiler/codegen/codegen_test.c>
+#include <buster/tests/compiler/codegen/investigation_test.c>
 #include <buster/tests/compiler/codegen/aarch64_stride_test.c>
 #include <buster/tests/compiler/debug/debug_test.c>
 #include <buster/tests/compiler/dwarf/dwarf_test.c>
@@ -902,6 +904,7 @@ typedef enum TestId
     TEST_ID_MACHINE_SELECTION,
     TEST_ID_MACHINE,
     TEST_ID_CODEGEN,
+    TEST_ID_INVESTIGATION,
     TEST_ID_AARCH64_STRIDE,
     TEST_ID_DEBUG_MODEL,
     TEST_ID_DWARF,
@@ -973,6 +976,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
     [TEST_ID_MACHINE] = {S8_INITIALIZER("machine_tests"), &machine_tests},
     [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests_with_block_start_oracle},
+    [TEST_ID_INVESTIGATION] = {S8_INITIALIZER("investigation_tests"), &investigation_test, true, TEST_DESCRIPTOR_PARALLEL_NONE},
     [TEST_ID_AARCH64_STRIDE] = {S8_INITIALIZER("aarch64_stride_tests"), &aarch64_stride_tests},
     [TEST_ID_DEBUG_MODEL] = {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
     [TEST_ID_DWARF] = {S8_INITIALIZER("dwarf_tests"), &dwarf_tests},
@@ -1796,6 +1800,7 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test_active;
 BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_body_called;
 #endif
 BUSTER_GLOBAL_LOCAL u64 buster_test_temporary_path_call_count;
+BUSTER_GLOBAL_LOCAL AtomicU64 buster_test_temporary_unique_path_serial;
 
 BUSTER_GLOBAL_LOCAL String8 buster_test_temporary_base(void)
 {
@@ -1879,8 +1884,12 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_create(void)
     bool probe_contained = string_starts_with_sequence(probe_path, buster_test_temporary_root) && probe_path.length > buster_test_temporary_root.length &&
                            probe_path.pointer[buster_test_temporary_root.length] == '/';
     BUSTER_CHECK(probe_contained);
-    OsFileDescriptor* probe = os_file_open(probe_path, (OpenFlags){.read = 1, .write = 1, .create = 1},
-                                           (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* probe = os_file_open(
+        probe_path,
+        (OpenFlags){ .create = 1 },
+        (OsFileAccess){ .read = 1, .write = 1 },
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
     bool result = probe != 0;
     if (probe)
     {
@@ -1955,6 +1964,15 @@ String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix)
     bool root_contained = string_starts_with_sequence(result, buster_test_temporary_root) && result.length > buster_test_temporary_root.length &&
                           (result.pointer[buster_test_temporary_root.length] == '/' || result.pointer[buster_test_temporary_root.length] == '\\');
     BUSTER_CHECK(root_contained);
+    return result;
+}
+
+String8 buster_test_temporary_unique_path(Arena* arena, String8 name, String8 suffix)
+{
+    // Concurrent fixtures share the counter, so take each serial atomically.
+    u64 serial = atomic_u64_increment(&buster_test_temporary_unique_path_serial);
+    String8 unique_suffix = string_format(arena, S8("-{u64}{S8}"), serial, suffix);
+    String8 result = buster_test_temporary_path(arena, name, unique_suffix);
     return result;
 }
 
@@ -2175,6 +2193,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         // including AArch64 CI. Prepare the exact-plan tables, with every shape
         // resolved, before their lanes.
         machine_x86_64_exact_prewarm_all_shapes();
+        x86_64_metadata_test_prewarm_symbolic_immediate_plans();
         // Every lane in the gang below is an aarch64 suite, and each one queries
         // canonical form validity per encode and per decode.
         buster_aarch64_prewarm();

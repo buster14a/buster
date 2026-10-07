@@ -4,6 +4,12 @@
 
 ## Compiler output streams
 
+For optional one-function native source/MIR/object investigation, see
+[the capture and command guide](../native-compiler-investigation.md). Capture
+uses `-finvestigation=PATH` with `-finvestigation-function=NAME`; `ide investigate`
+consumes the sidecar and exact object. The initial supported route is x86-64
+Linux C `-c` with FAST. Missing/transformed mappings stay explicit.
+
 `ide cc` writes warnings, source diagnostics, and `cc: error:` driver errors to
 stderr. With `-E` or `-S` and no `-o`, or with `-o -`, generated text
 goes to stdout;
@@ -69,8 +75,11 @@ inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
 `-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
 existing execution. Objects, archives, assembly and each `-l` occurrence are
 serial boundaries, even when `-x c` is present. A library between C sources
-ends the cohort before later translation units can publish definitions. Worker count is clamped to logical CPUs, input
-count and one inside an embedding caller's multi-lane gang.
+ends the cohort before later translation units can publish definitions. Worker count is clamped to the logical CPUs the
+process may run on (the affinity mask on Linux and Windows, so `taskset`, a
+cpuset or a job object narrows it; cgroup CPU quotas are not considered), input
+count and one inside an embedding caller's multi-lane gang. The default
+`lane_run` width uses the same count.
 
 Each cohort contains at most one full TU per worker. `lane_range` gives
 stable input slots, the existing persistent gang is reused, and each worker
@@ -122,7 +131,11 @@ only points here.
   (serial and lane paths alike). `-E` and `-S` over several inputs produce one
   concatenated stream, so after any failure nothing is printed or written for
   any input; the records still report each one. A TU arena that cannot be
-  allocated is that input's `failed` record and the batch continues. An
+  allocated is that input's `failed` record with `driver.resource` (rather
+  than an invalid-source rejection) and the batch continues. The diagnostic
+  states the 32 GiB virtual reservation required by that unit. This preserves
+  the fixed arena's large-input capacity; restricted-address-space admission
+  and job-count adaptation remain separate work (#1311). An
   unreadable or malformed prebuilt object or archive is also a `failed`
   record, but it still stops the invocation, because the link it belongs to
   cannot proceed. `-fkeep-going` alone allocates records with statuses only.
@@ -260,12 +273,37 @@ Host detection falls back to the dynamic `native` identity if a virtualized
 family/model description names a processor incompatible with the executing
 architecture; independently probed host features are preserved. Explicit
 `-march`/`-mcpu` requests still receive the incompatibility diagnostic.
+`-march=x86-64` (the existing `baseline` model) and the psABI levels
+`-march=x86-64-v2`, `-v3` and `-v4` are accepted on x86-64 targets only (other
+targets keep `unsupported CPU model`): each level is `baseline` plus the
+cumulative features of `compiler_driver_psabi_features` (v2: cx16, popcnt,
+sse3, ssse3, sse4.1, sse4.2; v3: avx, avx2, bmi1, bmi2, f16c, fma, lzcnt,
+movbe, xsave; v4: avx512f/bw/cd/dq/vl). The feature predefines the frontend
+publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
+the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
+not predefined at any level. `-mattr` overrides still refine the level.
+The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+`-mtune=<model>` is accepted with any nonempty value, `native` included, and
+ignored: it selects only a scheduling model, and instruction selection here has
+no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+`-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
+there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
+accepted and publishes no warning text or records; the only warnings the driver
+emits are the preprocessor's (`#warning`), gated in
+`compiler_driver_publish_c_diagnostics`. `--version`, `-dumpversion` and
+`-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
+`-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
+`__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
+`-dumpmachine` prints the effective target as `arch-os[-environment]` with the
+`gnu` environment on Linux and `msvc` on Windows (for example
+`x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
+`Target: <that triple>` and `Thread model: posix`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings
 (`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
 `unsupported target environment` instead of being aliased to MSVC (#1492);
@@ -274,12 +312,11 @@ The GNU environment refusal applies after a recognized Windows OS component;
 `x86_64-gnu-windows-msvc` and `x86_64-gnullvm-windows-msvc` retain their free-form
 vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
-every optimization level, including the default and `-O0`, while
-`-fno-register-allocator` and `-fregister-allocator=none` retain their accepted
-spelling but select MIR_STACK placement. Advanced and diagnostic callers may
-select `none`, `mir-stack`, `fast`, or `quality`; every spelling runs canonical
-IR -> MIR -> placement -> metadata-backed native emission, and the last
-allocator-affecting option wins.
+every optimization level, including the default and `-O0`. Callers may select
+`fast` or `quality`; both run canonical IR -> MIR -> placement ->
+metadata-backed native emission, and the last allocator-affecting option wins.
+The stack-only mode is removed: `-fregister-allocator=none`,
+`-fregister-allocator=mir-stack` and `-fno-register-allocator` are argument errors.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
 including ordinary Windows/UEFI functions with validated compact MIR frame
 and unwind records. Windows and Darwin AArch64 variadic definitions and calls
@@ -361,7 +398,7 @@ with the policy their external objects use; the linker cannot infer it.
 The configured-host packed-layout tests use an independent register probe
 (`tests/host_sysv_unnamed_bitfields.c`) instead of guessing from a version
 string. A later float argument forces a known live XMM0 value under either
-convention. Both link directions then run all four allocators and both frontend
+convention. Both link directions then run both allocators and both frontend
 forms, including later integer/float parameters and an assembly return control
 that zeros the unselected return register. A failed or unknown probe fails the
 test; it never silently assumes a convention or waives a mixed-link check.
@@ -375,13 +412,13 @@ defines their scope, invalidation rules and separate diagnostic replay protocol.
 `-fno-machine-fallback` and `-fmachine-fallback` remain accepted so existing
 build scripts do not break; neither changes native behavior or can re-enable
 the retired direct emitter. Native C generation is always strict, including
-the retained `none` spelling. Direct non-native output, preprocessing and
+both FAST and QUALITY. Direct non-native output, preprocessing and
 syntax-only checks still reject the native-only strict option. Assembly inputs
 and linked prebuilt objects have no canonical C functions to gate.
-For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
+For example, `build/Release/ide cc -fregister-allocator=fast -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
 `compiler_driver_test_machine_fallback` runs the same fourteen-fixture arithmetic,
 control-flow, call-ABI, aggregate and frame corpus for x86-64 and AArch64 on
-Linux, macOS and Windows, under all three machine allocators and both explicit
+Linux, macOS and Windows, under both machine allocators and both explicit
 frontend forms in `test_all`, including CI. Its 504 object-compilation rows
 require 504 non-empty strict successes, including the two variadic fixtures on
 Windows/Darwin AArch64. Any future explicit refusal must diagnose its function,
@@ -396,7 +433,7 @@ unwind-boundary execution remain registered. The atomic lane is strict across
 all AArch64 desktop targets, allocators and frontend forms; its broader
 aggregate and i128 censuses both require zero fallback, including exchange,
 arithmetic/bitwise updates and compare-exchange. The separate nine-function
-atomic-update fixture covers all three AArch64 desktop targets, four allocator
+atomic-update fixture covers all three AArch64 desktop targets, two allocator
 modes and both frontend forms; MIR legs reject failures, and only the matching
 native desktop executes the result. This adds 24 object-compilation cases
 outside the fourteen-fixture floor above. Independent host/compiler observers
@@ -412,7 +449,7 @@ bytes. Intel also accepts a displacement before the brackets
 (`"g"+8[rip]`). Delimiters and comment punctuation within a quoted name remain
 name bytes. Malformed or empty quoted symbols fail with an operand diagnostic.
 The registered `-g0`/`-g` listing round trip covers a string reference and an
-external call under all four allocators; matching Linux x86-64 hosts execute
+external call under both allocators; matching Linux x86-64 hosts execute
 the linked result.
 
 ## Plain-char signedness
@@ -461,7 +498,8 @@ layer above `assembly_encode`: it interprets the directive vocabulary, tracks
 one offset per section, resolves labels, and hands each instruction line to
 the instruction layer beneath, and the driver turns its sections, symbols and
 relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
-`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`/`.extern`, `.weak`,
+`.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
+`.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
@@ -484,7 +522,30 @@ section, an undefined name, a `.globl` or `.weak` label) stays an
 `R_AARCH64_ADR_PREL_LO21` relocation with its symbol and addend on ELF, which
 the object reader, in-memory/ELF linkers and `object_aarch64_elf_page_relocate`
 resolve as S + A - P; Mach-O and COFF have no such relocation, so there a
-target the unit cannot fold is refused. `adrp` with a symbol is still refused. A global
+target the unit cannot fold is refused.
+
+Symbolic page addressing takes the same relocation path (#2933). `adrp Xd, sym[+off]`
+names its symbol directly; the low 12 bits are `add Xd, Xn, :lo12:sym[+off]` and an
+unsigned-offset `[Xn, :lo12:sym[+off]]` on any LDR/STR/LDRB/LDRH/LDRSB/LDRSH/LDRSW,
+FP/SIMD or PRFM form (a leading `#` is accepted). A unit never folds these, even for a
+symbol it defines, because final section placement decides the pages; the word's
+immediate stays zero and the symbol and signed addend ride the relocation. The
+assembler's kinds are object-format neutral and the driver spells them per format:
+ELF `R_AARCH64_ADR_PREL_PG_HI21`, `R_AARCH64_ADD_ABS_LO12_NC` and
+`R_AARCH64_LDST{8,16,32,64,128}_ABS_LO12_NC` (chosen from the encoded access size,
+128 for Q registers); COFF `IMAGE_REL_ARM64_PAGEBASE_REL21`, `PAGEOFFSET_12A` and
+`PAGEOFFSET_12L` with the same `:lo12:` source spelling; Mach-O `ARM64_RELOC_PAGE21`
+and `PAGEOFF12` (one kind for ADD and every access size) spelled `sym@PAGE` and
+`sym@PAGEOFF` (`:lo12:` is refused there, and a bare `adrp sym` is also accepted). A modifier on any other instruction (`sub`, `adds`, `mov`), a
+shifted ADD, writeback or post-index addressing, a non-symbol operand, `@PAGE` off
+Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
+diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
+are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
+equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
+their own owners and remain refused here. Mach-O unit symbols currently receive the
+object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
+
+A global
 `.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
 absolute value are refused by name. Widths and alignment follow the target
 as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on
@@ -495,6 +556,27 @@ rather than truncated. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+For x86-64 ELF, `-S` text states what the `-c` object carries so that
+reassembling it (here or with GNU as/llvm-mc) gives the same symbol bindings,
+initializer order and calls (#1281, partial): a weak definition or undefined
+reference prints `.weak`, constructor and destructor priority prints one
+`.section .init_array.NNNNN,"aw",@init_array` / `.fini_array.NNNNN` group per
+priority (the unsuffixed section last), and an external call prints
+`call f@PLT`. A `@init_array`/`@fini_array` section keeps its ELF section type
+in this assembler, so priority names reach the linker. A call to a symbol the
+unit defines is `R_X86_64_PC32` in `-c` but an assembler always makes it
+`R_X86_64_PLT32`; hidden binding, TLS, `-g`/`-fPIC` and `-masm=att` are not yet
+preserved.
+
+ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
+declaration; `"x"` explicitly requests an executable stack. `@progbits` and
+`%progbits` are accepted, repeated declarations preserve any request, and
+payload or other flags/types are diagnosed. C and ordinary assembly objects
+always emit the nonexecuting declaration. Native linking refuses an explicit
+request from assembly, an external ELF object or a selected archive member
+with a diagnostic naming that input; it publishes no image. Inputs with no
+note remain accepted as nonexecuting. See [object emission](../object-emission.md).
 
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
@@ -509,7 +591,9 @@ immediate field as wide as its operand takes either interpretation, so
 `movb $0xff`, `andb $0xf0`, `xorb $-1` and `mov rax, -2147483649` assemble, and
 an all-ones 64-bit literal is the sign-extended -1. Deliberate differences from
 GNU as: values outside -2^(w-1)..2^w-1 and negative shift counts are diagnosed
-rather than wrapped, and a `movabs` value that fits a sign-extended imm32
+rather than wrapped. A matching instruction shape with an out-of-range immediate
+reports `x86 immediate is out of range`; invalid operand types still report an
+operand mismatch. A `movabs` value that fits a sign-extended imm32
 takes the shorter `mov` row. `ret`/`retq` with an immediate (`c2 imm16`), a
 multi-byte `nop` with a register or memory operand (`nopw 0(%rax,%rax,1)`,
 `nopl 0x0(%rax)`, `nop %eax`, Intel `nop word ptr [rax + rax]`; always the
@@ -525,18 +609,28 @@ longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
 choice; both are equal-value encodings left alone because changing them would
 change shared encoder selection.
 
-Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
-and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
-DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_str`,
-`.debug_loc`, `.debug_ranges`, `.debug_addr`, `.debug_str_offsets`,
-`.debug_line_str`, `.debug_rnglists`, `.debug_loclists`). DWARF sections
-retain nonallocated object identities through the driver. Raw-prefix
-lookalikes such as `.initdata` cannot acquire executable flags. Other bare
-names are diagnosed while the wider explicit flag/type and generic
-nonallocated section contract remains tracked in
-[#1279](https://github.com/buster14a/buster/issues/1279). These known bare
-DWARF names cover the section directives emitted by the current `-S` printer;
-quoted instruction operands and the broader round trip are tracked in
+Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
+`.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
+suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
+and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
+`.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
+`.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
+`.debug_loclists`). DWARF sections retain nonallocated object identities
+through the driver. Raw-prefix lookalikes such as `.initdata` cannot acquire
+flags from the prefix and other bare names are diagnosed.
+
+`.section NAME,"flags",@type` (and `.pushsection`) honours `w`, `x`, `T`
+(TLS: `SHF_TLS`, so labels become `STT_TLS`) and the types `@progbits`,
+`@nobits`, `@init_array`, `@fini_array` and `@preinit_array` (the last only
+for a `.preinit_array` name). `a`, `M`, `S` and `R` are accepted and change
+nothing the object stores. Other flag letters (`G`, `e`, `o`, ...), other
+types (`@unwind`, ...), array types combined with `x`/`T`/`@nobits`,
+`T` with `x`, and reopening a section as or from an array/TLS section with
+different flags are diagnosed naming the directive. Still open in
+[#1279](https://github.com/buster14a/buster/issues/1279): a section without
+`a` (such as `.note.GNU-stack,""`) is still written allocated, and `M`/`S`
+merging has no object representation, and `@note` is accepted as an approximation: the section takes the kind its flags select (read-only data for `"a"`) and `SHT_NOTE` is not preserved.
+Quoted instruction operands and the broader round trip are tracked in
 [#2519](https://github.com/buster14a/buster/issues/2519).
 
 Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
@@ -626,7 +720,8 @@ destinations are the same register, are operand diagnostics, as in llvm-mc.
 
 Not in this vocabulary, and still refused unless another owner accepts them:
 
-- symbolic or relocated operands such as `:lo12:` and labels (the control owner
+- relocated operands other than the page-address forms documented with the unit
+  vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
   handles label LDR);
 - CASP, LDAPR (RCPC), LDTR/STTR, BFC, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
@@ -729,6 +824,17 @@ spellings still re-lex as the same tokens. A lexical boundary check inserts one
 space when keyword respelling or macro replacement would instead fuse
 identifiers, preprocessing numbers, literal prefixes, punctuators or comment
 openers, and keeps a backslash token from splicing away a generated newline.
+Text-output requests retain macro-expanded line boundaries in an optional
+`CPreprocessDetail.output_spacing` sidecar. The raw lexer and replacement
+tokens provide leading whitespace before their spelling offsets are replaced;
+this preserves `F();`, `F() ;` and `F()/**/;` independently of the expanded
+spelling's width. Ordinary compilation does not request or allocate the sidecar.
+The lexical separator remains authoritative even when a retained boundary says
+adjacent, and untouched source lines keep the source-column recovery path.
+Empty replacements and substituted parameters carry pending whitespace to the
+next surviving token, including across argument prescan. That shared boundary
+is also needed by subsequent stringification; retaining text-output metadata
+must never change the string literals compared with ordinary compilation.
 The root input splits unquoted dollar prefixes before lexing. Assembly errors
 resolve lazily back to originating tokens and physical positions, including
 `#line` identities; an inserted separator itself has no source range.
@@ -1028,6 +1134,29 @@ On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
 
+The default fixed-address dynamic executable
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
+dynamic writers also build on) is hardened the way GNU ld's default is
+(#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
+`.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
+`.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
+with the `PT_GNU_RELRO` range, `.got.plt` then `.dynamic`, padded to a page
+boundary because the loader seals whole pages; `.data`, TLS and `.bss` follow.
+`DT_FLAGS` `DF_BIND_NOW` and `DT_FLAGS_1` `DF_1_NOW` request eager binding, so
+the sealed range covers the PLT slots too. No page is both writable and
+executable. Each load starts on a page boundary, so images grow by up to three
+pages of zero padding against the earlier single R+X load. The static
+(no-import) writers have no GOT and keep their single R+X load; separating
+their `.rodata` is not done yet. `link_test_elf_hardened_layout` checks the
+structure on both machines without `readelf`.
+
+`-static` follows the same split on every target: `-c`, `-S`, `-E` and
+`-fsyntax-only` ignore it, and a link refuses it as
+`unsupported option: -static (...)` because no image writer produces a
+static executable; hosted ELF links import `libc.so.6` dynamically. A
+configure probe that links with `-static` therefore learns the truth instead of
+receiving a dynamic executable (GitHub #2851).
+
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
 
@@ -1132,6 +1261,22 @@ source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
 
+Plain `-g` keeps code identical to `-g0`, so a named scalar local survives only
+where its value is described by one defining instruction. Locals that are
+reassigned, copied from a parameter or another local, or conditionally
+initialized get an empty location list and show as `<optimized out>` (#2717
+stays partly open for this default path; the proper fix is per-definition
+ranges plus an alias table).
+
+`-fpinned-debug-locals` (with `-g`; `-fno-pinned-debug-locals` is the default
+and the last one wins) makes every named scalar readable. A local stays SSA only
+when its sole write is its entry initializer and that initializer is an
+instruction result no other local already names; every other named local keeps a
+frame slot that its location list covers for the whole function. The cost is
+code: the target does not promote the remaining memory locals into registers
+and FAST/QUALITY frame layout does not coalesce frame objects over disjoint
+lifetimes. The regression is `compiler_driver_test_debug_scalar_local_locations`.
+
 This default also applies when compiler-driver arguments are parsed for an
 embedding caller. The typed invocation API uses its `debug_info` field
 explicitly; a zero-initialized field disables debug output. Release/Debug
@@ -1198,13 +1343,20 @@ and run the result. They also check the compressed-section driver diagnostic.
 `-fverify-codegen` validates canonical IR even when the frontend certified it,
 then checks selected and changed scheduled MIR and placement validity. Invalid
 verified states fail compilation. It applies to native x86-64/AArch64 code
-generation, including the `none` MIR_STACK compatibility spelling;
+generation with FAST or QUALITY;
 preprocessing, syntax-only and direct non-native output reject the flag.
 Successful compilation prints a versioned `CODEGEN_VERIFY` line with module,
 selected-function and scheduled-function counts and the effective allocator.
 Normal compilation keeps its existing validation certificates and fast paths.
 The [native differential runner](../differential-testing.md) consumes this
 explicit opt-in evidence and compares executable observations independently.
+
+The x86-64 System V mixed-object stack fixture checks aggregate and floating
+returns and live dynamic allocations in both compiler directions. Its exact
+sixteen-byte allocation-distance check is specific to Buster's caller lowering
+and is guarded by `__BUSTER__`; host callers retain the value and live-byte
+checks without assuming their `__builtin_alloca` layout.
+
 When selected or scheduled MIR fails verification, the refusal names the
 `MachineVerifyError` and its block, machine instruction, and operand. Without a
 failing canonical instruction its opcode is `unknown`, not an IR enum default.
@@ -1226,6 +1378,17 @@ leave the pointer null and `input_language_count` zero retain the legacy
 invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
+
+A lone `-` is an input naming standard input, as for GCC and Clang. It has no
+suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
+it as C source; without either, or under another language, the parser refuses
+it, and it may appear only once. The source text travels in
+`CompilerDriverInvocation.standard_input`: the `cc` command reads standard
+input to EOF into it after parsing, and embedding callers fill it themselves. A
+null pointer there fails the input as a read error. Diagnostics and `__FILE__`
+name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+`compiler_driver_test_probe_spellings` covers the admission rules, both routes
+and the `-static`/`-mtune` spellings (GitHub #2851).
 
 ## Response files
 
@@ -1267,3 +1430,16 @@ are NUL-terminated copies in the invocation arena.
 `compiler_driver_test_response_file_arguments` covers the grammar and bounds;
 `compiler_driver_test_response_file_batch` checks that a 400-input `-c` batch
 writes the same objects through `@file` as on the command line.
+
+## Opt-in source lex cache
+
+`-fsource-cache` requests one bounded 16 MiB raw translation/lex cache for the
+current invocation; `-fno-source-cache` cancels it (last wins, default disabled).
+Use it for serial multi-input builds; separate CLI processes start empty.
+Embedding callers can retain their own `CSourceCache` across serial invocations
+through `CompilerDriverInvocation.source_cache`. Cache presence clamps TU workers
+to one. `-v` prints a versioned `SOURCE_CACHE` record separately from conceptual
+SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
+IR validation, backends and publication run fresh. See
+[bounded raw source reuse](../source-lex-reuse.md), including ownership and
+qualified-host performance acceptance, which remains pending.

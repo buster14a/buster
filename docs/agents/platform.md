@@ -27,18 +27,29 @@
   device space: every ordinary chord has at most 0.25 pixel geometric error,
   while ten subdivision levels cap one source curve at 1,024 segments. A
   count-then-emit pass allocates the exact path and rejects more than 1,048,576
-  raster points. Compound glyphs align unsigned byte/word indices in their
-  original outline points after applying component matrices, including nested
-  compounds. An explicit stack admits up to eight component levels; retained
-  original points are capped at 1,048,576, while glyph visits, anchor searches
+  raster points. Compound glyphs align unsigned byte/word indices after
+  applying component matrices, including nested compounds. A parent index at or
+  past the points accumulated so far, or a child index at or past the child's
+  point count, selects an unhinted phantom point (pp1 left origin
+  `xMin - lsb`, pp2 `pp1.x + advance`, pp3/pp4 the vertical top/bottom) in that
+  glyph's own units, moved by the child's matrix; indices beyond the four
+  phantoms are invalid. Phantoms come from the glyph's glyf bounds, `hmtx` and,
+  when `vhea`/`vmtx` exist, `yMax + topSideBearing` and `pp3.y - advanceHeight`;
+  otherwise hhea ascent/descent. A composite's phantoms come from its own
+  metrics, or from the latest component with `USE_MY_METRICS`, untransformed as
+  FreeType does. Hinting is never evaluated, so phantoms are never
+  instruction-adjusted (tracked by
+  [#2138](https://github.com/buster14a/buster/issues/2138)); fonts whose
+  anchors depend on hinted phantoms are unsupported. An explicit stack admits
+  up to eight component levels; retained
+  points are capped at 1,048,576, while glyph visits, anchor searches
   and decoded/translated points share a 9,437,184-unit work budget. Glyph-local reads
-  and instruction-payload ranges are checked. Hinting and its phantom points
-  are not evaluated: an attachment outside the original outline points returns
-  an all-zero bitmap and rolls back its arena allocations; phantom-point support
-  is tracked by [#2138](https://github.com/buster14a/buster/issues/2138). A
+  and instruction-payload ranges are checked. Invalid anchors return an
+  all-zero bitmap and roll back their arena allocations. A
   conservative limit of 67,108,864 scanline edge-search steps
   further bounds raster work. The headless `truetype_tests` module covers these
-  contracts, including point/XY attachment equivalence, transformed/nested
+  contracts, including point/XY attachment equivalence, phantom-point
+  anchors against an in-memory font with and without `vmtx`, transformed/nested
   unsigned indices, scale-sensitive curve goldens, the subdivision cap and
   a deterministic malformed-parameter sweep in sanitizer and fuzz-enabled CI
   configurations.
@@ -125,6 +136,34 @@ the complete compiler environment. Registered `os_tests` inject each setup
 failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
+
+Process cancellation state uses `ProcessControlAtomic`: `BUSTER_SINGLE_THREADED`
+retains volatile `s32` storage for the existing signal-handler accesses, while
+threaded builds retain `AtomicU64`. The load explicitly converts the signed
+serial value directly to `u64`, preserving C's numeric conversion modulo 2^64.
+Serial stores and set-if-zero already convert their input to `s32`; callers
+share zero, one and positive signal numbers representable in that storage.
+Registered `os_tests` cover load/store/set-if-zero in both modes, plus serial
+negative-value loads with independent numeric expectations. Serial builds use
+the same lane path as a one-lane gang, as described in [parallelism](parallelism.md).
+
+## Linux process-group census reads
+
+A procfs task can disappear after its stat/status descriptor opens. Both the
+ordinary read and the capacity probe classify native ESRCH as disappearance;
+the caller retries its unchanged bounded, complete two-snapshot census.
+Open-time ENOENT/ESRCH retain the same meaning. Empty files, oversized content,
+malformed records, other read errors and close failures remain failures, and a
+failed read never publishes a length. This does not relax leader reservation,
+namespace identity, member-state or final ownership checks.
+
+Registered `os_tests` retain an unread stat descriptor for an exited child,
+reap that exact child, then exercise the production descriptor reader. Both
+normal and capacity-probe reads must observe ESRCH without publishing a length.
+Live, empty, oversized and invalid-descriptor controls distinguish disappearance
+from other outcomes. The existing synthetic census-churn fixture remains a
+separate check. This regression proves the read-after-open defect; the original
+#2380 CI failure had no stage detail and is not attributed conclusively to it.
 
 Linux process-group cleanup reads `self/status` from its retained procfs
 descriptor. `NSpid` lists the procfs mount's namespace followed by successively
@@ -355,7 +394,10 @@ retry, partial transfers advance, and zero progress is an error. Close consumes
 the handle even on failure and is never retried. `file_write_checked` preserves
 a write error over a later close error; `file_write` exposes the same completion
 contract as a boolean. Executable/PDB writers use the checked file helper with
-execute permission. Compiler artifact branches report `driver.file-write`;
+`OS_FILE_CREATE_MODE_EXECUTABLE`. Handle access, POSIX creation mode, and Windows
+read/write/delete sharing are passed independently. POSIX ignores sharing flags;
+Windows creation mode inherits the directory ACL and cannot promise private
+permissions or an explicit POSIX mode. Compiler artifact branches report `driver.file-write`;
 linker writers retain `link.file-write`. Metadata/import and copy callers check
 their existing boolean results, which now include close completion.
 

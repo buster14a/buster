@@ -24,6 +24,7 @@ struct TTF_FontInformation
     u64 hhea;
     u64 hmtx;
     u64 kern;
+    u64 vmtx;
     u32 cmap_format;
     u16 units_per_em;
     u16 num_glyphs;
@@ -33,6 +34,7 @@ struct TTF_FontInformation
     u16 max_contours;
     u16 max_composite_points;
     u16 max_composite_contours;
+    u16 num_vmetrics;
 };
 
 typedef struct TTF_FontInitialization TTF_FontInitialization;
@@ -112,10 +114,16 @@ BUSTER_F_DECL s32 truetype_get_codepoint_kern_advance(const TTF_FontInformation*
 // a 0.25px device-space tolerance and bounded subdivision; count-then-emit
 // extraction enforces the point and edge-search work budgets before allocating
 // the exact raster path, and checks the edge budget again before rasterization.
-// Compounds align original outline points with unsigned indices after matrix
-// transformation, with eight levels and bounded outline/attachment work. Hinting
-// and phantom-point anchors are unsupported; invalid/out-of-outline anchors
-// return the same all-zero bitmap and roll back extraction allocations.
+// Compounds align points with unsigned indices after matrix transformation,
+// with eight levels and bounded outline/attachment work. A parent index at or
+// past the points accumulated so far, and a child index at or past the child's
+// point count, selects the unhinted phantom points pp1..pp4 (left origin, right
+// advance, vertical top, vertical bottom) instead; larger indices are invalid.
+// Phantoms derive from the glyph's own glyf bounds and hmtx (and vmtx when
+// present, otherwise hhea ascent/descent for the vertical pair). A component
+// with USE_MY_METRICS gives its phantoms to its composite. Hinting is not
+// evaluated, so phantoms are never hint-adjusted. Invalid or out-of-range
+// anchors return the same all-zero bitmap and roll back extraction allocations.
 BUSTER_F_DECL TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint);
 
 // Rasterizes ' '..'~' of the font in memory into a text_height-scaled atlas.

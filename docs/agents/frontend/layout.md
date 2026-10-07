@@ -24,11 +24,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `c_test_expression_aggregate_bit_fields` checks these contexts, unnamed and
   zero-width members, typedef-named anonymous members, arithmetic widths, tag visibility and local/member name
   separation across six target layouts and both frontend forms. Its embedded
-  runtime source checks fixed sizes and unevaluated width operands in all four
-  native allocators; invalid member declarations retain structured diagnostics.
+  runtime source checks fixed sizes and unevaluated width operands in FAST and
+  QUALITY; invalid member declarations retain structured diagnostics.
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
-  alignment above the native stack's sixteen-byte guarantee, both canonical
-  and machine emitters compute `align_down(old_sp - size, alignment)` and
+  alignment above the native stack's sixteen-byte guarantee, native machine
+  emitters compute `align_down(old_sp - size, alignment)` and
   probe the complete distance to that address, including alignment padding.
   Rounding the byte count alone preserves a misaligned incoming stack pointer.
   Keep the ordinary sixteen-byte path and the existing save/restore lifetime
@@ -80,6 +80,33 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Linux) and `c_test_tagged_member_microsoft_anonymous` (x86-64 and AArch64
   Windows) name their targets, and the Clang corpus pins both answers byte for
   byte on every native target.
+- File-scope object redeclarations compare each declaration's effective explicit
+  alignment in `c_parse_validate_alignment_redeclarations` before canonical IR
+  construction (#1561). The strictest request within one declaration is its
+  effective alignment; requests on separate declarations must agree. A conflict
+  is reported once at the later explicit declaration and names both alignments,
+  including when every declaration is tentative or `extern`. Zero-only runs
+  compare as the declared type's natural alignment; zero mixed with a stronger
+  request leaves that stronger request in force.
+  Buster merges compatible explicit requests across tentative declarations in
+  both source orders: `_Alignas(16) int x; int x;` and
+  `int x; _Alignas(16) int x;` produce the same aligned object. Lowering records
+  whether the selected global declaration has an initializer; a tentative
+  omission cannot refuse the merged alignment. Its existing declaration site,
+  composite type and symbol linkage remain authoritative.
+  `c_test_tentative_alignment_merging` pins source identity, static linkage,
+  composite array types and direct-lowering initialized-definition refusals.
+  An initialized definition must still carry a
+  specifier when another declaration used standard `_Alignas`, while GNU
+  `aligned` can supply the alignment of a bare initialized definition. The
+  agreement rule applies to GNU requests too; it preserves their existing
+  rejection of unequal requests on a defined object and checks extern-only
+  disagreements during semantics. These tentative, extern-only and zero cases
+  are Buster compatibility policy, not a claim to settle WG14 open issue 1044.
+  `c_test_alignment_redeclarations` pins semantic-only analysis, both canonical
+  forms, target layouts, malformed-specifier ownership and accepted neighbors.
+  The structured driver `alignment_redeclaration` record deliberately changes
+  from syntax-only success to the same later-declaration error as object mode.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,
@@ -102,7 +129,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unpacked alignment capped to the pragma ceiling, even with GNU packed. Its
   explicit start request applies only when it does not exceed that ceiling. Zero-width bit-fields retain their natural and
   explicit alignment; Microsoft's required explicit member alignment overrides
-  packing. The actual pragma ceiling stays separate from aggregate `packed` in
+  packing. Direct non-array Microsoft members also preserve an aligned typedef's
+  required alignment after packing (#2203), even when the request equals or
+  lowers the underlying type's alignment. The packed floor comes from the
+  desugared type: an `int` typedef aligned to two places its member at two
+  under pack(1), but at four under pack(4). `CRecordLayoutMember.type_alignment_request`
+  carries that requirement separately from an attribute written on the member;
+  the sparse `CTypeAlignment` record preserves it even when both names map to
+  the same `IrType`. Qualifiers and unattributed typedef wrappers retain it,
+  while applying `_Atomic` to the alias drops it as described below. The
+  registered `c_test_microsoft_aligned_typedef_pack` checks folded constants and
+  canonical layouts on x86-64/AArch64 Linux and Windows with pack(1/2/4), plus
+  compile-only Clang witnesses for all four triples on hosted x86-64 Linux.
+  These direct ordinary-member tests do not establish typedef requirements on
+  bit-fields, array members or required alignment inherited from record
+  subobjects. The actual pragma ceiling stays separate from aggregate `packed` in
   both engines. `c_test_pragma_pack_explicit_alignment` pins these target rules,
   parse-time constants, and canonical member offsets. The registered
   `compiler_driver_test_pragma_pack_alignment` also cross-links independent
@@ -167,8 +208,27 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `sizeof(int) * 8 - 7` lays out identically in a folded `sizeof`/`offsetof`
   and in the object. An unresolved width holds the layout unresolved instead
   of reading as zero; lowering still evaluates such a width itself as a
-  temporary bridge, and `c_parse_validate_bit_field_widths` re-evaluates only
-  unresolved widths to diagnose a non-integer one.
+  temporary bridge. A constant the declaration evaluates but the field cannot
+  hold (negative, or wider than 32 bits) is diagnosed at the declaration with
+  the constant it evaluated, and the member's unresolved `bit_width` is set to
+  `C_PARSE_BIT_WIDTH_DIAGNOSED` so nothing evaluates it again;
+  `c_parse_validate_members` re-evaluates only other unresolved widths to
+  diagnose non-integer values. Both paths build their text with
+  `c_parse_bit_field_width_message`. A lexically invalid literal such as
+  `3junk` is reported by the parser's invalid-integer-literal check instead.
+  Semantic validation also refuses a width exceeding the target's declared integer
+  type, including an enum's resolved underlying type and qualified,
+  typedef, or `typeof` spellings. `_Bool` has a one-bit value limit even
+  though its storage occupies a byte. Resolved widths keep their declaration
+  point value; this check does not add a layout or constant-evaluation
+  authority. The `C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH` error names the
+  member, actual width, and type limit, or points at the width expression
+  for an unnamed field. `c_analyze_semantics_only` and both canonical
+  lowering forms report the same error before attempting to lower a record.
+  `c_test_bit_field_width_constraints` covers the issue #1560 rows, unnamed
+  fields, nonconstant and wide or signed folded widths, target-dependent
+  `long` limits, scoped enumerators, and valid width boundaries on x86-64
+  and AArch64 Linux and Windows in GNU17 and GNU23.
   `c_test_bit_field_width_authority` pins clang's answers for each spelling.
   `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
   one-diagnostic-per-type budget with the rejected alignment specifier -- they
@@ -289,7 +349,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   once. `c_test_parenthesized_bit_field_assignment_values` covers grouped
   record and pointer bases as statements and values (GitHub #1413).
   `compiler_driver_test_bit_field_assignment_results` covers both frontend
-  forms and all four allocators, with ordinary, volatile and split packed
+  forms and FAST and QUALITY, with ordinary, volatile and split packed
   fields, postfix controls, full-width fields and terminating update loops.
   `c_test_bit_field_assignment_accesses` also pins the volatile load/store
   counts on six desktop layouts in both forms. Boolean raw-unit accesses
@@ -304,8 +364,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   bit-fields, including zero-width fields, while anonymous structs and unions
   remain initializable subobjects. Indexed places inherit both the enclosing
   place's volatility and the field type's volatility. The frontend IR check
-  and `tests/basic_c_unnamed_initializer_members.c` cover these rules under all
-  four allocators (GitHub #323). Bit extraction uses the unqualified value
+  and `tests/basic_c_unnamed_initializer_members.c` cover these rules under FAST
+  and QUALITY (GitHub #323). Bit extraction uses the unqualified value
   type returned by the load, including its shift and mask constants. Volatility
   remains on the memory access; it must not create mismatched arithmetic types.
   A flat initializer keeps an iterative cursor for every aggregate subobject it
@@ -314,7 +374,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   stored as one object. The registered driver regression embeds the complete
   source and exercises named and anonymous records, arrays, unions, compound
   literals, qualifiers, and source-order side effects under both frontend SSA
-  forms and all four allocators (GitHub #341). The approved retirement corpus
+  forms and FAST and QUALITY (GitHub #341). The approved retirement corpus
   retains its existing inventory and policy.
   The strict driver corpus independently validates the complete canonical IR.
   A bit-field declarator carries a list of its own in exactly one place, *after*
@@ -493,7 +553,7 @@ Linux, Windows and macOS on x86-64/AArch64, GNU17/GNU23 and both frontend forms.
 It includes the original 64/128/16/32/1/32 object/member answers, packed and
 pragma cases, promoted/nested owner selection, typed and shadowed requests,
 unevaluated operands, invalid neighbors, refusal reset, and supported desktop
-execution under all allocators. Direct private-seam snapshots compare the
+execution under FAST and QUALITY. Direct private-seam snapshots compare the
 published model's complete header and spare rows before and after address and
 const-union queries. Reference semantics come from GCC's
 [alignment manual](https://gcc.gnu.org/onlinedocs/gcc/Alignment.html) and Clang
@@ -502,11 +562,32 @@ and [declaration alignment](https://github.com/llvm/llvm-project/blob/llvmorg-18
 The held Microsoft aligned-typedef packing repair (#2226/#2203) retains its
 separate rule ownership.
 
+## Array bounds over named objects
+
+An array bound such as `sizeof(g)`, `sizeof g` or `_Alignof(g)` reads the named
+object's layout in the same parse-side solve as the array (#1782). Recorded
+identifier uses retain declaration-point binding; a missing use falls back to
+the token's enclosing scope and source position. Redundant parentheses preserve
+that identity, and array/function parameters use their adjusted pointer layout.
+An unresolved object type becomes an ordinary agenda dependency; the reader
+does not start another layout solve or add a whole-table pass. A runtime VLA
+therefore remains nonconstant.
+
+Object alignment consumes the same declaration runs as standalone `_Alignof`,
+including literal requests, type-naming requests and completed redeclarations.
+The legacy layout reader still cannot evaluate identifier-bearing alignment
+expressions such as `_Alignas(A)` for an enumerator `A`; a bound using that
+object's alignment stays unresolved rather than treating the identifier as
+zero. The typed constant authority migration in #1247 owns that remaining
+boundary. `c_test_array_bound_object_layout` checks semantic-only analysis,
+both frontend SSA forms, enum and static-assert constants, canonical array
+sizes/counts, shadowing, parameter adjustment, false assertions and refusals.
+
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their
 object size to the next power of two. The x86-64 SysV and Win64 MIR selectors
-implement their call boundaries across retained allocator spellings. The registered driver suite keeps
+implement their call boundaries with FAST and QUALITY. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
 cross-target, native mixed-compiler, and Wine checks. In the native Linux
 mixed-compiler rows Buster compiles its half for `znver5` while the PATH Clang
@@ -552,12 +633,12 @@ Static initializer and runtime witnesses use an array index containing nested
 index 1 as an independent member-promotion control.
 `c_test_offsetof_members_runtime` compares all three constant contexts with
 addresses of real subobjects in generated programs, using both frontend forms
-and all four register allocators. Runtime execution is omitted on Android/iOS.
+and FAST and QUALITY. Runtime execution is omitted on Android/iOS.
 `c_test_offsetof_typed_indices` extends the parser/static/runtime comparison to
 nested typed indices on LP64, LLP64 and 32-bit layouts. Its refusal fixture checks
 signed negatives, high limbs, target-width multiplication/addition overflow and
 malformed separators; its runtime fixture checks real subobject addresses under
-both frontend forms and all four allocators.
+both frontend forms with FAST and QUALITY.
 
 ## Parse-side layout solve: ordered passes and the agenda
 
