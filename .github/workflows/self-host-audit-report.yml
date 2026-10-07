@@ -32,6 +32,7 @@ jobs:
       issues: write
     steps:
       - name: Assign the failed main audit to its response owner
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           AUDIT_SHA: ${{ github.event.workflow_run.head_sha }}
