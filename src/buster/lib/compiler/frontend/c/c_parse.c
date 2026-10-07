@@ -20708,7 +20708,6 @@ BUSTER_C_INTERNAL bool c_parse_typeof_statement_expression_after(CParseResult* r
     if (close != UINT32_MAX)
     {
         operand_start = search_from;
-        scanning = false;
     }
     else
     {
