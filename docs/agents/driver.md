@@ -746,6 +746,17 @@ spellings still re-lex as the same tokens. A lexical boundary check inserts one
 space when keyword respelling or macro replacement would instead fuse
 identifiers, preprocessing numbers, literal prefixes, punctuators or comment
 openers, and keeps a backslash token from splicing away a generated newline.
+Text-output requests retain macro-expanded line boundaries in an optional
+`CPreprocessDetail.output_spacing` sidecar. The raw lexer and replacement
+tokens provide leading whitespace before their spelling offsets are replaced;
+this preserves `F();`, `F() ;` and `F()/**/;` independently of the expanded
+spelling's width. Ordinary compilation does not request or allocate the sidecar.
+The lexical separator remains authoritative even when a retained boundary says
+adjacent, and untouched source lines keep the source-column recovery path.
+Empty replacements and substituted parameters carry pending whitespace to the
+next surviving token, including across argument prescan. That shared boundary
+is also needed by subsequent stringification; retaining text-output metadata
+must never change the string literals compared with ordinary compilation.
 The root input splits unquoted dollar prefixes before lexing. Assembly errors
 resolve lazily back to originating tokens and physical positions, including
 `#line` identities; an inserted separator itself has no source range.
