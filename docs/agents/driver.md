@@ -503,6 +503,15 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
+declaration; `"x"` explicitly requests an executable stack. `@progbits` and
+`%progbits` are accepted, repeated declarations preserve any request, and
+payload or other flags/types are diagnosed. C and ordinary assembly objects
+always emit the nonexecuting declaration. Native linking refuses an explicit
+request from assembly, an external ELF object or a selected archive member
+with a diagnostic naming that input; it publishes no image. Inputs with no
+note remain accepted as nonexecuting. See [object emission](../object-emission.md).
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and

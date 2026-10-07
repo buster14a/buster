@@ -4282,6 +4282,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
         .relocations = arena_allocate(arena, ObjectRelocation, unit.relocation_count ? unit.relocation_count : 1),
         .section_count = unit.section_count,
         .symbol_count = unit.symbol_count,
+        .requires_executable_stack = unit.requires_executable_stack,
+        .executable_stack_source = unit.requires_executable_stack ? path : (String8){0},
     };
     for (u32 index = 0; index < unit.section_count; index += 1)
     {
@@ -6087,6 +6089,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 goto finish;
             }
             ObjectFile object = object_read(arena, object_file.bytes, invocation.target);
+            if (object.requires_executable_stack) object.executable_stack_source = input_path;
             file_map_unmap(object_file);
             if (object.error != OBJECT_ERROR_NONE)
             {
