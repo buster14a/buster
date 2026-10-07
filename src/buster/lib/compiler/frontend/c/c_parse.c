@@ -67,8 +67,8 @@
 //                                                 (c_parse_static_assert_check)
 //                                                 and deferred past unresolved
 //                                                 bounds
-//   c_parse_token_range_text                      the one-line source quote a
-//                                                 non-constant assertion prints
+//   c_parse_static_assert_diagnostic_message      immediate/deferred messages;
+//   c_parse_token_range_text                      one-line expression quotes
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_initializer_slot_table                a walk's per-record slot
@@ -1599,6 +1599,7 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
 BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                                    CTypeId base, u32 declarator_start, u32 name_index, u32 suffix_end, bool has_name);
 BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index);
+BUSTER_C_INTERNAL bool c_parse_declarator_name_has_parameters(CPreprocessResult preprocess, u32 name_index, u32 end);
 
 BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index, bool parameter,
                                                           u32 segment_start, u32 segment_end, bool declares_no_storage);
@@ -7836,7 +7837,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
 }
 
 BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                        CDeclaration declaration, CScopeId scope, u64* value_out, String8* message_out,
+                                                        CDeclaration declaration, CScopeId scope, u64* value_out,
                                                         bool* requires_typed_evaluation_out)
 {
     if (requires_typed_evaluation_out)
@@ -7892,10 +7893,6 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
     valid = valid && close != end && expression_end > start + 2;
     if (valid)
     {
-        if (comma < close && comma + 1 < close && preprocess.tokens[comma + 1].kind == C_TOKEN_STRING_LITERAL)
-        {
-            *message_out = c_token_spelling(preprocess.spelling_base, preprocess.tokens[comma + 1]);
-        }
         valid = c_parse_constant_expression_evaluate(machine, arena, preprocess, result, scope, start + 2, expression_end,
                                                       value_out, requires_typed_evaluation_out);
     }
@@ -8024,6 +8021,10 @@ struct CParseConstant
     // zero or a shift count outside the promoted width -- as opposed to an
     // operand shape this evaluator does not model.
     bool faulted;
+    // A GNU imaginary literal: `valid` stays false so no operator consumes it,
+    // `floating` holds the imaginary half, and only an explicit cast to a
+    // real type reads it (the real half is zero).
+    bool imaginary;
 };
 
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
@@ -8088,6 +8089,45 @@ BUSTER_C_INTERNAL String8 c_parse_token_range_text(Arena* arena, CPreprocessResu
         .pointer = text,
         .length = length,
     };
+}
+
+// Formatting belongs to the original assertion token range, independently of
+// which evaluator decides it. Allocate diagnostic text in the result arena,
+// after semantic evaluation has rewound its scratch space. Literal spelling
+// retains its quotes and escapes; the C23 one-argument form has no message.
+BUSTER_C_SHARED String8 c_parse_static_assert_diagnostic_message(Arena* arena, CPreprocessResult preprocess,
+                                                                   CDeclaration declaration, CDiagnosticKind kind)
+{
+    String8 message = kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT
+                          ? S8("static assertion expression is not an integer constant expression")
+                          : S8("static assertion failed");
+    u32 expression_start = 0;
+    u32 expression_end = 0;
+    if (c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end))
+    {
+        if (kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT)
+        {
+            String8 expression = c_parse_token_range_text(arena, preprocess, expression_start, expression_end);
+            message = string_format(arena, S8("{S8}: {S8}"), message, expression);
+        }
+        else if (expression_end + 1 < declaration.token_start + declaration.token_count &&
+                 c_token_is_punctuator(&preprocess.tokens[expression_end], C_PUNCTUATOR_COMMA) &&
+                 preprocess.tokens[expression_end + 1].kind == C_TOKEN_STRING_LITERAL)
+        {
+            u32 message_start = expression_end + 1;
+            u32 message_end = message_start + 1;
+            u32 declaration_end = declaration.token_start + declaration.token_count;
+            while (message_end < declaration_end && preprocess.tokens[message_end].kind == C_TOKEN_STRING_LITERAL)
+            {
+                message_end += 1;
+            }
+            String8 literal = message_end == message_start + 1
+                                  ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[message_start])
+                                  : c_parse_token_range_text(arena, preprocess, message_start, message_end);
+            message = string_format(arena, S8("{S8}: {S8}"), message, literal);
+        }
+    }
+    return message;
 }
 
 // Whether a type name that ends at `cursor`, short of its operand's `)`, is
@@ -8339,78 +8379,64 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     {
         c_parse_defer_static_assert(preprocess, result, declaration, scope);
     }
-    if (syntax_error.length || deferred)
+    if (!syntax_error.length && !deferred)
     {
-        return;
-    }
-    CToken first = preprocess.tokens[declaration.token_start];
-    bool expression_is_integer = true;
-    u32 expression_start = 0;
-    u32 expression_end = 0;
-    bool has_expression = c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end);
-    if (machine && has_expression)
-    {
-        CTypeId expression_type = C_TYPE_ID_INVALID;
-        if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, expression_start, expression_end, &expression_type) &&
-            expression_type.value < result->type_count)
+        CToken first = preprocess.tokens[declaration.token_start];
+        bool expression_is_integer = true;
+        u32 expression_start = 0;
+        u32 expression_end = 0;
+        bool has_expression = c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end);
+        if (machine && has_expression)
         {
-            expression_is_integer = c_parse_expression_integer_kind(result->types[expression_type.value].kind);
+            CTypeId expression_type = C_TYPE_ID_INVALID;
+            if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, expression_start, expression_end, &expression_type) &&
+                expression_type.value < result->type_count)
+            {
+                expression_is_integer = c_parse_expression_integer_kind(result->types[expression_type.value].kind);
+            }
+        }
+        u64 value = 0;
+        bool requires_typed_evaluation = false;
+        // An integer constant expression has one value: the one C's types,
+        // promotions and conversions give it (C17 6.6), which the typed
+        // evaluator computes through the shared integer semantics. The legacy
+        // retokenizer's preprocessing arithmetic (intmax_t, casts erased) is a
+        // different rule (6.10.1p4): it still decides which assertions wait for
+        // the deferred typed check, and answers only shapes the typed evaluator
+        // does not model. A typed fault (division by zero, a shift count outside
+        // the promoted width) is final, as it is in lowering.
+        bool legacy = expression_is_integer && c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value,
+                                                                              &requires_typed_evaluation);
+        CParseConstant typed = {.type = C_TYPE_ID_INVALID};
+        if (!requires_typed_evaluation && machine && expression_is_integer && expression_end > expression_start)
+        {
+            // The caller's arena, as the legacy route uses: nested type parses may
+            // grow machine state in the scratch arena mid-declaration, so it is not
+            // rewound here.
+            typed = c_parse_typed_constant(machine, arena, preprocess, result, scope, expression_start, expression_end);
+        }
+        bool typed_answer = typed.valid && !typed.is_float;
+        bool evaluated = typed_answer || (!typed.faulted && legacy);
+        if (typed_answer)
+        {
+            value = c_parse_constant_truth(typed);
+        }
+        if (requires_typed_evaluation)
+        {
+            c_parse_defer_static_assert(preprocess, result, declaration, scope);
+        }
+        else if (!evaluated)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
+        }
+        else if (!value)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
         }
     }
-    u64 value = 0;
-    String8 message = {0};
-    bool requires_typed_evaluation = false;
-    // An integer constant expression has one value: the one C's types,
-    // promotions and conversions give it (C17 6.6), which the typed
-    // evaluator computes through the shared integer semantics. The legacy
-    // retokenizer's preprocessing arithmetic (intmax_t, casts erased) is a
-    // different rule (6.10.1p4): it still decides which assertions wait for
-    // the deferred typed check, and answers only shapes the typed evaluator
-    // does not model. A typed fault (division by zero, a shift count outside
-    // the promoted width) is final, as it is in lowering.
-    bool legacy = expression_is_integer && c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value,
-                                                                          &message, &requires_typed_evaluation);
-    CParseConstant typed = {.type = C_TYPE_ID_INVALID};
-    if (!requires_typed_evaluation && machine && expression_is_integer && expression_end > expression_start)
-    {
-        // The caller's arena, as the legacy route uses: nested type parses may
-        // grow machine state in the scratch arena mid-declaration, so it is not
-        // rewound here.
-        typed = c_parse_typed_constant(machine, arena, preprocess, result, scope, expression_start, expression_end);
-    }
-    bool typed_answer = typed.valid && !typed.is_float;
-    bool evaluated = typed_answer || (!typed.faulted && legacy);
-    if (typed_answer)
-    {
-        value = c_parse_constant_truth(typed);
-        // The message is the string literal after the expression's comma.
-        if (expression_end + 1 < declaration.token_start + declaration.token_count &&
-            c_token_is_punctuator(&preprocess.tokens[expression_end], C_PUNCTUATOR_COMMA) &&
-            preprocess.tokens[expression_end + 1].kind == C_TOKEN_STRING_LITERAL)
-        {
-            message = c_token_spelling(preprocess.spelling_base, preprocess.tokens[expression_end + 1]);
-        }
-    }
-    if (requires_typed_evaluation)
-    {
-        c_parse_defer_static_assert(preprocess, result, declaration, scope);
-    }
-    else if (!evaluated)
-    {
-        // Quote the whole controlling expression: the range ends at the
-        // separator comma or closing parenthesis at the assertion's own depth,
-        // not at the first one inside a parenthesized operand or a call.
-        String8 expression = has_expression ? c_parse_token_range_text(arena, preprocess, expression_start, expression_end) : (String8){0};
-        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                           expression.length
-                               ? string_format(arena, S8("static assertion expression is not an integer constant expression: {S8}"), expression)
-                               : S8("static assertion expression is not an integer constant expression"));
-    }
-    else if (!value)
-    {
-        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
-                           message.length ? string_format(arena, S8("static assertion failed: {S8}"), message) : S8("static assertion failed"));
-    }
+    return;
 }
 
 BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
@@ -16949,7 +16975,14 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_function_name(CPreprocessResult pre
         }
         close += 1;
     }
-    if (depth || close >= end || !c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    // `(*f(int))(void)` and `(*f(int))[3]` both declare a function: the
+    // group's own name carries the parameter list, and what follows the group
+    // is the pointee of the returned pointer. `(*p)[3]` has no parameter list
+    // after its name and stays an object.
+    if (depth || close >= end ||
+        !(c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+          (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_BRACKET) &&
+           c_parse_declarator_name_has_parameters(preprocess, candidate, end))))
     {
         return false;
     }
@@ -25018,6 +25051,31 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_member_address(CTypeParseMachi
     return value;
 }
 
+// An imaginary literal under an explicit cast to a real type: _Bool tests the
+// imaginary half (C 6.3.1.2), any other real type takes the zero real half
+// (C 6.3.1.7p2). A complex destination stays unevaluated.
+BUSTER_C_INTERNAL CParseConstant c_parse_constant_imaginary_cast(CParseResult* result, Target target, CParseConstant value,
+                                                                  CTypeId destination, CConstantEvaluationMode mode)
+{
+    CTypeKind kind = destination.value < result->type_count ? c_parse_expression_value_kind(result, destination) : C_TYPE_INVALID;
+    CParseConstant converted = {.type = C_TYPE_ID_INVALID};
+    if (kind != C_TYPE_INVALID && !c_type_kind_is_complex(kind))
+    {
+        // The imaginary half is a real element-typed value for the truth test.
+        value.type = c_parse_expression_scalar_type(result, c_type_kind_complex_element(c_parse_expression_value_kind(result, value.type)));
+        value.imaginary = false;
+        value.valid = true;
+        if (kind != C_TYPE_BOOL)
+        {
+            value.integer = 0;
+            value.integer_high = 0;
+            value.floating = 0.0;
+        }
+        converted = c_parse_constant_convert(result, target, value, destination, mode);
+    }
+    return converted;
+}
+
 BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                        CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
@@ -25038,7 +25096,23 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         {
             CNumberFact fact = c_number_fact(result->number_facts, preprocess.tokens, start);
             value.is_float = fact.present ? (fact.flags & C_NUMBER_FACT_FLOATING) != 0 : c_number_is_float(spelling);
-            if (value.is_float)
+            CTypeKind imaginary_kind = value.type.value < result->type_count ? c_parse_expression_value_kind(result, value.type) : C_TYPE_INVALID;
+            if (value.is_float && c_type_kind_is_complex(imaginary_kind))
+            {
+                IrType scalar = {0};
+                u32 alignment = 0;
+                String8 real_spelling = {0};
+                CIrConstantValue folded = {0};
+                c_ir_scalar_type_properties(preprocess.target, c_type_kind_complex_element(imaginary_kind), &scalar.kind, &scalar.bit_width,
+                                            &scalar.is_signed, &alignment);
+                value.imaginary = c_ir_number_imaginary_spelling(arena, spelling, &real_spelling) &&
+                                  c_ir_constant_float_literal_for_type(&scalar, real_spelling, &folded);
+                value.floating = folded.floating;
+                value.integer = folded.integer;
+                value.integer_high = folded.integer_high;
+                value.float_width = (u8)scalar.bit_width;
+            }
+            else if (value.is_float)
             {
                 IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, value.type);
                 CIrConstantValue folded = {0};
@@ -25459,7 +25533,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             }
             else if (task->state == 3)
             {
-                last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
+                last = last.imaginary ? c_parse_constant_imaginary_cast(result, preprocess.target, last, task->cast_type,
+                                                                        machine->constant_evaluation_mode)
+                                      : c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
             }
             else if (task->state == 4)
             {
@@ -27790,7 +27866,19 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
     {
         CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, start, end);
         CParseConstant converted = c_parse_constant_convert(result, preprocess.target, value, destination, machine->constant_evaluation_mode);
-        if (!converted.valid || unknown)
+        // This evaluator has no complex values. A GNU imaginary literal in a
+        // real destination's initializer (`static int i = 5.0 + 7.0i;`) is
+        // folded, or refused, by the lowering evaluator, which owns complex
+        // constants.
+        bool imaginary = false;
+        for (u32 cursor = start; !converted.valid && !imaginary && cursor < end; cursor += 1)
+        {
+            String8 real_spelling = {0};
+            imaginary = preprocess.tokens[cursor].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+                        c_ir_number_imaginary_spelling(machine->scratch_arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]),
+                                                       &real_spelling);
+        }
+        if ((!converted.valid && !imaginary) || unknown)
         {
             diagnostic.message = string_format(result->arena, S8("cannot fold '{S8}' in a static initializer"),
                                                c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]));
@@ -28805,15 +28893,14 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
         if (!value.valid)
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                               S8("static assertion expression is not an integer constant expression"));
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
         }
         else if (value.is_float || !c_parse_constant_truth(value))
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
-                               S8("static assertion expression is not a true integer constant expression"));
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
         }
     }
-    BUSTER_UNUSED(arena);
 }
 
 // The diagnostic text for one evaluated bit-field width, empty when the width
@@ -29354,7 +29441,13 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_UNREACHABLE: maximum = 0; break;
         default: break;
         }
-        String8 message = count < minimum || count > maximum ? S8("could not prepare C calls") : (String8){0};
+        // One unsigned range test, with minimum <= maximum in every arm above.
+        // GCC 13.3 -O2/-O3 (dom2 relation oracle) folds the mirrored pair
+        // `count < minimum || count > maximum` to true once it propagates the
+        // `minimum = maximum = N` arms' shared value, which rejected every
+        // fixed-arity builtin (#1301); a single comparison has no pair to fuse.
+        bool arity_mismatch = count - minimum > maximum - minimum;
+        String8 message = arity_mismatch ? S8("could not prepare C calls") : (String8){0};
         u32 location = close;
         if (fabs_builtin)
         {

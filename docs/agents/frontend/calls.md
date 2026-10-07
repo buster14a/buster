@@ -358,6 +358,17 @@ This local automatic-object slice does not complete issue #1254: file-scope,
 `constexpr`, static, external and thread-local inference, and broader
 statement-expression queries remain outside its contract.
 
+Pointer-to-array declarator shapes (#1262): `int (*f(args))[3]` declares a
+function returning a pointer to an array, whether it is a prototype or a
+definition (`c_parse_parenthesized_function_name` accepts a `[` after the group
+when the name carries a parameter list). `int (*)[]` points at an array of
+unknown bound: `c_ir_collect_flexible_array_types` maps that pointee like a
+flexible array and `c_ir_type_name_suffix_bounds` accepts it in type names.
+Pointer difference compares pointee array types by representation
+(`c_ir_representation_types_compatible`), since each spelling owns its IR array.
+`c_test_pointer_to_array_shapes_runtime` runs all of these under every allocator
+and both frontend forms.
+
 Function types reject array and function return types when their declarators
 are formed, including unused prototypes, typedef return types and nested
 function-pointer declarators. Pointer return types keep their array/function

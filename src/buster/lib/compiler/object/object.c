@@ -7,6 +7,8 @@
 // string is bounds-checked before use, and malformed bytes produce an
 // invalid ObjectFile, never a crash — object_fuzz_test_input keeps that
 // honest.
+// object_read_elf64 also refuses allocated section/symbol semantics the model
+// cannot preserve, with a named diagnostic; unallocated metadata stays skippable.
 //
 // The three formats spell "this definition may be dropped for another one"
 // differently. ELF STB_WEAK and Mach-O N_WEAK_DEF read into ObjectSymbol.weak.
@@ -1414,6 +1416,8 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
         // under the model's neutral name, and object_write_coff writes them there
         // -- the unprioritized member of each group, because a printed section
         // carries no per-entry priority (object_initializer_section_name).
+        // x86-64 ELF states priority itself, one section per group
+        // (object_assembly_append_initializer_group_directive).
         case OBJECT_SECTION_INIT_ARRAY:
             result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .CRT$XCU,\"dr\"\n")
                                                                                                : S8("\t.section .init_array,\"aw\",@init_array\n");
@@ -1585,6 +1589,29 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_is_aarch64_text_anchor(ObjectFile* obje
     return result;
 }
 
+// Weak binding and constructor priority are carried by the x86-64 ELF text as
+// `.weak` and a `.init_array.NNNNN` section (issue 1281); the other targets
+// keep their existing spelling.
+BUSTER_GLOBAL_LOCAL bool object_assembly_is_x86_64_elf(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64 && object_assembly_is_gnu_type_target(target);
+}
+
+// The per-entry priorities of the initializer array a section is, or zero when
+// the text has no way to state them: the model keeps them beside the array
+// (ObjectFile.initializer_priorities), and an ELF assembler reads them back
+// only from the section name.
+BUSTER_GLOBAL_LOCAL u32* object_assembly_initializer_priorities(ObjectFile* object, Target target, u32 section_index)
+{
+    u32* result = 0;
+    if (object_assembly_is_x86_64_elf(target) && (section_index == OBJECT_SECTION_INIT_ARRAY || section_index == OBJECT_SECTION_FINI_ARRAY) &&
+        section_index < object->section_count && (u32)object->sections[section_index].kind == section_index)
+    {
+        result = object->initializer_priorities[section_index == OBJECT_SECTION_FINI_ARRAY];
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section, u64 offset)
 {
     u32 end = buffer->index.sections[section].symbol_end;
@@ -1596,7 +1623,13 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
         {
             continue;
         }
-        if (symbol->global)
+        if (symbol->weak && object_assembly_is_x86_64_elf(target))
+        {
+            object_assembly_append_string(buffer, S8("\t.weak "));
+            object_assembly_append_assembly_symbol(buffer, target, symbol->name);
+            object_assembly_append_string(buffer, S8("\n"));
+        }
+        else if (symbol->global)
         {
             object_assembly_append_string(buffer, S8("\t.globl "));
             object_assembly_append_assembly_symbol(buffer, target, symbol->name);
@@ -4176,6 +4209,38 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_named_section_directive(ObjectAs
     object_assembly_append_string(buffer, attributes);
 }
 
+BUSTER_GLOBAL_LOCAL void object_assembly_append_section_alignment(ObjectAssemblyBuffer* buffer, ObjectSection* section)
+{
+    if (section->alignment > 1)
+    {
+        object_assembly_append_string(buffer, S8("\t.p2align "));
+        object_assembly_append_u64_decimal(buffer, object_assembly_alignment_exponent(section->alignment));
+        object_assembly_append_string(buffer, S8("\n"));
+    }
+}
+
+// One priority group of an ELF initializer array, spelled the way
+// object_initializer_section_name names it, so the assembler's own section
+// carries the order `ld` sorts by.
+BUSTER_GLOBAL_LOCAL void object_assembly_append_initializer_group_directive(ObjectAssemblyBuffer* buffer, ObjectSectionKind kind, u32 priority)
+{
+    object_assembly_append_string(buffer, S8("\t.section "));
+    object_assembly_append_string(buffer, object_section_name_for_kind(kind));
+    if (priority != IR_INITIALIZER_PRIORITY_NONE)
+    {
+        char8 digits[5];
+        u32 value = priority;
+        for (u32 index = 5; index; index -= 1)
+        {
+            digits[index - 1] = (char8)('0' + value % 10);
+            value /= 10;
+        }
+        object_assembly_append_string(buffer, S8("."));
+        object_assembly_append_string(buffer, (String8){.pointer = digits, .length = 5});
+    }
+    object_assembly_append_string(buffer, kind == OBJECT_SECTION_FINI_ARRAY ? S8(",\"aw\",@fini_array\n") : S8(",\"aw\",@init_array\n"));
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section_index)
 {
     ObjectSection* section = object->sections + section_index;
@@ -4189,20 +4254,21 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
     {
         return;
     }
+    u32* priorities = object_assembly_initializer_priorities(object, target, section_index);
+    u64 priority_entries = priorities ? data_length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
     if (section_index >= OBJECT_SECTION_COUNT)
     {
         object_assembly_append_named_section_directive(buffer, section);
     }
-    else
+    else if (!priority_entries || priorities[0] == IR_INITIALIZER_PRIORITY_NONE)
     {
         object_assembly_append_string(buffer, object_assembly_section_directive(target, section->kind));
     }
-    if (section->alignment > 1)
+    else
     {
-        object_assembly_append_string(buffer, S8("\t.p2align "));
-        object_assembly_append_u64_decimal(buffer, object_assembly_alignment_exponent(section->alignment));
-        object_assembly_append_string(buffer, S8("\n"));
+        object_assembly_append_initializer_group_directive(buffer, section->kind, priorities[0]);
     }
+    object_assembly_append_section_alignment(buffer, section);
     if (object_section_kind_is_zero_fill(section->kind))
     {
         object_assembly_emit_labels(buffer, object, target, section_index, 0);
@@ -4242,6 +4308,12 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
             object_assembly_emit_apple_x86_relocation(buffer, object, target, next_relocation, data, cursor);
             cursor = next_relocation->offset + 4;
             continue;
+        }
+        u64 group_entry = cursor / OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (cursor && group_entry < priority_entries && !(cursor % OBJECT_INITIALIZER_ENTRY_SIZE) && priorities[group_entry] != priorities[group_entry - 1])
+        {
+            object_assembly_append_initializer_group_directive(buffer, section->kind, priorities[group_entry]);
+            object_assembly_append_section_alignment(buffer, section);
         }
         object_assembly_emit_labels(buffer, object, target, section_index, cursor);
         object_assembly_emit_internal_label(buffer, section_index, cursor);
@@ -4348,7 +4420,7 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
                 ObjectSymbol* symbol = object->symbols + symbol_index;
                 if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    object_assembly_append_string(&buffer, S8("\t.extern "));
+                    object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
                     object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
                     object_assembly_append_string(&buffer, S8("\n"));
                 }
@@ -5072,6 +5144,41 @@ BUSTER_GLOBAL_LOCAL bool object_reader_merge_initializer_arrays(Arena* arena, Ob
     return result;
 }
 
+// FEATURE_1_AND records describe optional compatibility. Buster's generated
+// code has no feature assertion, so the ABI intersection is zero and the
+// output omits the property. Unknown or mandatory properties cannot be dropped.
+BUSTER_GLOBAL_LOCAL ObjectError object_read_elf_optional_property(ByteSlice bytes, u64 offset, u64 size, u64 flags, u64 alignment, CpuArch architecture)
+{
+    ObjectError result = OBJECT_ERROR_INVALID_INPUT;
+    if (offset <= bytes.length && size <= bytes.length - offset)
+    {
+        result = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        if (size == 32 && flags == 2 && alignment == 8)
+        {
+            u32 name_size = 0;
+            u32 descriptor_size = 0;
+            u32 note_type = 0;
+            u32 property_type = 0;
+            u32 property_size = 0;
+            u32 feature_bits = 0;
+            bool read = object_read_u32(bytes, offset, &name_size) && object_read_u32(bytes, offset + 4, &descriptor_size) &&
+                        object_read_u32(bytes, offset + 8, &note_type) && object_read_u32(bytes, offset + 16, &property_type) &&
+                        object_read_u32(bytes, offset + 20, &property_size) && object_read_u32(bytes, offset + 24, &feature_bits);
+            if (read && name_size == 4 && descriptor_size == 16 && note_type == 5 && property_size == 4 &&
+                memcmp(bytes.pointer + offset + 12, "GNU\0", 4) == 0)
+            {
+                u32 supported_type = architecture == CPU_ARCH_X86_64 ? 0xc0000002u : 0xc0000000u;
+                u32 supported_bits = architecture == CPU_ARCH_X86_64 ? 3u : 7u;
+                if (property_type == supported_type && !(feature_bits & ~supported_bits))
+                {
+                    result = OBJECT_ERROR_NONE;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, Target target)
 {
     bool read_ok = true;
@@ -5302,6 +5409,20 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     read_ok = false;
                 }
             }
+            if (read_ok && section_type == 7 && (flags & 2) && string_equal(name, S8(".note.gnu.property")))
+            {
+                ObjectError property_error = object_read_elf_optional_property(bytes, offset, size, flags, alignment, target.cpu_arch);
+                if (property_error == OBJECT_ERROR_NONE)
+                {
+                    continue;
+                }
+                result.error = property_error;
+                if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                {
+                    result.diagnostic = string_format(arena, S8("unsupported ELF section {S8} (type {u32})"), name, section_type);
+                }
+                read_ok = false;
+            }
             if (read_ok && string_equal(name, S8(".note.GNU-stack")))
             {
                 // This convention uses SHF_EXECINSTR as a stack request,
@@ -5340,11 +5461,26 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             ObjectSectionKind debug_kind = {0};
             if (read_ok)
             {
-                debug_kind = flags & 0x2 ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
-                if ((!(flags & 0x2) && debug_kind == OBJECT_SECTION_COUNT) ||
-                    (unwind ? !unwind_type : !initializer_array && section_type != 1 && section_type != 8) || ignored)
+                bool allocated = (flags & 0x2) != 0;
+                bool supported_type = unwind ? unwind_type : initializer_array || section_type == 1 || section_type == 8;
+                debug_kind = allocated ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
+                if (!allocated && (debug_kind == OBJECT_SECTION_COUNT || !supported_type || ignored))
                 {
                     continue;
+                }
+                // These names carry execution/ordering semantics that ordinary
+                // text/data cannot preserve. Unallocated metadata remains skippable.
+                bool legacy_lifecycle = allocated && (string_equal(name, S8(".ctors")) || string_starts_with_sequence(name, S8(".ctors.")) ||
+                                        string_equal(name, S8(".dtors")) || string_starts_with_sequence(name, S8(".dtors.")) ||
+                                        string_equal(name, S8(".init")) || string_equal(name, S8(".fini")));
+                if (!supported_type || ignored || legacy_lifecycle)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF section {S8} (type {u32})"), name, section_type);
+                    }
+                    read_ok = false;
                 }
                 if (!alignment)
                 {
@@ -5620,15 +5756,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     }
                     read_ok = false;
                 }
-                // Absolute, common, processor-specific, and SHN_XINDEX symbols do
-                // not identify one of the ordinary section headers represented by an
-                // ObjectFile.  Keep them unsupported-but-skippable, as the previous
-                // reader did, while still rejecting malformed ordinary indexes.
-                if (section_index >= ELF_SHN_LORESERVE)
+                if (read_ok && !object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
                 {
-                    continue;
+                    read_ok = false;
                 }
-                if (section_index != 0 && section_index >= section_count)
+                // Absolute/common values and extended indexes need representation;
+                // dropping their definitions turns weak references into zero.
+                if (read_ok && section_index >= ELF_SHN_LORESERVE)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32})"), name, (u32)section_index);
+                    }
+                    read_ok = false;
+                }
+                if (read_ok && section_index != 0 && section_index >= section_count)
                 {
                     read_ok = false;
                 }
@@ -5636,11 +5779,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     continue;
                 }
-            }
-            if (read_ok)
-            {
-                if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
+                // NOTYPE, OBJECT, FUNC, SECTION and TLS are represented. IFUNC
+                // resolves through a resolver, never a direct call to its value.
+                if (read_ok && symbol_type != 0 && symbol_type != 1 && symbol_type != 2 && symbol_type != 3 && symbol_type != 6)
                 {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF symbol {S8} (type {u32})"), name, (u32)symbol_type);
+                    }
                     read_ok = false;
                 }
             }
@@ -5733,10 +5880,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     .thread_local_state = symbol_type == 6 || section_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES
                                           : !section_index && symbol_type == 0 ? OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN
                                                                                : OBJECT_SYMBOL_THREAD_LOCAL_NO,
-                    // st_other's low two bits are st_visibility; STV_HIDDEN
-                    // is 2 and STV_INTERNAL 3, both of which mean the symbol
-                    // does not leave the image.
-                    .hidden = (other & 3) == 2 || (other & 3) == 3,
+                    // st_other's low two bits are st_visibility: STV_DEFAULT 0,
+                    // STV_INTERNAL 1, STV_HIDDEN 2, STV_PROTECTED 3. INTERNAL
+                    // and HIDDEN do not leave the image. PROTECTED is exported
+                    // but not preemptible; ObjectSymbol cannot record that, so
+                    // it imports as default visibility (#1291).
+                    .hidden = (other & 3) == 1 || (other & 3) == 2,
                 };
                 symbol_map[source_index] = result.symbol_count++;
             }
@@ -9548,6 +9697,13 @@ BUSTER_GLOBAL_LOCAL ObjectArchive object_archive_read_core(Arena* arena, ByteSli
                             if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
                             {
                                 result.error = object.error;
+                                result.failed_member = result.object_count;
+                                if (object.diagnostic.length && member_name.length <= UINT64_MAX - 128 &&
+                                    object.diagnostic.length <= UINT64_MAX - member_name.length - 128 &&
+                                    object_reader_arena_can_allocate_bytes(arena, member_name.length + object.diagnostic.length + 128, BUSTER_ALIGN_OF(char8)))
+                                {
+                                    result.diagnostic = string_format(arena, S8("member {S8}: {S8}"), member_name, object.diagnostic);
+                                }
                                 return result;
                             }
                             if (lazy)

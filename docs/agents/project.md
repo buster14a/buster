@@ -92,4 +92,4 @@ Applications:
 | Path | Contents |
 |---|---|
 | `src/buster/apps/ide/ide.c` | Headless `ide` executable: `cc`, `test`, `bench`, fuzzing, and x86-64 completion census. The name is retained for build compatibility. |
-| `src/buster/apps/disk_builder.c` | Standalone disk-image builder; not part of the default CMake target. |
+| `src/buster/apps/disk_builder.c` | Standalone disk-image builder; built by the `disk_builder` target in `cmake/DiskBuilder.cmake` (a `test_all` dependency, compile-checked only), not part of `ide`. |
