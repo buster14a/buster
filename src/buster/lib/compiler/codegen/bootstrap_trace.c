@@ -402,6 +402,7 @@ void bootstrap_trace_ir(BootstrapTrace* trace, IrProgram* program, IrModule* mod
         bootstrap_trace_u64(trace, (u64)symbol->is_thread_local);
         bootstrap_trace_u64(trace, (u64)symbol->is_weak);
         bootstrap_trace_u64(trace, (u64)symbol->is_hidden);
+        bootstrap_trace_u64(trace, (u64)symbol->is_returns_twice);
     }
     bootstrap_trace_u64(trace, module->global_count);
     for (u32 i = 0; i < module->global_count; i += 1)

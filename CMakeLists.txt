@@ -2518,3 +2518,4 @@ endif()
 # Separate application/component graphs keep graphics out of the compiler.
 include(cmake/Raster.cmake)
 include(cmake/ImageBrowser.cmake)
+include(cmake/DiskBuilder.cmake)

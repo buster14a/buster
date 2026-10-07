@@ -137,6 +137,8 @@
 //   c_ir_constant_float_* ..                     source-format-preserving
 //   c_ir_constant_wide_float_*                    x87/binary128 constants
 //   c_ir_global_initializer                       globals
+//   c_ir_global_complex_real_value                complex constant to a real
+//                                                 static destination
 //   CIrRowStreams, c_ir_row_streams_trim          dense, line-aligned
 //                                                 construction rows shared by
 //                                                 the functions of one module
@@ -336,6 +338,8 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             {
                 binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
                                                               C_ATTRIBUTE_WORDS_WEAK);
+                binding->is_returns_twice |= c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                                                       C_ATTRIBUTE_WORDS_RETURNS_TWICE);
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
                                               C_ATTRIBUTE_WORDS_CONSTRUCTOR))
                 {
@@ -11282,7 +11286,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, u32 to
 // one. Reports the spelling with the imaginary letter removed, which is an
 // ordinary real literal the parser below already understands; `arena` is only
 // touched when that letter is not the last one.
-BUSTER_C_INTERNAL bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out)
+BUSTER_C_SHARED bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out)
 {
     u64 suffix_start = spelling.length;
     u64 imaginary_index = spelling.length;
@@ -20159,9 +20163,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
 //     unchanged rather than added to it).
 //   * `*` and `/` with a real operand scale or divide both halves.
 //   * `*` and `/` with two complex operands lower inline -- the naive product
-//     and Smith's algorithm in `c_ir_emit_complex_divide` -- matching Clang's
-//     `-fcomplex-arithmetic=improved` mode rather than the runtime helper calls
-//     it emits by default. This toolchain neither ships nor links a compiler
+//     and, for division, Smith's algorithm on exactly rescaled operands with
+//     Annex G's infinity recovery in `c_ir_emit_complex_divide` -- rather than
+//     the runtime helper calls Clang emits by default. The static initializer
+//     folder `c_ir_constant_complex_divide` mirrors it operation for operation. This toolchain neither ships nor links a compiler
 //     runtime to resolve those helpers.
 //   * `real / complex` follows the same inline Smith path, with the numerator's
 //     imaginary part supplied as a positive zero.
@@ -20594,71 +20599,397 @@ BUSTER_C_INTERNAL bool c_ir_emit_complex_smith_arm(CIntegerIrBuilder* builder, I
            c_ir_emit_store_place(builder, imaginary_place, element, imaginary, source);
 }
 
-// (a + bi) / (c + di) by Smith's algorithm, which is what Clang emits inline
-// for `-fcomplex-arithmetic=improved`: divide through by whichever denominator
-// half has the larger magnitude so the intermediate `c*c + d*d` of the naive
-// form -- which overflows for operands whose squares do not fit -- never
-// appears.
+// The binary exponents the scaled division below works with, for one element
+// format: a magnitude of at least 2^large_exponent is halved so that the sum
+// of two such operands cannot overflow, a magnitude of at most
+// 2^small_exponent (the smallest normal times 2/epsilon) is boosted by
+// 2^boost_exponent (2/epsilon squared) so that the ratio and the products of
+// Smith's algorithm keep their precision. All three are powers of two, so the
+// scaling is exact and the result is multiplied back by one power of two.
+typedef struct CComplexDivideScaling CComplexDivideScaling;
+struct CComplexDivideScaling
+{
+    s32 large_exponent;
+    s32 small_exponent;
+    s32 boost_exponent;
+};
+
+BUSTER_C_INTERNAL CComplexDivideScaling c_complex_divide_scaling(u32 bit_width)
+{
+    s32 precision = bit_width == 32 ? 24 : bit_width == 64 ? 53 : bit_width == 80 ? 64 : 113;
+    s32 largest = bit_width == 32 ? 127 : bit_width == 64 ? 1023 : 16383;
+    return (CComplexDivideScaling){
+        .large_exponent = largest - 1,
+        .small_exponent = 1 - largest + precision,
+        .boost_exponent = 2 * precision - 1,
+    };
+}
+
+// The hexadecimal-float spelling of 2^exponent in the element type. Both the
+// run-time emitter and the static folder build their scale factors from this
+// one spelling, so the two paths multiply by identical constants.
+BUSTER_C_INTERNAL String8 c_complex_divide_power_spelling(CIntegerIrBuilder* builder, IrTypeId element, s32 exponent)
+{
+    IrType* type = ir_type_from_id(&builder->program->types, element);
+    String8 suffix = type->bit_width == 32 ? S8("f") : type->bit_width == 64 ? S8("") : S8("L");
+    return string_format(builder->arena, S8("0x1p{S8}{u32}{S8}"), exponent < 0 ? S8("-") : S8(""), (u32)(exponent < 0 ? -exponent : exponent), suffix);
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_divide_power(CIntegerIrBuilder* builder, IrTypeId element, s32 exponent, IrSourceRange source)
+{
+    IrValueId value = c_ir_emit_float_spelling(builder, c_complex_divide_power_spelling(builder, element, exponent), source);
+    // A 64-bit long double is a distinct type from double that spells without
+    // a suffix; bring the constant to the element type.
+    if (value.value != IR_ID_UNDERLYING_INVALID && builder->function->values[value.value].canonical_type.value != element.value)
+    {
+        value = c_ir_emit_cast(builder, value, element, source);
+    }
+    return value;
+}
+
+// The larger of |p| and |q|, through a stack slot because the choice is a
+// branch. A NaN operand makes the comparison false, which selects |q|; a NaN
+// magnitude then compares false against every scaling threshold.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_divide_larger_magnitude(CIntegerIrBuilder* builder, IrTypeId element, IrValueId p, IrValueId q,
+                                                                        IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId magnitude_p = c_ir_emit_float_magnitude(builder, p, element, source);
+    IrValueId magnitude_q = c_ir_emit_float_magnitude(builder, q, element, source);
+    IrValueId slot = c_ir_emit_temporary(builder, element, source);
+    IrValueId condition = c_ir_emit_binary_value(builder, magnitude_p, magnitude_q, builder->bool_type, IR_BINARY_FLOAT_GREATER_EQUAL, source);
+    IrBlockId take_p = c_ir_block_create(builder);
+    IrBlockId merge = c_ir_block_create(builder);
+    if (magnitude_p.value != IR_ID_UNDERLYING_INVALID && magnitude_q.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID &&
+        condition.value != IR_ID_UNDERLYING_INVALID && take_p.value != IR_ID_UNDERLYING_INVALID && merge.value != IR_ID_UNDERLYING_INVALID &&
+        c_ir_emit_store_place(builder, slot, element, magnitude_q, source))
+    {
+        IrBlockId targets[2] = {take_p, merge};
+        IrBlockId merge_target[1] = {merge};
+        if (c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, source) && c_ir_switch_block(builder, take_p) &&
+            c_ir_emit_store_place(builder, slot, element, magnitude_p, source) &&
+            c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, merge_target, 1, source) && c_ir_switch_block(builder, merge))
+        {
+            result = c_ir_emit_load_place(builder, slot, element, source);
+        }
+    }
+    return result;
+}
+
+// if (magnitude >= 2^threshold_exponent) (or <= when `at_least` is false) {
+//     *first *= 2^operand_exponent; *second *= 2^operand_exponent;
+//     *scale *= 2^scale_exponent; }
+BUSTER_C_INTERNAL bool c_ir_emit_complex_divide_scale_if(CIntegerIrBuilder* builder, IrTypeId element, IrValueId magnitude, s32 threshold_exponent,
+                                                           bool at_least, IrValueId first_slot, IrValueId second_slot, IrValueId scale_slot,
+                                                           s32 operand_exponent, s32 scale_exponent, IrSourceRange source)
+{
+    bool success = false;
+    IrValueId threshold = c_ir_emit_complex_divide_power(builder, element, threshold_exponent, source);
+    IrValueId condition = threshold.value != IR_ID_UNDERLYING_INVALID
+                              ? c_ir_emit_binary_value(builder, magnitude, threshold, builder->bool_type,
+                                                       at_least ? IR_BINARY_FLOAT_GREATER_EQUAL : IR_BINARY_FLOAT_LESS_EQUAL, source)
+                              : IR_VALUE_ID_INVALID;
+    IrBlockId scaled = c_ir_block_create(builder);
+    IrBlockId merge = c_ir_block_create(builder);
+    if (condition.value != IR_ID_UNDERLYING_INVALID && scaled.value != IR_ID_UNDERLYING_INVALID && merge.value != IR_ID_UNDERLYING_INVALID)
+    {
+        IrBlockId targets[2] = {scaled, merge};
+        IrBlockId merge_target[1] = {merge};
+        success = c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, source) && c_ir_switch_block(builder, scaled);
+        if (success)
+        {
+            IrValueId operand_factor = c_ir_emit_complex_divide_power(builder, element, operand_exponent, source);
+            IrValueId scale_factor = c_ir_emit_complex_divide_power(builder, element, scale_exponent, source);
+            IrValueId first = c_ir_emit_load_place(builder, first_slot, element, source);
+            IrValueId second = c_ir_emit_load_place(builder, second_slot, element, source);
+            IrValueId scale = c_ir_emit_load_place(builder, scale_slot, element, source);
+            IrValueId first_scaled = c_ir_emit_binary_value(builder, first, operand_factor, element, IR_BINARY_FLOAT_MULTIPLY, source);
+            IrValueId second_scaled = c_ir_emit_binary_value(builder, second, operand_factor, element, IR_BINARY_FLOAT_MULTIPLY, source);
+            IrValueId scale_scaled = c_ir_emit_binary_value(builder, scale, scale_factor, element, IR_BINARY_FLOAT_MULTIPLY, source);
+            success = operand_factor.value != IR_ID_UNDERLYING_INVALID && scale_factor.value != IR_ID_UNDERLYING_INVALID &&
+                      first_scaled.value != IR_ID_UNDERLYING_INVALID && second_scaled.value != IR_ID_UNDERLYING_INVALID &&
+                      scale_scaled.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, first_slot, element, first_scaled, source) &&
+                      c_ir_emit_store_place(builder, second_slot, element, second_scaled, source) &&
+                      c_ir_emit_store_place(builder, scale_slot, element, scale_scaled, source) &&
+                      c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, merge_target, 1, source) && c_ir_switch_block(builder, merge);
+        }
+    }
+    return success;
+}
+
+// (v - v) == 0 holds for every finite v and fails for an infinity and a NaN.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_divide_finite(CIntegerIrBuilder* builder, IrTypeId element, IrValueId value, IrValueId zero, IrSourceRange source)
+{
+    IrValueId difference = c_ir_emit_binary_value(builder, value, value, element, IR_BINARY_FLOAT_SUBTRACT, source);
+    return c_ir_emit_binary_value(builder, difference, zero, builder->bool_type, IR_BINARY_FLOAT_EQUAL, source);
+}
+
+// An infinity is neither finite nor a NaN.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_divide_infinite(CIntegerIrBuilder* builder, IrTypeId element, IrValueId value, IrValueId zero,
+                                                                IrSourceRange source)
+{
+    IrValueId difference = c_ir_emit_binary_value(builder, value, value, element, IR_BINARY_FLOAT_SUBTRACT, source);
+    IrValueId not_finite = c_ir_emit_binary_value(builder, difference, zero, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
+    IrValueId ordered = c_ir_emit_binary_value(builder, value, value, builder->bool_type, IR_BINARY_FLOAT_EQUAL, source);
+    return c_ir_emit_binary_value(builder, not_finite, ordered, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+}
+
+// copysign(isinf(v) ? 1 : 0, v): -1, 0 or +1, with zero for every finite
+// value and every NaN.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_divide_infinite_sign(CIntegerIrBuilder* builder, IrTypeId element, IrValueId value, IrValueId zero,
+                                                                     IrSourceRange source)
+{
+    IrValueId infinite = c_ir_emit_complex_divide_infinite(builder, element, value, zero, source);
+    IrValueId positive = c_ir_emit_binary_value(builder, value, zero, builder->bool_type, IR_BINARY_FLOAT_GREATER, source);
+    IrValueId negative = c_ir_emit_binary_value(builder, value, zero, builder->bool_type, IR_BINARY_FLOAT_LESS, source);
+    IrValueId infinite_value = c_ir_emit_cast(builder, infinite, element, source);
+    IrValueId positive_value = c_ir_emit_cast(builder, positive, element, source);
+    IrValueId negative_value = c_ir_emit_cast(builder, negative, element, source);
+    IrValueId sign = c_ir_emit_binary_value(builder, positive_value, negative_value, element, IR_BINARY_FLOAT_SUBTRACT, source);
+    return c_ir_emit_binary_value(builder, sign, infinite_value, element, IR_BINARY_FLOAT_MULTIPLY, source);
+}
+
+// One of the three recoveries of C11 Annex G.5.2 (the ones libgcc's __divdc3
+// and compiler-rt's apply), run only when both halves of the quotient came out
+// NaN. `kind` selects it:
+//   0: a zero denominator and a numerator that is not NaN-NaN gives
+//      copysign(inf, c) * a and copysign(inf, c) * b;
+//   1: an infinite numerator over a finite denominator gives
+//      inf * (a*c' + b*d') and inf * (b*c' - a*d') with a, b replaced by their
+//      infinite-or-zero signs;
+//   2: a finite numerator over an infinite denominator gives
+//      0 * (a'*c + b'*d) and 0 * (b'*c - a'*d) with c, d replaced likewise.
+// An infinite product inf * v is spelled v / 0, which has the same value for
+// every v including the NaN of inf * 0, and needs no infinity constant. With
+// c a signed zero, copysign(inf, c) is 1 / c.
+BUSTER_C_INTERNAL bool c_ir_emit_complex_divide_recovery(CIntegerIrBuilder* builder, IrTypeId element, IrValueId result_place, u32 kind, IrValueId a,
+                                                           IrValueId b, IrValueId c, IrValueId d, IrValueId zero, IrSourceRange source)
+{
+    IrValueId real = IR_VALUE_ID_INVALID;
+    IrValueId imaginary = IR_VALUE_ID_INVALID;
+    if (kind == 0)
+    {
+        IrValueId one = c_ir_emit_complex_divide_power(builder, element, 0, source);
+        IrValueId infinity = c_ir_emit_binary_value(builder, one, c, element, IR_BINARY_FLOAT_DIVIDE, source);
+        real = c_ir_emit_binary_value(builder, infinity, a, element, IR_BINARY_FLOAT_MULTIPLY, source);
+        imaginary = c_ir_emit_binary_value(builder, infinity, b, element, IR_BINARY_FLOAT_MULTIPLY, source);
+    }
+    else
+    {
+        // kind 1 replaces a and b, kind 2 replaces c and d.
+        IrValueId first = kind == 1 ? a : c;
+        IrValueId second = kind == 1 ? b : d;
+        IrValueId first_sign = c_ir_emit_complex_divide_infinite_sign(builder, element, first, zero, source);
+        IrValueId second_sign = c_ir_emit_complex_divide_infinite_sign(builder, element, second, zero, source);
+        IrValueId a_part = kind == 1 ? first_sign : a;
+        IrValueId b_part = kind == 1 ? second_sign : b;
+        IrValueId c_part = kind == 1 ? c : first_sign;
+        IrValueId d_part = kind == 1 ? d : second_sign;
+        IrValueId ac = c_ir_emit_binary_value(builder, a_part, c_part, element, IR_BINARY_FLOAT_MULTIPLY, source);
+        IrValueId bd = c_ir_emit_binary_value(builder, b_part, d_part, element, IR_BINARY_FLOAT_MULTIPLY, source);
+        IrValueId bc = c_ir_emit_binary_value(builder, b_part, c_part, element, IR_BINARY_FLOAT_MULTIPLY, source);
+        IrValueId ad = c_ir_emit_binary_value(builder, a_part, d_part, element, IR_BINARY_FLOAT_MULTIPLY, source);
+        IrValueId real_sum = c_ir_emit_binary_value(builder, ac, bd, element, IR_BINARY_FLOAT_ADD, source);
+        IrValueId imaginary_sum = c_ir_emit_binary_value(builder, bc, ad, element, IR_BINARY_FLOAT_SUBTRACT, source);
+        real = c_ir_emit_binary_value(builder, real_sum, zero, element, kind == 1 ? IR_BINARY_FLOAT_DIVIDE : IR_BINARY_FLOAT_MULTIPLY, source);
+        imaginary = c_ir_emit_binary_value(builder, imaginary_sum, zero, element, kind == 1 ? IR_BINARY_FLOAT_DIVIDE : IR_BINARY_FLOAT_MULTIPLY, source);
+    }
+    IrValueId real_place = c_ir_emit_field_index_place(builder, result_place, 0, source);
+    IrValueId imaginary_place = c_ir_emit_field_index_place(builder, result_place, 1, source);
+    return real.value != IR_ID_UNDERLYING_INVALID && imaginary.value != IR_ID_UNDERLYING_INVALID && real_place.value != IR_ID_UNDERLYING_INVALID &&
+           imaginary_place.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, real_place, element, real, source) &&
+           c_ir_emit_store_place(builder, imaginary_place, element, imaginary, source);
+}
+
+// Branches to `taken` when `condition` holds and continues in `otherwise`.
+BUSTER_C_INTERNAL bool c_ir_emit_complex_divide_branch(CIntegerIrBuilder* builder, IrValueId condition, IrBlockId taken, IrBlockId otherwise,
+                                                         IrSourceRange source)
+{
+    IrBlockId targets[2] = {taken, otherwise};
+    return condition.value != IR_ID_UNDERLYING_INVALID && taken.value != IR_ID_UNDERLYING_INVALID && otherwise.value != IR_ID_UNDERLYING_INVALID &&
+           c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, source);
+}
+
+BUSTER_C_INTERNAL bool c_ir_emit_complex_divide_jump(CIntegerIrBuilder* builder, IrBlockId target, IrSourceRange source)
+{
+    IrBlockId targets[1] = {target};
+    return target.value != IR_ID_UNDERLYING_INVALID && c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, targets, 1, source);
+}
+
+// The Annex G.5.2 recoveries, entered with the quotient already stored in
+// `result_place` and with the original operands. Continues in a merge block.
+BUSTER_C_INTERNAL bool c_ir_emit_complex_divide_recoveries(CIntegerIrBuilder* builder, IrTypeId element, IrValueId result_place, IrValueId a,
+                                                             IrValueId b, IrValueId c, IrValueId d, IrSourceRange source)
+{
+    bool success = false;
+    IrValueId real_place = c_ir_emit_field_index_place(builder, result_place, 0, source);
+    IrValueId imaginary_place = c_ir_emit_field_index_place(builder, result_place, 1, source);
+    IrValueId real = real_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place(builder, real_place, element, source) : IR_VALUE_ID_INVALID;
+    IrValueId imaginary =
+        imaginary_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place(builder, imaginary_place, element, source) : IR_VALUE_ID_INVALID;
+    IrValueId zero = c_ir_complex_zero(builder, element, source);
+    IrValueId real_nan = c_ir_emit_binary_value(builder, real, real, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
+    IrValueId imaginary_nan = c_ir_emit_binary_value(builder, imaginary, imaginary, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
+    IrBlockId second_check = c_ir_block_create(builder);
+    IrBlockId recover = c_ir_block_create(builder);
+    IrBlockId test_numerator = c_ir_block_create(builder);
+    IrBlockId test_denominator = c_ir_block_create(builder);
+    IrBlockId zero_denominator = c_ir_block_create(builder);
+    IrBlockId infinite_numerator = c_ir_block_create(builder);
+    IrBlockId infinite_denominator = c_ir_block_create(builder);
+    IrBlockId merge = c_ir_block_create(builder);
+    if (zero.value != IR_ID_UNDERLYING_INVALID && real_nan.value != IR_ID_UNDERLYING_INVALID && imaginary_nan.value != IR_ID_UNDERLYING_INVALID &&
+        c_ir_emit_complex_divide_branch(builder, real_nan, second_check, merge, source) && c_ir_switch_block(builder, second_check) &&
+        c_ir_emit_complex_divide_branch(builder, imaginary_nan, recover, merge, source) && c_ir_switch_block(builder, recover))
+    {
+        // c == 0 && d == 0 && (a == a || b == b)
+        IrValueId c_zero = c_ir_emit_binary_value(builder, c, zero, builder->bool_type, IR_BINARY_FLOAT_EQUAL, source);
+        IrValueId d_zero = c_ir_emit_binary_value(builder, d, zero, builder->bool_type, IR_BINARY_FLOAT_EQUAL, source);
+        IrValueId a_ordered = c_ir_emit_binary_value(builder, a, a, builder->bool_type, IR_BINARY_FLOAT_EQUAL, source);
+        IrValueId b_ordered = c_ir_emit_binary_value(builder, b, b, builder->bool_type, IR_BINARY_FLOAT_EQUAL, source);
+        IrValueId denominator_zero = c_ir_emit_binary_value(builder, c_zero, d_zero, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+        IrValueId numerator_ordered = c_ir_emit_binary_value(builder, a_ordered, b_ordered, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
+        IrValueId zero_case = c_ir_emit_binary_value(builder, denominator_zero, numerator_ordered, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+        success = c_ir_emit_complex_divide_branch(builder, zero_case, zero_denominator, test_numerator, source) &&
+                  c_ir_switch_block(builder, zero_denominator) &&
+                  c_ir_emit_complex_divide_recovery(builder, element, result_place, 0, a, b, c, d, zero, source) &&
+                  c_ir_emit_complex_divide_jump(builder, merge, source) && c_ir_switch_block(builder, test_numerator);
+        if (success)
+        {
+            // (isinf(a) || isinf(b)) && finite(c) && finite(d)
+            IrValueId a_infinite = c_ir_emit_complex_divide_infinite(builder, element, a, zero, source);
+            IrValueId b_infinite = c_ir_emit_complex_divide_infinite(builder, element, b, zero, source);
+            IrValueId c_finite = c_ir_emit_complex_divide_finite(builder, element, c, zero, source);
+            IrValueId d_finite = c_ir_emit_complex_divide_finite(builder, element, d, zero, source);
+            IrValueId numerator_infinite = c_ir_emit_binary_value(builder, a_infinite, b_infinite, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
+            IrValueId denominator_finite = c_ir_emit_binary_value(builder, c_finite, d_finite, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+            IrValueId numerator_case =
+                c_ir_emit_binary_value(builder, numerator_infinite, denominator_finite, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+            success = c_ir_emit_complex_divide_branch(builder, numerator_case, infinite_numerator, test_denominator, source) &&
+                      c_ir_switch_block(builder, infinite_numerator) &&
+                      c_ir_emit_complex_divide_recovery(builder, element, result_place, 1, a, b, c, d, zero, source) &&
+                      c_ir_emit_complex_divide_jump(builder, merge, source) && c_ir_switch_block(builder, test_denominator);
+        }
+        if (success)
+        {
+            // (isinf(c) || isinf(d)) && finite(a) && finite(b)
+            IrValueId c_infinite = c_ir_emit_complex_divide_infinite(builder, element, c, zero, source);
+            IrValueId d_infinite = c_ir_emit_complex_divide_infinite(builder, element, d, zero, source);
+            IrValueId a_finite = c_ir_emit_complex_divide_finite(builder, element, a, zero, source);
+            IrValueId b_finite = c_ir_emit_complex_divide_finite(builder, element, b, zero, source);
+            IrValueId denominator_infinite = c_ir_emit_binary_value(builder, c_infinite, d_infinite, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
+            IrValueId numerator_finite = c_ir_emit_binary_value(builder, a_finite, b_finite, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+            IrValueId denominator_case =
+                c_ir_emit_binary_value(builder, denominator_infinite, numerator_finite, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+            success = c_ir_emit_complex_divide_branch(builder, denominator_case, infinite_denominator, merge, source) &&
+                      c_ir_switch_block(builder, infinite_denominator) &&
+                      c_ir_emit_complex_divide_recovery(builder, element, result_place, 2, a, b, c, d, zero, source) &&
+                      c_ir_emit_complex_divide_jump(builder, merge, source) && c_ir_switch_block(builder, merge);
+        }
+    }
+    return success;
+}
+
+// (a + bi) / (c + di): Smith's algorithm on exactly rescaled operands, with
+// C11 Annex G's infinity recovery.
 //
-// Clang's default for C is neither this nor the naive form: it calls
+// Clang's default for C is neither Smith nor the naive form: it calls
 // __divdc3 (and __muldc3 for the product), the compiler-runtime helpers that
-// add C11 Annex G's infinity recovery, and for division an ilogb rescaling,
-// on top of the same arithmetic. Those helpers live in libgcc or compiler-rt,
-// and this toolchain ships neither and links neither, so calling them would
-// turn every complex multiply into an unresolved symbol at link time.
+// add Annex G's infinity recovery, and for division an ilogb rescaling, on top
+// of the same arithmetic. Those helpers live in libgcc or compiler-rt, and
+// this toolchain ships neither and links neither, so calling them would turn
+// every complex multiply into an unresolved symbol at link time. The inline
+// form below reproduces what they compute without a library:
+//   1. Scale. Smith's c + d*r and a + b*r still overflow when the operands sit
+//      near the top of the range, and its ratios and products lose precision
+//      or underflow near the bottom, so the operands are first moved by exact
+//      powers of two (see CComplexDivideScaling) and the quotient is multiplied
+//      back by the accumulated power of two. The scaling is the one Baudin and
+//      Smith describe for their robust division; ilogb-based scaling needs
+//      exponent extraction per format and gains nothing over it.
+//   2. Smith. Divide through by whichever denominator half has the larger
+//      magnitude, so the `c*c + d*d` of the naive form never appears.
+//   3. Recover. A quotient with both halves NaN is the one Annex G.5.2 repairs
+//      (c_ir_emit_complex_divide_recoveries).
+// The static initializer folder (c_ir_constant_complex_divide) performs the
+// same operations in the same order, so a constant and a run-time quotient are
+// bit-identical.
 //
-// The inline forms below were differenced against Clang over an operand
-// matrix covering the signed zeroes, the subnormal and overflow edges and the
-// infinities. Against `-fcomplex-arithmetic=improved` every answer in that
-// matrix is bit-identical, on System V x86-64, AAPCS64 and Win64 alike.
-// Against the default they part company in two places, both inside the
-// library helpers: Annex G's recovery, where the helper turns a NaN into a
-// signed infinity, and a quotient whose operands straddle the format's
-// exponent range, where the helper's rescaling rounds one unit in the last
-// place differently.
+// Against Clang's default, a quotient whose operands straddle the format's
+// exponent range may still round one unit in the last place differently,
+// because the library helpers rescale by a different power of two.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_divide(CIntegerIrBuilder* builder, IrTypeId complex_type, IrTypeId element, IrValueId a, IrValueId b,
                                                        IrValueId c, IrValueId d, IrSourceRange source)
 {
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrType* element_type = ir_type_from_id(&builder->program->types, element);
+    CComplexDivideScaling scaling = c_complex_divide_scaling(element_type ? element_type->bit_width : 64);
     IrValueId result_place = c_ir_emit_temporary(builder, complex_type, source);
-    IrValueId magnitude_c = c_ir_emit_float_magnitude(builder, c, element, source);
-    IrValueId magnitude_d = c_ir_emit_float_magnitude(builder, d, element, source);
-    if (result_place.value == IR_ID_UNDERLYING_INVALID || magnitude_c.value == IR_ID_UNDERLYING_INVALID ||
-        magnitude_d.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
+    IrValueId a_slot = c_ir_emit_temporary(builder, element, source);
+    IrValueId b_slot = c_ir_emit_temporary(builder, element, source);
+    IrValueId c_slot = c_ir_emit_temporary(builder, element, source);
+    IrValueId d_slot = c_ir_emit_temporary(builder, element, source);
+    IrValueId scale_slot = c_ir_emit_temporary(builder, element, source);
+    IrValueId one = c_ir_emit_complex_divide_power(builder, element, 0, source);
+    IrValueId numerator_magnitude = c_ir_emit_complex_divide_larger_magnitude(builder, element, a, b, source);
+    IrValueId denominator_magnitude = c_ir_emit_complex_divide_larger_magnitude(builder, element, c, d, source);
+    bool success = result_place.value != IR_ID_UNDERLYING_INVALID && a_slot.value != IR_ID_UNDERLYING_INVALID &&
+                   b_slot.value != IR_ID_UNDERLYING_INVALID && c_slot.value != IR_ID_UNDERLYING_INVALID && d_slot.value != IR_ID_UNDERLYING_INVALID &&
+                   scale_slot.value != IR_ID_UNDERLYING_INVALID && one.value != IR_ID_UNDERLYING_INVALID &&
+                   numerator_magnitude.value != IR_ID_UNDERLYING_INVALID && denominator_magnitude.value != IR_ID_UNDERLYING_INVALID &&
+                   c_ir_emit_store_place(builder, a_slot, element, a, source) && c_ir_emit_store_place(builder, b_slot, element, b, source) &&
+                   c_ir_emit_store_place(builder, c_slot, element, c, source) && c_ir_emit_store_place(builder, d_slot, element, d, source) &&
+                   c_ir_emit_store_place(builder, scale_slot, element, one, source);
+    // The quotient scales by the inverse of what the denominator scales by and
+    // by the same power as the numerator.
+    success = success && c_ir_emit_complex_divide_scale_if(builder, element, numerator_magnitude, scaling.large_exponent, true, a_slot, b_slot,
+                                                           scale_slot, -1, 1, source);
+    success = success && c_ir_emit_complex_divide_scale_if(builder, element, denominator_magnitude, scaling.large_exponent, true, c_slot, d_slot,
+                                                           scale_slot, -1, -1, source);
+    success = success && c_ir_emit_complex_divide_scale_if(builder, element, numerator_magnitude, scaling.small_exponent, false, a_slot, b_slot,
+                                                           scale_slot, scaling.boost_exponent, -scaling.boost_exponent, source);
+    success = success && c_ir_emit_complex_divide_scale_if(builder, element, denominator_magnitude, scaling.small_exponent, false, c_slot, d_slot,
+                                                           scale_slot, scaling.boost_exponent, scaling.boost_exponent, source);
+    IrValueId scaled_a = success ? c_ir_emit_load_place(builder, a_slot, element, source) : IR_VALUE_ID_INVALID;
+    IrValueId scaled_b = success ? c_ir_emit_load_place(builder, b_slot, element, source) : IR_VALUE_ID_INVALID;
+    IrValueId scaled_c = success ? c_ir_emit_load_place(builder, c_slot, element, source) : IR_VALUE_ID_INVALID;
+    IrValueId scaled_d = success ? c_ir_emit_load_place(builder, d_slot, element, source) : IR_VALUE_ID_INVALID;
+    IrValueId scale = success ? c_ir_emit_load_place(builder, scale_slot, element, source) : IR_VALUE_ID_INVALID;
+    IrValueId magnitude_c = c_ir_emit_float_magnitude(builder, scaled_c, element, source);
+    IrValueId magnitude_d = c_ir_emit_float_magnitude(builder, scaled_d, element, source);
     IrValueId condition = c_ir_emit_binary_value(builder, magnitude_c, magnitude_d, builder->bool_type, IR_BINARY_FLOAT_GREATER_EQUAL, source);
     IrBlockId near_real = c_ir_block_create(builder);
     IrBlockId near_imaginary = c_ir_block_create(builder);
     IrBlockId merge = c_ir_block_create(builder);
-    if (condition.value == IR_ID_UNDERLYING_INVALID || near_real.value == IR_ID_UNDERLYING_INVALID ||
-        near_imaginary.value == IR_ID_UNDERLYING_INVALID || merge.value == IR_ID_UNDERLYING_INVALID)
+    success = success && scaled_a.value != IR_ID_UNDERLYING_INVALID && scaled_b.value != IR_ID_UNDERLYING_INVALID &&
+              scaled_c.value != IR_ID_UNDERLYING_INVALID && scaled_d.value != IR_ID_UNDERLYING_INVALID && scale.value != IR_ID_UNDERLYING_INVALID &&
+              magnitude_c.value != IR_ID_UNDERLYING_INVALID && magnitude_d.value != IR_ID_UNDERLYING_INVALID &&
+              condition.value != IR_ID_UNDERLYING_INVALID && near_real.value != IR_ID_UNDERLYING_INVALID &&
+              near_imaginary.value != IR_ID_UNDERLYING_INVALID && merge.value != IR_ID_UNDERLYING_INVALID &&
+              c_ir_emit_complex_divide_branch(builder, condition, near_real, near_imaginary, source) && c_ir_switch_block(builder, near_real) &&
+              c_ir_emit_complex_smith_arm(builder, complex_type, element, result_place, scaled_a, scaled_b, scaled_c, scaled_d, true, source) &&
+              c_ir_emit_complex_divide_jump(builder, merge, source) && c_ir_switch_block(builder, near_imaginary) &&
+              c_ir_emit_complex_smith_arm(builder, complex_type, element, result_place, scaled_a, scaled_b, scaled_d, scaled_c, false, source) &&
+              c_ir_emit_complex_divide_jump(builder, merge, source) && c_ir_switch_block(builder, merge);
+    if (success)
     {
-        return IR_VALUE_ID_INVALID;
+        // Undo the scaling, then apply Annex G's recovery to a NaN-NaN quotient.
+        IrValueId real_place = c_ir_emit_field_index_place(builder, result_place, 0, source);
+        IrValueId imaginary_place = c_ir_emit_field_index_place(builder, result_place, 1, source);
+        IrValueId real = c_ir_emit_load_place(builder, real_place, element, source);
+        IrValueId imaginary = c_ir_emit_load_place(builder, imaginary_place, element, source);
+        IrValueId real_scaled = c_ir_emit_binary_value(builder, real, scale, element, IR_BINARY_FLOAT_MULTIPLY, source);
+        IrValueId imaginary_scaled = c_ir_emit_binary_value(builder, imaginary, scale, element, IR_BINARY_FLOAT_MULTIPLY, source);
+        success = real_scaled.value != IR_ID_UNDERLYING_INVALID && imaginary_scaled.value != IR_ID_UNDERLYING_INVALID &&
+                  c_ir_emit_store_place(builder, real_place, element, real_scaled, source) &&
+                  c_ir_emit_store_place(builder, imaginary_place, element, imaginary_scaled, source) &&
+                  c_ir_emit_complex_divide_recoveries(builder, element, result_place, a, b, c, d, source);
     }
-    IrBlockId targets[2] = {near_real, near_imaginary};
-    if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, source))
+    if (success)
     {
-        return IR_VALUE_ID_INVALID;
+        result = c_ir_emit_load_place(builder, result_place, complex_type, source);
     }
-    IrBlockId merge_target[1] = {merge};
-    if (!c_ir_switch_block(builder, near_real) ||
-        !c_ir_emit_complex_smith_arm(builder, complex_type, element, result_place, a, b, c, d, true, source) ||
-        !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, merge_target, 1, source))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    if (!c_ir_switch_block(builder, near_imaginary) ||
-        !c_ir_emit_complex_smith_arm(builder, complex_type, element, result_place, a, b, d, c, false, source) ||
-        !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, merge_target, 1, source))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    if (!c_ir_switch_block(builder, merge))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    return c_ir_emit_load_place(builder, result_place, complex_type, source);
+    return result;
 }
 
 // Complex <-> real and complex <-> complex conversions (C11 6.3.1.6-7): the
@@ -26902,7 +27233,12 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             IrTypeId right_pointer_type = right_pointer ? right_type : c_ir_add_pointer_type(builder->program, builder->pointer_types, right->element_type);
             IrType* left_pointer_value = ir_type_from_id(&builder->program->types, left_pointer_type);
             IrType* right_pointer_value = ir_type_from_id(&builder->program->types, right_pointer_type);
-            if (!left_pointer_value || !right_pointer_value || left_pointer_value->element_type.value != right_pointer_value->element_type.value)
+            // Each declarator spelling of an array type owns its IR array, so
+            // `int (*)[4]` operands naming the same shape compare by
+            // representation rather than by IR type identity.
+            if (!left_pointer_value || !right_pointer_value ||
+                (left_pointer_value->element_type.value != right_pointer_value->element_type.value &&
+                 !c_ir_representation_types_compatible(builder, left_pointer_value->element_type, right_pointer_value->element_type)))
             {
                 return false;
             }
@@ -28292,6 +28628,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end);
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix_bounds(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end, bool allow_unknown_bound);
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_parameter(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 // A declarator inside a type name spells a function two ways: `int (void)` is
@@ -28438,7 +28775,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder,
             }
             else if (pointer_group && (outer_array || pointer_close + 1 == end))
             {
-                type = outer_array ? c_ir_type_name_suffix(builder, type, parameters_open, end) : type;
+                // `int (*)[]` points at an array of unknown bound, a complete
+                // object type for the pointer (C17 6.7.6.2p6).
+                type = outer_array ? c_ir_type_name_suffix_bounds(builder, type, parameters_open, end, true) : type;
                 answered = true;
             }
             else if (!pointer_count && pointer_close < end && pointer_close + 1 == end)
@@ -28491,6 +28830,11 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* bu
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end)
 {
+    return c_ir_type_name_suffix_bounds(builder, type, index, end, false);
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix_bounds(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end, bool allow_unknown_bound)
+{
     while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR))
     {
         type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
@@ -28540,7 +28884,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrT
     while (valid && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
     {
         u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-        valid = close < end && close > index + 1;
+        valid = close < end && (close > index + 1 || (allow_unknown_bound && !array_count));
         if (valid)
         {
             bounds[array_count++] = (CArrayBound){.token_start = index + 1, .token_count = close - index - 1};
@@ -28549,7 +28893,11 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrT
     }
     while (valid && array_count && type.value != IR_ID_UNDERLYING_INVALID)
     {
-        type = c_ir_vla_array_type_add(builder, type, bounds[--array_count]);
+        CArrayBound bound = bounds[--array_count];
+        IrType* bound_element = ir_type_from_id(&builder->program->types, type);
+        type = bound.token_count ? c_ir_vla_array_type_add(builder, type, bound)
+               : bound_element && bound_element->layout.resolved ? c_ir_add_array_type(builder->program, builder->pointer_types, type, 0)
+                                                                  : IR_TYPE_ID_INVALID;
     }
     return valid && index == end ? type : IR_TYPE_ID_INVALID;
 }
@@ -30759,6 +31107,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
 BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields);
+BUSTER_C_INTERNAL bool c_ir_sizeof_unmapped_array_value_type(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
@@ -31818,6 +32167,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_promoted(CIntegerIrBuild
         CIrSizeofFrame* frame = frames + count - 1;
         CIrSizeofStep step = frame->op == C_IR_SIZEOF_OP_CLASSIFY ? c_ir_sizeof_operand_type_classify(builder, frame, &returned)
                                                                    : c_ir_sizeof_operand_type_combine(builder, frame, returned, &returned);
+        // An additive operand is a value, so a bare incomplete array decays.
+        if (step == C_IR_SIZEOF_STEP_FAIL && frame->op == C_IR_SIZEOF_OP_CLASSIFY && count > 1 &&
+            frames[count - 2].op == C_IR_SIZEOF_OP_ADDITIVE &&
+            c_ir_sizeof_unmapped_array_value_type(builder, frame->start, frame->end, &returned))
+        {
+            step = C_IR_SIZEOF_STEP_DONE;
+        }
         if (step == C_IR_SIZEOF_STEP_DONE)
         {
             count -= 1;
@@ -32013,6 +32369,22 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_token_is_unmapped_array(CIntegerIrBuilder* bu
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     return start + 1 == end && c_ir_sizeof_token_is_unmapped_array(builder, start, false);
+}
+
+// An incomplete `extern T a[];` never maps to an IR array type, and the strict
+// operand walk refuses it bare so that sizeof can diagnose the unsized array.
+// Used as a value -- a conditional arm or an additive operand -- it is only
+// the pointer to its element; report that type, or fail when it is not one.
+BUSTER_C_INTERNAL bool c_ir_sizeof_unmapped_array_value_type(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
+{
+    bool result = false;
+    if (!builder->queries->has_request && c_ir_sizeof_operand_is_unmapped_array_object(builder, start, end))
+    {
+        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+        *type_out = c_ir_sizeof_unlowered_array_decay(builder, builder->parse.entities[entity.value].type);
+        result = type_out->value != IR_ID_UNDERLYING_INVALID;
+    }
+    return result;
 }
 
 // Whether a statement-expression operand's tail names an unlowered array
@@ -36730,7 +37102,16 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
     // the usual arithmetic conversions and pointer arithmetic, so use its
     // result whenever the full range is unambiguous.
     IrTypeId strict_type = IR_TYPE_ID_INVALID;
-    if (c_ir_sizeof_operand_type_attempt(builder, start, end, &strict_type))
+    // A bare incomplete extern array is only its decayed element pointer as a
+    // value; the strict walk refuses it so that sizeof can diagnose it, and
+    // the identifier fallback below guessed int, so `c ? tbl : "x"` looked
+    // int-versus-pointer (Lua's lapi.c, PCRE2's pcre2_compile.c).
+    bool strict_ready = c_ir_sizeof_operand_type_attempt(builder, start, end, &strict_type);
+    if (!strict_ready)
+    {
+        strict_ready = c_ir_sizeof_unmapped_array_value_type(builder, start, end, &strict_type);
+    }
+    if (strict_ready)
     {
         // The strict operand walk deliberately preserves an array's declared
         // type so callers such as sizeof can distinguish an array from its
@@ -51013,12 +51394,22 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
             IrSymbolId symbol = builder->entity_symbols[entity_id.value];
             IrTypeId type = builder->c_type_ir_map[entity->type.value];
             IrType* type_value = ir_type_from_id(&builder->program->types, type);
-            if (type_value && type_value->layout.resolved)
+            // An incomplete `extern T a[];` has no IR array type, so it cannot
+            // be an lvalue here; as a value it is only the pointer to its
+            // element, which is what `a + 1`, `&a[1]` and `c ? a : "x"` fold
+            // against (relocation to the symbol, addend in element units).
+            IrTypeId decayed = IR_TYPE_ID_INVALID;
+            if (!type_value && type.value == IR_ID_UNDERLYING_INVALID && symbol.value != IR_ID_UNDERLYING_INVALID)
+            {
+                decayed = c_ir_sizeof_unlowered_array_decay(builder, entity->type);
+            }
+            bool lvalue = type_value && type_value->layout.resolved;
+            if (lvalue || decayed.value != IR_ID_UNDERLYING_INVALID)
             {
                 *result = (CIrConstantValue){
-                    .type = type,
+                    .type = lvalue ? type : decayed,
                     .symbol = symbol,
-                    .kind = C_IR_CONSTANT_LVALUE,
+                    .kind = lvalue ? C_IR_CONSTANT_LVALUE : C_IR_CONSTANT_POINTER,
                 };
                 return true;
             }
@@ -52687,8 +53078,24 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_cast(CIntegerIrBuilder*
         return false;
     }
     CIrConstantValue real = {0};
-    if (!c_ir_constant_cast(builder, &source->real, target_type, &real))
+    if (source->is_complex && target->kind == IR_TYPE_BOOLEAN)
     {
+        // C 6.3.1.2: a complex value is false only when both halves compare
+        // equal to zero, so the real half alone cannot answer.
+        CIrConstantTruth real_truth = c_ir_constant_truth(builder, &source->real);
+        CIrConstantTruth imaginary_truth = c_ir_constant_truth(builder, &source->imaginary);
+        bool known = (real_truth == C_IR_CONSTANT_TRUTH_TRUE || real_truth == C_IR_CONSTANT_TRUTH_FALSE) &&
+                     (imaginary_truth == C_IR_CONSTANT_TRUTH_TRUE || imaginary_truth == C_IR_CONSTANT_TRUTH_FALSE);
+        if (!known)
+        {
+            return false;
+        }
+        real = c_ir_constant_integer(target_type, real_truth == C_IR_CONSTANT_TRUTH_TRUE || imaginary_truth == C_IR_CONSTANT_TRUTH_TRUE);
+    }
+    else if (!c_ir_constant_cast(builder, &source->real, target_type, &real))
+    {
+        // C 6.3.1.7p2: a complex value converts to a real type through its
+        // real half.
         return false;
     }
     *result = (CIrConstantComplexInitializerValue){.real = real, .type = target_type};
@@ -52709,6 +53116,267 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_unary(CIntegerIrBuilder
         return false;
     }
     return !source->is_complex || c_ir_constant_apply_unary(builder, operation, IR_TYPE_ID_INVALID, &result->imaginary);
+}
+
+// Constant operands of the scaled division the run time emits
+// (c_ir_emit_complex_divide): 2^exponent in the element type.
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide_power(CIntegerIrBuilder* builder, IrTypeId element, s32 exponent, CIrConstantValue* result)
+{
+    IrType* type = ir_type_from_id(&builder->program->types, element);
+    CIrConstantValue literal = {0};
+    bool success = c_ir_constant_float_literal_for_type(type, c_complex_divide_power_spelling(builder, element, exponent), &literal) &&
+                   c_ir_constant_cast(builder, &literal, element, result);
+    return success && result->kind == C_IR_CONSTANT_FLOAT;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide_test(CIntegerIrBuilder* builder, CConditionalOperator operation, const CIrConstantValue* left,
+                                                           const CIrConstantValue* right, bool* result)
+{
+    CIrConstantValue computed = {0};
+    bool success = c_ir_constant_apply_binary(builder, operation, left, right, &computed) && computed.kind == C_IR_CONSTANT_INTEGER;
+    *result = success && computed.integer != 0;
+    return success;
+}
+
+// |value|: the sign is cleared by negation when the value is below zero, which
+// leaves a negative zero alone; only comparisons look at the result.
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide_magnitude(CIntegerIrBuilder* builder, const CIrConstantValue* zero, CIrConstantValue* value)
+{
+    bool negative = false;
+    bool success = c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_LESS, value, zero, &negative);
+    return success && (!negative || c_ir_constant_apply_unary(builder, C_CONDITIONAL_UNARY_MINUS, IR_TYPE_ID_INVALID, value));
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide_larger_magnitude(CIntegerIrBuilder* builder, const CIrConstantValue* zero,
+                                                                       const CIrConstantValue* p, const CIrConstantValue* q, CIrConstantValue* result)
+{
+    CIrConstantValue magnitude_p = *p;
+    CIrConstantValue magnitude_q = *q;
+    bool take_p = false;
+    bool success = c_ir_constant_complex_divide_magnitude(builder, zero, &magnitude_p) &&
+                   c_ir_constant_complex_divide_magnitude(builder, zero, &magnitude_q) &&
+                   c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_GREATER_EQUAL, &magnitude_p, &magnitude_q, &take_p);
+    if (success)
+    {
+        *result = take_p ? magnitude_p : magnitude_q;
+    }
+    return success;
+}
+
+// The mirror of c_ir_emit_complex_divide_scale_if.
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide_scale_if(CIntegerIrBuilder* builder, IrTypeId element, const CIrConstantValue* magnitude,
+                                                               s32 threshold_exponent, bool at_least, CIrConstantValue* first,
+                                                               CIrConstantValue* second, CIrConstantValue* scale, s32 operand_exponent,
+                                                               s32 scale_exponent)
+{
+    CIrConstantValue threshold = {0};
+    bool taken = false;
+    bool success = c_ir_constant_complex_divide_power(builder, element, threshold_exponent, &threshold) &&
+                   c_ir_constant_complex_divide_test(builder, at_least ? C_CONDITIONAL_GREATER_EQUAL : C_CONDITIONAL_LESS_EQUAL, magnitude,
+                                                     &threshold, &taken);
+    if (success && taken)
+    {
+        CIrConstantValue operand_factor = {0};
+        CIrConstantValue scale_factor = {0};
+        success = c_ir_constant_complex_divide_power(builder, element, operand_exponent, &operand_factor) &&
+                  c_ir_constant_complex_divide_power(builder, element, scale_exponent, &scale_factor) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, first, &operand_factor, first) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, second, &operand_factor, second) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, scale, &scale_factor, scale);
+    }
+    return success;
+}
+
+// finite: (v - v) == 0.  infinite: neither finite nor NaN.  Mirrors the
+// run-time predicates.
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide_classify(CIntegerIrBuilder* builder, const CIrConstantValue* zero, const CIrConstantValue* value,
+                                                               bool* finite, bool* infinite)
+{
+    CIrConstantValue difference = {0};
+    bool ordered = false;
+    bool success = c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, value, value, &difference) &&
+                   c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_EQUAL, &difference, zero, finite) &&
+                   c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_EQUAL, value, value, &ordered);
+    *infinite = success && !*finite && ordered;
+    return success;
+}
+
+// copysign(isinf(v) ? 1 : 0, v) as a constant of the element type.
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide_infinite_sign(CIntegerIrBuilder* builder, const CIrConstantValue* zero,
+                                                                    const CIrConstantValue* one, const CIrConstantValue* value,
+                                                                    CIrConstantValue* result)
+{
+    bool finite = false;
+    bool infinite = false;
+    bool positive = false;
+    bool success = c_ir_constant_complex_divide_classify(builder, zero, value, &finite, &infinite) &&
+                   c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_GREATER, value, zero, &positive);
+    *result = *zero;
+    if (success && infinite)
+    {
+        *result = *one;
+        success = positive || c_ir_constant_apply_unary(builder, C_CONDITIONAL_UNARY_MINUS, IR_TYPE_ID_INVALID, result);
+    }
+    return success;
+}
+
+// Annex G.5.2's recoveries for a NaN-NaN quotient; the mirror of
+// c_ir_emit_complex_divide_recoveries, including the spelling of an infinite
+// product inf * v as v / 0 and of copysign(inf, c) as 1 / c.
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide_recover(CIntegerIrBuilder* builder, const CIrConstantValue* zero, const CIrConstantValue* one,
+                                                              const CIrConstantValue* a, const CIrConstantValue* b, const CIrConstantValue* c,
+                                                              const CIrConstantValue* d, CIrConstantValue* real, CIrConstantValue* imaginary)
+{
+    bool c_zero = false;
+    bool d_zero = false;
+    bool a_ordered = false;
+    bool b_ordered = false;
+    bool a_finite = false;
+    bool b_finite = false;
+    bool c_finite = false;
+    bool d_finite = false;
+    bool a_infinite = false;
+    bool b_infinite = false;
+    bool c_infinite = false;
+    bool d_infinite = false;
+    bool success = c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_EQUAL, c, zero, &c_zero) &&
+                   c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_EQUAL, d, zero, &d_zero) &&
+                   c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_EQUAL, a, a, &a_ordered) &&
+                   c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_EQUAL, b, b, &b_ordered) &&
+                   c_ir_constant_complex_divide_classify(builder, zero, a, &a_finite, &a_infinite) &&
+                   c_ir_constant_complex_divide_classify(builder, zero, b, &b_finite, &b_infinite) &&
+                   c_ir_constant_complex_divide_classify(builder, zero, c, &c_finite, &c_infinite) &&
+                   c_ir_constant_complex_divide_classify(builder, zero, d, &d_finite, &d_infinite);
+    if (success && c_zero && d_zero && (a_ordered || b_ordered))
+    {
+        CIrConstantValue infinity = {0};
+        success = c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, one, c, &infinity) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &infinity, a, real) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &infinity, b, imaginary);
+    }
+    else if (success && (a_infinite || b_infinite) && c_finite && d_finite)
+    {
+        CIrConstantValue a_sign = {0};
+        CIrConstantValue b_sign = {0};
+        CIrConstantValue ac = {0};
+        CIrConstantValue bd = {0};
+        CIrConstantValue bc = {0};
+        CIrConstantValue ad = {0};
+        CIrConstantValue real_sum = {0};
+        CIrConstantValue imaginary_sum = {0};
+        success = c_ir_constant_complex_divide_infinite_sign(builder, zero, one, a, &a_sign) &&
+                  c_ir_constant_complex_divide_infinite_sign(builder, zero, one, b, &b_sign) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &a_sign, c, &ac) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &b_sign, d, &bd) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &b_sign, c, &bc) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &a_sign, d, &ad) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &ac, &bd, &real_sum) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, &bc, &ad, &imaginary_sum) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &real_sum, zero, real) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &imaginary_sum, zero, imaginary);
+    }
+    else if (success && (c_infinite || d_infinite) && a_finite && b_finite)
+    {
+        CIrConstantValue c_sign = {0};
+        CIrConstantValue d_sign = {0};
+        CIrConstantValue ac = {0};
+        CIrConstantValue bd = {0};
+        CIrConstantValue bc = {0};
+        CIrConstantValue ad = {0};
+        CIrConstantValue real_sum = {0};
+        CIrConstantValue imaginary_sum = {0};
+        success = c_ir_constant_complex_divide_infinite_sign(builder, zero, one, c, &c_sign) &&
+                  c_ir_constant_complex_divide_infinite_sign(builder, zero, one, d, &d_sign) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, a, &c_sign, &ac) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, b, &d_sign, &bd) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, b, &c_sign, &bc) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, a, &d_sign, &ad) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &ac, &bd, &real_sum) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, &bc, &ad, &imaginary_sum) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &real_sum, zero, real) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &imaginary_sum, zero, imaginary);
+    }
+    return success;
+}
+
+// (a + bi) / (c + di), operation for operation what c_ir_emit_complex_divide
+// emits at run time -- the same exact power-of-two scaling, the same two arms
+// of Smith's algorithm, the same rescaling of the quotient and the same
+// Annex G recoveries -- so that a static initializer and the equivalent
+// run-time expression give bit-identical halves.
+BUSTER_C_INTERNAL bool c_ir_constant_complex_divide(CIntegerIrBuilder* builder, IrTypeId element, const CIrConstantValue* a_input,
+                                                      const CIrConstantValue* b_input, const CIrConstantValue* c_input,
+                                                      const CIrConstantValue* d_input, CIrConstantValue* real, CIrConstantValue* imaginary)
+{
+    IrType* element_type = ir_type_from_id(&builder->program->types, element);
+    CComplexDivideScaling scaling = c_complex_divide_scaling(element_type ? element_type->bit_width : 64);
+    CIrConstantValue a = *a_input;
+    CIrConstantValue b = *b_input;
+    CIrConstantValue c = *c_input;
+    CIrConstantValue d = *d_input;
+    CIrConstantValue zero = {0};
+    CIrConstantValue scale = {0};
+    CIrConstantValue numerator_magnitude = {0};
+    CIrConstantValue denominator_magnitude = {0};
+    bool success = c_ir_constant_complex_divide_power(builder, element, 0, &scale);
+    CIrConstantValue one = scale;
+    success = success && c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, &one, &one, &zero) &&
+              c_ir_constant_complex_divide_larger_magnitude(builder, &zero, &a, &b, &numerator_magnitude) &&
+              c_ir_constant_complex_divide_larger_magnitude(builder, &zero, &c, &d, &denominator_magnitude) &&
+              c_ir_constant_complex_divide_scale_if(builder, element, &numerator_magnitude, scaling.large_exponent, true, &a, &b, &scale, -1, 1) &&
+              c_ir_constant_complex_divide_scale_if(builder, element, &denominator_magnitude, scaling.large_exponent, true, &c, &d, &scale, -1, -1) &&
+              c_ir_constant_complex_divide_scale_if(builder, element, &numerator_magnitude, scaling.small_exponent, false, &a, &b, &scale,
+                                                    scaling.boost_exponent, -scaling.boost_exponent) &&
+              c_ir_constant_complex_divide_scale_if(builder, element, &denominator_magnitude, scaling.small_exponent, false, &c, &d, &scale,
+                                                    scaling.boost_exponent, scaling.boost_exponent);
+    CIrConstantValue magnitude_c = c;
+    CIrConstantValue magnitude_d = d;
+    bool near_real = false;
+    success = success && c_ir_constant_complex_divide_magnitude(builder, &zero, &magnitude_c) &&
+              c_ir_constant_complex_divide_magnitude(builder, &zero, &magnitude_d) &&
+              c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_GREATER_EQUAL, &magnitude_c, &magnitude_d, &near_real);
+    if (success)
+    {
+        // Smith's algorithm: `dominant` is the denominator half of larger
+        // magnitude, `lesser` the other.
+        const CIrConstantValue* dominant = near_real ? &c : &d;
+        const CIrConstantValue* lesser = near_real ? &d : &c;
+        CIrConstantValue ratio = {0};
+        CIrConstantValue scaled = {0};
+        CIrConstantValue denominator = {0};
+        CIrConstantValue a_ratio = {0};
+        CIrConstantValue b_ratio = {0};
+        CIrConstantValue real_numerator = {0};
+        CIrConstantValue imaginary_numerator = {0};
+        success = c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, lesser, dominant, &ratio) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &ratio, lesser, &scaled) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, dominant, &scaled, &denominator) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &b, &ratio, &b_ratio) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &a, &ratio, &a_ratio);
+        if (success && near_real)
+        {
+            success = c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &a, &b_ratio, &real_numerator) &&
+                      c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, &b, &a_ratio, &imaginary_numerator);
+        }
+        else if (success)
+        {
+            success = c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &a_ratio, &b, &real_numerator) &&
+                      c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, &b_ratio, &a, &imaginary_numerator);
+        }
+        success = success && c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &real_numerator, &denominator, real) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &imaginary_numerator, &denominator, imaginary) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, real, &scale, real) &&
+                  c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, imaginary, &scale, imaginary);
+    }
+    bool real_nan = false;
+    bool imaginary_nan = false;
+    success = success && c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_NOT_EQUAL, real, real, &real_nan) &&
+              c_ir_constant_complex_divide_test(builder, C_CONDITIONAL_NOT_EQUAL, imaginary, imaginary, &imaginary_nan);
+    if (success && real_nan && imaginary_nan)
+    {
+        success = c_ir_constant_complex_divide_recover(builder, &zero, &one, a_input, b_input, c_input, d_input, real, imaginary);
+    }
+    return success;
 }
 
 BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_binary(CIntegerIrBuilder* builder, CConditionalOperator operation,
@@ -52815,31 +53483,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_binary(CIntegerIrBuilde
             return false;
         }
     }
-    else
+    else if (!c_ir_constant_complex_divide(builder, element, &left_real, &left_imaginary, &right_real, &right_imaginary, &real, &imaginary))
     {
-        CIrConstantValue cc = {0};
-        CIrConstantValue dd = {0};
-        CIrConstantValue denominator = {0};
-        CIrConstantValue ac = {0};
-        CIrConstantValue bd = {0};
-        CIrConstantValue bc = {0};
-        CIrConstantValue ad = {0};
-        CIrConstantValue real_numerator = {0};
-        CIrConstantValue imaginary_numerator = {0};
-        if (!c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &right_real, &right_real, &cc) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &right_imaginary, &right_imaginary, &dd) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &cc, &dd, &denominator) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_real, &right_real, &ac) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_imaginary, &right_imaginary, &bd) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_imaginary, &right_real, &bc) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_real, &right_imaginary, &ad) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &ac, &bd, &real_numerator) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, &bc, &ad, &imaginary_numerator) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &real_numerator, &denominator, &real) ||
-            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &imaginary_numerator, &denominator, &imaginary))
-        {
-            return false;
-        }
+        return false;
     }
     *result = (CIrConstantComplexInitializerValue){
         .real = real,
@@ -53460,12 +54106,40 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 {
                     // This evaluator has no complex value, and folding an
                     // imaginary literal as its magnitude would answer
-                    // `1.0i == 1.0` with true. Refuse instead.
-                    String8 ignored_real_spelling = {0};
+                    // `1.0i == 1.0` with true. Refuse instead, except as the
+                    // direct operand of a cast to a real type, which GCC and
+                    // Clang fold: _Bool tests the imaginary half (C 6.3.1.2)
+                    // and any other real type takes the zero real half
+                    // (C 6.3.1.7p2).
+                    String8 imaginary_real_spelling = {0};
                     if (c_ir_number_imaginary_spelling(builder->arena, c_token_spelling(builder->preprocess.spelling_base, token),
-                                                       &ignored_real_spelling))
+                                                       &imaginary_real_spelling))
                     {
-                        return false;
+                        IrType* cast_target = operator_count && operators[operator_count - 1].operation == C_CONDITIONAL_CAST
+                                                  ? ir_type_from_id(&builder->program->types, operators[operator_count - 1].cast_type) : 0;
+                        CIrConstantValue magnitude = {0};
+                        CIrConstantValue real_zero = c_ir_constant_integer(builder->s32_type, 0);
+                        bool real_target = cast_target && value_count < capacity &&
+                                           (cast_target->kind == IR_TYPE_FLOAT || c_ir_constant_type_is_integer(cast_target)) &&
+                                           c_ir_constant_float_literal(builder, imaginary_real_spelling, &magnitude);
+                        CIrConstantTruth imaginary_truth = real_target ? c_ir_constant_truth(builder, &magnitude) : C_IR_CONSTANT_TRUTH_INVALID;
+                        if (!real_target || (cast_target->kind == IR_TYPE_BOOLEAN && imaginary_truth != C_IR_CONSTANT_TRUTH_TRUE &&
+                                             imaginary_truth != C_IR_CONSTANT_TRUTH_FALSE))
+                        {
+                            return false;
+                        }
+                        if (cast_target->kind == IR_TYPE_BOOLEAN)
+                        {
+                            real_zero = c_ir_constant_integer(builder->s32_type, imaginary_truth == C_IR_CONSTANT_TRUTH_TRUE);
+                        }
+                        if (!c_ir_constant_cast(builder, &real_zero, operators[operator_count - 1].cast_type, &value))
+                        {
+                            return false;
+                        }
+                        operator_count -= 1;
+                        values[value_count++] = value;
+                        expect_operand = false;
+                        continue;
                     }
                     if (!c_ir_constant_float_literal(builder, c_token_spelling(builder->preprocess.spelling_base, token), &value)) return false;
                 }
@@ -54101,10 +54775,36 @@ BUSTER_C_INTERNAL void c_ir_constant_store_bits(IrProgram* program, IrType* type
     c_ir_constant_store_unit_bits(program, type->layout.size, bytes, offset, bits, sign_extend);
 }
 
+// A complex constant under a real static destination (`static int i = 5.0 +
+// 7.0i;`) folds through the complex initializer evaluator to the converted real
+// value, which the scalar path then stores. GCC refuses an implicit complex to
+// _Bool initializer, so only an explicit cast, whose result is no longer
+// complex, reaches a _Bool destination.
+BUSTER_C_INTERNAL bool c_ir_global_complex_real_value(CIntegerIrBuilder* builder, IrType* type, IrTypeId type_id, u32 start, u32 end,
+                                                      CIrConstantValue* value)
+{
+    CIrConstantComplexInitializerValue complex = {0};
+    CIrConstantComplexInitializerValue converted = {0};
+    bool folded = (type->kind == IR_TYPE_FLOAT || c_ir_constant_type_is_integer(type)) &&
+                  c_ir_constant_complex_initializer_evaluate(builder, start, end, &complex) &&
+                  !(complex.is_complex && type->kind == IR_TYPE_BOOLEAN) &&
+                  c_ir_constant_complex_initializer_cast(builder, &complex, type_id, &converted);
+    if (folded)
+    {
+        *value = converted.real;
+    }
+    return folded;
+}
+
 BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, u32 start, u32 end, IrGlobal* global)
 {
     CIrConstantValue value = {0};
-    if (c_ir_constant_evaluate(builder, start, end, &value))
+    bool evaluated = c_ir_constant_evaluate(builder, start, end, &value);
+    if (!evaluated && type->kind != IR_TYPE_POINTER)
+    {
+        evaluated = c_ir_global_complex_real_value(builder, type, global->type, start, end, &value);
+    }
+    if (evaluated)
     {
         if (type->kind == IR_TYPE_POINTER)
         {
@@ -55465,6 +56165,23 @@ BUSTER_C_INTERNAL void c_ir_collect_flexible_array_types(CParseResult* parse, bo
         if (!bound.token_count && !bound.is_star && !bound.has_inferred_count)
         {
             flexible[member->type.value] = true;
+        }
+    }
+    // The pointee of `int (*)[]` is an array of unknown bound, which is a
+    // complete object type for the pointer (C17 6.7.6.2p6) and maps like a
+    // flexible array: no elements and the element's alignment.
+    for (u32 pointer_index = 0; pointer_index < parse->type_count; pointer_index += 1)
+    {
+        CType* pointer = parse->types + pointer_index;
+        if (pointer->kind != C_TYPE_POINTER || pointer->element_type.value >= parse->type_count)
+        {
+            continue;
+        }
+        CType* array = parse->types + pointer->element_type.value;
+        if (array->kind == C_TYPE_ARRAY && array->array_bound < parse->array_bound_count && array->element_type.value < parse->type_count)
+        {
+            CArrayBound bound = parse->array_bounds[array->array_bound];
+            flexible[pointer->element_type.value] |= !bound.token_count && !bound.is_star && !bound.has_inferred_count;
         }
     }
 }
@@ -56950,6 +57667,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // which for a static target nothing else names it would not.
     CEntityId* entity_alias_targets = arena_allocate(arena, CEntityId, parse.entity_count);
     bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
+    bool* entity_returns_twice = arena_allocate(arena, bool, parse.entity_count);
+    memset(entity_returns_twice, 0, sizeof(*entity_returns_twice) * parse.entity_count);
     memset(entity_alias_targets, 0xff, sizeof(*entity_alias_targets) * parse.entity_count);
     memset(entity_weak, 0, sizeof(*entity_weak) * parse.entity_count);
     // __attribute__((constructor))/((destructor)) per entity, for the same
@@ -56977,6 +57696,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
         entity_weak[declaration.entity.value] |= binding.is_weak;
+        entity_returns_twice[declaration.entity.value] |= binding.is_returns_twice && declaration.kind == C_DECLARATION_FUNCTION;
         if (declaration.kind == C_DECLARATION_FUNCTION && binding.is_constructor)
         {
             entity_constructor_priority[declaration.entity.value] = binding.constructor_priority;
@@ -57347,6 +58067,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_returns_twice = entity_returns_twice[entity_index],
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -57396,6 +58117,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_returns_twice = entity_returns_twice[entity_index],
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -57947,6 +58669,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                         .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                         .is_definition = declaration.is_definition,
                                                         .is_weak = declaration.entity.value < parse.entity_count && entity_weak[declaration.entity.value],
+                                                        .is_returns_twice = declaration.entity.value < parse.entity_count && entity_returns_twice[declaration.entity.value],
                                                     });
             if (declaration.entity.value < parse.entity_count)
             {
